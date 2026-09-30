@@ -99,7 +99,7 @@ const payload = (rows, extra) => Object.assign({
     reasons: rows.map(r => r[0]), reasonCodes: rows.map(r => r[1]), reasonData: rows.map(r => r[2] || null)
 }, extra || {});
 
-const GAMMA_CMD = 'kb-release promote REL-1 --to GAMMA --confirm-deploy --actor <lead>';
+const GAMMA_CMD = `kb-release promote 'REL-1' --to GAMMA --confirm-deploy --actor <lead>`;
 const flagsOf = (cmd) => Array.from(new Set(cmd.match(/--[a-z][a-z-]*/g) || [])).sort();
 
 (async () => {
@@ -161,15 +161,15 @@ const flagsOf = (cmd) => Array.from(new Set(cmd.match(/--[a-z][a-z-]*/g) || []))
         { cls: 'actor not a lead at GAMMA', row: ["GAMMA: deploy confirmation refused: actor 'x' is not in releaseConfig.leads", 'GAMMA_ACTOR_NOT_LEAD', { stage: 'GAMMA' }],
           cmd: GAMMA_CMD },
         { cls: 'test needs a waiver (FAIL/SKIP)', row: ["QA: test 't2' result is FAIL", 'WAIVER_NEEDED', { stage: 'QA', test: 't2' }],
-          cmd: 'kb-release waive REL-1 --stage QA --tests t2 --reason "..." --by <lead>' },
+          cmd: `kb-release waive 'REL-1' --stage 'QA' --tests 't2' --reason "..." --by <lead>` },
         { cls: 'waiver granted by a non-lead', row: ['only the release lead may grant a waiver', 'WAIVER_NOT_LEAD', { stage: 'QA', test: 't2' }],
-          cmd: 'kb-release waive REL-1 --stage QA --tests t2 --reason "..." --by <a name in releaseConfig.leads>' },
+          cmd: `kb-release waive 'REL-1' --stage 'QA' --tests 't2' --reason "..." --by <a name in releaseConfig.leads>` },
         { cls: 'actor not in releaseConfig.leads', row: ["actor 'mallory' is not in releaseConfig.leads", 'NOT_IN_LEADS', null],
-          cmd: 'kb-release waive REL-1 --stage <STAGE> --tests <test> --reason "..." --by <a name in releaseConfig.leads>' },
+          cmd: `kb-release waive 'REL-1' --stage <STAGE> --tests <test> --reason "..." --by <a name in releaseConfig.leads>` },
         { cls: 'waiver void: new SHA', row: ["QA: test 't2' result is FAIL; waiver VOID: waiver sha aaa != graded sha bbb", 'WAIVER_VOID_SHA', { stage: 'QA', test: 't2' }],
-          cmd: 'kb-release waive REL-1 --stage QA --tests t2 --reason "..." --by <lead>', text: /re-run the test at the new SHA/i },
+          cmd: `kb-release waive 'REL-1' --stage 'QA' --tests 't2' --reason "..." --by <lead>`, text: /re-run the test at the new SHA/i },
         { cls: 'waiver void: invalid', row: ["QA: test 't2' result is FAIL; waiver VOID: waiver is malformed: 'by' is blank", 'WAIVER_VOID_INVALID', { stage: 'QA', test: 't2' }],
-          cmd: 'kb-release waive REL-1 --stage QA --tests t2 --reason "..." --by <lead>' },
+          cmd: `kb-release waive 'REL-1' --stage 'QA' --tests 't2' --reason "..." --by <lead>` },
     ];
     for (const c of classes) {
         await test('remedy class: ' + c.cls + ' -> its own command', () => {
@@ -221,9 +221,9 @@ const flagsOf = (cmd) => Array.from(new Set(cmd.match(/--[a-z][a-z-]*/g) || []))
 
     await test("a waiver command for a test named 'lead-time' quotes/keeps the name intact", () => {
         const items = api.buildPromoteReasonItems(R, payload([["QA: test 'lead-time' result is FAIL", 'WAIVER_NEEDED', { stage: 'QA', test: 'lead-time' }]]), false);
-        assert.strictEqual(items[0].remedy.command, 'kb-release waive REL-1 --stage QA --tests lead-time --reason "..." --by <lead>');
+        assert.strictEqual(items[0].remedy.command, `kb-release waive 'REL-1' --stage 'QA' --tests 'lead-time' --reason "..." --by <lead>`);
         const spaced = api.buildPromoteReasonItems(R, payload([["x", 'WAIVER_NEEDED', { stage: 'QA', test: 'my test; rm' }]]), false);
-        assert.ok(spaced[0].remedy.command.includes('--tests "my test; rm"'));
+        assert.ok(spaced[0].remedy.command.includes("--tests 'my test; rm'"));
     });
 
     await test('mixed GAMMA + waiver: both remedies shown, each next to its own reason, identical ones deduped', () => {
@@ -234,7 +234,7 @@ const flagsOf = (cmd) => Array.from(new Set(cmd.match(/--[a-z][a-z-]*/g) || []))
             ["GAMMA: test 'smoke' result is FAIL", 'WAIVER_NEEDED', { stage: 'GAMMA', test: 'smoke' }],
         ]), false);
         assert.strictEqual(items[0].remedy.command, GAMMA_CMD);
-        assert.strictEqual(items[1].remedy.command, 'kb-release waive REL-1 --stage GAMMA --tests smoke --reason "..." --by <lead>');
+        assert.strictEqual(items[1].remedy.command, `kb-release waive 'REL-1' --stage 'GAMMA' --tests 'smoke' --reason "..." --by <lead>`);
         assert.strictEqual(items[2].remedy, null, 'identical GAMMA remedy is shown once');
         assert.strictEqual(items[3].remedy, null, 'identical waiver remedy is shown once');
         assert.strictEqual(items.length, 4);
@@ -258,7 +258,7 @@ const flagsOf = (cmd) => Array.from(new Set(cmd.match(/--[a-z][a-z-]*/g) || []))
     await test('V1-V3 regression: advice depends on WHICH condition failed and the right stage', () => {
         // V2: QA->ALPHA skipped test -> waiver for QA, NOT a GAMMA confirmation
         const v2 = api.buildPromoteResultModel(R, { from: 'QA', to: 'ALPHA' }, { ok: false, status: 409, data: payload([["QA: test 't2' was SKIPped and is not optional (needs a lead waiver)", 'WAIVER_NEEDED', { stage: 'QA', test: 't2' }]]) });
-        assert.ok(v2.reasonItems[0].remedy.command.startsWith('kb-release waive REL-1 --stage QA'));
+        assert.ok(v2.reasonItems[0].remedy.command.startsWith(`kb-release waive 'REL-1' --stage 'QA'`));
         assert.ok(!/GAMMA/.test(JSON.stringify(v2.reasonItems)));
         // V3: GAMMA->PROD with no leads configured -> configure leads, never "GAMMA requires"
         const v3 = api.buildPromoteResultModel(R, { from: 'GAMMA', to: 'PROD' }, { ok: false, status: 409, data: payload([['releaseConfig.leads is missing or empty; nobody can be authorized as lead (fails closed)', 'LEADS_NOT_CONFIGURED']]) });
@@ -274,8 +274,8 @@ const flagsOf = (cmd) => Array.from(new Set(cmd.match(/--[a-z][a-z-]*/g) || []))
         assert.strictEqual(T.WAIVE.command, 'kb-release waive');
         const gamma = api.buildPromoteReasonItems(R, payload([['g', 'GAMMA_CONFIRM_REQUIRED', { stage: 'GAMMA' }]]), false)[0].remedy.command;
         const waive = api.buildPromoteReasonItems(R, payload([['w', 'WAIVER_NEEDED', { stage: 'QA', test: 't' }]]), false)[0].remedy.command;
-        assert.ok(gamma.startsWith(T.GAMMA_CONFIRM.command + ' REL-1 '));
-        assert.ok(waive.startsWith(T.WAIVE.command + ' REL-1 '));
+        assert.ok(gamma.startsWith(T.GAMMA_CONFIRM.command + " 'REL-1' "));
+        assert.ok(waive.startsWith(T.WAIVE.command + " 'REL-1' "));
         assert.deepStrictEqual(flagsOf(gamma), arr(T.GAMMA_CONFIRM.flags).sort());
         assert.deepStrictEqual(flagsOf(waive), arr(T.WAIVE.flags).sort());
     });
@@ -376,7 +376,7 @@ const flagsOf = (cmd) => Array.from(new Set(cmd.match(/--[a-z][a-z-]*/g) || []))
 
     await test('PROMOTE disables Cancel before the request starts', () => {
         assert.ok(/promote-cancel-btn'\)\.disabled = true/.test(STEP_NEXT));
-        assert.ok(/if \(promoteModalState\.inFlight\) return;/.test(STEP_NEXT));
+        assert.ok(/if \(promoteModalState\.inFlight \|\| promoteModalState\.loading\) return;/.test(STEP_NEXT));
     });
 
     // ── copy / markup hygiene ────────────────────────────────────────────────────────────

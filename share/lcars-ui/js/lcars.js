@@ -12085,7 +12085,9 @@ let promoteModalState = {
     currentStep: 1,
     preview: null,
     result: null,
-    inFlight: false
+    inFlight: false,
+    loading: false,
+    token: 0
 };
 
 // >>> PROMOTE-MODAL-PURE-START (DOM-free; sliced by lcars-ui/tests/test-xaca-1346-promote-modal-single-request.js)
@@ -12101,21 +12103,43 @@ const PROMOTE_REMEDY_COMMANDS = {
     WAIVE: { command: 'kb-release waive', flags: ['--stage', '--tests', '--reason', '--by'] }
 };
 
+/**
+ * POSIX single-quote a value so a shell reads it back as ONE inert word (XACA-1346-057/-058).
+ * Inside single quotes nothing is special ($, backtick, !, ", backslash, newline); the only character
+ * that cannot appear is the quote itself, so each embedded ' closes the string, emits an escaped \',
+ * and reopens it: x'y -> 'x'\''y'. Applied to EVERY interpolated arg (release id, stage, test name).
+ */
 function promoteQuoteArg(value) {
-    const v = String(value);
-    return /^[A-Za-z0-9_.:\/-]+$/.test(v) ? v : JSON.stringify(v);
+    return "'" + String(value).replace(/'/g, "'\\''") + "'";
 }
 
 function promoteGammaCommand(releaseId) {
-    return PROMOTE_REMEDY_COMMANDS.GAMMA_CONFIRM.command + ' ' + releaseId +
+    return PROMOTE_REMEDY_COMMANDS.GAMMA_CONFIRM.command + ' ' + promoteQuoteArg(releaseId) +
         ' --to GAMMA --confirm-deploy --actor <lead>';
 }
 
 function promoteWaiveCommand(releaseId, data, by) {
-    const stage = (data && data.stage) ? data.stage : '<STAGE>';
+    const stage = (data && data.stage) ? promoteQuoteArg(data.stage) : '<STAGE>';
     const test = (data && data.test) ? promoteQuoteArg(data.test) : '<test>';
-    return PROMOTE_REMEDY_COMMANDS.WAIVE.command + ' ' + releaseId + ' --stage ' + stage +
+    return PROMOTE_REMEDY_COMMANDS.WAIVE.command + ' ' + promoteQuoteArg(releaseId) + ' --stage ' + stage +
         ' --tests ' + test + ' --reason "..." --by ' + by;
+}
+
+/**
+ * Preview-load guard (XACA-1346-056). The modal opens IMMEDIATELY in a loading state (PROMOTE disabled)
+ * while the dryRun preview loads. Returns the fresh state, or null when a preview is already loading
+ * (a second click must not start a second preview). `token` lets a late response detect it is stale.
+ */
+let promotePreviewSeq = 0;
+function promoteBeginPreview(prev, releaseId) {
+    if (prev && prev.loading) return null;
+    promotePreviewSeq += 1;
+    return { releaseId: releaseId, releaseData: null, currentStep: 1, preview: null, result: null,
+             inFlight: false, loading: true, token: promotePreviewSeq };
+}
+
+function promoteLoadingModel() {
+    return { message: 'Checking gate…', nextLabel: 'CHECKING GATE…', nextDisabled: true };
 }
 
 /**
@@ -12282,22 +12306,35 @@ function buildPromoteResultModel(releaseId, preview, outcome) {
  * @param {string} releaseId - The release ID to promote
  */
 async function promoteRelease(releaseId) {
-    promoteModalState = { releaseId: releaseId, releaseData: null, currentStep: 1, preview: null, result: null, inFlight: false };
+    const begun = promoteBeginPreview(promoteModalState, releaseId);
+    if (!begun) return;          // a preview is already loading: no second request
+    promoteModalState = begun;
+    const token = begun.token;
+    showPromoteLoading(releaseId);
+
+    const stale = () => promoteModalState.token !== token;
+    const abort = () => { if (!stale()) hidePromoteModal(); };
 
     try {
         const releaseResponse = await fetch(apiUrl(`/api/releases/${releaseId}`));
+        if (stale()) return;
         if (!releaseResponse.ok) {
+            abort();
             showToast(`Failed to load release: ${releaseId}`, 'error');
             return;
         }
-        promoteModalState.releaseData = await releaseResponse.json();
+        const releaseData = await releaseResponse.json();
+        if (stale()) return;
+        promoteModalState.releaseData = releaseData;
     } catch (error) {
         console.error('Error loading release for promotion:', error);
+        abort();
         showToast('Failed to load release data', 'error');
         return;
     }
 
     // The preview is the SERVER's verdict (real gate, dry run: no write, no log).
+    let preview;
     try {
         const response = await apiFetch(apiUrl(`/api/releases/${releaseId}/promote`), {
             method: 'POST',
@@ -12305,15 +12342,34 @@ async function promoteRelease(releaseId) {
             body: JSON.stringify({ dryRun: true, actor: 'lcars-ui', confirmDeploy: false })
         });
         const data = await response.json().catch(() => ({}));
-        promoteModalState.preview = response.ok
+        preview = response.ok
             ? data
             : { allowed: false, reasons: Array.isArray(data.reasons) ? data.reasons : [data.error || `HTTP ${response.status}`],
                 reasonCodes: data.reasonCodes, reasonData: data.reasonData };
     } catch (error) {
-        promoteModalState.preview = { allowed: false, reasons: [error.message] };
+        preview = { allowed: false, reasons: [error.message] };
     }
+    if (stale()) return;
+    promoteModalState.preview = preview;
+    promoteModalState.loading = false;
 
     populatePromotePreview();
+    updatePromoteStepIndicator(1);
+    showPromoteStep(1);
+    document.getElementById('promote-cancel-btn').disabled = false;
+    document.getElementById('promote-modal').style.display = 'flex';
+}
+
+/** Open the modal right away with a "Checking gate..." state and PROMOTE disabled. */
+function showPromoteLoading(releaseId) {
+    const m = promoteLoadingModel();
+    document.getElementById('promote-release-info').innerHTML =
+        `<span class="release-id">${escapeHtml(String(releaseId))}</span>`;
+    document.getElementById('promote-preview').innerHTML =
+        `<p class="promote-instruction">${escapeHtml(m.message)}</p>`;
+    const nextBtn = document.getElementById('promote-next-btn');
+    nextBtn.disabled = m.nextDisabled;
+    nextBtn.textContent = m.nextLabel;
     updatePromoteStepIndicator(1);
     showPromoteStep(1);
     document.getElementById('promote-cancel-btn').disabled = false;
@@ -12425,7 +12481,7 @@ function promoteStepNext() {
     const step = promoteModalState.currentStep;
     if (step === 1) {
         if (!promoteModalState.previewModel || !promoteModalState.previewModel.canPromote) return;
-        if (promoteModalState.inFlight) return;
+        if (promoteModalState.inFlight || promoteModalState.loading) return;
         promoteModalState.currentStep = 2;
         updatePromoteStepIndicator(2);
         showPromoteStep(2);

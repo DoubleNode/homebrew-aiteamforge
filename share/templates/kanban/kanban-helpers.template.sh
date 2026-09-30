@@ -24386,88 +24386,52 @@ kb-release-reschedule() {
     kb-release-edit "$release_id" --target-date "$date"
 }
 
-# Promote one or all platforms of a release to the next (or a specified) environment.
-# Usage: kb-release promote <REL-ID> --platform <plat> | --all [--to <ENV>]
+# ---------------------------------------------------------------------------
+# XACA-1346-007 / -006: release stage transitions are SERVER-decided.
 #
-# FORWARD-ONLY: refuses to move a platform to an environment at or before its
-# current position in the enabled-environment ordering.  The server already
-# guards the auto-advance case; this CLI guard covers explicit --to overrides.
-kb-release-promote() {
-    local release_id=""
-    local opt_platform=""
-    local opt_all=0
-    local opt_to=""
+# promote, regress, waive and plan are thin clients of the LCARS release gate
+# endpoints.  The CLI never orders stages, never evaluates the gate and never
+# writes release state itself: every state change goes through
+#   POST /api/releases/<id>/{promote,regress,plan}
+#   POST /api/releases/<id>/stages/<STAGE>/waiver
+# and if the server is unreachable the command FAILS (rc 1).  There is
+# deliberately no fallback write -- a fallback would be a way around the gate.
+#
+# Exit codes (promote / regress / waive / plan):
+#   0 ok   1 server/transport error   2 usage or rejected request (400)
+#   3 refused by the gate (409)       4 not found (404)
+#   5 not a release lead (403, waive)
+# ---------------------------------------------------------------------------
 
-    # Parse arguments
-    while [[ $# -gt 0 ]]; do
-        case "${1-}" in
-            --platform|-p)
-                opt_platform="${2-}"
-                shift 2
-                ;;
-            --all|-a)
-                opt_all=1
-                shift
-                ;;
-            --to|-t)
-                opt_to="${2-}"
-                shift 2
-                ;;
-            --help|-h)
-                echo "Usage: kb-release promote <release-id> --platform <plat> | --all [--to <ENV>]"
-                echo ""
-                echo "Options:"
-                echo "  --platform <plat>  Promote a single platform (e.g. ios, android, firebase)"
-                echo "  --all              Promote every platform in the release"
-                echo "  --to <ENV>         Target environment (optional; server auto-advances when omitted)"
-                echo ""
-                echo "Exactly one of --platform or --all is required."
-                echo ""
-                echo "FORWARD-ONLY: refuses backward/no-op promotions."
-                echo "  Environment order is taken from the release's own 'environments' sequence."
-                echo "  Passing --to <ENV> that is at or before the platform's current environment"
-                echo "  is rejected with an error (disabled-stage targets are rejected by the server)."
-                echo ""
-                echo "Examples:"
-                echo "  kb-release promote REL-2026-Q1-001 --all"
-                echo "  kb-release promote REL-2026-Q1-001 --platform ios"
-                echo "  kb-release promote REL-2026-Q1-001 --platform android --to QA"
-                return 0
-                ;;
-            *)
-                if [[ -z "$release_id" ]]; then
-                    release_id="${1-}"
-                else
-                    echo "Error: Unexpected argument: ${1-}"
-                    echo "Usage: kb-release promote <release-id> --platform <plat> | --all [--to <ENV>]"
-                    return 1
-                fi
-                shift
-                ;;
-        esac
-    done
+# Validate an identifier that is interpolated into a URL path.
+# Usage: _kb_release_valid_token <value>
+_kb_release_valid_token() {
+    [[ "${1-}" =~ ^[A-Za-z0-9._-]+$ ]]
+}
 
-    if [[ -z "$release_id" ]]; then
-        echo "Error: Release ID is required"
-        echo "Usage: kb-release promote <release-id> --platform <plat> | --all [--to <ENV>]"
-        return 1
-    fi
+# Default actor for gate calls: --actor/--by, else $USER, else id -un.
+_kb_release_default_actor() {
+    local actor="${USER:-}"
+    [[ -z "$actor" ]] && actor=$(id -un 2>/dev/null)
+    printf '%s' "${actor:-unknown}"
+}
 
-    if [[ $opt_all -eq 0 && -z "$opt_platform" ]]; then
-        echo "Error: exactly one of --platform <plat> or --all is required"
-        return 1
-    fi
+# POST a JSON payload to /api/releases/<subpath> on the caller team's LCARS.
+# Usage: _kb_release_api_post <subpath> <json-payload>
+# Sets:  _KB_REL_CODE (HTTP status) and _KB_REL_BODY (response body).
+# Returns 0 when an HTTP response was received (any status), 1 on a team
+# context or transport failure (message already printed).
+_kb_release_api_post() {
+    local subpath="${1-}" payload="${2-}"
+    _KB_REL_CODE=""
+    _KB_REL_BODY=""
 
-    if [[ $opt_all -eq 1 && -n "$opt_platform" ]]; then
-        echo "Error: --platform and --all are mutually exclusive"
-        return 1
-    fi
+    local context team port response curl_exit
+    local _kb_reason cause remedy
+    local _KB_LCARS_AUTH_ARGS=() _KB_LCARS_AUTH_STDIN=""
 
-    # Detect caller's team and resolve the correct LCARS port
-    local context team port
     context=$(_kb_detect_context 2>/dev/null)
     team="${context%%:*}"
-
     if [[ -z "$team" || "$team" == "ERROR:"* ]]; then
         echo "Error: Could not determine team context" >&2
         return 1
@@ -24478,287 +24442,399 @@ kb-release-promote() {
         port="8080"
     }
 
-    # Fetch the release record to determine platform list and current environments.
-    # GET /api/releases returns the full list; we find ours by id.
-    local list_resp list_code list_body list_curl_exit release_json
-    # _kb_reason/cause/remedy are also consumed inside the per-platform
-    # promote loop further below (k501: declared once here, not re-declared
-    # inside the loop, to avoid the zsh local-in-loop stdout leak).
-    local _kb_reason cause remedy
-    list_resp=$(curl -s -w "\n%{http_code}" \
-        --max-time 5 \
-        "http://localhost:${port}/api/releases" 2>/dev/null)
-    list_curl_exit=$?
-    list_code=$(printf '%s' "$list_resp" | tail -n1)
-    list_body=$(printf '%s' "$list_resp" | sed '$d')
+    _kb_lcars_auth_args
+    response=$(printf '%s' "$_KB_LCARS_AUTH_STDIN" | curl -s -w "\n%{http_code}" \
+        --max-time "${KB_RELEASE_HTTP_TIMEOUT:-30}" \
+        -X POST \
+        -H "Content-Type: application/json" \
+        "${_KB_LCARS_AUTH_ARGS[@]}" \
+        -d "$payload" \
+        "http://localhost:${port}/api/releases/${subpath}" 2>/dev/null)
+    curl_exit=$?
+    _KB_REL_CODE=$(printf '%s' "$response" | tail -n1)
+    _KB_REL_BODY=$(printf '%s' "$response" | sed '$d')
 
-    if [[ "$list_code" == "000" ]]; then
-        # curl reports %{http_code}=000 for ANY connection-phase failure
-        # (refused, timed out, DNS, reset) — decode curl's own exit code
-        # instead of asserting a single cause for all of them (see
-        # _kb_curl_failure_reason; XACA-1099).
-        _kb_reason=$(_kb_curl_failure_reason "$list_curl_exit" "$port")
+    if [[ "$_KB_REL_CODE" == "000" ]]; then
+        # curl reports %{http_code}=000 for ANY connection-phase failure --
+        # decode curl's own exit code instead of asserting one cause (XACA-1099).
+        _kb_reason=$(_kb_curl_failure_reason "$curl_exit" "$port")
         cause="${_kb_reason%%$'\n'*}"
         remedy="${_kb_reason#*$'\n'}"
-        echo "Error: LCARS server on port $port — $cause."
-        echo "  $remedy"
-        return 1
-    fi
-    if [[ "$list_code" != "200" ]]; then
-        echo "Error: Failed to fetch releases (HTTP $list_code)"
-        [[ -n "$list_body" ]] && echo "  $list_body"
-        return 1
-    fi
-
-    release_json=$(printf '%s' "$list_body" | jq --arg id "$release_id" \
-        '.releases[] | select(.id == $id)' 2>/dev/null)
-    if [[ -z "$release_json" ]]; then
-        echo "Error: Release not found: $release_id"
-        return 1
-    fi
-
-    # Derive the ordered environment sequence from the release's own
-    # `environments` array (set at create time, ordered).  NOTE: flowConfig
-    # lives at the top level of the releases config and is NOT exposed by the
-    # GET /api/releases list response, so we cannot replicate the server's
-    # enabled-stage filtering here.  We don't need to: for a forward/backward
-    # determination, index comparison within the full ordered `environments`
-    # array is correct — a disabled stage between current and target does not
-    # change their relative order, and the server independently rejects a `--to`
-    # that names a disabled stage with HTTP 400 ("Invalid or disabled
-    # environment").  Auto-advance (no --to) is always forward by server design.
-    local enabled_envs
-    enabled_envs=$(printf '%s' "$release_json" | jq -r \
-        '.environments // [] | .[]' \
-        2>/dev/null)
-
-    # Build the platforms list to promote
-    local platforms_to_promote
-    if [[ $opt_all -eq 1 ]]; then
-        platforms_to_promote=$(printf '%s' "$release_json" | jq -r \
-            '.platforms // {} | keys[]' 2>/dev/null)
-    else
-        platforms_to_promote="$opt_platform"
-    fi
-
-    if [[ -z "$platforms_to_promote" ]]; then
-        echo "Error: release has no platforms to promote"
-        return 1
-    fi
-
-    # Loop-scoped vars declared before the loop (k501: zsh local-in-loop stdout leak)
-    local promote_plat cur_env target_env cur_idx target_idx env_entry idx
-    local promote_response promote_code promote_body promote_curl_exit prev_env new_env
-    # k501: declared before the loop — re-declaring inside the per-platform
-    # loop would leak to stdout on the 2nd+ platform (--all / 400-path).
-    # (_kb_reason/cause/remedy, also consumed in the loop's 000 branch below,
-    # are already declared local earlier in this function — see the
-    # list_resp/list_code fetch above — so they are not re-declared here.)
-    local promote_payload err_msg
-    local any_promoted=0
-    local any_failed=0
-    # XACA-0395-006: same k501 rule — declare once before the loop.
-    local _KB_LCARS_AUTH_ARGS=() _KB_LCARS_AUTH_STDIN=""
-
-    while IFS= read -r promote_plat; do
-        [[ -z "$promote_plat" ]] && continue
-
-        # Current environment for this platform
-        cur_env=$(printf '%s' "$release_json" | jq -r \
-            --arg p "$promote_plat" '.platforms[$p].environment // empty' 2>/dev/null)
-
-        # Determine target environment
-        if [[ -n "$opt_to" ]]; then
-            target_env="$opt_to"
-        else
-            # Auto: server will pick next enabled env; we just validate it's not
-            # already at the final position (server returns 400 in that case, we
-            # handle it below per-platform).
-            target_env=""
-        fi
-
-        # Forward-only check (only when --to is explicit AND we have enabled env list)
-        if [[ -n "$target_env" && -n "$enabled_envs" ]]; then
-            cur_idx=-1
-            target_idx=-1
-            idx=0
-            while IFS= read -r env_entry; do
-                [[ -z "$env_entry" ]] && continue
-                [[ "$env_entry" == "$cur_env" ]]    && cur_idx=$idx
-                [[ "$env_entry" == "$target_env" ]] && target_idx=$idx
-                idx=$(( idx + 1 ))
-            done <<< "$enabled_envs"
-
-            if [[ $target_idx -lt 0 ]]; then
-                echo "Error: '$target_env' is not an enabled environment for release $release_id"
-                any_failed=1
-                continue
-            fi
-            if [[ $cur_idx -ge 0 && $target_idx -le $cur_idx ]]; then
-                echo "Error: refusing backward/no-op promotion: $promote_plat is at $cur_env, cannot promote to $target_env"
-                any_failed=1
-                continue
-            fi
-        fi
-
-        # Build POST payload (promote_payload declared before the loop — k501)
-        if [[ -n "$target_env" ]]; then
-            promote_payload=$(jq -n \
-                --arg plat "$promote_plat" \
-                --arg env "$target_env" \
-                '{platform: $plat, targetEnvironment: $env}')
-        else
-            promote_payload=$(jq -n \
-                --arg plat "$promote_plat" \
-                '{platform: $plat}')
-        fi
-
-        # POST /api/releases/:id/promote
-        _kb_lcars_auth_args
-        promote_response=$(printf '%s' "$_KB_LCARS_AUTH_STDIN" | curl -s -w "\n%{http_code}" \
-            --max-time 5 \
-            -X POST \
-            -H "Content-Type: application/json" \
-            "${_KB_LCARS_AUTH_ARGS[@]}" \
-            -d "$promote_payload" \
-            "http://localhost:${port}/api/releases/${release_id}/promote" 2>/dev/null)
-        promote_curl_exit=$?
-
-        promote_code=$(printf '%s' "$promote_response" | tail -n1)
-        promote_body=$(printf '%s' "$promote_response" | sed '$d')
-
-        if [[ "$promote_code" == "200" ]]; then
-            prev_env=$(printf '%s' "$promote_body" | jq -r '.previousEnvironment // empty')
-            new_env=$(printf '%s' "$promote_body" | jq -r '.newEnvironment // empty')
-            echo "  $promote_plat: $prev_env -> $new_env"
-            any_promoted=1
-        elif [[ "$promote_code" == "400" ]]; then
-            # Already at final env or other business-logic rejection
-            # (err_msg declared before the loop — k501)
-            err_msg=$(printf '%s' "$promote_body" | jq -r '.error // .message // empty' 2>/dev/null)
-            echo "  $promote_plat: skipped — ${err_msg:-HTTP 400}"
-            any_failed=1
-        elif [[ "$promote_code" == "404" ]]; then
-            echo "  $promote_plat: Error — Release or platform not found (HTTP 404)"
-            any_failed=1
-        elif [[ "$promote_code" == "000" ]]; then
-            # curl reports %{http_code}=000 for ANY connection-phase failure
-            # (refused, timed out, DNS, reset) — decode curl's own exit code
-            # instead of asserting a single cause for all of them (see
-            # _kb_curl_failure_reason; XACA-1099).
-            _kb_reason=$(_kb_curl_failure_reason "$promote_curl_exit" "$port")
-            cause="${_kb_reason%%$'\n'*}"
-            remedy="${_kb_reason#*$'\n'}"
-            echo "Error: LCARS server on port $port — $cause."
-            echo "  $remedy"
-            return 1
-        else
-            echo "  $promote_plat: Error — HTTP $promote_code"
-            [[ -n "$promote_body" ]] && echo "    $promote_body"
-            any_failed=1
-        fi
-    done <<< "$platforms_to_promote"
-
-    if [[ $any_promoted -eq 1 ]]; then
-        echo "✓ Promoted release: $release_id"
-        echo "  Team: $team (LCARS port $port)"
-    fi
-
-    if [[ $any_promoted -eq 0 ]]; then
+        echo "Error: LCARS server on port $port — $cause." >&2
+        echo "  $remedy" >&2
+        echo "  (release state is only changed by the server; there is no offline fallback)" >&2
         return 1
     fi
     return 0
 }
 
-# XACA-0729: Demote all platforms of a release back to the PLANNED holding state.
-# Usage: kb-release-plan <release-id>
-#
-# Calls POST /api/releases/<id>/plan which resets every platform's environment
-# to "PLANNED" and appends an audit history entry.  Useful when a release was
-# accidentally created in an ACTIVE state (defaultEnvironments drift) or needs
-# to be pulled back to the holding queue before re-promotion begins.
-kb-release-plan() {
-    local release_id="${1-}"
+# Print .reasons[] from a response body, one per line.
+# Usage: _kb_release_print_reasons <body> [header]
+_kb_release_print_reasons() {
+    local body="${1-}" header="${2-}" lines line
+    lines=$(printf '%s' "$body" | jq -r \
+        '(.reasons // [])[] | if type == "string" then . else (.message // .reason // tostring) end' \
+        2>/dev/null)
+    [[ -z "$lines" ]] && return 0
+    [[ -n "$header" ]] && echo "$header"
+    while IFS= read -r line; do
+        echo "  - $line"
+    done <<< "$lines"
+    return 0
+}
 
-    case "${release_id-}" in
-        --help|-h|"")
-            echo "Usage: kb-release plan <release-id>"
-            echo ""
-            echo "Demote all platforms of a release back to the PLANNED holding state."
-            echo ""
-            echo "  release-id: Release ID (e.g., REL-2026-Q1-001)"
-            echo ""
-            echo "Example:"
-            echo "  kb-release plan REL-2026-Q1-007"
-            return 0
+# Map a non-success HTTP status to a message + exit code.
+# Usage: _kb_release_fail <what> ; reads _KB_REL_CODE / _KB_REL_BODY.
+_kb_release_fail() {
+    local what="${1-request}" err
+    err=$(printf '%s' "$_KB_REL_BODY" | jq -r '.error // .message // empty' 2>/dev/null)
+    case "$_KB_REL_CODE" in
+        409)
+            echo "Refused: $what"
+            _kb_release_print_reasons "$_KB_REL_BODY" "gate refused:"
+            return 3
             ;;
-    esac
-
-    # Resolve team context and LCARS port (mirrors kb-release-promote pattern)
-    local context team port
-    context=$(_kb_detect_context 2>/dev/null)
-    team="${context%%:*}"
-
-    if [[ -z "$team" || "$team" == "ERROR:"* ]]; then
-        echo "Error: Could not determine team context" >&2
-        return 1
-    fi
-
-    port=$(_kb_team_lcars_port "$team") || {
-        echo "Warning: no LCARS port known for team '$team', falling back to 8080" >&2
-        port="8080"
-    }
-
-    # POST /api/releases/<id>/plan — no body required
-    local response code body curl_exit
-    local _KB_LCARS_AUTH_ARGS=() _KB_LCARS_AUTH_STDIN=""
-    _kb_lcars_auth_args
-    response=$(printf '%s' "$_KB_LCARS_AUTH_STDIN" | curl -s -w "\n%{http_code}" \
-        --max-time 5 \
-        -X POST \
-        -H "Content-Type: application/json" \
-        "${_KB_LCARS_AUTH_ARGS[@]}" \
-        -d '{}' \
-        "http://localhost:${port}/api/releases/${release_id}/plan" 2>/dev/null)
-    curl_exit=$?
-    code=$(printf '%s' "$response" | tail -n1)
-    body=$(printf '%s' "$response" | sed '$d')
-
-    case "$code" in
-        200)
-            local platforms
-            platforms=$(printf '%s' "$body" | jq -r '.platforms // [] | join(", ")' 2>/dev/null)
-            echo "✓ Release $release_id reset to PLANNED"
-            echo "  Team: $team (LCARS port $port)"
-            [[ -n "$platforms" ]] && echo "  Platforms: $platforms"
-            return 0
-            ;;
-        000)
-            # curl reports %{http_code}=000 for ANY connection-phase failure
-            # (refused, --max-time expiry, DNS, reset) — decode curl's own
-            # exit code rather than asserting one of them (XACA-1099).
-            # NOTE: this site is a `case` label, not a [[ == "000" ]] test,
-            # so the quoted-string grep that inventoried the other six sites
-            # did not match it. Cover unquoted case labels when auditing.
-            local _kb_reason cause remedy
-            _kb_reason=$(_kb_curl_failure_reason "$curl_exit" "$port")
-            cause="${_kb_reason%%$'\n'*}"
-            remedy="${_kb_reason#*$'\n'}"
-            echo "Error: LCARS server on port $port — $cause"
-            echo "  $remedy"
-            return 1
+        403)
+            echo "Error: not a release lead — $what refused"
+            _kb_release_print_reasons "$_KB_REL_BODY"
+            [[ -n "$err" ]] && echo "  $err"
+            return 5
             ;;
         404)
-            echo "Error: Release not found: $release_id (HTTP 404)"
-            [[ -n "$body" ]] && echo "  $body"
-            return 1
+            echo "Error: not found: $what (HTTP 404)"
+            [[ -n "$err" ]] && echo "  $err"
+            return 4
+            ;;
+        400)
+            echo "Error: request rejected: $what (HTTP 400)"
+            [[ -n "$err" ]] && echo "  $err"
+            _kb_release_print_reasons "$_KB_REL_BODY"
+            return 2
             ;;
         *)
-            echo "Error: HTTP $code"
-            [[ -n "$body" ]] && echo "  $body"
+            echo "Error: $what failed (HTTP ${_KB_REL_CODE:-?})"
+            [[ -n "$err" ]] && echo "  $err"
+            [[ -z "$err" && -n "$_KB_REL_BODY" ]] && echo "  $_KB_REL_BODY"
             return 1
             ;;
     esac
+}
+
+# Promote a release to its next (or a specified) stage via the release gate.
+# Usage: kb-release promote <REL-ID> [--to STAGE] [--confirm-deploy] [--actor NAME]
+# Stage is release-level: --platform/--all are accepted but ignored.
+kb-release-promote() {
+    local release_id="" opt_to="" opt_actor="" opt_confirm=0 opt_legacy=0
+    local usage="Usage: kb-release promote <release-id> [--to <STAGE>] [--confirm-deploy] [--actor <name>]"
+
+    while [[ $# -gt 0 ]]; do
+        case "${1-}" in
+            --to|-t)
+                if [[ $# -lt 2 ]]; then echo "Error: --to needs a value" >&2; echo "$usage" >&2; return 2; fi
+                opt_to="${2-}"; shift 2 ;;
+            --actor)
+                if [[ $# -lt 2 ]]; then echo "Error: --actor needs a value" >&2; echo "$usage" >&2; return 2; fi
+                opt_actor="${2-}"; shift 2 ;;
+            --confirm-deploy)
+                opt_confirm=1; shift ;;
+            --platform|-p)
+                opt_legacy=1
+                [[ $# -ge 2 ]] && shift
+                shift ;;
+            --all|-a)
+                opt_legacy=1; shift ;;
+            --help|-h)
+                echo "$usage"
+                echo ""
+                echo "Ask the release gate to promote the release. The SERVER decides: it"
+                echo "evaluates the gate, picks the next stage when --to is omitted, and"
+                echo "records the transition. This command never writes release state itself."
+                echo ""
+                echo "Options:"
+                echo "  --to <STAGE>       Target stage (optional; server uses the gate's next stage)"
+                echo "  --confirm-deploy   Confirm a deploy-bearing transition"
+                echo "  --actor <name>     Who is promoting (default: \$USER)"
+                echo "  --platform/--all   Deprecated, ignored: stage is release-level"
+                echo ""
+                echo "Exit codes: 0 promoted, 1 server/transport error, 2 usage/rejected,"
+                echo "            3 refused by the gate, 4 release not found"
+                echo ""
+                echo "In report mode (releaseConfig.gateEnforcement=report) the gate's reasons"
+                echo "are printed as warnings and the promotion still proceeds."
+                return 0 ;;
+            -*)
+                echo "Error: Unknown option: ${1-}" >&2; echo "$usage" >&2; return 2 ;;
+            *)
+                if [[ -z "$release_id" ]]; then
+                    release_id="${1-}"
+                else
+                    echo "Error: Unexpected argument: ${1-}" >&2; echo "$usage" >&2; return 2
+                fi
+                shift ;;
+        esac
+    done
+
+    if [[ -z "$release_id" ]]; then
+        echo "Error: Release ID is required" >&2
+        echo "$usage" >&2
+        return 2
+    fi
+    if ! _kb_release_valid_token "$release_id"; then
+        echo "Error: invalid release id: $release_id" >&2
+        return 2
+    fi
+    if [[ $opt_legacy -eq 1 ]]; then
+        echo "Note: --platform/--all are deprecated — stage is release-level; platform ignored." >&2
+    fi
+    [[ -z "$opt_actor" ]] && opt_actor=$(_kb_release_default_actor)
+
+    local payload
+    payload=$(jq -n \
+        --arg to "$opt_to" \
+        --arg actor "$opt_actor" \
+        --argjson confirm "$( [[ $opt_confirm -eq 1 ]] && echo true || echo false )" \
+        '{actor: $actor, confirmDeploy: $confirm}
+         + (if $to == "" then {} else {targetStage: $to} end)') || return 1
+
+    _kb_release_api_post "${release_id}/promote" "$payload" || return 1
+
+    local from to mode
+    from=$(printf '%s' "$_KB_REL_BODY" | jq -r '.from // empty' 2>/dev/null)
+    to=$(printf '%s' "$_KB_REL_BODY" | jq -r '.to // empty' 2>/dev/null)
+    mode=$(printf '%s' "$_KB_REL_BODY" | jq -r '.mode // empty' 2>/dev/null)
+
+    case "$_KB_REL_CODE" in
+        200)
+            echo "✓ Promoted release: $release_id  ${from:-?} -> ${to:-?}  (mode: ${mode:-unknown})"
+            if [[ "$mode" == "report" ]]; then
+                _kb_release_print_reasons "$_KB_REL_BODY" "gate would refuse (report mode):"
+            else
+                _kb_release_print_reasons "$_KB_REL_BODY" "gate notes:"
+            fi
+            return 0
+            ;;
+        409)
+            echo "Refused: release $release_id  ${from:-?} -> ${to:-?}  (mode: ${mode:-enforce})"
+            _kb_release_print_reasons "$_KB_REL_BODY" "gate refused:"
+            return 3
+            ;;
+        *)
+            _kb_release_fail "promote $release_id"
+            return $?
+            ;;
+    esac
+}
+
+# Move a release BACK to an earlier stage (server-audited).
+# Usage: kb-release regress <REL-ID> --to STAGE --reason "..." [--actor NAME]
+kb-release-regress() {
+    local release_id="" opt_to="" opt_reason="" opt_actor=""
+    local usage="Usage: kb-release regress <release-id> --to <STAGE> --reason \"<why>\" [--actor <name>]"
+
+    while [[ $# -gt 0 ]]; do
+        case "${1-}" in
+            --to|-t)
+                if [[ $# -lt 2 ]]; then echo "Error: --to needs a value" >&2; echo "$usage" >&2; return 2; fi
+                opt_to="${2-}"; shift 2 ;;
+            --reason|-r)
+                if [[ $# -lt 2 ]]; then echo "Error: --reason needs a value" >&2; echo "$usage" >&2; return 2; fi
+                opt_reason="${2-}"; shift 2 ;;
+            --actor)
+                if [[ $# -lt 2 ]]; then echo "Error: --actor needs a value" >&2; echo "$usage" >&2; return 2; fi
+                opt_actor="${2-}"; shift 2 ;;
+            --help|-h)
+                echo "$usage"
+                echo ""
+                echo "Regress a release to an earlier stage. --to and --reason are required;"
+                echo "the reason is recorded in the release history. The SERVER decides."
+                echo ""
+                echo "Exit codes: 0 ok, 1 server/transport error, 2 usage/rejected,"
+                echo "            3 refused, 4 release not found"
+                return 0 ;;
+            -*)
+                echo "Error: Unknown option: ${1-}" >&2; echo "$usage" >&2; return 2 ;;
+            *)
+                if [[ -z "$release_id" ]]; then
+                    release_id="${1-}"
+                else
+                    echo "Error: Unexpected argument: ${1-}" >&2; echo "$usage" >&2; return 2
+                fi
+                shift ;;
+        esac
+    done
+
+    if [[ -z "$release_id" ]]; then
+        echo "Error: Release ID is required" >&2; echo "$usage" >&2; return 2
+    fi
+    if ! _kb_release_valid_token "$release_id"; then
+        echo "Error: invalid release id: $release_id" >&2; return 2
+    fi
+    if [[ -z "$opt_to" ]]; then
+        echo "Error: --to <STAGE> is required" >&2; echo "$usage" >&2; return 2
+    fi
+    if [[ -z "${opt_reason//[[:space:]]/}" ]]; then
+        echo "Error: --reason is required (a regression must say why)" >&2; echo "$usage" >&2; return 2
+    fi
+    [[ -z "$opt_actor" ]] && opt_actor=$(_kb_release_default_actor)
+
+    local payload
+    payload=$(jq -n --arg to "$opt_to" --arg reason "$opt_reason" --arg actor "$opt_actor" \
+        '{to: $to, reason: $reason, actor: $actor}') || return 1
+
+    _kb_release_api_post "${release_id}/regress" "$payload" || return 1
+
+    if [[ "$_KB_REL_CODE" == "200" ]]; then
+        local from to
+        from=$(printf '%s' "$_KB_REL_BODY" | jq -r '.from // empty' 2>/dev/null)
+        to=$(printf '%s' "$_KB_REL_BODY" | jq -r '.to // empty' 2>/dev/null)
+        echo "✓ Regressed release: $release_id  ${from:-?} -> ${to:-$opt_to}"
+        return 0
+    fi
+    _kb_release_fail "regress $release_id"
+    return $?
+}
+
+# Record a lead-approved waiver for a stage's gate.
+# Usage: kb-release waive <REL-ID> --stage STAGE --reason "..." --tests t1,t2 [--by NAME]
+kb-release-waive() {
+    local release_id="" opt_stage="" opt_reason="" opt_tests="" opt_by=""
+    local usage="Usage: kb-release waive <release-id> --stage <STAGE> --reason \"<why>\" --tests <t1,t2> [--by <name>]"
+
+    while [[ $# -gt 0 ]]; do
+        case "${1-}" in
+            --stage|-s)
+                if [[ $# -lt 2 ]]; then echo "Error: --stage needs a value" >&2; echo "$usage" >&2; return 2; fi
+                opt_stage="${2-}"; shift 2 ;;
+            --reason|-r)
+                if [[ $# -lt 2 ]]; then echo "Error: --reason needs a value" >&2; echo "$usage" >&2; return 2; fi
+                opt_reason="${2-}"; shift 2 ;;
+            --tests)
+                if [[ $# -lt 2 ]]; then echo "Error: --tests needs a value" >&2; echo "$usage" >&2; return 2; fi
+                opt_tests="${2-}"; shift 2 ;;
+            --by)
+                if [[ $# -lt 2 ]]; then echo "Error: --by needs a value" >&2; echo "$usage" >&2; return 2; fi
+                opt_by="${2-}"; shift 2 ;;
+            --help|-h)
+                echo "$usage"
+                echo ""
+                echo "Waive named tests for a stage's gate. Only release leads"
+                echo "(releaseConfig.leads) may waive; the SERVER decides."
+                echo ""
+                echo "Exit codes: 0 ok, 1 server/transport error, 2 usage/rejected,"
+                echo "            3 refused, 4 not found, 5 not a release lead"
+                return 0 ;;
+            -*)
+                echo "Error: Unknown option: ${1-}" >&2; echo "$usage" >&2; return 2 ;;
+            *)
+                if [[ -z "$release_id" ]]; then
+                    release_id="${1-}"
+                else
+                    echo "Error: Unexpected argument: ${1-}" >&2; echo "$usage" >&2; return 2
+                fi
+                shift ;;
+        esac
+    done
+
+    if [[ -z "$release_id" ]]; then
+        echo "Error: Release ID is required" >&2; echo "$usage" >&2; return 2
+    fi
+    if ! _kb_release_valid_token "$release_id"; then
+        echo "Error: invalid release id: $release_id" >&2; return 2
+    fi
+    if [[ -z "$opt_stage" ]] || ! _kb_release_valid_token "$opt_stage"; then
+        echo "Error: --stage <STAGE> is required (letters, digits, . _ -)" >&2; echo "$usage" >&2; return 2
+    fi
+    if [[ -z "${opt_reason//[[:space:]]/}" ]]; then
+        echo "Error: --reason is required (a waiver must say why)" >&2; echo "$usage" >&2; return 2
+    fi
+    [[ -z "$opt_by" ]] && opt_by=$(_kb_release_default_actor)
+
+    local payload
+    payload=$(jq -n --arg by "$opt_by" --arg reason "$opt_reason" --arg tests "$opt_tests" \
+        '{by: $by, reason: $reason,
+          tests: ($tests | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0)))}') || return 1
+
+    _kb_release_api_post "${release_id}/stages/${opt_stage}/waiver" "$payload" || return 1
+
+    if [[ "$_KB_REL_CODE" == "200" ]]; then
+        echo "✓ Waiver recorded: $release_id stage $opt_stage (by $opt_by)"
+        return 0
+    fi
+    _kb_release_fail "waive $release_id stage $opt_stage"
+    return $?
+}
+
+# XACA-0729: Demote a release back to the PLANNED holding state.
+# Usage: kb-release-plan <release-id> --reason "<why>"
+#
+# Calls POST /api/releases/<id>/plan, which resets the release to "PLANNED"
+# and appends an audit history entry.  XACA-1346: the server REQUIRES a
+# reason (400 without one), so --reason is required here too (rc 2 before
+# any HTTP call).  Shares _kb_release_api_post with promote/regress/waive.
+kb-release-plan() {
+    local release_id="" opt_reason=""
+    local usage="Usage: kb-release plan <release-id> --reason \"<why>\""
+
+    while [[ $# -gt 0 ]]; do
+        case "${1-}" in
+            --reason|-r)
+                if [[ $# -lt 2 ]]; then echo "Error: --reason needs a value" >&2; echo "$usage" >&2; return 2; fi
+                opt_reason="${2-}"; shift 2 ;;
+            --help|-h)
+                echo "$usage"
+                echo ""
+                echo "Demote the release back to the PLANNED holding state (XACA-0729)."
+                echo "The reason is REQUIRED and is recorded in the release history."
+                echo ""
+                echo "  release-id: Release ID (e.g., REL-2026-Q1-001)"
+                echo "  --reason:   Why the release is being pulled back (required)"
+                echo ""
+                echo "Example:"
+                echo "  kb-release plan REL-2026-Q1-007 --reason \"created active by mistake\""
+                echo ""
+                echo "Exit codes: 0 ok, 1 server/transport error, 2 usage/rejected,"
+                echo "            3 refused, 4 release not found"
+                return 0 ;;
+            -*)
+                echo "Error: Unknown option: ${1-}" >&2; echo "$usage" >&2; return 2 ;;
+            *)
+                if [[ -z "$release_id" ]]; then
+                    release_id="${1-}"
+                else
+                    echo "Error: Unexpected argument: ${1-}" >&2; echo "$usage" >&2; return 2
+                fi
+                shift ;;
+        esac
+    done
+
+    if [[ -z "$release_id" ]]; then
+        echo "$usage"
+        return 0
+    fi
+    if ! _kb_release_valid_token "$release_id"; then
+        echo "Error: invalid release id: $release_id" >&2
+        return 2
+    fi
+    if [[ -z "${opt_reason//[[:space:]]/}" ]]; then
+        echo "Error: --reason is required (the server records why a release is demoted)" >&2
+        echo "$usage" >&2
+        return 2
+    fi
+
+    local payload
+    payload=$(jq -n --arg reason "$opt_reason" '{reason: $reason}') || return 1
+
+    _kb_release_api_post "${release_id}/plan" "$payload" || return 1
+
+    if [[ "$_KB_REL_CODE" == "200" ]]; then
+        local platforms
+        platforms=$(printf '%s' "$_KB_REL_BODY" | jq -r '.platforms // [] | join(", ")' 2>/dev/null)
+        echo "✓ Release $release_id reset to PLANNED"
+        [[ -n "$platforms" ]] && echo "  Platforms: $platforms"
+        return 0
+    fi
+    _kb_release_fail "plan $release_id"
+    return $?
 }
 
 # _kb_cr_write_manifest_crid <team> <rel_id> <cr_id>
@@ -25232,6 +25308,14 @@ kb-release() {
         promote)
             kb-release-promote "$@"
             ;;
+        regress)
+            # XACA-1346-006: server-audited move back to an earlier stage
+            kb-release-regress "$@"
+            ;;
+        waive)
+            # XACA-1346-006: lead-approved gate waiver (server checks the lead list)
+            kb-release-waive "$@"
+            ;;
         reschedule)
             kb-release-reschedule "$@"
             ;;
@@ -25254,8 +25338,13 @@ kb-release() {
             echo "  kb-release show <item|REL-ID>              Show item's release info, or release detail + linked CRs"
             echo "  kb-release sync [team]                     Reconcile board ↔ manifests"
             echo "  kb-release edit <id> [options]             Edit release metadata"
-            echo "  kb-release promote <id> --platform|--all   Promote environment (forward-only)"
-            echo "  kb-release plan <id>                       Demote all platforms back to PLANNED (XACA-0729)"
+            echo "  kb-release promote <id> [--to STAGE] [--confirm-deploy] [--actor NAME]"
+            echo "                                              Promote through the release gate (server-decided; XACA-1346)"
+            echo "  kb-release regress <id> --to STAGE --reason \"...\" [--actor NAME]"
+            echo "                                              Move back to an earlier stage (reason required)"
+            echo "  kb-release waive <id> --stage STAGE --reason \"...\" --tests t1,t2 [--by NAME]"
+            echo "                                              Lead-approved gate waiver"
+            echo "  kb-release plan <id> --reason \"...\"       Demote back to PLANNED (XACA-0729; reason required)"
             echo "  kb-release reschedule <id> <date>          Change target date"
             echo "  kb-release link-cr <rel> <cr>              Link a CR to this release (XACA-0657)"
             echo "  kb-release unlink-cr <rel> <cr>            Unlink a CR from this release (XACA-0657)"
@@ -25278,10 +25367,14 @@ kb-release() {
             echo "  --platform-version <plt>=<v>     Update version for an existing platform (repeatable)"
             echo "  --platform-build <plt>=<num>     Update build number (repeatable; aliases: --build-number, --version-code)"
             echo ""
-            echo "Promote options:"
-            echo "  --platform <plat>  Promote a single platform"
-            echo "  --all              Promote all platforms"
-            echo "  --to <ENV>         Target environment (optional; auto-advances when omitted)"
+            echo "Promote options (stage is release-level; the SERVER decides):"
+            echo "  --to <STAGE>       Target stage (optional; server uses the gate's next stage)"
+            echo "  --confirm-deploy   Confirm a deploy-bearing transition"
+            echo "  --actor <name>     Actor recorded by the gate (default: \$USER)"
+            echo "  --platform/--all   Deprecated, ignored"
+            echo ""
+            echo "Gate exit codes: 0 ok, 1 server/transport, 2 usage/rejected, 3 refused (409),"
+            echo "                 4 not found, 5 not a release lead (waive)"
             ;;
         *)
             echo "Unknown subcommand: $subcmd"
