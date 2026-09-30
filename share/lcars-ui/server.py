@@ -4953,6 +4953,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             # POST /api/releases/<id>/stages/<STAGE>/waiver — lead-only, SHA-bound waiver (XACA-1346-006)
             release_id, _sep, tail = path[len('/api/releases/'):].partition('/stages/')
             self.handle_release_stage_waiver(release_id, tail[:-len('/waiver')])
+        elif path.startswith('/api/releases/') and '/stages/' in path and path.endswith('/tests'):
+            # POST /api/releases/<id>/stages/<STAGE>/tests — the ONE writer of expected[] + tests[] (XACA-1347-004)
+            release_id, _sep, tail = path[len('/api/releases/'):].partition('/stages/')
+            self.handle_release_stage_tests(release_id, tail[:-len('/tests')])
         elif path.startswith('/api/releases/') and path.endswith('/regress'):
             # POST /api/releases/<id>/regress — the only sanctioned backward move (XACA-1346-006)
             release_id = path[len('/api/releases/'):-len('/regress')]
@@ -5093,7 +5097,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         # Release API endpoints
         if (path.startswith('/api/releases/') and not path.endswith('/items') and not path.endswith('/promote')
                 and not path.endswith('/platform-gate-status') and not path.endswith('/regress')
-                and not path.endswith('/waiver')):
+                and not path.endswith('/waiver') and not path.endswith('/tests')):
             release_id = path.replace('/api/releases/', '')
             self.handle_update_release(release_id)
         # Epic API endpoints
@@ -8280,6 +8284,12 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     # sanctioned, gated writer.
     _RELEASE_STAGE_STATE_FIELDS = ('environment', 'stage', 'stages', 'stageSha', 'tests')
     _RELEASE_GATE_MODES = ('enforce', 'report')
+    # Cap for the bulk release-state POST (/stages/<S>/tests), enforced from Content-Length
+    # BEFORE the body is read (413). Measured 2026-09-30: a full per-file run of a 6,585-record suite
+    # (records + expected) is 2.95 MiB, 6.1 MiB with 500-byte notes on every record; 16 MiB is ~2.6x
+    # the worst case and stays under the global MAX_POST_BODY_BYTES (50 MiB) that do_POST already applies.
+    _RELEASE_STATE_BODY_MAX_BYTES = 16 * 1024 * 1024
+    _BODY_TOO_LARGE = "request body too large"
     # THE default for a board with no releaseConfig.gateEnforcement (USER DECISION 2026-09-30,
     # XACA-1346-045, superseding -037's "absent = enforce"). It is "report" because "enforce" is
     # UNPASSABLE today: the PLANNED->DEV branch cut is a stub (XACA-1352) and nothing records
@@ -8288,14 +8298,18 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     # run: an explicit "enforce" opts a team in, an invalid value still means enforce + warning.
     _GATE_ENFORCEMENT_DEFAULT = 'report'
 
-    def _read_release_json_body(self):
+    def _read_release_json_body(self, max_bytes=None):
         """(body, error). Missing/empty body is {} (the promote target then defaults to
-        the gate's `next`); anything that is not a JSON object is an error string."""
+        the gate's `next`); anything that is not a JSON object is an error string. With
+        `max_bytes`, a Content-Length above it is an error starting _BODY_TOO_LARGE (callers
+        answer 413) returned BEFORE a byte of the body is read."""
         try:
             raw_len = self.headers.get('Content-Length')
             length = int(raw_len) if raw_len not in (None, '') else 0
         except (TypeError, ValueError):
             return None, "invalid Content-Length"
+        if max_bytes is not None and length > max_bytes:
+            return None, "%s: Content-Length %d exceeds the %d-byte limit" % (self._BODY_TOO_LARGE, length, max_bytes)
         if length <= 0:
             return {}, None
         try:
@@ -8811,6 +8825,187 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             return
         except Exception as e:
             self.send_error(500, f"Error granting waiver: {e}")
+
+    _TEST_PROTO_FIELDS = ('ref', 'parentRef', 'stage', 'type', 'ts', 'env', 'sha', 'test',
+                          'result', 'runBy', 'notes')
+
+    @staticmethod
+    def _expected_not_superset(old, new):
+        """Entries of the recorded `old` expected set that `new` removes or relaxes -> list of
+        human-readable names ([] = `new` is a valid superset). Compared on test name; an entry that was
+        required (bare string or optional false) may not come back optional. Malformed `old` entries
+        are skipped: the shape check already ran on `new`, and a stored set is server-written."""
+        def norm(lst):
+            out = {}
+            for e in (lst if isinstance(lst, list) else []):
+                if isinstance(e, str):
+                    out[e] = False
+                elif isinstance(e, dict) and isinstance(e.get('test'), str):
+                    out[e['test']] = bool(e.get('optional', False))
+            return out
+        o, n = norm(old), norm(new)
+        lost = []
+        for name, opt in o.items():
+            if name not in n:
+                lost.append("%s (removed)" % name)
+            elif n[name] and not opt:
+                lost.append("%s (optional false -> true)" % name)
+        return lost
+
+    @staticmethod
+    def _release_tests_problems(body, stage):
+        """Shape-check a /tests body -> list of problems ([] = ok). Records are validated for real later."""
+        errs = []
+        if not isinstance(body.get('sha'), str) or len(body['sha']) != 40 \
+                or any(c not in '0123456789abcdefABCDEF' for c in body['sha']):
+            errs.append("'sha' is required and must be a full 40-hex commit id")
+        exp = body.get('expected')
+        if exp is not None:
+            if not isinstance(exp, list):
+                errs.append("expected must be a list")
+            else:
+                for i, e in enumerate(exp):
+                    ok = (isinstance(e, str) and e.strip()) or (
+                        isinstance(e, dict) and set(e) <= {'test', 'optional'}
+                        and isinstance(e.get('test'), str) and e['test'].strip()
+                        and isinstance(e.get('optional', False), bool))
+                    if not ok:
+                        errs.append("expected[%d] must be a non-blank string or {test, optional}" % i)
+        if 'intentionallyEmpty' in body:
+            # Gate bypass (XACA-1347-008): {"expected": [], "intentionallyEmpty": true} passed a stage.
+            # The provider schema cannot declare an intentionally empty stage, so no legitimate caller
+            # sends this field; it is refused outright, not merely type-checked.
+            errs.append("intentionallyEmpty is not accepted: a stage cannot be declared intentionally "
+                        "empty over this endpoint")
+        recs = body.get('records')
+        if not isinstance(recs, list):
+            errs.append("records is required and must be a list")
+            return errs
+        seen = set()
+        for i, r in enumerate(recs):
+            if not isinstance(r, dict):
+                errs.append("records[%d] must be an object" % i)
+                continue
+            for k in r:
+                if k not in LCARSHandler._TEST_PROTO_FIELDS:
+                    errs.append("records[%d]: unknown field %s (ids/parent/supersededBy are server-assigned)" % (i, k))
+            if r.get('stage') != stage:
+                errs.append("records[%d]: stage must be %s" % (i, stage))
+            if r.get('sha') != body.get('sha'):
+                errs.append("records[%d]: sha must equal the body sha" % i)
+            ref, pref = r.get('ref'), r.get('parentRef')
+            if ref is not None:
+                if not isinstance(ref, str) or not ref or ref in seen:
+                    errs.append("records[%d]: ref must be a unique non-blank string" % i)
+                else:
+                    seen.add(ref)
+            if pref is not None and (not isinstance(pref, str) or pref not in seen or pref == ref):
+                errs.append("records[%d]: parentRef %r must name an EARLIER record's ref" % (i, pref))
+        return errs
+
+    def handle_release_stage_tests(self, release_id, stage):
+        """POST /api/releases/<id>/stages/<STAGE>/tests (XACA-1347-004) — the ONE sanctioned writer of
+        stages.<STAGE>.expected and of appended tests[] records (the generic PUT rejects both).
+        Body {"sha": <40hex>, "expected": [...]?, "records": [proto...]} where a proto record is a spec 6.2 record minus id/parent/supersededBy,
+        plus local "ref"/"parentRef". 404 unknown release; 409 STAGE is not current or sha !=
+        stageSha[STAGE] (stale run: nothing is written); 400 any invalid body/record. ALL-OR-NOTHING.
+        200 = {"ok": true, "ids": [...]} with ids assigned T0001... after the current maximum.
+
+        Hardening (XACA-1347-008, spec 6.3/6.4): 'intentionallyEmpty' in the body is a 400 (it would let a
+        client pass an empty stage). 'expected' may be SET only while the stage has none recorded for the
+        current graded SHA (stages.<S>.expectedSha != graded); after that a post may only ADD entries
+        (a superset compared on test name, optional never flipping false -> true) else 409 naming the
+        entries, so a client cannot drop a failing test. A new SHA allows a fresh set. A body over
+        _RELEASE_STATE_BODY_MAX_BYTES is a 413, decided from Content-Length before the body is read."""
+        try:
+            if self._gate_unavailable():
+                return
+            body, err = self._read_release_json_body(max_bytes=self._RELEASE_STATE_BODY_MAX_BYTES)
+            if err and err.startswith(self._BODY_TOO_LARGE):
+                return self._send_json_response({"error": err}, status=413)
+            if err:
+                return self._send_json_response({"error": err}, status=400)
+            if stage not in _release_gate.TEST_STAGES:
+                return self._send_json_response(
+                    {"error": "stage '%s' has no test set (one of %s)" % (stage, list(_release_gate.TEST_STAGES))},
+                    status=400)
+            problems = self._release_tests_problems(body, stage)
+            if problems:
+                return self._send_json_response({"error": problems[0], "problems": problems}, status=400)
+            with self._board_write_transaction():
+                data = self._load_releases_config(_lock_held=True)
+                release = self._find_release_by_id(data, release_id)
+                if not release:
+                    raise _DeferredResponse.json({"error": "Release not found: %s" % release_id}, 404)
+                cur = _release_gate.current_stage(release)
+                graded = _release_gate.graded_sha(release, stage)
+                if stage != cur:
+                    raise _DeferredResponse.json(
+                        {"error": "stage %s is not the current stage (%s); results are only recorded for it"
+                                  % (stage, cur)}, 409)
+                if not graded or graded.lower() != body['sha'].lower():
+                    raise _DeferredResponse.json(
+                        {"error": "stale run: body sha %s != stageSha.%s %s; nothing recorded"
+                                  % (body['sha'], stage, graded or "<none>")}, 409)
+                srec0 = (release.get('stages') or {}).get(stage) if isinstance(release.get('stages'), dict) else None
+                if 'expected' in body and isinstance(srec0, dict) and srec0.get('expected') is not None \
+                        and str(srec0.get('expectedSha') or '').lower() == graded.lower():
+                    lost = self._expected_not_superset(srec0.get('expected'), body['expected'])
+                    if lost:
+                        raise _DeferredResponse.json(
+                            {"error": "expected is already recorded for sha %s; it may only be added to. "
+                                      "Refusing to drop or relax: %s" % (graded, ", ".join(lost)),
+                             "entries": lost}, 409)
+                existing = release.get('tests') if isinstance(release.get('tests'), list) else []
+                top = 0
+                for t in existing:
+                    m = re.fullmatch(r'T(\d+)', str(t.get('id'))) if isinstance(t, dict) else None
+                    top = max(top, int(m.group(1))) if m else top
+                ids, refmap, tests, bad = [], {}, list(existing), []
+                for i, r in enumerate(body['records']):
+                    top += 1
+                    rid = 'T%04d' % top
+                    full = {k: r.get(k) for k in ('stage', 'type', 'ts', 'env', 'sha', 'test', 'result', 'runBy')}
+                    # sha: stored as the STAGE's own spelling (the compare above is case-insensitive, the
+                    # gate's current-record lookup is exact; an upper-case copy would never count).
+                    full.update(id=rid, notes=r.get('notes', ''), parent=refmap.get(r.get('parentRef')),
+                               supersededBy=None, sha=graded)
+                    try:
+                        tests = _release_schema.append_test_record(tests, full)
+                    except ValueError as ve:
+                        bad.append("records[%d]: %s" % (i, ve))
+                        continue
+                    if r.get('ref'):
+                        refmap[r['ref']] = rid
+                    ids.append(rid)
+                if bad:
+                    raise _DeferredResponse.json({"error": bad[0], "problems": bad}, 400)
+                release['tests'] = tests
+                stages = release.get('stages') if isinstance(release.get('stages'), dict) else {}
+                release['stages'] = stages
+                srec = stages.get(stage)
+                if not isinstance(srec, dict):
+                    srec = {}
+                    stages[stage] = srec
+                if 'expected' in body:
+                    srec['expected'] = body['expected']
+                    srec['expectedSha'] = graded      # the SHA this set was recorded for (locks it, see docstring)
+                else:
+                    srec.setdefault('expected', [])
+                srec['status'] = _release_gate.derive_stage_status(
+                    dict(srec, sha=graded), tests, srec.get('expected'), stage)
+                if not self._save_releases_config(data, _lock_held=True):
+                    raise _DeferredResponse.json({"error": "board write failed"}, 500)
+                snapshot = copy.deepcopy(release)
+            self._mirror_release_manifest(snapshot)
+            self._log_release_activity(release_id, 'release_tests_recorded', cur, stage,
+                                       actor='pipeline', count=len(ids), first=ids[:1], last=ids[-1:])
+            return self._send_json_response({"ok": True, "ids": ids})
+        except _DeferredResponse as deferred:
+            deferred.emit(self)
+            return
+        except Exception as e:
+            self.send_error(500, f"Error recording stage tests: {e}")
 
     def handle_plan_release(self, release_id):
         """POST /api/releases/<id>/plan — send a release BACK to the PLANNED holding state.

@@ -23,6 +23,11 @@ Deliberate fail-closed choices (a stream that hits one has zero results, which g
     (XACA-1347-025/-026). Every <testcase> is graded exactly once and every failure/error must
     sit directly in a graded <testcase>. Declared failures/errors
     are parse errors. `tests=` is NOT reconciled (pytest 9 counts subtests; see _check_junit_counts).
+    Surefire flaky*/rerun* elements are allowed but never grade; rerun* without a failure/error and
+    flaky* beside one are parse errors (XACA-1347-027/-028).
+
+What each parser accepts, rejects and how it grades, with the incident behind each rule:
+docs/release-workflow/test-output-formats.md (keep it in step with this module).
 """
 import json
 import re
@@ -208,6 +213,7 @@ def _check_junit_counts(suite):
 # root). Every element of the document must appear here under an allowed parent, else the report
 # is rejected. Anything not listed (unknown, namespaced `{ns}tag`, case variants such as <Failure>)
 # has no grading path, so accepting it could silently drop a recorded result: fail closed instead.
+_JUNIT_RERUN_TAGS = ("flakyFailure", "flakyError", "rerunFailure", "rerunError")
 _JUNIT_PARENTS = {
     "testsuites": (None,),
     "testsuite": (None, "testsuites", "testsuite"),
@@ -217,9 +223,17 @@ _JUNIT_PARENTS = {
     "skipped": ("testcase",),
     "properties": ("testsuites", "testsuite", "testcase"),
     "property": ("properties",),
-    "system-out": ("testsuite", "testcase"),
-    "system-err": ("testsuite", "testcase"),
+    # XACA-1347-027/-028: Maven Surefire rerunFailingTestsCount elements (surefire-test-report.xsd).
+    # NON-grading, testcase-only; contents are exactly stackTrace/system-out/system-err (text only).
+    "flakyFailure": ("testcase",),
+    "flakyError": ("testcase",),
+    "rerunFailure": ("testcase",),
+    "rerunError": ("testcase",),
+    "stackTrace": _JUNIT_RERUN_TAGS,
+    "system-out": ("testsuites", "testsuite", "testcase") + _JUNIT_RERUN_TAGS,
+    "system-err": ("testsuites", "testsuite", "testcase") + _JUNIT_RERUN_TAGS,
 }
+_JUNIT_FLAKY_TAGS = ("flakyFailure", "flakyError")
 
 
 def _check_junit_structure(root):
@@ -272,6 +286,17 @@ def _parse_junit(text, default_test):
             if bad is None:
                 bad = tc.find("error")
             skip = tc.find("skipped")
+            flakes = [el for el in tc if el.tag in _JUNIT_FLAKY_TAGS]
+            reruns = [el for el in tc if el.tag in ("rerunFailure", "rerunError")]
+            # Surefire rerun elements never grade. A flake means the test ultimately PASSED, so a
+            # failure/error beside it is a contradiction; a rerun means every retry failed, so the
+            # terminal failure/error must be there. Either shape is a malformed report: fail closed.
+            if flakes and bad is not None:
+                raise _ParseError("JUnit <testcase> %r has <%s> (passed on rerun) AND <%s> (failed): contradictory report"
+                                  % (cname, flakes[0].tag, bad.tag))
+            if reruns and bad is None:
+                raise _ParseError("JUnit <testcase> %r has <%s> but no <failure>/<error>: malformed surefire report"
+                                  % (cname, reruns[0].tag))
             if bad is not None:
                 result = "FAIL"
                 first = (bad.text or "").strip().splitlines()
@@ -279,6 +304,9 @@ def _parse_junit(text, default_test):
             elif skip is not None:
                 result = "SKIP"
                 notes = skip.get("message") or (skip.text or "").strip()
+            if flakes:
+                flaky_note = "flaky: passed on rerun after %d failure(s)" % len(flakes)
+                notes = (notes + "; " + flaky_note) if notes else flaky_note
             children.append(_child(name, cname, result, notes))
         results.append(_finish_parent(name, None, "", children))
     # Invariant: every <testcase> in the document is graded exactly once. A case under a wrapper
