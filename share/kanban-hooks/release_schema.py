@@ -1,0 +1,172 @@
+"""
+release_schema.py -- release-record schema helpers (XACA-1346, spec RELEASE-LIFECYCLE 3.4/6.1/6.2).
+
+Pure module: no I/O, stdlib only, py3.9-safe. The gate evaluator, the server and
+scripts/migrate-release-schema.py all import it so the record shape lives in ONE place.
+"""
+import copy
+import re
+
+STAGES = ("PLANNED", "DEV", "QA", "ALPHA", "BETA", "CR", "GAMMA", "PROD")
+STAGE_STATUSES = ("pending", "running", "passed", "failed", "waived")  # spec 3.4
+TEST_TYPES = ("Automated", "Manual")
+TEST_RESULTS = ("PASS", "FAIL", "SKIP")
+
+# Test-record fields (spec 6.2), in canonical order.
+TEST_FIELDS = ("id", "stage", "type", "ts", "env", "sha", "test", "result",
+               "runBy", "notes", "parent", "supersededBy")
+_STR_FIELDS = ("id", "ts", "env", "sha", "test", "runBy")
+_NULLABLE_STR = ("parent", "supersededBy")
+
+
+def release_defaults():
+    """Fresh migration-safe defaults for the spec 6.1 release additions."""
+    return {
+        "stageSha": {},
+        "rollbackSha": None,
+        "stages": {},
+        "tests": [],
+        "notices": [],
+        "branch": None,
+        "branchBaseSha": None,
+    }
+
+
+def validate_test_record(rec):
+    """Return a list of problems with a spec 6.2 test record ([] = valid)."""
+    if not isinstance(rec, dict):
+        return ["record must be an object"]
+    errs = []
+    for f in TEST_FIELDS:
+        if f not in rec:
+            errs.append("missing field: %s" % f)
+    for f in rec:
+        if f not in TEST_FIELDS:
+            errs.append("unknown field: %s" % f)
+    if errs:
+        return errs
+    for f in _STR_FIELDS:
+        if not isinstance(rec[f], str) or not rec[f].strip():
+            errs.append("%s must be a non-empty string" % f)
+    if rec["stage"] not in STAGES:
+        errs.append("stage must be one of %s" % (list(STAGES),))
+    if rec["type"] not in TEST_TYPES:
+        errs.append("type must be one of %s" % (list(TEST_TYPES),))
+    if rec["result"] not in TEST_RESULTS:
+        errs.append("result must be one of %s" % (list(TEST_RESULTS),))
+    if not isinstance(rec["notes"], str):
+        errs.append("notes must be a string")
+    elif rec["result"] in ("FAIL", "SKIP") and not rec["notes"].strip():
+        errs.append("notes is required when result is FAIL or SKIP")
+    for f in _NULLABLE_STR:
+        if rec[f] is not None and not isinstance(rec[f], str):
+            errs.append("%s must be a string or null" % f)
+    return errs
+
+
+def validate_stage_status(status):
+    """True if status is a legal spec 3.4 stage status."""
+    return status in STAGE_STATUSES
+
+
+def append_test_record(tests, rec):
+    """Return a NEW tests[] with rec appended (spec 6.3 append-only).
+
+    Rejects an invalid record or a duplicate id. Never mutates the input list.
+    """
+    problems = validate_test_record(rec)
+    if problems:
+        raise ValueError("invalid test record: " + "; ".join(problems))
+    if any(t.get("id") == rec["id"] for t in tests):
+        raise ValueError("duplicate test record id: %s" % rec["id"])
+    return list(tests) + [copy.deepcopy(rec)]
+
+
+def _ids(tests):
+    return {t["id"]: t for t in tests if isinstance(t, dict) and isinstance(t.get("id"), str)}
+
+
+def supersede_transition_ok(rec, new_value, tests):
+    """THE single supersededBy transition rule (spec 6.5), used by set_superseded AND
+    check_append_only. `rec` is the record as it stands, `tests` the snapshot that
+    must contain the target. Legal transitions are exactly:
+
+      null       -> an existing record id different from rec's own
+      null       -> "sha:<non-empty hex>"          (placeholder until a record exists)
+      "sha:<X>"  -> an existing record id whose `test` equals rec's and whose sha == X
+
+    Everything else is illegal: id -> other id, sha -> other sha, anything -> null/""/
+    non-string, and "sha:" with an empty or non-hex value.
+    """
+    if not isinstance(new_value, str) or not new_value:
+        return False
+    old = rec.get("supersededBy")
+    by_id = _ids(tests)
+    if old is None:
+        if new_value.startswith("sha:"):
+            return re.fullmatch(r"[0-9a-fA-F]+", new_value[4:]) is not None
+        return new_value != rec.get("id") and new_value in by_id
+    if isinstance(old, str) and old.startswith("sha:"):
+        target = by_id.get(new_value)
+        return (target is not None and new_value != rec.get("id") and not new_value.startswith("sha:")
+                and target.get("test") == rec.get("test") and target.get("sha") == old[4:])
+    return False
+
+
+def set_superseded(tests, rec_id, superseded_by):
+    """Return a NEW tests[] with supersededBy set on rec_id -- the ONLY permitted edit.
+
+    Applies supersede_transition_ok; raises ValueError on an unknown record or an
+    illegal transition (dangling/self target, id -> other id, sha -> other sha, ...).
+    """
+    rec = _ids(tests).get(rec_id)
+    if rec is None:
+        raise ValueError("no test record with id: %s" % rec_id)
+    if not supersede_transition_ok(rec, superseded_by, tests):
+        raise ValueError("illegal supersededBy transition for %s: %r -> %r"
+                         % (rec_id, rec.get("supersededBy"), superseded_by))
+    return [dict(t, supersededBy=superseded_by) if t is rec else t for t in tests]
+
+
+def check_append_only(old_tests, new_tests):
+    """Return violations between two tests[] snapshots ([] = only legal changes).
+
+    Legal: appended VALID records with fresh ids, and supersededBy changes that
+    supersede_transition_ok allows. Existing records are compared by key PRESENCE and
+    value, never by .get(). Never raises on malformed input; reports it.
+    """
+    if not isinstance(old_tests, list) or not isinstance(new_tests, list):
+        return ["tests must be lists"]
+    errs = ["old[%d]: not an object" % i for i, o in enumerate(old_tests) if not isinstance(o, dict)]
+    if errs:
+        return errs
+    if len(new_tests) < len(old_tests):
+        return ["records removed (%d -> %d)" % (len(old_tests), len(new_tests))]
+    seen = set()
+    for i, new in enumerate(new_tests):
+        if not isinstance(new, dict):
+            errs.append("new[%d]: not an object" % i)
+            continue
+        rid = new.get("id")
+        if i < len(old_tests):
+            old = old_tests[i]
+            if set(old) != set(new):
+                errs.append("%s: keys changed (%s)" % (old.get("id"), sorted(set(old) ^ set(new))))
+            for k in set(old) & set(new):
+                if k != "supersededBy" and old[k] != new[k]:
+                    errs.append("%s: field %s modified" % (rid, k))
+            if "supersededBy" in old and "supersededBy" in new and old["supersededBy"] != new["supersededBy"] \
+                    and not supersede_transition_ok(old, new["supersededBy"], new_tests):
+                errs.append("%s: illegal supersededBy transition %r -> %r"
+                            % (rid, old["supersededBy"], new["supersededBy"]))
+        else:
+            for p in validate_test_record(new):
+                errs.append("appended %s: %s" % (rid, p))
+            if new.get("supersededBy") is not None and \
+                    not supersede_transition_ok(dict(new, supersededBy=None), new["supersededBy"], new_tests):
+                errs.append("appended %s: illegal supersededBy %r" % (rid, new["supersededBy"]))
+        if isinstance(rid, str):
+            if rid in seen:
+                errs.append("duplicate id: %s" % rid)
+            seen.add(rid)
+    return errs
