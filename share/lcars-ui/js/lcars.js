@@ -12426,55 +12426,52 @@ function populatePromoteStep3() {
 }
 
 /**
- * Execute the promotion for all selected platforms
+ * Execute the promotion. XACA-1346: stage state is RELEASE-LEVEL, so this sends ONE request
+ * per user action (the server picks the next enabled stage), never one per selected platform:
+ * a per-platform loop advanced the release once per platform. A refusal (409) carries the unmet
+ * gate conditions in `reasons[]`/`error`; show those, not "HTTP 409".
  */
 async function executePromotion() {
     const releaseId = promoteModalState.releaseId;
     const selected = promoteModalState.selectedPlatforms;
-    const results = [];
+    const label = selected.join(', ');
 
     const progressBar = document.getElementById('promote-progress-bar');
     const progressMessage = document.getElementById('progress-message');
+    progressMessage.textContent = `Promoting ${label}...`;
+    progressBar.style.width = '50%';
 
-    for (let i = 0; i < selected.length; i++) {
-        const platform = selected[i];
-        progressMessage.textContent = `Promoting ${platform}...`;
-        progressBar.style.width = `${((i + 0.5) / selected.length) * 100}%`;
+    let result;
+    try {
+        const response = await apiFetch(apiUrl(`/api/releases/${releaseId}/promote`), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ actor: 'lcars-ui', confirmDeploy: false })
+        });
 
-        try {
-            const response = await apiFetch(apiUrl(`/api/releases/${releaseId}/promote`), {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ platform: platform })
-            });
-
-            if (!response.ok) {
-                const errorData = await response.json().catch(() => ({}));
-                results.push({
-                    platform,
-                    success: false,
-                    error: errorData.error || `HTTP ${response.status}`
-                });
-            } else {
-                const data = await response.json();
-                results.push({
-                    platform,
-                    success: true,
-                    previousEnvironment: data.previousEnvironment,
-                    newEnvironment: data.newEnvironment
-                });
-            }
-        } catch (error) {
-            results.push({
-                platform,
+        if (!response.ok) {
+            const errorData = await response.json().catch(() => ({}));
+            const reasons = Array.isArray(errorData.reasons) ? errorData.reasons.join('; ') : '';
+            result = {
+                platform: label,
                 success: false,
-                error: error.message
-            });
+                error: reasons || errorData.error || `HTTP ${response.status}`
+            };
+        } else {
+            const data = await response.json();
+            result = {
+                platform: label,
+                success: true,
+                previousEnvironment: data.previousEnvironment || data.from,
+                newEnvironment: data.newEnvironment || data.to
+            };
         }
-
-        progressBar.style.width = `${((i + 1) / selected.length) * 100}%`;
+    } catch (error) {
+        result = { platform: label, success: false, error: error.message };
     }
+    const results = [result];
 
+    progressBar.style.width = '100%';
     promoteModalState.promotionResults = results;
     progressMessage.textContent = 'Complete!';
 

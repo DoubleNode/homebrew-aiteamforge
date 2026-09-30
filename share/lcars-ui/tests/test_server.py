@@ -2067,9 +2067,9 @@ class TestHandlePromoteRelease(unittest.TestCase):
         if environments is None:
             environments = ["PLANNED", "DEV", "QA", "ALPHA", "BETA", "GAMMA", "PROD"]
 
-        body_dict = {"platform": platform}
-        if target_env:
-            body_dict["targetEnvironment"] = target_env
+        # XACA-1346: a target-less legacy {platform} body is a 400 (stage is release-level); the
+        # auto-advance cases send a release-level body and the gate picks `next`.
+        body_dict = {"platform": platform, "targetEnvironment": target_env} if target_env else {}
         body = json.dumps(body_dict).encode()
 
         handler, buf = _make_handler(

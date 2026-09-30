@@ -468,9 +468,9 @@ class TestHandlePromoteReleaseSyncWiring(unittest.TestCase):
         if environments is None:
             environments = ["PLANNED", "DEV", "QA", "PROD"]
 
-        body_dict = {"platform": platform}
-        if target_env:
-            body_dict["targetEnvironment"] = target_env
+        # XACA-1346: stage is release-level; a target-less legacy {platform} body is a 400, so the
+        # auto-advance case sends a release-level body (no platform) and the gate picks `next`.
+        body_dict = {"platform": platform, "targetEnvironment": target_env} if target_env else {}
         body = json.dumps(body_dict).encode()
 
         handler, buf = _make_handler(
@@ -531,7 +531,7 @@ class TestHandlePromoteReleaseSyncWiring(unittest.TestCase):
     def test_save_before_sync_on_promote(self):
         """_save_releases_config must precede _sync_release_metadata_to_manifest on promote."""
         call_order = []
-        body = json.dumps({"platform": "ios"}).encode()
+        body = json.dumps({}).encode()
         handler, _ = _make_handler(
             path="/api/releases/REL-0659-001/promote",
             method="POST",
@@ -568,9 +568,10 @@ class TestHandlePromoteReleaseSyncWiring(unittest.TestCase):
                          "promote must still return 200 even when manifest sync fails")
         handler.send_error.assert_not_called()
 
-    def test_sync_not_called_on_invalid_platform(self):
-        """When platform is not in the release, send_error is called and sync must NOT run."""
-        body = json.dumps({"platform": "nonexistent_platform"}).encode()
+    def test_sync_not_called_on_targetless_legacy_platform_body(self):
+        """XACA-1346: a legacy {platform} body with no target is refused (400) and sync must NOT run.
+        (It used to mean "next", once per platform: N platforms advanced the release N stages.)"""
+        body = json.dumps({"platform": "ios"}).encode()
         handler, _ = _make_handler(
             path="/api/releases/REL-0659-001/promote",
             method="POST",
@@ -580,20 +581,15 @@ class TestHandlePromoteReleaseSyncWiring(unittest.TestCase):
         release = _make_release(platforms={
             "ios": {"version": "2.10.0", "buildNumber": 42, "environment": "DEV", "environmentHistory": []}
         })
-        fake_data = {
-            "releases": [release],
-            "defaultEnvironments": ["PLANNED", "DEV", "QA", "PROD"],
-            "flowConfig": {"stages": {e: {"enabled": True} for e in ["PLANNED", "DEV", "QA", "PROD"]}},
-        }
-        handler._load_releases_config = MagicMock(return_value=fake_data)
         handler._find_release_by_id = MagicMock(return_value=release)
-        handler._get_timestamp = MagicMock(return_value="2026-06-09T00:00:00Z")
         handler._save_releases_config = MagicMock()
         handler._sync_release_metadata_to_manifest = MagicMock()
+        _gate_report_mode(handler)
 
         handler.handle_promote_release("REL-0659-001")
 
-        handler.send_error.assert_called()
+        self.assertEqual(handler._response_code, 400)
+        handler._save_releases_config.assert_not_called()
         handler._sync_release_metadata_to_manifest.assert_not_called()
 
     # --- Forward-only server-side enforcement ---
@@ -880,7 +876,7 @@ class TestManifestSyncPayloadMatchesServerRecord(unittest.TestCase):
                         "environment": "DEV", "environmentHistory": []}
             },
         )
-        body = json.dumps({"platform": "ios"}).encode()
+        body = json.dumps({}).encode()
         handler, buf = _make_handler(
             path=f"/api/releases/{release['id']}/promote",
             method="POST",

@@ -8275,6 +8275,13 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     # sanctioned, gated writer.
     _RELEASE_STAGE_STATE_FIELDS = ('environment', 'stage', 'stages', 'stageSha', 'tests')
     _RELEASE_GATE_MODES = ('enforce', 'report')
+    # THE default for a board with no releaseConfig.gateEnforcement (USER DECISION 2026-09-30,
+    # XACA-1346-045, superseding -037's "absent = enforce"). It is "report" because "enforce" is
+    # UNPASSABLE today: the PLANNED->DEV branch cut is a stub (XACA-1352) and nothing records
+    # item.prMerged (XACA-1347). XACA-1352 + XACA-1347 FLIP THIS to "enforce" (one line, here)
+    # once enforce can pass. Behaviour never depends on scripts/migrate-release-schema.py having
+    # run: an explicit "enforce" opts a team in, an invalid value still means enforce + warning.
+    _GATE_ENFORCEMENT_DEFAULT = 'report'
 
     def _read_release_json_body(self):
         """(body, error). Missing/empty body is {} (the promote target then defaults to
@@ -8301,6 +8308,14 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             return json.load(f)
 
     @staticmethod
+    def _reasons_error(reasons):
+        """One-line summary for the `error` key next to reasons[] (the LCARS modal shows it)."""
+        reasons = [str(r) for r in (reasons or [])]
+        if not reasons:
+            return "refused"
+        return reasons[0] if len(reasons) == 1 else "%s (+%d more)" % (reasons[0], len(reasons) - 1)
+
+    @staticmethod
     def _release_cfg(board_raw):
         rc = board_raw.get('releaseConfig') if isinstance(board_raw, dict) else None
         return rc if isinstance(rc, dict) else {}
@@ -8314,10 +8329,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
     @classmethod
     def _gate_mode(cls, release_config):
-        """(mode, config_warning). ABSENT gateEnforcement = 'enforce' (new boards enforce).
-        Any other unrecognised value is a config error: treated as enforce, with a warning."""
+        """(mode, config_warning). ABSENT gateEnforcement = _GATE_ENFORCEMENT_DEFAULT ('report'
+        for now). Any other unrecognised value is a config error: treated as enforce, with a warning."""
         if 'gateEnforcement' not in release_config:
-            return 'enforce', None
+            return cls._GATE_ENFORCEMENT_DEFAULT, None
         v = release_config.get('gateEnforcement')
         if isinstance(v, str) and v in cls._RELEASE_GATE_MODES:
             return v, None
@@ -8491,6 +8506,12 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             if target and legacy_target and target != legacy_target:
                 return self._send_json_response(
                     {"error": "targetStage and targetEnvironment disagree"}, status=400)
+            if legacy_style and legacy_target is None:
+                # A target-less per-platform body used to mean "next" ONCE PER PLATFORM: N platforms
+                # advanced the release N stages (XACA-1346-039/042). Stage is release-level.
+                return self._send_json_response({
+                    "error": "target required: stage is release-level; send one {targetStage} request, "
+                             "not one per platform"}, status=400)
             target = target or legacy_target
             if target is not None and target not in _release_schema.STAGES:
                 return self._send_json_response(
@@ -8572,7 +8593,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                           cut=cut, configWarning=cfg_warning)
             if not written:
                 self._log_release_activity(release_id, 'release_promote_refused', cur, eff_target, **logctx)
-                return self._send_json_response(dict(base, allowed=False), status=409)
+                return self._send_json_response(
+                    dict(base, allowed=False, error=self._reasons_error(reasons)), status=409)
             self._mirror_release_manifest(snapshot)
             self._log_release_activity(
                 release_id, 'release_promote_report' if reasons else 'release_promote',
@@ -8626,7 +8648,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         logctx = dict(actor=actor, reason=reason, reasons=reasons)
         if not written:
             self._log_release_activity(release_id, 'release_regress_refused', cur, to, **logctx)
-            return 409, {"allowed": False, "from": cur, "to": to, "reasons": reasons}
+            return 409, {"allowed": False, "from": cur, "to": to, "reasons": reasons,
+                         "error": self._reasons_error(reasons)}
         self._mirror_release_manifest(snapshot)
         self._log_release_activity(release_id, 'release_regress', cur, to, **logctx)
         return 200, {"allowed": True, "from": cur, "to": to, "release": snapshot}
@@ -8703,7 +8726,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                                    % (stage, cur))
                 if reasons:
                     status = 403 if not is_lead else 409
-                    payload = {"reasons": reasons}
+                    payload = {"reasons": reasons, "error": self._reasons_error(reasons)}
                 else:
                     prior = srec_ro.get('waiver')
                     if release.get('stages') is not stages:  # was absent/malformed: replace, never clobber a dict
