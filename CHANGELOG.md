@@ -6,6 +6,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1347** — new `kanban-hooks/release_providers.py` (per-team `test-providers.json` loader/validator, `release-test-providers/v1`, GAMMA readOnly/prodSafe enforcement) and `kanban-hooks/release_parsers.py` (tap/junit/jsonl/line-regex stage-test output parsers, spec 6.4 parent/child grading, `<provider>::harness` FAIL). Not wired in yet.
 - **XACA-1346** — new `kanban-hooks/release_schema.py`: pure release-record schema helpers (test-record validation, stage statuses, append-only supersede rule) that the release gate and server import.
   - XACA-1346 (PR 2/3): new `kanban-hooks/release_gate.py`, the pure promote/regress gate evaluator (no I/O; not yet wired into the server).
   - XACA-1346 (PR 3a/3): `lcars-ui/server.py` now gates `POST /api/releases/<id>/promote` (new `/regress` and `/stages/<STAGE>/waiver` endpoints; `releaseConfig.gateEnforcement` enforce/report, `releaseConfig.leads`); `/plan` needs a reason; `PUT /api/releases/<id>` refuses stage fields. `release_gate.py` accepts `emergency-deployed` at the CR exit. `kanban_utils.log_activity` writes release activity logs. The three lcars-ui tests that asserted the old ungated promote are updated.

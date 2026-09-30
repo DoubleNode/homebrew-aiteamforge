@@ -1,0 +1,377 @@
+"""
+release_parsers.py -- test-output parsers for release providers (XACA-1347, spec RELEASE-LIFECYCLE 6.2/6.4/7.1/7.2).
+
+Pure module: no subprocess, no file I/O (parsers receive strings), stdlib only, py3.9-safe.
+Parsers produce PROTO-results; the runner turns them into full spec 6.2 records
+(id, ts, sha, stage, runBy, supersededBy).
+
+Proto-result shape:
+    {"test": str, "result": "PASS"|"FAIL"|"SKIP", "notes": str,
+     "children": [{"test": <parent> + CHILD_SEP + <child>, "result": ..., "notes": ...}]}
+
+Rules enforced here (spec 6.4): exit code alone is never trusted; a parent is PASS only if
+exit 0 AND no child FAIL AND at least one parseable result; a provider crash, timeout or
+unparseable output becomes a FAIL record named "<provider>::harness". FAIL and SKIP always
+carry non-empty notes so the records validate.
+"""
+import json
+import re
+import xml.etree.ElementTree as ET
+
+from release_schema import TEST_RESULTS
+
+CHILD_SEP = " › "   # "file > check" (U+203A), spec 6.2 `test` field
+PARSERS = ("tap", "junit", "jsonl", "line-regex")
+_NO_MSG = {"FAIL": "failed (no message from test output)",
+           "SKIP": "skipped (no reason given)"}
+
+
+class ParseResult(object):
+    """results: list of proto-results; error: str when output is unparseable/malformed, else None."""
+
+    def __init__(self, results=None, error=None):
+        self.results = results if results is not None else []
+        self.error = error
+
+    def __repr__(self):
+        return "ParseResult(results=%r, error=%r)" % (self.results, self.error)
+
+
+class _ParseError(Exception):
+    pass
+
+
+# --------------------------------------------------------------------- helpers
+def _notes(result, notes):
+    """FAIL/SKIP must have non-empty notes; PASS keeps whatever it has."""
+    notes = (notes or "").strip()
+    if not notes and result in _NO_MSG:
+        return _NO_MSG[result]
+    return notes
+
+
+def _child(parent, name, result, notes):
+    return {"test": parent + CHILD_SEP + name, "result": result, "notes": _notes(result, notes)}
+
+
+def _finish_parent(name, explicit, notes, children):
+    """Build a proto-result; a parent's result folds in its children (any FAIL -> FAIL;
+    all SKIP -> SKIP; else PASS). An explicit FAIL/SKIP on the parent itself is kept."""
+    kids = [c["result"] for c in children]
+    failed = [c["test"] for c in children if c["result"] == "FAIL"]
+    if explicit == "FAIL" or failed:
+        result = "FAIL"
+        if not (notes or "").strip() and failed:
+            notes = "child failed: " + ", ".join(failed[:5]) + (" ..." if len(failed) > 5 else "")
+    elif explicit == "SKIP":
+        result = "SKIP"
+    elif kids and all(k == "SKIP" for k in kids):
+        result = "SKIP"
+        if not (notes or "").strip():
+            notes = "all children skipped"
+    else:
+        result = "PASS"
+    return {"test": name, "result": result, "notes": _notes(result, notes), "children": children}
+
+
+def _leaf(name, result, notes):
+    return {"test": name, "result": result, "notes": _notes(result, notes), "children": []}
+
+
+# ------------------------------------------------------------------------- TAP
+# Case-insensitive and whitespace-tolerant on purpose: a line that LOOKS like a failing test
+# ("NOT OK", "not  ok", "not okay") must never be dropped as noise -> silent PASS.
+_TAP_TEST = re.compile(r"^(\s*)(not\s+ok|ok\b)\s*(\d+)?\s*(?:-\s*)?(.*)$", re.IGNORECASE)
+_TAP_PLAN = re.compile(r"^1\.\.(\d+)\s*(?:#.*)?$")
+_TAP_DIRECTIVE = re.compile(r"\s#\s*(SKIP\w*|TODO)\b[\s:]*(.*)$", re.IGNORECASE)
+_TAP_BAIL = re.compile(r"^\s*Bail out!\s*(.*)$", re.IGNORECASE)
+
+
+def _parse_tap(text, default_test):
+    tests = []       # top-level entries: [name, explicit, notes, children]
+    pending = []     # indented (subtest) results waiting for their parent line
+    plan = None
+    last = None      # last test entry, for YAML `message:` capture
+    in_yaml = False
+    for raw in text.splitlines():
+        bail = _TAP_BAIL.match(raw)
+        if bail:
+            raise _ParseError("TAP bailed out: " + (bail.group(1).strip() or "(no reason)"))
+        stripped = raw.strip()
+        if stripped == "---" and raw[:1].isspace():    # YAML blocks are indented under a test line
+            in_yaml = True
+            continue
+        if in_yaml:
+            if stripped and not raw[:1].isspace():
+                raise _ParseError("TAP YAML block not terminated by '...' before line %r" % stripped[:40])
+            if stripped == "...":
+                in_yaml = False
+            elif last is not None and stripped.startswith("message:") and not last[2]:
+                last[2] = stripped[len("message:"):].strip().strip("'\"")
+            continue
+        plan_m = _TAP_PLAN.match(raw)
+        if plan_m:                       # only a column-0 plan counts; subtest plans are ignored
+            plan = int(plan_m.group(1))
+            continue
+        m = _TAP_TEST.match(raw)
+        if not m:
+            continue                     # noise / comments / "TAP version" / "# Subtest:"
+        indent, status, num, desc = m.group(1), m.group(2), m.group(3), m.group(4).strip()
+        result = "PASS" if status.lower() == "ok" else "FAIL"
+        notes = ""
+        d = _TAP_DIRECTIVE.search(" " + desc)
+        if d:
+            kind, reason = d.group(1).upper(), d.group(2).strip()
+            desc = _TAP_DIRECTIVE.sub("", " " + desc).strip()
+            result = "SKIP"              # TODO must yield neither FAIL nor PASS
+            if kind == "TODO":
+                notes = "TODO: " + (reason or "(no reason given)")
+            else:
+                notes = reason
+        name = desc or ("test %s" % num if num else "test %d" % (len(tests) + len(pending) + 1))
+        if indent:
+            pending.append({"name": name, "result": result, "notes": notes})
+            continue
+        entry = [name, result, notes, pending]
+        pending = []
+        tests.append(entry)
+        last = entry
+    if in_yaml:
+        raise _ParseError("TAP YAML block not terminated by '...' (output truncated?)")
+    if pending:                          # subtests with no following parent line
+        tests.append([default_test or "(unnamed)", None, "", pending])
+    if plan is not None and plan != len(tests):
+        raise _ParseError("TAP plan 1..%d but %d test line(s) found" % (plan, len(tests)))
+    results = []
+    for name, explicit, notes, kids in tests:
+        if kids:
+            children = [_child(name, k["name"], k["result"], k["notes"]) for k in kids]
+            results.append(_finish_parent(name, explicit, notes, children))
+        else:
+            results.append(_leaf(name, explicit, notes))
+    return results
+
+
+# ----------------------------------------------------------------------- JUnit
+def _junit_int(suite, attr):
+    raw = suite.get(attr)
+    if raw is None:
+        return None
+    try:
+        return int(raw.strip())
+    except ValueError:
+        raise _ParseError("JUnit <testsuite %s=%r> is not an integer" % (attr, raw))
+
+
+def _check_junit_counts(suite, cases):
+    """Declared totals must agree with the <testcase> elements actually present; a suite that
+    claims failures it does not itemise (or more tests than it lists) is truncated/lying."""
+    tests = _junit_int(suite, "tests")
+    if tests is not None and tests != len(cases):
+        raise _ParseError("JUnit suite %r declares tests=%d but has %d <testcase>" % (suite.get("name"), tests, len(cases)))
+    declared = sum(v for v in (_junit_int(suite, "failures"), _junit_int(suite, "errors")) if v)
+    actual = sum(1 for tc in cases if tc.find("failure") is not None or tc.find("error") is not None)
+    if declared > actual:
+        raise _ParseError("JUnit suite %r declares %d failure(s)/error(s) but only %d failing <testcase>" % (suite.get("name"), declared, actual))
+
+
+def _parse_junit(text, default_test):
+    lowered = text.lower()
+    if "<!doctype" in lowered or "<!entity" in lowered:
+        raise _ParseError("JUnit XML rejected: DOCTYPE/ENTITY declarations are not allowed")
+    try:
+        root = ET.fromstring(text.encode("utf-8"))
+    except (ET.ParseError, ValueError) as exc:
+        raise _ParseError("invalid or truncated JUnit XML: %s" % exc)
+    if root.tag not in ("testsuite", "testsuites"):
+        raise _ParseError("JUnit root element must be <testsuites> or <testsuite>, got <%s>" % root.tag)
+    if root.tag == "testsuites" and root.findall("testcase"):
+        raise _ParseError("JUnit <testcase> directly under <testsuites> (no <testsuite>) is not supported")
+    suites = list(root.iter("testsuite"))   # includes root and NESTED suites: none may be skipped
+    results = []
+    for suite in suites:
+        cases = suite.findall("testcase")
+        if suite.find("testsuite") is None:
+            _check_junit_counts(suite, cases)
+        if not cases:
+            continue
+        name = suite.get("name") or suite.get("file") or default_test or "(unnamed suite)"
+        children = []
+        for tc in cases:
+            cname = tc.get("name") or "(unnamed)"
+            if tc.get("classname"):
+                cname = tc.get("classname") + "." + cname
+            result, notes = "PASS", ""
+            bad = tc.find("failure")
+            if bad is None:
+                bad = tc.find("error")
+            skip = tc.find("skipped")
+            if bad is not None:
+                result = "FAIL"
+                first = (bad.text or "").strip().splitlines()
+                notes = bad.get("message") or (first[0] if first else "")
+            elif skip is not None:
+                result = "SKIP"
+                notes = skip.get("message") or (skip.text or "").strip()
+            children.append(_child(name, cname, result, notes))
+        results.append(_finish_parent(name, None, "", children))
+    return results
+
+
+# ----------------------------------------------------------------------- JSONL
+def _parse_jsonl(text, default_test):
+    entries = []
+    for n, line in enumerate(text.splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError as exc:
+            raise _ParseError("line %d: invalid JSON (%s)" % (n, exc))
+        if not isinstance(obj, dict):
+            raise _ParseError("line %d: expected a JSON object" % n)
+        test = obj.get("test")
+        if not isinstance(test, str) or not test.strip():
+            raise _ParseError("line %d: 'test' must be a non-empty string" % n)
+        res = obj.get("result")
+        if not isinstance(res, str) or res.upper() not in TEST_RESULTS:
+            raise _ParseError("line %d: 'result' must be one of %s" % (n, list(TEST_RESULTS)))
+        notes = obj.get("notes", "")
+        if notes is None:
+            notes = ""
+        if not isinstance(notes, str):
+            raise _ParseError("line %d: 'notes' must be a string" % n)
+        parent = obj.get("parent")
+        if parent is not None and (not isinstance(parent, str) or not parent.strip()):
+            raise _ParseError("line %d: 'parent' must be a non-empty string" % n)
+        entries.append({"test": test, "result": res.upper(), "notes": notes, "parent": parent, "line": n})
+    top = [e for e in entries if not e["parent"]]
+    top_names = set(t["test"] for t in top)
+    child_names = set(e["test"] for e in entries if e["parent"])
+    for e in entries:
+        if e["parent"] and e["parent"] in child_names:
+            raise _ParseError("line %d: nested parents are not supported (%r)" % (e["line"], e["parent"]))
+    order, kids = [], {}
+    for e in entries:
+        if e["parent"]:
+            kids.setdefault(e["parent"], []).append(e)
+            if e["parent"] not in top_names and e["parent"] not in order:
+                order.append(e["parent"])        # synthesized parent, keeps first-seen order
+        elif e["test"] not in order:
+            order.append(e["test"])
+    explicit = {}
+    for t in top:
+        if t["test"] in explicit:      # first-wins would let a later FAIL vanish
+            raise _ParseError("line %d: duplicate top-level test %r (first seen line %d)"
+                              % (t["line"], t["test"], explicit[t["test"]]["line"]))
+        explicit[t["test"]] = t
+    results = []
+    for name in order:
+        children = [_child(name, k["test"], k["result"], k["notes"]) for k in kids.get(name, [])]
+        if name in explicit:
+            ex = explicit[name]
+            if children:
+                results.append(_finish_parent(name, ex["result"], ex["notes"], children))
+            else:
+                results.append(_leaf(name, ex["result"], ex["notes"]))
+        else:
+            results.append(_finish_parent(name, None, "", children))
+    return results
+
+
+# ------------------------------------------------------------------ line-regex
+_TOKENS = {"pass": "PASS", "ok": "PASS", "passed": "PASS",
+           "fail": "FAIL", "failed": "FAIL", "error": "FAIL", "not ok": "FAIL",
+           "skip": "SKIP", "skipped": "SKIP"}
+
+
+def _parse_line_regex(text, pattern):
+    if pattern is None or (isinstance(pattern, str) and not pattern):
+        raise _ParseError("line-regex parser requires a pattern")
+    try:
+        rx = re.compile(pattern) if isinstance(pattern, str) else pattern
+    except re.error as exc:
+        raise _ParseError("invalid line-regex pattern: %s" % exc)
+    groups = rx.groupindex
+    if "test" not in groups or "result" not in groups:
+        raise _ParseError("line-regex pattern needs named groups 'test' and 'result'")
+    results = []
+    for n, line in enumerate(text.splitlines(), 1):
+        m = rx.search(line)
+        if not m:
+            continue
+        token = (m.group("result") or "").strip().lower()
+        if token not in _TOKENS:
+            raise _ParseError("line %d: unmapped result token %r" % (n, m.group("result")))
+        name = (m.group("test") or "").strip()
+        if not name:
+            raise _ParseError("line %d: empty test name" % n)
+        notes = m.groupdict().get("notes") or ""
+        results.append(_leaf(name, _TOKENS[token], notes))
+    return results
+
+
+# ------------------------------------------------------------------- public API
+def parse(parser, text, *, default_test=None, pattern=None):
+    """Parse provider output into a ParseResult. Unknown parser / malformed output -> .error set.
+
+    default_test: parent name for formats with no natural parent. It is the fallback name for
+    nameless suites/tests, and when every result is flat (no children) they are wrapped as
+    children of ONE parent named default_test (per-file runs: parent = the file).
+    """
+    if parser not in PARSERS:
+        return ParseResult([], "unknown parser %r (expected one of %s)" % (parser, list(PARSERS)))
+    if not isinstance(text, str):
+        return ParseResult([], "output must be a string")
+    try:
+        if parser == "tap":
+            results = _parse_tap(text, default_test)
+        elif parser == "junit":
+            results = _parse_junit(text, default_test)
+        elif parser == "jsonl":
+            results = _parse_jsonl(text, default_test)
+        else:
+            results = _parse_line_regex(text, pattern)
+    except _ParseError as exc:
+        return ParseResult([], str(exc))
+    if default_test and results and not any(r["children"] for r in results):
+        kids = [_child(default_test, r["test"], r["result"], r["notes"]) for r in results]
+        results = [_finish_parent(default_test, None, "", kids)]
+    return ParseResult(results, None)
+
+
+def grade_parent(exit_code, parse_result, *, timed_out=False):
+    """Spec 6.4 parent rule for a whole provider/file run -> (result, notes).
+
+    FAIL: timeout, nonzero/missing exit, parse error, zero parseable results, any FAIL anywhere.
+    SKIP: everything parsed was SKIP (never invent a pass). PASS: exit 0, no FAIL, >=1 result.
+    """
+    if timed_out:
+        return "FAIL", "timed out"
+    if isinstance(exit_code, bool) or not isinstance(exit_code, int):
+        return "FAIL", "no exit code recorded (%r)" % (exit_code,)
+    if exit_code != 0:
+        return "FAIL", "exited with code %d" % exit_code
+    if parse_result.error:
+        return "FAIL", "unparseable output: %s" % parse_result.error
+    results = parse_result.results
+    if not results:
+        return "FAIL", "exited 0 but produced no parseable results"
+    failed = []
+    for r in results:
+        if r["result"] == "FAIL":
+            failed.append(r["test"])
+        failed.extend(c["test"] for c in r["children"] if c["result"] == "FAIL")
+    if failed:
+        return "FAIL", "%d failing: %s" % (len(failed), ", ".join(failed[:5]) + (" ..." if len(failed) > 5 else ""))
+    if all(r["result"] == "SKIP" for r in results):
+        reasons = "; ".join(r["notes"] for r in results[:3])
+        return "SKIP", "all results skipped: " + reasons
+    return "PASS", ""
+
+
+def harness_fail(provider_name, reason):
+    """Proto-result for a provider crash/timeout/unparseable output: never passes silently."""
+    return {"test": "%s::harness" % provider_name, "result": "FAIL",
+            "notes": (reason or "").strip() or "provider harness failed (no reason given)",
+            "children": []}
