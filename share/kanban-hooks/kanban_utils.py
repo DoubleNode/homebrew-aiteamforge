@@ -525,7 +525,7 @@ def get_team_from_item_id(item_id: str) -> str:
     return ""
 
 
-def get_activity_dir(item_id: str) -> str:
+def get_activity_dir(item_id: str, team: str = None) -> str:
     """
     Return the path to the activity/ subdirectory for the given item's team.
 
@@ -533,11 +533,14 @@ def get_activity_dir(item_id: str) -> str:
 
     Args:
         item_id: An item or subitem ID.
+        team:    Optional explicit team (XACA-1346: release IDs such as REL-2026-Q3-012
+                 do not encode a team, so release callers pass it). Defaults to the
+                 team derived from the item ID prefix.
 
     Returns:
         Absolute path string to the activity directory.
     """
-    team = get_team_from_item_id(item_id)
+    team = team or get_team_from_item_id(item_id)
     kanban_dir = TEAM_KANBAN_DIRS.get(team)
     if kanban_dir is None:
         # Fall back to the default academy directory so logging never crashes
@@ -596,12 +599,17 @@ def log_activity(
     old_value: str = None,
     new_value: str = None,
     context: str = None,
+    team: str = None,
 ) -> None:
     """
     Append an activity entry to the item's activity log file.
 
     The log file lives at:
         <team-kanban-dir>/activity/<parent-item-id>.json
+    or, for target_type="release" (XACA-1346):
+        <team-kanban-dir>/activity/<REL-ID>.json
+    in the same document shape as items (the REL-ID is used verbatim: it is never
+    split like a subitem ID).
 
     File writes use exclusive fcntl locking and an atomic temp-file rename so
     concurrent callers never corrupt the log.  All exceptions are swallowed
@@ -611,11 +619,13 @@ def log_activity(
     Args:
         action:      Short action label (e.g. "status_change", "created").
         target_id:   The item or subitem ID being acted on.
-        target_type: "item" or "subitem".
+        target_type: "item", "subitem" or "release".
         field:       Optional field name that changed.
         old_value:   Optional previous value of the field.
         new_value:   Optional new value of the field.
         context:     Optional free-form context string.
+        team:        Optional team override; REQUIRED in practice for target_type="release"
+                     (release IDs carry no team code). Existing callers omit it.
     """
     try:
         # Resolve agent identity from environment variables in priority order.
@@ -627,8 +637,11 @@ def log_activity(
             or "unknown"
         )
 
-        parent_id = get_parent_item_id(target_id)
-        activity_dir = get_activity_dir(target_id)
+        parent_id = target_id if target_type == "release" else get_parent_item_id(target_id)
+        if target_type == "release" and (not parent_id or "/" in parent_id or "\\" in parent_id
+                                         or parent_id.startswith(".")):
+            raise ValueError(f"unsafe release id for activity file name: {parent_id!r}")
+        activity_dir = get_activity_dir(target_id, team=team)
         activity_file = os.path.join(activity_dir, f"{parent_id}.json")
         lock_file = activity_file + ".lock"
 

@@ -265,12 +265,17 @@ class TestHandlePlanRelease(unittest.TestCase):
         response is None when send_error was called instead of a 200 body.
         """
         release_id = release_dict.get("id", "REL-0729-001")
+        # XACA-1346: /plan is a backward move and REQUIRES a reason (400 otherwise); it runs through
+        # the regress rules, which read the raw board (teamConfig) inside the lock.
+        plan_body = b'{"reason": "XACA-0729 test reset"}'
         handler, buf = _make_handler(
             path=f"/api/releases/{release_id}/plan",
             method="POST",
-            body=b"{}",
-            headers={"Content-Length": "2"},
+            body=plan_body,
+            headers={"Content-Length": str(len(plan_body))},
         )
+        handler._read_board_raw_locked = MagicMock(return_value={})
+        handler._log_release_activity = MagicMock()
 
         if fake_data is None:
             fake_data = {
@@ -350,12 +355,13 @@ class TestHandlePlanRelease(unittest.TestCase):
 
     # B2 — missing release → 404
     def test_b2_missing_release_returns_404(self):
-        """Release not found: handle_plan_release must call send_error with 404."""
+        """Release not found: handle_plan_release answers 404 (XACA-1346: JSON body, not send_error)."""
+        plan_body = b'{"reason": "r"}'
         handler, buf = _make_handler(
             path="/api/releases/REL-NONEXISTENT/plan",
             method="POST",
-            body=b"{}",
-            headers={"Content-Length": "2"},
+            body=plan_body,
+            headers={"Content-Length": str(len(plan_body))},
         )
         fake_data = {"releases": [], "defaultEnvironments": self._ENVIRONMENTS}
         handler._load_releases_config = MagicMock(return_value=fake_data)
@@ -363,12 +369,13 @@ class TestHandlePlanRelease(unittest.TestCase):
         handler._save_releases_config = MagicMock()
         handler._get_timestamp = MagicMock(return_value=self._TS)
         handler._sync_release_metadata_to_manifest = MagicMock()
+        handler._read_board_raw_locked = MagicMock(return_value={})
+        handler._log_release_activity = MagicMock()
 
         handler.handle_plan_release("REL-NONEXISTENT")
 
-        handler.send_error.assert_called_once()
-        code = handler.send_error.call_args[0][0]
-        self.assertEqual(code, 404)
+        self.assertEqual(handler._response_code, 404)
+        handler._save_releases_config.assert_not_called()
 
     # B3 — multi-platform release: all platforms reset
     def test_b3_multi_platform_all_reset_to_planned(self):
@@ -444,22 +451,21 @@ class TestHandlePlanRelease(unittest.TestCase):
         self.assertEqual(history[2]["from"], "QA")
         self.assertEqual(history[2]["to"], "PLANNED")
 
-    def test_b4_platform_already_at_planned_still_gets_history_entry(self):
+    def test_b4_release_already_at_planned_is_refused_not_rewritten(self):
         """
-        Calling plan on a release already at PLANNED must still append a history entry
-        (from=PLANNED, to=PLANNED) — same audit convention as promote (no special-casing).
+        XACA-1346: /plan is a backward move routed through the regress rules. A release already
+        at PLANNED with no drifted platform is not strictly earlier than PLANNED, so it is refused
+        (409) and nothing is written. (Before XACA-1346 this appended a from=PLANNED,to=PLANNED
+        history entry; that audit noise is retired. The XACA-0729 drift heal is covered in
+        tests/test_xaca1346_release_gate_endpoints.py.)
         """
         release = self._make_release(platforms={
             "ios": {"environment": "PLANNED", "environmentHistory": []},
         })
         handler, result = self._run_plan(release)
-        self.assertIsNotNone(result)
-
-        saved = handler._save_releases_config.call_args[0][0]
-        history = saved["releases"][0]["platforms"]["ios"]["environmentHistory"]
-        self.assertEqual(len(history), 1)
-        self.assertEqual(history[0]["from"], "PLANNED")
-        self.assertEqual(history[0]["to"], "PLANNED")
+        self.assertEqual(handler._response_code, 409)
+        handler._save_releases_config.assert_not_called()
+        self.assertEqual(release["platforms"]["ios"]["environmentHistory"], [])
 
     def test_b4_release_id_in_response(self):
         """Response must include the releaseId that was reset."""

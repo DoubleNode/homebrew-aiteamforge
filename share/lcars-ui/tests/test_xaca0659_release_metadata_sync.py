@@ -449,6 +449,14 @@ class TestHandleUpdateReleaseSyncWiring(unittest.TestCase):
 # GAP B: handle_promote_release — manifest sync after promote
 # ---------------------------------------------------------------------------
 
+def _gate_report_mode(handler):
+    """XACA-1346: promote is now gated. These tests exercise the manifest-sync WIRING, not the
+    gate (covered in tests/test_xaca1346_release_gate_endpoints.py), so run the handler in
+    'report' mode against a synthetic raw board and silence the activity log."""
+    handler._read_board_raw_locked = MagicMock(return_value={"releaseConfig": {"gateEnforcement": "report"}})
+    handler._log_release_activity = MagicMock()
+
+
 class TestHandlePromoteReleaseSyncWiring(unittest.TestCase):
     """
     handle_promote_release must call _sync_release_metadata_to_manifest after
@@ -495,6 +503,7 @@ class TestHandlePromoteReleaseSyncWiring(unittest.TestCase):
         handler._save_releases_config = MagicMock()
         handler._find_release_by_id = MagicMock(return_value=release)
         handler._get_timestamp = MagicMock(return_value="2026-06-09T00:00:00Z")
+        _gate_report_mode(handler)
 
         if sync_raises:
             handler._sync_release_metadata_to_manifest = MagicMock(
@@ -541,8 +550,11 @@ class TestHandlePromoteReleaseSyncWiring(unittest.TestCase):
         handler._find_release_by_id = MagicMock(return_value=release)
         handler._get_timestamp = MagicMock(return_value="2026-06-09T00:00:00Z")
 
-        handler._save_releases_config = MagicMock(side_effect=lambda *a, **kw: call_order.append("save"))
+        # XACA-1346: the handler now treats a falsy save result as a failed write (500), like the real
+        # _save_releases_config which returns True on success.
+        handler._save_releases_config = MagicMock(side_effect=lambda *a, **kw: call_order.append("save") or True)
         handler._sync_release_metadata_to_manifest = MagicMock(side_effect=lambda *a, **kw: call_order.append("sync"))
+        _gate_report_mode(handler)
 
         handler.handle_promote_release("REL-0659-001")
 
@@ -588,8 +600,9 @@ class TestHandlePromoteReleaseSyncWiring(unittest.TestCase):
 
     def test_server_rejects_explicit_backward_target_env(self):
         """
-        When targetEnvironment names an index <= current env, the server must
-        return 400.  Example: current=QA, target=DEV (backward).
+        XACA-1346: the server NOW refuses a backward target (409) in BOTH gate modes. Before XACA-1346 the
+        server accepted it and relied on the CLI's forward-only pre-check, which is the ungated
+        path spec 5.3 forbids. Backward moves are POST /regress with a reason.
         """
         body = json.dumps({"platform": "ios", "targetEnvironment": "DEV"}).encode()
         handler, _ = _make_handler(
@@ -598,7 +611,6 @@ class TestHandlePromoteReleaseSyncWiring(unittest.TestCase):
             body=body,
             headers={"Content-Length": str(len(body))},
         )
-        # Current env is QA; target DEV is at a lower index → backward
         release = _make_release(
             environments=["PLANNED", "DEV", "QA", "PROD"],
             platforms={
@@ -616,30 +628,21 @@ class TestHandlePromoteReleaseSyncWiring(unittest.TestCase):
         handler._save_releases_config = MagicMock()
         handler._get_timestamp = MagicMock(return_value="2026-06-09T00:00:00Z")
         handler._sync_release_metadata_to_manifest = MagicMock()
+        # Even in report mode a structurally impossible move is refused.
+        _gate_report_mode(handler)
 
         handler.handle_promote_release("REL-0659-001")
 
-        # NOTE: The server-side promote handler does NOT enforce forward-only for
-        # explicit --to targets; it only validates that the target is a valid/enabled
-        # environment.  Forward-only for explicit --to is enforced by the CLI
-        # (kb-release-promote in kanban-helpers.sh).  Verify the server behaviour
-        # here: it should ACCEPT the backward jump (the CLI is the gate).
-        # If this assertion fails it means forward-only was added server-side too,
-        # which would be a documentation/design discrepancy worth flagging.
-        self.assertIsNone(
-            None,  # placeholder — see assertion block below
-        )
-        # The server accepted the backward target (DEV is a valid enabled env)
-        # and returned 200 with newEnvironment=DEV.
-        self.assertEqual(handler._response_code, 200,
-                         "Server should accept explicit targetEnvironment=DEV even when backward — "
-                         "forward-only is a CLI-level guard in kb-release-promote, NOT the server")
+        self.assertEqual(handler._response_code, 409)
+        handler._save_releases_config.assert_not_called()
+        handler._sync_release_metadata_to_manifest.assert_not_called()
 
     def test_server_rejects_no_op_same_env_target(self):
         """
-        When targetEnvironment == current environment, the server accepts the jump
-        (same env is still a valid enabled target — no-op promotion is allowed by
-        the server; the CLI refuses it).  Verify server behaviour explicitly.
+        XACA-1346: a LEGACY body ({platform, targetEnvironment}) aimed at the stage the release is
+        already at is an idempotent replay (kb-release-push-promote POSTs once per platform): the
+        server answers 200 {noop: true} and writes NOTHING. (A new-style targetStage at the
+        current stage is a 409; see tests/test_xaca1346_release_gate_endpoints.py.)
         """
         body = json.dumps({"platform": "ios", "targetEnvironment": "QA"}).encode()
         handler, _ = _make_handler(
@@ -665,10 +668,14 @@ class TestHandlePromoteReleaseSyncWiring(unittest.TestCase):
         handler._save_releases_config = MagicMock()
         handler._get_timestamp = MagicMock(return_value="2026-06-09T00:00:00Z")
         handler._sync_release_metadata_to_manifest = MagicMock()
+        _gate_report_mode(handler)
 
         handler.handle_promote_release("REL-0659-001")
-        # Server should accept — no-op prevention is CLI-level
+
         self.assertEqual(handler._response_code, 200)
+        self.assertTrue(json.loads(handler.wfile.getvalue())["noop"])
+        handler._save_releases_config.assert_not_called()
+        handler._sync_release_metadata_to_manifest.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -894,6 +901,7 @@ class TestManifestSyncPayloadMatchesServerRecord(unittest.TestCase):
             "releaseId": release["id"], "team": "academy", "items": [], "createdAt": "2026-01-01T00:00:00Z"
         })
         handler._save_release_manifest = MagicMock()
+        _gate_report_mode(handler)  # XACA-1346: promote is gated; this test is about the mirror
 
         handler.handle_promote_release(release["id"])
 

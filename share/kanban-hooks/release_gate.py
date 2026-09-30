@@ -9,7 +9,8 @@ Record shape read (release-level state, XACA-1346-001):
   release.stageSha{S}               graded SHA per stage (wins over stages[S].sha)
   release.tests[]                   append-only; superseded records carry supersededBy
   release.branch                    release branch (spec 4.1)
-  release.cr                        {state, approvedAt, deployWindowPlanned}  (documented, not yet written by anyone)
+  release.cr                        {state, approvedAt, deployWindowPlanned}  (documented, not yet written by anyone;
+                                    state 'emergency-deployed' is accepted in place of 'cr-approved', spec 13.5)
   release.platforms{P}.version      PLANNED version check
 
 Waiver shape (spec 6.1 plus one DELIBERATE addition): stages.<S>.waiver =
@@ -34,7 +35,8 @@ whose data is absent is UNMET ("cannot verify"), never assumed satisfied.
 """
 from datetime import datetime, timezone
 
-STAGES = ["PLANNED", "DEV", "QA", "ALPHA", "BETA", "CR", "GAMMA", "PROD"]
+from release_schema import STAGES  # single source of truth (XACA-1346-003); re-exported here
+
 ALWAYS_ENABLED = ("PLANNED", "DEV", "GAMMA", "PROD")
 TEST_STAGES = ("DEV", "QA", "ALPHA", "BETA", "GAMMA")  # stages whose exit gate is a test set
 PASSED, FAILED, WAIVED, PENDING, RUNNING = "passed", "failed", "waived", "pending", "running"
@@ -94,7 +96,10 @@ def _parse_ts(v):
 
 
 def _norm_expected(expected):
-    """[str | {test, optional}] -> [(test, optional)]"""
+    """[str | {test, optional}] -> [(test, optional)]. A non-list container yields ONE
+    malformed entry (name None) so _grade can name it; it is never iterated as a string."""
+    if expected and not isinstance(expected, (list, tuple)):
+        return [(None, False)]
     out = []
     for e in expected or []:
         if isinstance(e, dict):
@@ -109,10 +114,15 @@ def _graded_sha(release, stage):
         ((release.get("stages") or {}).get(stage) or {}).get("sha")
 
 
+graded_sha = _graded_sha  # public alias: the server stamps waivers with the same SHA the gate grades
+
+
 def _current_record(tests, stage, name, sha):
     """Latest non-superseded record for `name` at the graded sha (spec 6.4)."""
     found = None
     for r in tests or []:
+        if not isinstance(r, dict):
+            continue  # a malformed record can never satisfy an expected test
         if (r.get("test") == name and (stage is None or r.get("stage") == stage)
                 and sha and r.get("sha") == sha and not r.get("supersededBy")):
             found = r  # later in append-only list wins
@@ -155,6 +165,12 @@ def _grade(expected, tests, sha, waiver, stage=None):
     covered = _waiver_tests(waiver) if waiver and bad is None else set()
     rows = []
     for name, optional in _norm_expected(expected):
+        if not isinstance(name, str) or not name.strip():
+            # XACA-1346-033: an unhashable/blank expected `test` must be a NAMED refusal,
+            # never a TypeError from the `in covered` set lookups below.
+            rows.append(("<malformed>", FAILED, "expected test entry is malformed: 'test' must be a "
+                         "non-empty string (got %r)" % (name,)))
+            continue
         rec = _current_record(tests, stage, name, sha)
         if rec and rec.get("result") == "PASS":
             rows.append((name, PASSED, ""))
@@ -170,7 +186,9 @@ def _grade(expected, tests, sha, waiver, stage=None):
             outcome, why = FAILED, "test '%s' was SKIPped and is not optional (needs a lead waiver)" % name
         else:
             outcome, why = FAILED, "test '%s' result is %s" % (name, rec.get("result"))
-        if rec is not None and waiver and (name in covered or rec.get("id") in covered):
+        rid = rec.get("id") if rec is not None else None
+        rid = rid if isinstance(rid, str) else None  # XACA-1346-033: unhashable id can never be "covered"
+        if rec is not None and waiver and (name in covered or (rid is not None and rid in covered)):
             if w_ok:
                 rows.append((name, WAIVED, ""))
                 continue
@@ -267,13 +285,20 @@ def _exit_conditions(release, cur, cr_on, ctx):
             r.append("DEV: stageSha.DEV %s != release branch HEAD %s" % (sha, head))
     if cur == "CR":
         cr = release.get("cr") or {}
-        if cr.get("state") != "cr-approved":
-            r.append("CR: CR state is '%s', must be cr-approved" % cr.get("state"))
-        now, ap, win = _parse_ts(ctx.get("now")), _parse_ts(cr.get("approvedAt")), _parse_ts(cr.get("deployWindowPlanned"))
-        if not (now and ap and win):
-            r.append("CR: cannot verify approval time / deploy window (need context.now, cr.approvedAt, cr.deployWindowPlanned)")
-        elif now < max(ap, win):
-            r.append("CR: now is before max(cr_approved_at, deploy_window_planned)")
+        state = cr.get("state")
+        if state == "emergency-deployed":
+            # Spec 13.5: the GAMMA gate accepts emergency-deployed IN PLACE OF cr-approved.
+            # Approval is retroactive on this path, so there is no approval time / deploy
+            # window to wait for; the branch-HEAD == stageSha.CR check below still applies.
+            pass
+        else:
+            if state != "cr-approved":
+                r.append("CR: CR state is '%s', must be cr-approved (or emergency-deployed, spec 13.5)" % state)
+            now, ap, win = _parse_ts(ctx.get("now")), _parse_ts(cr.get("approvedAt")), _parse_ts(cr.get("deployWindowPlanned"))
+            if not (now and ap and win):
+                r.append("CR: cannot verify approval time / deploy window (need context.now, cr.approvedAt, cr.deployWindowPlanned)")
+            elif now < max(ap, win):
+                r.append("CR: now is before max(cr_approved_at, deploy_window_planned)")
         head = ctx.get("branch_head")
         if not head or head != sha:
             r.append("CR: release branch HEAD %s != stageSha.CR %s (branch moved or unknown)" % (head, sha))

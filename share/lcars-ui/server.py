@@ -157,6 +157,16 @@ except ImportError as e:
         return "/tmp/"
     print(f"[LCARS] Warning: kanban_utils not available, activity logging disabled: {e}")
 
+# Release gate (XACA-1346): pure evaluator + schema constants. A missing module FAILS CLOSED
+# (the promote/regress/waiver handlers answer 500), never "no gate".
+try:
+    import release_gate as _release_gate
+    import release_schema as _release_schema
+except ImportError as e:  # pragma: no cover
+    _release_gate = None
+    _release_schema = None
+    print(f"[LCARS] Warning: release_gate unavailable, release promote/regress/waiver fail closed: {e}")
+
 # Import integration providers
 try:
     from integrations import get_manager, IntegrationManager
@@ -1646,6 +1656,33 @@ _PATH_LOCKS: dict = {}  # resolved-path-str -> threading.RLock
 # files those locks protect. Held only for the dict lookup/insert, never
 # across a file read/write.
 _PATH_LOCKS_REGISTRY_LOCK = threading.Lock()
+
+
+def _cut_release_branch(release, board):
+    """PLANNED->DEV branch-cut hook (XACA-1346 decision -002; STUB until XACA-1352).
+
+    CONTRACT for XACA-1352, which replaces this body (keep the name and signature):
+      release: the release dict from the board (READ-ONLY: do not mutate it)
+      board:   the raw board JSON dict (READ-ONLY)
+      returns: {"branch": "releases/<ver>", "branchBaseSha": "<sha of develop HEAD>"}
+               (both non-empty strings), which handle_promote_release records in the SAME
+               locked write that sets release.stage.
+      raises:  ANY exception on failure. Nothing is then written to the release.
+    Called ONLY when the move would proceed and the release has no branch recorded yet,
+    under the board lock: keep it fast, idempotent (a retry after a failed board write must
+    find the branch it already cut), and never write the release record. XACA-1346 is the
+    hook's sole caller; XACA-1352 never writes the release record.
+    """
+    raise NotImplementedError("branch cut is delivered by XACA-1352")
+
+
+def _validate_branch_cut(result):
+    """The hook's return must be {branch, branchBaseSha} of non-empty strings, else it failed."""
+    if (isinstance(result, dict)
+            and all(isinstance(result.get(k), str) and result[k].strip() for k in ('branch', 'branchBaseSha'))):
+        return {"branch": result['branch'].strip(), "branchBaseSha": result['branchBaseSha'].strip()}
+    raise ValueError("_cut_release_branch must return {branch, branchBaseSha} as non-empty strings, got %r"
+                     % (result,))
 
 
 class _DeferredResponse(Exception):
@@ -4907,6 +4944,14 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             # POST /api/releases/<id>/platform-gate-status — persist gate result (XACA-0658-004)
             release_id = path[len('/api/releases/'):-len('/platform-gate-status')]
             self.handle_platform_gate_status(release_id)
+        elif path.startswith('/api/releases/') and '/stages/' in path and path.endswith('/waiver'):
+            # POST /api/releases/<id>/stages/<STAGE>/waiver — lead-only, SHA-bound waiver (XACA-1346-006)
+            release_id, _sep, tail = path[len('/api/releases/'):].partition('/stages/')
+            self.handle_release_stage_waiver(release_id, tail[:-len('/waiver')])
+        elif path.startswith('/api/releases/') and path.endswith('/regress'):
+            # POST /api/releases/<id>/regress — the only sanctioned backward move (XACA-1346-006)
+            release_id = path[len('/api/releases/'):-len('/regress')]
+            self.handle_regress_release(release_id)
         elif path.startswith('/api/releases/') and path.endswith('/promote'):
             release_id = path.replace('/api/releases/', '').replace('/promote', '')
             self.handle_promote_release(release_id)
@@ -5041,7 +5086,9 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 break
 
         # Release API endpoints
-        if path.startswith('/api/releases/') and not path.endswith('/items') and not path.endswith('/promote') and not path.endswith('/platform-gate-status'):
+        if (path.startswith('/api/releases/') and not path.endswith('/items') and not path.endswith('/promote')
+                and not path.endswith('/platform-gate-status') and not path.endswith('/regress')
+                and not path.endswith('/waiver')):
             release_id = path.replace('/api/releases/', '')
             self.handle_update_release(release_id)
         # Epic API endpoints
@@ -6760,13 +6807,20 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             # Update board with releases data
             board_data['releases'] = data.get('releases', [])
             board_data['nextReleaseId'] = data.get('nextId', 1)
-            board_data['releaseConfig'] = {
+            # XACA-1346: start from the on-disk releaseConfig so keys this function does not
+            # model (releaseConfig.leads, releaseConfig.gateEnforcement, ...) SURVIVE every
+            # release write. Rebuilding the dict from scratch silently dropped them, which
+            # would have erased the lead list and flipped a 'report' team back to 'enforce'.
+            _existing_rc = board_data.get('releaseConfig')
+            _rc = dict(_existing_rc) if isinstance(_existing_rc, dict) else {}
+            _rc.update({
                 "defaultEnvironments": data.get('defaultEnvironments', self.DEFAULT_RELEASE_CONFIG['defaultEnvironments']),
                 "platforms": data.get('platforms', self.DEFAULT_RELEASE_CONFIG['platforms']),
                 "releaseTypes": data.get('releaseTypes', self.DEFAULT_RELEASE_CONFIG['releaseTypes']),
                 "flowConfig": data.get('flowConfig', self.DEFAULT_RELEASE_CONFIG['flowConfig']),
                 "projectEnvironments": data.get('projectEnvironments', {})
-            }
+            })
+            board_data['releaseConfig'] = _rc
             board_data['lastUpdated'] = self._get_timestamp()
 
             self._atomic_write_json(board_file, board_data)
@@ -8134,6 +8188,12 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     manifest.pop('versionCode', None)
                     manifest.pop('currentEnvironment', None)
 
+                # XACA-1346: mirror the release-level stage state (board is authoritative).
+                # tests[] is deliberately NOT mirrored (large, append-only, board-only).
+                for _k in ('stage', 'stages', 'stageSha', 'rollbackSha', 'branch', 'branchBaseSha'):
+                    if _k in release:
+                        manifest[_k] = release[_k]
+
                 # Marker so readers know this file is a derived mirror.
                 manifest['_source'] = 'board.releases[] (authoritative); this manifest is a mirror — do not edit by hand'
 
@@ -8199,178 +8259,511 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             finally:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
-    def handle_promote_release(self, release_id):
-        """POST /api/releases/<id>/promote - Promote platform to next environment"""
+    # =========================================================================
+    # RELEASE GATE WIRING (XACA-1346-005/006, spec RELEASE-LIFECYCLE 5.3, 6.4, 13.1)
+    #
+    # Stage state is RELEASE-LEVEL: release.stage / stages{} / stageSha{} / tests[].
+    # platforms.<p>.environment is LEGACY: it is MIRRORED after every successful
+    # move so the existing LCARS UI keeps working, and never gated on.
+    # Every path that moves a release between stages goes through
+    # release_gate: forward = handle_promote_release, backward =
+    # handle_regress_release / handle_plan_release. No other endpoint writes
+    # stage state (handle_update_release rejects those fields with 400).
+    # =========================================================================
+
+    # Fields the generic PUT /api/releases/<id> must never accept: each has ONE
+    # sanctioned, gated writer.
+    _RELEASE_STAGE_STATE_FIELDS = ('environment', 'stage', 'stages', 'stageSha', 'tests')
+    _RELEASE_GATE_MODES = ('enforce', 'report')
+
+    def _read_release_json_body(self):
+        """(body, error). Missing/empty body is {} (the promote target then defaults to
+        the gate's `next`); anything that is not a JSON object is an error string."""
         try:
-            content_length = int(self.headers['Content-Length'])
-            post_data = json.loads(self.rfile.read(content_length))
+            raw_len = self.headers.get('Content-Length')
+            length = int(raw_len) if raw_len not in (None, '') else 0
+        except (TypeError, ValueError):
+            return None, "invalid Content-Length"
+        if length <= 0:
+            return {}, None
+        try:
+            body = json.loads(self.rfile.read(length))
+        except (ValueError, UnicodeDecodeError):
+            return None, "request body is not valid JSON"
+        if not isinstance(body, dict):
+            return None, "request body must be a JSON object"
+        return body, None
 
-            platform = post_data.get('platform')
-            target_env = post_data.get('targetEnvironment')
+    def _read_board_raw_locked(self, team=None):
+        """Raw board JSON. Call ONLY inside _board_write_transaction (plain read: the
+        exclusive flock is already held by this thread; taking it again would deadlock)."""
+        with open(self._get_board_file(team), 'r') as f:
+            return json.load(f)
 
-            if not platform:
-                self.send_error(400, "Missing required field: platform")
+    @staticmethod
+    def _release_cfg(board_raw):
+        rc = board_raw.get('releaseConfig') if isinstance(board_raw, dict) else None
+        return rc if isinstance(rc, dict) else {}
+
+    @staticmethod
+    def _crsupport_enabled(board_raw):
+        """SOLE source of truth for CR (spec 3.1): teamConfig.crSupport.enabled is True."""
+        tc = board_raw.get('teamConfig') if isinstance(board_raw, dict) else None
+        cs = tc.get('crSupport') if isinstance(tc, dict) else None
+        return isinstance(cs, dict) and cs.get('enabled') is True
+
+    @classmethod
+    def _gate_mode(cls, release_config):
+        """(mode, config_warning). ABSENT gateEnforcement = 'enforce' (new boards enforce).
+        Any other unrecognised value is a config error: treated as enforce, with a warning."""
+        if 'gateEnforcement' not in release_config:
+            return 'enforce', None
+        v = release_config.get('gateEnforcement')
+        if isinstance(v, str) and v in cls._RELEASE_GATE_MODES:
+            return v, None
+        return 'enforce', ("releaseConfig.gateEnforcement is %r, which is not 'enforce' or 'report' "
+                           "(config error); treating it as 'enforce'" % (v,))
+
+    @staticmethod
+    def _actor_is_lead(actor, release_config):
+        """(is_lead, reason). FAILS CLOSED: releaseConfig.leads missing/empty/malformed means
+        nobody is a lead. The actor is self-asserted (localhost trust model) but always recorded."""
+        leads = release_config.get('leads')
+        names = {x.strip() for x in leads if isinstance(x, str) and x.strip()} \
+            if isinstance(leads, list) else set()
+        if not names:
+            return False, ("releaseConfig.leads is missing or empty; nobody can be authorized as lead "
+                           "(fails closed)")
+        if not isinstance(actor, str) or not actor.strip():
+            return False, "an actor name is required and must be listed in releaseConfig.leads"
+        if actor.strip() not in names:
+            return False, "actor '%s' is not in releaseConfig.leads" % actor.strip()
+        return True, None
+
+    def _release_repo_root(self, team):
+        """Team's git working dir (aiteamforge_paths registry), else kanban dir's parent."""
+        try:
+            from aiteamforge_paths import get_team_working_dir  # noqa: PLC0415
+            root = Path(get_team_working_dir(team))
+            if root.is_dir():
+                return root
+        except Exception:
+            pass
+        kd = TEAM_KANBAN_DIRS.get(team)
+        if kd and Path(kd).parent.is_dir():
+            return Path(kd).parent
+        return None
+
+    def _release_branch_head(self, release, team):
+        """`git rev-parse <release.branch>` in the team repo, or None. None makes the gate
+        fail closed ("cannot verify"); it is never guessed."""
+        branch = release.get('branch')
+        if not isinstance(branch, str) or not branch.strip() or branch.startswith('-'):
+            return None
+        root = self._release_repo_root(team)
+        if root is None:
+            return None
+        env = {k: v for k, v in os.environ.items()
+               if k not in ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE')}
+        try:
+            r = subprocess.run(['git', '-C', str(root), 'rev-parse', '--verify', '--quiet',
+                                branch.strip() + '^{commit}'],
+                               capture_output=True, text=True, timeout=5, env=env)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        sha = (r.stdout or '').strip()
+        return sha if r.returncode == 0 and re.fullmatch(r'[0-9a-fA-F]{7,64}', sha) else None
+
+    def _build_gate_context(self, release, release_id, board_raw, data, team, deploy_confirmed):
+        """Read-only evaluate() context. Nothing here is invented: an item that records no
+        prMerged passes prMerged=None and the gate refuses it (fails closed by design)."""
+        items = []
+        for it in board_raw.get('backlog') or []:
+            ra = it.get('releaseAssignment') if isinstance(it, dict) else None
+            if isinstance(ra, dict) and ra.get('releaseId') == release_id:
+                items.append({"id": it.get('id'), "status": it.get('status'),
+                              "prMerged": it.get('prMerged')})
+        ctx = {"items": items, "other_releases": data.get('releases') or [],
+               "now": self._get_timestamp(), "deploy_confirmed": bool(deploy_confirmed)}
+        head = self._release_branch_head(release, team)
+        if head:
+            ctx["branch_head"] = head
+        return ctx
+
+    def _legacy_environment_for_stage(self, release, data, stage):
+        """The value to MIRROR into platforms.<p>.environment: the stage itself when the
+        legacy environments list knows it, else the nearest earlier stage it does (the CR
+        stage has no legacy tab, so it mirrors as BETA)."""
+        envs = release.get('environments') or data.get('defaultEnvironments') or []
+        if stage in envs or stage not in _release_schema.STAGES:
+            return stage
+        idx = _release_schema.STAGES.index(stage)
+        for s in reversed(_release_schema.STAGES[:idx]):
+            if s in envs:
+                return s
+        return stage
+
+    def _apply_stage_move(self, release, data, frm, to, now, kind):
+        """The ONE state mutation for promote/regress/plan (caller holds the board lock and
+        saves). Sets release.stage, creates-or-completes stages[to] WITHOUT clobbering an
+        existing record, then mirrors the legacy per-platform environment."""
+        release['stage'] = to
+        stages = release.get('stages')
+        if not isinstance(stages, dict):
+            stages = {}
+            release['stages'] = stages
+        st = stages.get(to)
+        if not isinstance(st, dict):
+            stages[to] = {"enteredAt": now, "status": "pending", "expected": []}
+        else:
+            st.setdefault('enteredAt', now)
+            st.setdefault('status', 'pending')
+            st.setdefault('expected', [])
+            if kind == 'regress':  # re-entering a stage: it restarts (records/waivers stay SHA-bound)
+                st['enteredAt'] = now
+                st['status'] = 'pending'
+        legacy = self._legacy_environment_for_stage(release, data, to)
+        platforms = release.get('platforms')
+        for pdata in (platforms.values() if isinstance(platforms, dict) else []):
+            if not isinstance(pdata, dict):
+                continue
+            prev = pdata.get('environment')
+            if prev != legacy:
+                history = pdata.get('environmentHistory')
+                history = history if isinstance(history, list) else []
+                history.append({"from": prev, "to": legacy, "promotedAt": now})
+                pdata['environmentHistory'] = history
+            pdata['environment'] = legacy
+
+    def _log_release_activity(self, release_id, action, frm=None, to=None, **ctx):
+        """Append to <team kanban dir>/activity/<REL-ID>.json. Fire-and-forget: a logging
+        failure must never change the outcome of the request."""
+        try:
+            log_activity(action, release_id, 'release', field='stage', old_value=frm, new_value=to,
+                         context=json.dumps(ctx, sort_keys=True, default=str), team=LCARS_TEAM)
+        except Exception as e:  # pragma: no cover - log_activity swallows its own errors
+            print(f"[LCARS] Warning: release activity log failed for {release_id}: {e}")
+
+    def _mirror_release_manifest(self, release):
+        try:
+            self._sync_release_metadata_to_manifest(release, release.get('team'))
+        except Exception as sync_err:
+            print(f"[LCARS] Warning: manifest sync after release move failed: {sync_err}")
+
+    def _gate_unavailable(self):
+        if _release_gate is None or _release_schema is None:
+            self._send_json_response({"error": "release gate module unavailable; refusing (fails closed)"},
+                                     status=500)
+            return True
+        return False
+
+    def handle_promote_release(self, release_id):
+        """POST /api/releases/<id>/promote - the single gated stage promote (spec 5.3).
+
+        Body {"targetStage": S, "actor": name, "confirmDeploy": bool}; the legacy
+        {"platform", "targetEnvironment"} form is accepted (platform ignored: stage state is
+        release-level). No targetStage = the gate's `next`. The gate is evaluated BEFORE any
+        write. releaseConfig.gateEnforcement: 'enforce' (default when absent) refuses with 409
+        and writes nothing; 'report' evaluates + logs and lets a structurally sane forward
+        move proceed. Backward/same/terminal/disabled-target moves are refused in BOTH modes.
+        """
+        try:
+            if self._gate_unavailable():
                 return
+            body, err = self._read_release_json_body()
+            if err:
+                return self._send_json_response({"error": err}, status=400)
+            target = body.get('targetStage')
+            legacy_target = body.get('targetEnvironment')
+            actor = body.get('actor')
+            for label, v in (('targetStage', target), ('targetEnvironment', legacy_target), ('actor', actor)):
+                if v is not None and not isinstance(v, str):
+                    return self._send_json_response({"error": "%s must be a string" % label}, status=400)
+            if 'confirmDeploy' in body and not isinstance(body['confirmDeploy'], bool):
+                return self._send_json_response({"error": "confirmDeploy must be a boolean"}, status=400)
+            target = (target or '').strip() or None
+            legacy_target = (legacy_target or '').strip() or None
+            # A LEGACY body ({"platform", "targetEnvironment"}, no targetStage) can be a per-platform
+            # replay of a promote that already happened at release level (kb-release-push-promote
+            # POSTs once per platform). Such a call aimed at the stage the release is already at is
+            # a no-op, not a refusal. A NEW-style body (targetStage) at the current stage is not.
+            legacy_style = target is None and 'platform' in body
+            if target and legacy_target and target != legacy_target:
+                return self._send_json_response(
+                    {"error": "targetStage and targetEnvironment disagree"}, status=400)
+            target = target or legacy_target
+            if target is not None and target not in _release_schema.STAGES:
+                return self._send_json_response(
+                    {"error": "unknown target stage '%s' (one of %s)" % (target, list(_release_schema.STAGES))},
+                    status=400)
+            actor = (actor or '').strip() or None
+            confirm = body.get('confirmDeploy') is True
 
-            # XACA-0890 review-gate fix: one lock across load -> mutate -> save.
+            written = False
+            noop_log = None
             with self._board_write_transaction():
                 data = self._load_releases_config(_lock_held=True)
                 release = self._find_release_by_id(data, release_id)
                 if not release:
-                    raise _DeferredResponse.error(404, f"Release not found: {release_id}")
+                    raise _DeferredResponse.json({"error": "Release not found: %s" % release_id}, 404)
+                board_raw = self._read_board_raw_locked()
+                rcfg = self._release_cfg(board_raw)
+                mode, cfg_warning = self._gate_mode(rcfg)
+                if legacy_style and legacy_target is not None \
+                        and legacy_target == _release_gate.current_stage(release):
+                    # Idempotent legacy replay: nothing is evaluated or written. The activity entry
+                    # is appended by the except clause below, AFTER the board lock is released
+                    # (log_activity can spawn a 2s tmux subprocess; never under the lock).
+                    noop_log = dict(stage=legacy_target, actor=actor, mode=mode,
+                                    platform=body.get('platform'), configWarning=cfg_warning)
+                    noop_payload = {"allowed": True, "noop": True, "mode": mode, "from": legacy_target,
+                                    "to": legacy_target, "reasons": [], "success": True,
+                                    "previousEnvironment": legacy_target, "newEnvironment": legacy_target}
+                    if cfg_warning:
+                        noop_payload["configWarning"] = cfg_warning
+                    raise _DeferredResponse.json(noop_payload, 200)
+                cr_on = self._crsupport_enabled(board_raw)
+                flow = data.get('flowConfig') or {}
+                is_lead, lead_reason = self._actor_is_lead(actor, rcfg)
+                ctx = self._build_gate_context(release, release_id, board_raw, data, LCARS_TEAM,
+                                               confirm and is_lead)
+                cur = _release_gate.current_stage(release)
+                order = _release_gate.enabled_stages(flow, cr_support_enabled=cr_on)
+                later = [s for s in order if _release_schema.STAGES.index(s) > _release_schema.STAGES.index(cur)]
+                eff_target = target or (later[0] if later else None)
+                verdict = _release_gate.evaluate(release, eff_target or cur, flow, cr_support_enabled=cr_on,
+                                                 actor=actor, context=ctx)
+                reasons = list(verdict['reasons'])
+                if eff_target == 'GAMMA' and confirm and not is_lead:
+                    reasons.append("GAMMA: deploy confirmation refused: " + lead_reason)
+                # Structurally impossible moves are refused in BOTH modes: report mode must
+                # never write a stage that is unknown, disabled, unchanged, backward or past PROD.
+                hard = (eff_target is None or cur == 'PROD' or eff_target == cur
+                        or eff_target not in order
+                        or _release_schema.STAGES.index(eff_target) < _release_schema.STAGES.index(cur))
+                proceed = (not hard) and (mode == 'report' or not reasons)
+                cut = None
+                if proceed and cur == 'PLANNED' and eff_target == 'DEV' and not release.get('branch'):
+                    try:  # decision -002: XACA-1346's gated write is the SOLE caller of the cut
+                        cut = _validate_branch_cut(_cut_release_branch(copy.deepcopy(release), board_raw))
+                    except NotImplementedError as e:
+                        reasons.append("PLANNED->DEV: %s" % e)
+                    except Exception as e:  # any failure: nothing was cut, never proceed as if it was
+                        reasons.append("PLANNED->DEV: branch cut failed: %s" % e)
+                    if cut is None and mode == 'enforce':
+                        proceed = False
+                if proceed:
+                    now = self._get_timestamp()
+                    self._apply_stage_move(release, data, cur, eff_target, now, 'promote')
+                    if cut:  # same locked write as the stage change
+                        release['branch'] = cut['branch']
+                        release['branchBaseSha'] = cut['branchBaseSha']
+                    if not self._save_releases_config(data, _lock_held=True):
+                        raise _DeferredResponse.json({"error": "board write failed"}, 500)
+                    written = True
+                    snapshot = copy.deepcopy(release)
+                if not proceed and cfg_warning:
+                    reasons.append(cfg_warning)
 
-                if platform not in release.get('platforms', {}):
-                    raise _DeferredResponse.error(400, f"Platform not found in release: {platform}")
-
-                platform_data = release['platforms'][platform]
-                all_environments = release.get('environments', data.get('defaultEnvironments', []))
-                current_env = platform_data.get('environment')
-
-                # Get flow config and filter to enabled stages only
-                flow_config = data.get('flowConfig', {})
-                stages = flow_config.get('stages', {})
-                environments = [env for env in all_environments if stages.get(env, {}).get('enabled', True)]
-
-                # Determine target environment
-                if target_env:
-                    # Validate target is in enabled environments
-                    if target_env not in environments:
-                        raise _DeferredResponse.error(400, f"Invalid or disabled environment: {target_env}")
-                    new_env = target_env
-                else:
-                    # Auto-promote to next enabled environment
-                    try:
-                        current_idx = environments.index(current_env)
-                        if current_idx >= len(environments) - 1:
-                            raise _DeferredResponse.error(400, f"Already at final environment: {current_env}")
-                        new_env = environments[current_idx + 1]
-                    except ValueError:
-                        # Current env not in enabled list, find next enabled after current
-                        try:
-                            all_idx = all_environments.index(current_env)
-                            # Find next enabled environment
-                            for env in all_environments[all_idx + 1:]:
-                                if env in environments:
-                                    new_env = env
-                                    break
-                            else:
-                                new_env = environments[0] if environments else "PLANNED"
-                        except ValueError:
-                            new_env = environments[0] if environments else "PLANNED"
-
-                # Record history and update
-                history = platform_data.get('environmentHistory', [])
-                history.append({
-                    "from": current_env,
-                    "to": new_env,
-                    "promotedAt": self._get_timestamp()
-                })
-
-                platform_data['environment'] = new_env
-                platform_data['environmentHistory'] = history
-
-                self._save_releases_config(data, _lock_held=True)
-
-            # XACA-0659 (GAP B): Write-through updated environment into manifest.json
-            # so the manifest mirrors the board's authoritative environment state.
-            try:
-                self._sync_release_metadata_to_manifest(release, release.get('team'))
-            except Exception as sync_err:
-                print(f"[LCARS] Warning: manifest sync after promote failed: {sync_err}")
-
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self._send_cors_headers()
-            self.end_headers()
-            self.wfile.write(json.dumps({
-                "success": True,
-                "platform": platform,
-                "previousEnvironment": current_env,
-                "newEnvironment": new_env
-            }).encode())
+            base = {"mode": mode, "from": cur, "to": eff_target, "reasons": reasons}
+            if cfg_warning:
+                base["configWarning"] = cfg_warning
+            logctx = dict(actor=actor, mode=mode, reasons=reasons, confirmDeploy=confirm,
+                          cut=cut, configWarning=cfg_warning)
+            if not written:
+                self._log_release_activity(release_id, 'release_promote_refused', cur, eff_target, **logctx)
+                return self._send_json_response(dict(base, allowed=False), status=409)
+            self._mirror_release_manifest(snapshot)
+            self._log_release_activity(
+                release_id, 'release_promote_report' if reasons else 'release_promote',
+                cur, eff_target, **logctx)
+            return self._send_json_response(dict(
+                base, allowed=True, release=snapshot,
+                success=True, previousEnvironment=cur, newEnvironment=eff_target))
 
         except _DeferredResponse as deferred:
-            # XACA-0890-022: emitted HERE, outside the
-            # _board_write_transaction `with` block - board_file's
-            # exclusive flock is already released, so a slow or stalled
-            # client blocks no other writer. Must stay ABOVE the generic
-            # `except Exception` below, which would otherwise swallow this
-            # sentinel and turn a 404/400/409 into a 500.
+            # XACA-0890-022: emitted HERE, outside the _board_write_transaction block, so the
+            # exclusive flock is already released. Must stay ABOVE `except Exception`.
+            if noop_log is not None and deferred.status == 200:
+                stage = noop_log.pop('stage')
+                self._log_release_activity(release_id, 'release_promote_noop', stage, stage, **noop_log)
             deferred.emit(self)
             return
         except Exception as e:
             self.send_error(500, f"Error promoting release: {e}")
 
-    def handle_plan_release(self, release_id):
-        """POST /api/releases/<id>/plan — Demote all platforms back to the PLANNED holding state.
+    def _regress_release_core(self, release_id, to, reason, actor, reconcile_ok=False, reset_status=False):
+        """Shared backward-move path for /regress and /plan. Regress rules are ALWAYS enforced
+        (no report mode). Returns (status, payload). Logs every outcome for a known release.
+        Decides inside the lock and RETURNS (never raises a deferred response, never writes to
+        the socket): the caller sends the response after the lock is released."""
+        written = False
+        with self._board_write_transaction():
+            data = self._load_releases_config(_lock_held=True)
+            release = self._find_release_by_id(data, release_id)
+            if not release:
+                return 404, {"error": "Release not found: %s" % release_id}
+            board_raw = self._read_board_raw_locked()
+            cr_on = self._crsupport_enabled(board_raw)
+            flow = data.get('flowConfig') or {}
+            verdict = _release_gate.evaluate_regress(release, to, flow, reason, cr_support_enabled=cr_on)
+            cur = verdict['current']
+            reasons = list(verdict['reasons'])
+            if reconcile_ok and to == 'PLANNED' and cur == 'PLANNED' and str(reason or '').strip():
+                # XACA-0729 heal: release-level stage is already PLANNED but a platform drifted.
+                plats = release.get('platforms') if isinstance(release.get('platforms'), dict) else {}
+                if any(isinstance(p, dict) and p.get('environment') != 'PLANNED' for p in plats.values()):
+                    reasons = []
+            if not reasons:
+                now = self._get_timestamp()
+                self._apply_stage_move(release, data, cur, to, now, 'regress')
+                if reset_status:
+                    release['status'] = "in_progress"
+                if not self._save_releases_config(data, _lock_held=True):
+                    return 500, {"error": "board write failed"}
+                written = True
+                snapshot = copy.deepcopy(release)
+        logctx = dict(actor=actor, reason=reason, reasons=reasons)
+        if not written:
+            self._log_release_activity(release_id, 'release_regress_refused', cur, to, **logctx)
+            return 409, {"allowed": False, "from": cur, "to": to, "reasons": reasons}
+        self._mirror_release_manifest(snapshot)
+        self._log_release_activity(release_id, 'release_regress', cur, to, **logctx)
+        return 200, {"allowed": True, "from": cur, "to": to, "release": snapshot}
 
-        XACA-0729: Resets a release that was accidentally born ACTIVE (e.g. because
-        defaultEnvironments drifted and omitted PLANNED) or that needs to be pulled
-        back to the holding queue before re-promotion begins.
-
-        Every platform's environment is set to "PLANNED" and a history entry is
-        appended (same audit-trail convention as handle_promote_release).  The release
-        status is reset to "in_progress" — matching what a freshly-created PLANNED
-        release looks like (see handle_create_release).
-
-        Returns 404 if the release does not exist.
-        No request body is required (the endpoint ignores any body that is sent).
-        """
+    def handle_regress_release(self, release_id):
+        """POST /api/releases/<id>/regress - the ONLY sanctioned backward move (spec 13.1).
+        Body {"to": S, "reason": "...", "actor": name}. Rules always enforced."""
         try:
-            # XACA-0890 review-gate fix: one lock across load -> mutate -> save.
+            if self._gate_unavailable():
+                return
+            body, err = self._read_release_json_body()
+            if err:
+                return self._send_json_response({"error": err}, status=400)
+            to, reason, actor = body.get('to'), body.get('reason'), body.get('actor')
+            if not isinstance(to, str) or not to.strip():
+                return self._send_json_response({"error": "'to' (target stage) is required"}, status=400)
+            for label, v in (('reason', reason), ('actor', actor)):
+                if v is not None and not isinstance(v, str):
+                    return self._send_json_response({"error": "%s must be a string" % label}, status=400)
+            status, payload = self._regress_release_core(
+                release_id, to.strip(), reason, (actor or '').strip() or None)
+            return self._send_json_response(payload, status=status)
+        except Exception as e:
+            self.send_error(500, f"Error regressing release: {e}")
+
+    def handle_release_stage_waiver(self, release_id, stage):
+        """POST /api/releases/<id>/stages/<STAGE>/waiver (spec 6.4). Body
+        {"by", "reason", "tests": [id-or-name, ...]}. The server stamps ts and sha (the stage's
+        graded SHA); release_gate.validate_waiver decides. 403 = not a lead (releaseConfig.leads,
+        fails closed), 409 = invalid, 200 = {"waiver"}. Only the CURRENT stage can be waived."""
+        try:
+            if self._gate_unavailable():
+                return
+            body, err = self._read_release_json_body()
+            if err:
+                return self._send_json_response({"error": err}, status=400)
+            if stage not in _release_gate.TEST_STAGES:
+                return self._send_json_response(
+                    {"error": "stage '%s' has no waivable tests (one of %s)"
+                              % (stage, list(_release_gate.TEST_STAGES))}, status=400)
+            by, reason, tests = body.get('by'), body.get('reason'), body.get('tests')
+            if not isinstance(by, str) or not by.strip():
+                return self._send_json_response({"error": "'by' is required"}, status=400)
+            if reason is not None and not isinstance(reason, str):
+                return self._send_json_response({"error": "reason must be a string"}, status=400)
+            if isinstance(tests, str):
+                tests = [tests]
+            if tests is None:
+                tests = []
+            if not isinstance(tests, list) or not all(isinstance(t, str) for t in tests):
+                return self._send_json_response({"error": "tests must be a list of strings"}, status=400)
+            by = by.strip()
+
+            status, payload, prior = 200, None, None
             with self._board_write_transaction():
                 data = self._load_releases_config(_lock_held=True)
                 release = self._find_release_by_id(data, release_id)
                 if not release:
-                    raise _DeferredResponse.error(404, f"Release not found: {release_id}")
-
-                now = self._get_timestamp()
-                platforms = release.get('platforms', {})
-
-                for plat_name, plat_data in platforms.items():
-                    current_env = plat_data.get('environment')
-                    history = plat_data.get('environmentHistory', [])
-                    history.append({
-                        "from": current_env,
-                        "to": "PLANNED",
-                        "promotedAt": now
-                    })
-                    plat_data['environment'] = "PLANNED"
-                    plat_data['environmentHistory'] = history
-
-                release['platforms'] = platforms
-                # Reset to the same status a freshly-created release carries.
-                release['status'] = "in_progress"
-
-                self._save_releases_config(data, _lock_held=True)
-
-            # Write-through to manifest so it stays a faithful mirror of board state
-            # (same pattern as handle_promote_release / handle_platform_gate_status).
-            try:
-                self._sync_release_metadata_to_manifest(release, release.get('team'))
-            except Exception as sync_err:
-                print(f"[LCARS] Warning: manifest sync after plan-reset failed: {sync_err}")
-
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self._send_cors_headers()
-            self.end_headers()
-            self.wfile.write(json.dumps({
-                "success": True,
-                "releaseId": release_id,
-                "resetEnvironment": "PLANNED",
-                "platforms": list(platforms.keys())
-            }).encode())
-
+                    raise _DeferredResponse.json({"error": "Release not found: %s" % release_id}, 404)
+                board_raw = self._read_board_raw_locked()
+                rcfg = self._release_cfg(board_raw)
+                is_lead, lead_reason = self._actor_is_lead(by, rcfg)
+                cur = _release_gate.current_stage(release)
+                graded = _release_gate.graded_sha(release, stage)
+                stages = release.get('stages') if isinstance(release.get('stages'), dict) else {}
+                srec_ro = stages.get(stage) if isinstance(stages.get(stage), dict) else {}
+                waiver = {"by": by, "reason": reason or "", "ts": self._get_timestamp(),
+                          "tests": list(tests), "sha": graded}
+                reasons = _release_gate.validate_waiver(waiver, dict(srec_ro, sha=graded), is_lead)
+                if not is_lead:
+                    reasons.append(lead_reason)
+                if stage != cur:
+                    reasons.append("stage %s is not the current stage (%s); only the current stage can be waived"
+                                   % (stage, cur))
+                if reasons:
+                    status = 403 if not is_lead else 409
+                    payload = {"reasons": reasons}
+                else:
+                    prior = srec_ro.get('waiver')
+                    if release.get('stages') is not stages:  # was absent/malformed: replace, never clobber a dict
+                        release['stages'] = stages
+                    srec = stages.get(stage)
+                    if not isinstance(srec, dict):
+                        srec = {}
+                        stages[stage] = srec
+                    srec['waiver'] = waiver
+                    srec.setdefault('expected', [])
+                    srec['status'] = _release_gate.derive_stage_status(
+                        dict(srec, sha=graded), release.get('tests'), srec.get('expected'), stage)
+                    if not self._save_releases_config(data, _lock_held=True):
+                        raise _DeferredResponse.json({"error": "board write failed"}, 500)
+                    payload = {"waiver": waiver}
+                    snapshot = copy.deepcopy(release)
+            if status == 200:
+                self._mirror_release_manifest(snapshot)
+                self._log_release_activity(release_id, 'release_waiver_granted', cur, stage,
+                                           actor=by, waiver=waiver, replaced=prior)
+            else:
+                self._log_release_activity(release_id, 'release_waiver_refused', cur, stage,
+                                           actor=by, reasons=payload["reasons"], tests=tests)
+            return self._send_json_response(payload, status=status)
         except _DeferredResponse as deferred:
-            # XACA-0890-022: emitted HERE, outside the
-            # _board_write_transaction `with` block - board_file's
-            # exclusive flock is already released, so a slow or stalled
-            # client blocks no other writer. Must stay ABOVE the generic
-            # `except Exception` below, which would otherwise swallow this
-            # sentinel and turn a 404/400/409 into a 500.
             deferred.emit(self)
             return
+        except Exception as e:
+            self.send_error(500, f"Error granting waiver: {e}")
+
+    def handle_plan_release(self, release_id):
+        """POST /api/releases/<id>/plan — send a release BACK to the PLANNED holding state.
+
+        XACA-0729 originated this as an unconditional reset. XACA-1346 routes it through the
+        regress rules (it IS a backward move): a non-blank body {"reason": "..."} is REQUIRED
+        (400 otherwise), the move is refused when the release is not strictly later than
+        PLANNED (except the XACA-0729 heal of a drifted platform), and it is logged.
+        Every platform's legacy environment is mirrored to PLANNED; status resets to in_progress.
+        Returns 404 if the release does not exist.
+        """
+        try:
+            if self._gate_unavailable():
+                return
+            body, err = self._read_release_json_body()
+            if err:
+                return self._send_json_response({"error": err}, status=400)
+            reason, actor = body.get('reason'), body.get('actor')
+            if not isinstance(reason, str) or not reason.strip():
+                return self._send_json_response(
+                    {"error": "a non-empty 'reason' is required: /plan is a backward move "
+                              "(same rules as POST /api/releases/<id>/regress)"}, status=400)
+            if actor is not None and not isinstance(actor, str):
+                return self._send_json_response({"error": "actor must be a string"}, status=400)
+            status, payload = self._regress_release_core(
+                release_id, 'PLANNED', reason, (actor or '').strip() or None,
+                reconcile_ok=True, reset_status=True)
+            if status == 200:
+                payload = dict(payload, success=True, releaseId=release_id, resetEnvironment="PLANNED",
+                               platforms=list((payload["release"].get('platforms') or {}).keys()))
+            return self._send_json_response(payload, status=status)
         except Exception as e:
             self.send_error(500, f"Error resetting release to PLANNED: {e}")
 
@@ -8494,6 +8887,21 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             content_length = int(self.headers['Content-Length'])
             post_data = json.loads(self.rfile.read(content_length))
 
+            # XACA-1346: stage state has ONE gated writer per direction. Refuse (400) rather than
+            # silently ignore, so a caller cannot believe it moved a release.
+            _bad = [f for f in self._RELEASE_STAGE_STATE_FIELDS if f in post_data]
+            _plat = post_data.get('platforms')
+            if isinstance(_plat, dict):
+                for _pn, _pu in _plat.items():
+                    if isinstance(_pu, dict):
+                        _bad += ['platforms.%s.%s' % (_pn, f) for f in ('environment', 'environmentHistory')
+                                 if f in _pu]
+            if _bad:
+                return self._send_json_response({
+                    "error": "stage state cannot be set through release update (%s); use "
+                             "POST /api/releases/<id>/promote (forward, gated), /regress (backward, with a "
+                             "reason) or /stages/<STAGE>/waiver" % ", ".join(_bad)}, status=400)
+
             # XACA-0890 review-gate fix: one lock across load -> mutate -> save.
             with self._board_write_transaction():
                 data = self._load_releases_config(_lock_held=True)
@@ -8553,10 +8961,18 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     )
                     for platform in post_data['addPlatforms']:
                         if platform not in existing_platforms:
+                            # XACA-1346: a new platform MIRRORS the release's current stage. A fixed
+                            # "PLANNED" would drag a legacy release (no release.stage) back to
+                            # PLANNED through current_stage()'s earliest-platform rule = an ungated
+                            # backward move.
+                            _new_env = "PLANNED"
+                            if _release_gate is not None:
+                                _new_env = self._legacy_environment_for_stage(
+                                    release, data, _release_gate.current_stage(release))
                             existing_platforms[platform] = {
                                 "version": release_version,
                                 "buildNumber": 1,
-                                "environment": "PLANNED",
+                                "environment": _new_env,
                                 "environmentHistory": []
                             }
                     release['platforms'] = existing_platforms

@@ -2102,11 +2102,18 @@ class TestHandlePromoteRelease(unittest.TestCase):
         handler._save_releases_config = create_autospec(handler._save_releases_config)
         handler._find_release_by_id = MagicMock(return_value=release)
         handler._get_timestamp = MagicMock(return_value="2026-04-25T00:00:00Z")
+        # XACA-1346: promote is gated. This suite covers pipeline ADVANCEMENT, so it runs in
+        # 'report' mode (gate evaluated + logged, structurally sane forward moves proceed); the
+        # gate itself is covered in tests/test_xaca1346_release_gate_endpoints.py.
+        handler._read_board_raw_locked = MagicMock(
+            return_value={"releaseConfig": {"gateEnforcement": "report"}})
+        handler._log_release_activity = MagicMock()
+        handler._sync_release_metadata_to_manifest = MagicMock()
 
         handler.handle_promote_release("REL-001")
 
-        # If send_error was called, promotion was rejected
-        if handler.send_error.called:
+        # A refused move answers 409 (JSON), never a 200 body
+        if handler._response_code != 200:
             return handler, None
 
         try:
@@ -2132,13 +2139,11 @@ class TestHandlePromoteRelease(unittest.TestCase):
         self.assertEqual(result["newEnvironment"], "ALPHA")
 
     def test_prod_is_final_stage_returns_error(self):
-        """Promoting from PROD must be rejected — already at the final stage."""
+        """Promoting from PROD must be refused (409) even in report mode - terminal stage."""
         handler, result = self._run_promote("PROD")
-        self.assertIsNone(result, "Expected send_error, not a success response")
-        handler.send_error.assert_called_once()
-        args = handler.send_error.call_args[0]
-        self.assertEqual(args[0], 400)
-        self.assertIn("final environment", args[1])
+        self.assertIsNone(result, "Expected a refusal, not a success response")
+        self.assertEqual(handler._response_code, 409)
+        handler._save_releases_config.assert_not_called()
 
     def test_history_records_from_planned_to_dev(self):
         """environmentHistory must log the PLANNED→DEV transition."""
@@ -2151,9 +2156,10 @@ class TestHandlePromoteRelease(unittest.TestCase):
         self.assertEqual(history[0]["from"], "PLANNED")
         self.assertEqual(history[0]["to"], "DEV")
 
-    def test_missing_platform_in_body_returns_400(self):
-        """Omitting the platform field must produce a 400 error."""
-        body = json.dumps({}).encode()
+    def test_platform_field_is_ignored_release_level_stage(self):
+        """XACA-1346-001: stage state is release-level, so `platform` is no longer required (it
+        used to be a 400). An empty body promotes to the gate's `next`."""
+        body = b"{}"
         handler, buf = _make_handler(
             path="/api/releases/REL-001/promote",
             method="POST",
@@ -2171,11 +2177,15 @@ class TestHandlePromoteRelease(unittest.TestCase):
         handler._find_release_by_id = MagicMock(return_value=release)
         handler._save_releases_config = create_autospec(handler._save_releases_config)
         handler._get_timestamp = MagicMock(return_value="2026-04-25T00:00:00Z")
+        handler._read_board_raw_locked = MagicMock(
+            return_value={"releaseConfig": {"gateEnforcement": "report"}})
+        handler._log_release_activity = MagicMock()
+        handler._sync_release_metadata_to_manifest = MagicMock()
 
         handler.handle_promote_release("REL-001")
-        handler.send_error.assert_called_once()
-        args = handler.send_error.call_args[0]
-        self.assertEqual(args[0], 400)
+        self.assertEqual(handler._response_code, 200)
+        self.assertEqual(release["stage"], "DEV")
+        handler.send_error.assert_not_called()
 
     def test_target_env_direct_promotion(self):
         """When targetEnvironment is supplied, platform jumps directly to that env."""
