@@ -8836,12 +8836,18 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         required (bare string or optional false) may not come back optional. Malformed `old` entries
         are skipped: the shape check already ran on `new`, and a stored set is server-written."""
         def norm(lst):
+            # Duplicate names are folded to the STRICTEST flag (required wins), never last-wins: the gate
+            # grades every entry, so [req a, opt a] is required and must not compare as optional
+            # (XACA-1347-033). A body with duplicates is refused outright before it gets here.
             out = {}
             for e in (lst if isinstance(lst, list) else []):
                 if isinstance(e, str):
-                    out[e] = False
+                    name, opt = e, False
                 elif isinstance(e, dict) and isinstance(e.get('test'), str):
-                    out[e['test']] = bool(e.get('optional', False))
+                    name, opt = e['test'], bool(e.get('optional', False))
+                else:
+                    continue
+                out[name] = out.get(name, True) and opt
             return out
         o, n = norm(old), norm(new)
         lost = []
@@ -8871,6 +8877,13 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         and isinstance(e.get('optional', False), bool))
                     if not ok:
                         errs.append("expected[%d] must be a non-blank string or {test, optional}" % i)
+                names = [e if isinstance(e, str) else e.get('test') for e in exp
+                         if isinstance(e, str) or (isinstance(e, dict) and isinstance(e.get('test'), str))]
+                dups = sorted({n for n in names if names.count(n) > 1})
+                if dups:
+                    # The gate grades EVERY entry but the lock compares by name: [req a, opt a] -> [opt a]
+                    # would relax it (XACA-1347-033). One entry per test name.
+                    errs.append("expected has duplicate test name(s): %s" % ", ".join(dups[:10]))
         if 'intentionallyEmpty' in body:
             # Gate bypass (XACA-1347-008): {"expected": [], "intentionallyEmpty": true} passed a stage.
             # The provider schema cannot declare an intentionally empty stage, so no legitimate caller
@@ -8882,6 +8895,12 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             errs.append("records is required and must be a list")
             return errs
         seen = set()
+        tnames = [r.get('test') for r in recs if isinstance(r, dict) and isinstance(r.get('test'), str)]
+        tdups = sorted({n for n in tnames if tnames.count(n) > 1})
+        if tdups:
+            # The gate grades the LATEST record per name, so FAIL then PASS for one name in one body
+            # would grade PASS (XACA-1347-032). A re-run is a LATER post, not a repeat inside one body.
+            errs.append("records repeat test name(s) within one body: %s" % ", ".join(tdups[:10]))
         for i, r in enumerate(recs):
             if not isinstance(r, dict):
                 errs.append("records[%d] must be an object" % i)
@@ -8915,7 +8934,9 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         client pass an empty stage). 'expected' may be SET only while the stage has none recorded for the
         current graded SHA (stages.<S>.expectedSha != graded); after that a post may only ADD entries
         (a superset compared on test name, optional never flipping false -> true) else 409 naming the
-        entries, so a client cannot drop a failing test. A new SHA allows a fresh set. A body over
+        entries, so a client cannot drop a failing test. A new SHA allows a fresh set. A records-only post (no 'expected') while expectedSha is absent or
+        != the graded SHA is a 409 (XACA-1347-031). One body may not repeat a test name in records or
+        expected (400; XACA-1347-032/-033); a RE-RUN is a LATER post appending a new record (spec 6.3). A body over
         _RELEASE_STATE_BODY_MAX_BYTES is a 413, decided from Content-Length before the body is read."""
         try:
             if self._gate_unavailable():
@@ -8956,6 +8977,14 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                             {"error": "expected is already recorded for sha %s; it may only be added to. "
                                       "Refusing to drop or relax: %s" % (graded, ", ".join(lost)),
                              "entries": lost}, 409)
+                have = str((srec0.get('expectedSha') if isinstance(srec0, dict) else None) or '')
+                if 'expected' not in body and have.lower() != graded.lower():
+                    # XACA-1347-031: records graded against a stale/absent expected set (carried from another
+                    # SHA, or never recorded) say nothing about THIS sha; send the set first or with them.
+                    raise _DeferredResponse.json(
+                        {"error": "expected set required for this SHA: stages.%s.expectedSha is %s but the graded "
+                                  "sha is %s; send 'expected' with (or before) the records"
+                                  % (stage, have or "<none>", graded)}, 409)
                 existing = release.get('tests') if isinstance(release.get('tests'), list) else []
                 top = 0
                 for t in existing:

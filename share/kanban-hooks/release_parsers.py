@@ -469,6 +469,18 @@ def parse(parser, text, *, default_test=None, pattern=None):
             results = _parse_line_regex(text, pattern)
     except _ParseError as exc:
         return ParseResult([], str(exc))
+    # ONE shared invariant for every parser (XACA-1347-031): a full test name (top-level or child) appears
+    # once per output. The gate grades the LATEST record per name, so FAIL-then-PASS under one name would
+    # grade PASS; it is a parse error -> harness FAIL, exactly as a duplicate JSONL test already was.
+    seen_names, dups = set(), []
+    for r in results:
+        for n in [r["test"]] + [c["test"] for c in r["children"]]:
+            if n in seen_names and n not in dups:
+                dups.append(n)
+            seen_names.add(n)
+    if dups:
+        return ParseResult([], "duplicate test name(s) in one output (the gate would grade only the last): %s%s"
+                           % (", ".join(repr(d) for d in dups[:5]), " ..." if len(dups) > 5 else ""))
     if default_test and results and not any(r["children"] for r in results):
         kids = [_child(default_test, r["test"], r["result"], r["notes"]) for r in results]
         results = [_finish_parent(default_test, None, "", kids)]

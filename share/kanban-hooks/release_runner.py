@@ -56,6 +56,7 @@ Manual case-file format (load_cases): markdown.
 Text before the first heading is ignored. Unknown keys, a missing title, a bad prodSafe value
 and duplicate IDs raise RunnerError. The expected test name for a case is "<ID> <title>".
 """
+import collections
 import datetime
 import json
 import os
@@ -356,8 +357,10 @@ class _Records(object):
 
     def __init__(self, stage, sha, ts):
         self.stage, self.sha, self.ts, self.items = stage, sha, ts, []
+        self.names = set()          # every record name already written (run-wide uniqueness, XACA-1347-030)
 
     def add(self, test, result, notes, env, parent_ref=None):
+        self.names.add(test)
         ref = "r%d" % (len(self.items) + 1)
         self.items.append({"ref": ref, "parentRef": parent_ref, "stage": self.stage, "type": "Automated",
                            "ts": self.ts, "env": env, "sha": self.sha, "test": test, "result": result,
@@ -371,7 +374,42 @@ class _Records(object):
         return ref
 
 
-def _run_provider(p, rec, names, repo_dir, environ, run):
+def _name_problems(pname, names, owner, seen, *, top_own=None):
+    """Names a provider may NOT emit -> ["<name> (<why>)"] ([] = fine). The gate grades the LATEST record
+    per test name, so a name that is another provider's, a harness name or one already recorded lets a
+    later PASS mask an earlier FAIL (XACA-1347-030/-032/-033). Checked per name, first hit wins:
+      * `*::harness` is reserved: only the runner writes those;
+      * a name listed by ANOTHER provider (`owner`) is foreign;
+      * `top_own` (a set, or None to skip): the name must be one of the provider's own listed ids;
+      * a name already recorded this run (`seen`) or repeated in this batch is a duplicate."""
+    bad, local = [], set()
+    for n in names:
+        if n.endswith("::harness"):
+            why = "reserved for harness records"
+        elif owner.get(n, pname) != pname:
+            why = "listed by provider '%s'" % owner[n]
+        elif top_own is not None and n not in top_own:
+            why = "not one of this provider's listed ids"
+        elif n in seen or n in local:
+            why = "emitted more than once in this run"
+        else:
+            why = None
+        if why:
+            bad.append("%s (%s)" % (n, why))
+        local.add(n)
+    return bad
+
+
+def _violation_note(bad):
+    return ("provider output used test names it does not own or repeated a name (%d); none of it was recorded: %s%s"
+            % (len(bad), "; ".join(bad[:5]), " ..." if len(bad) > 5 else ""))
+
+
+def _proto_names(proto):
+    return [c["test"] for c in proto.get("children") or []]
+
+
+def _run_provider(p, rec, names, repo_dir, environ, run, owner):
     """Run one automated provider into `rec`; return True if a harness FAIL was written."""
     env_label, name = p["envLabel"], p["name"]
     hname = _harness(p)
@@ -405,6 +443,15 @@ def _run_provider(p, rec, names, repo_dir, environ, run):
         if pr.error or not pr.results:
             rec.add(hname, "FAIL", gnotes + (" | stderr: " + tail if tail else ""), env_label)
             return True
+        # Ownership + run-wide uniqueness (XACA-1347-030): top-level names must be this provider's own
+        # listed ids; child names must not be foreign/harness/duplicate. A violation drops EVERYTHING this
+        # provider parsed (its expected entries then have no record: missing != passing).
+        bad = _name_problems(name, [r["test"] for r in pr.results], owner, rec.names, top_own=set(names))
+        bad += _name_problems(name, [c for r in pr.results for c in _proto_names(r)], owner,
+                              rec.names | {r["test"] for r in pr.results})
+        if bad:
+            rec.add(hname, "FAIL", _violation_note(bad), env_label)
+            return True
         for proto in pr.results:
             rec.proto(proto, env_label)
         has_fail = any(r["result"] == "FAIL" or any(c["result"] == "FAIL" for c in r["children"])
@@ -417,6 +464,7 @@ def _run_provider(p, rec, names, repo_dir, environ, run):
     if not any("{file}" in a for a in base):
         rec.add(hname, "FAIL", "perFile provider command has no {file} token; refusing to run it blind", env_label)
         return True
+    violations = []
     for fid in names:
         argv = [a.replace("{file}", fid) for a in base]
         code, out, err, timed, oserr = _exec(run, argv, cwd, env, timeout, secrets)
@@ -431,16 +479,44 @@ def _run_provider(p, rec, names, repo_dir, environ, run):
             tail = _redact(err, secrets)
             if tail:
                 gnotes += " | stderr: " + tail
-        parent_ref = rec.add(fid, g, gnotes, env_label)
-        for proto in pr.results:
-            if proto["test"] == fid:
-                for c in proto["children"]:
-                    rec.add(c["test"], c["result"], c["notes"], env_label, parent_ref)
-            else:
-                rec.proto(proto, env_label)
+        rows, bad = _per_file_rows(fid, pr.results, name, owner, rec.names)
+        if bad:
+            # Scope: THIS file run only. Its parent record is not written either (a PASS parent over
+            # dropped children would be a lie), so `fid` has no record and the gate fails it as missing.
+            # Other files are separate processes with their own expected ids; their results stand.
+            violations.append("%s: %s" % (fid, "; ".join(bad[:5])))
+        else:
+            parent_ref = rec.add(fid, g, gnotes, env_label)
+            for t, r, n in rows:
+                rec.add(t, r, n, env_label, parent_ref)
         if g == "FAIL" and p.get("continueOnFailure") is False:
             break
+    if violations:
+        rec.add(hname, "FAIL", _violation_note(violations), env_label)   # ONE harness record per provider
+        return True
     return False
+
+
+def _per_file_rows(fid, protos, pname, owner, seen):
+    """-> ([(test, result, notes)] all direct children of `fid`, [violations]).
+    A proto named `fid` contributes its children. Any other top-level name (a JUnit suite name, a TAP/JSONL
+    parent) is namespaced under the file, `fid > name` (+ `fid > name > child`), so it can never equal a
+    name another provider or file owns; but a top-level name that IS an id someone owns (any provider,
+    this one included) or a harness name is a violation, not something to quietly re-home."""
+    rows, raw, bad = [], [], []
+    for pr in protos:
+        t = pr["test"]
+        if t == fid:
+            for c in pr["children"]:
+                rows.append((c["test"], c["result"], c["notes"]))
+        else:
+            if t in owner or t.endswith("::harness"):
+                bad.append("%s (top-level name is not this file's id '%s')" % (t, fid))
+            rows.append((fid + CHILD_SEP + t, pr["result"], pr["notes"]))
+            for c in pr["children"]:
+                rows.append((fid + CHILD_SEP + c["test"], c["result"], c["notes"]))
+    bad += _name_problems(pname, [r[0] for r in rows], owner, seen)
+    return rows, bad
 
 
 def run_stage(release, stage, providers, *, repo_dir, kanban_dir, env_label_default=None,
@@ -463,6 +539,7 @@ def run_stage(release, stage, providers, *, repo_dir, kanban_dir, env_label_defa
     per_provider = _disjoint([(p,) + _provider_expected(p, repo_dir, kanban_dir, environ, run, list_timeout)
                               for p in providers])
     expected, problems = _assemble(per_provider)
+    owner = {n: p.get("name") for p, names, problem in per_provider if not problem for n in names}
     for p, names, problem in per_provider:
         if not p.get("envLabel") and env_label_default:
             p = dict(p, envLabel=env_label_default)
@@ -473,10 +550,15 @@ def run_stage(release, stage, providers, *, repo_dir, kanban_dir, env_label_defa
             continue
         if p.get("schedule") and not include_scheduled:
             continue
-        if _run_provider(p, rec, names, repo_dir, environ, run):
+        if _run_provider(p, rec, names, repo_dir, environ, run, owner):
             h = _harness(p)
             if h not in expected:
                 expected.append(h)
+    counts = collections.Counter(r["test"] for r in rec.items if not r["test"].endswith("::harness"))
+    dup = sorted(n for n, c in counts.items() if c > 1)
+    if dup:   # defence in depth: the per-provider checks should make this unreachable
+        raise RunnerError("internal inconsistency: duplicate test name(s) in the run's records: %s; nothing posted"
+                          % ", ".join(dup[:5]))
     return {"expected": expected, "records": rec.items, "problems": problems}
 
 
