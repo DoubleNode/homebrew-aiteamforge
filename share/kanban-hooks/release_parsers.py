@@ -13,6 +13,14 @@ Rules enforced here (spec 6.4): exit code alone is never trusted; a parent is PA
 exit 0 AND no child FAIL AND at least one parseable result; a provider crash, timeout or
 unparseable output becomes a FAIL record named "<provider>::harness". FAIL and SKIP always
 carry non-empty notes so the records validate.
+
+Deliberate fail-closed choices (a stream that hits one has zero results, which grades FAIL):
+  * TAP: a pass line is lowercase `ok` followed by a test number, `-`, or end of line. Bare
+    `ok some prose` is valid TAP but is treated as noise, never as a pass (XACA-1347-024).
+    `not ok` detection stays case/whitespace tolerant and accepts any trailing text.
+  * JUnit: every <testcase> must sit directly in a <testsuite> and is graded exactly once; any
+    other placement, or a <testsuites> below the root, is a parse error. Declared failures/errors
+    and (on aggregates) declared tests= above what the subtree holds are parse errors.
 """
 import json
 import re
@@ -83,7 +91,11 @@ def _leaf(name, result, notes):
 # that LOOKS like a failing test ("NOT OK", "not  ok", "not okay") must never be dropped as noise.
 # A passing `ok` must be lowercase (TAP spec) and followed by whitespace or end of line, so log
 # noise such as "OK: connected" / "okay" / "OK 1 - a" is never counted as a pass (XACA-1347-019).
-_TAP_TEST = re.compile(r"^(\s*)((?i:not\s+ok)|ok(?=\s|$))\s*(\d+)?\s*(?:-\s*)?(.*)$")
+# DELIBERATE fail-closed tightening (XACA-1347-024): a passing line is `ok` then a test number,
+# `-`, or end of line. Bare `ok some prose` is valid TAP (number optional) but is indistinguishable
+# from log noise, so it is NOT a test line; a stream of only such lines has zero results = FAIL.
+# `not ok` keeps accepting any trailing text, so a failure is never dropped.
+_TAP_TEST = re.compile(r"^(\s*)((?i:not\s+ok)|ok(?=\s+(?:\d|-)|\s*$))\s*(\d+)?\s*(?:-\s*)?(.*)$")
 _TAP_PLAN = re.compile(r"^1\.\.(\d+)\s*(?:#.*)?$")
 _TAP_DIRECTIVE = re.compile(r"\s#\s*(SKIP\w*|TODO)\b[\s:]*(.*)$", re.IGNORECASE)
 _TAP_BAIL = re.compile(r"^\s*Bail out!\s*(.*)$", re.IGNORECASE)
@@ -173,13 +185,17 @@ def _check_junit_counts(suite, is_leaf):
     level (<testsuites> root, parent suites, leaves): declared failures+errors must be matched by
     at least that many failing <testcase> in the element's SUBTREE, else the report is lying or
     truncated (fail closed). Declared LOWER than actual is fine here: the failing cases still FAIL.
-    `tests=` is an exact-equality check on leaves only (aggregates legitimately differ)."""
+    `tests=` is an exact-equality check on leaves; on aggregates only the fail-closed direction
+    is checked (declared MORE than the subtree holds = truncated report; fewer is tolerated)."""
     tests = _junit_int(suite, "tests")
     declared = sum(v for v in (_junit_int(suite, "failures"), _junit_int(suite, "errors")) if v)
     subtree = list(suite.iter("testcase"))
     name = suite.get("name") or suite.tag
     if is_leaf and tests is not None and tests != len(subtree):
         raise _ParseError("JUnit suite %r declares tests=%d but has %d <testcase>" % (name, tests, len(subtree)))
+    if not is_leaf and tests is not None and tests > len(subtree):
+        raise _ParseError("JUnit <%s> %r declares tests=%d but only %d <testcase> in its subtree"
+                          % (suite.tag, name, tests, len(subtree)))
     actual = sum(1 for tc in subtree if tc.find("failure") is not None or tc.find("error") is not None)
     if declared > actual:
         raise _ParseError("JUnit <%s> %r declares %d failure(s)/error(s) but only %d failing <testcase> in its subtree"
@@ -198,10 +214,14 @@ def _parse_junit(text, default_test):
         raise _ParseError("JUnit root element must be <testsuites> or <testsuite>, got <%s>" % root.tag)
     if root.tag == "testsuites" and root.findall("testcase"):
         raise _ParseError("JUnit <testcase> directly under <testsuites> (no <testsuite>) is not supported")
+    for el in root.iter("testsuites"):      # only the root may aggregate; a nested one is never reconciled
+        if el is not root:
+            raise _ParseError("JUnit <testsuites> nested below the root is not supported")
     suites = list(root.iter("testsuite"))   # includes root and NESTED suites: none may be skipped
     if root.tag == "testsuites":
         _check_junit_counts(root, False)    # the aggregate root is reconciled too (XACA-1347-015)
     results = []
+    graded = []
     for suite in suites:
         cases = suite.findall("testcase")
         _check_junit_counts(suite, suite.find("testsuite") is None)
@@ -210,6 +230,7 @@ def _parse_junit(text, default_test):
         name = suite.get("name") or suite.get("file") or default_test or "(unnamed suite)"
         children = []
         for tc in cases:
+            graded.append(tc)
             cname = tc.get("name") or "(unnamed)"
             if tc.get("classname"):
                 cname = tc.get("classname") + "." + cname
@@ -227,6 +248,18 @@ def _parse_junit(text, default_test):
                 notes = skip.get("message") or (skip.text or "").strip()
             children.append(_child(name, cname, result, notes))
         results.append(_finish_parent(name, None, "", children))
+    # Invariant: every <testcase> in the document is graded exactly once. A case under a wrapper
+    # element or nested in another <testcase> has no grading path, so it must not vanish silently.
+    graded_ids = [id(tc) for tc in graded]
+    if len(graded_ids) != len(set(graded_ids)):
+        raise _ParseError("JUnit <testcase> graded more than once (internal inconsistency)")
+    seen = set(graded_ids)
+    orphans = [tc for tc in root.iter("testcase") if id(tc) not in seen]
+    if orphans:
+        names = ", ".join(repr((tc.get("classname") + "." if tc.get("classname") else "") + (tc.get("name") or "(unnamed)"))
+                          for tc in orphans[:5])
+        raise _ParseError("JUnit %d <testcase> not directly inside a <testsuite> (would be ungraded): %s%s"
+                          % (len(orphans), names, " ..." if len(orphans) > 5 else ""))
     return results
 
 

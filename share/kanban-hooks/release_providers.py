@@ -25,8 +25,9 @@ _MANUAL = _COMMON | {"cases", "device", "filter"}
 _BOOL_FIELDS = ("perFile", "continueOnFailure", "readOnly", "optional")
 _SECRET_KEY = re.compile(r"(KEY|TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|CRED|BEARER|COOKIE|SIGNATURE)", re.IGNORECASE)
 # Short words that only count as a WHOLE `_`-delimited token, so PATH / PATTERN / AUTHOR don't trigger
-# (XACA-1347-020): GH_PAT, AUTH, BASIC_AUTH, PRIVATE_KEY_PEM, PRIVATE_FOO.
-_SECRET_TOKEN = re.compile(r"(?:^|_)(?:PAT|AUTH|PRIVATE)(?:_|$)", re.IGNORECASE)
+# (XACA-1347-020): GH_PAT, AUTH, BASIC_AUTH, PRIVATE_KEY_PEM, PRIVATE_FOO, DB_PASS, MYSQL_PWD
+# (PASSTHROUGH / BYPASS_CACHE / PWDIR stay allowed).
+_SECRET_TOKEN = re.compile(r"(?:^|_)(?:PAT|AUTH|PRIVATE|PASS|PWD)(?:_|$)", re.IGNORECASE)
 _SECRETREF = re.compile(r"env:[A-Za-z_][A-Za-z0-9_]*")   # used with fullmatch: `$` would accept a trailing newline
 _SCHEDULE = re.compile(r"T\+[0-9]+[hm]")             # used with fullmatch; ASCII digits only
 _DEVICE_FIELDS = ("required", "description")
