@@ -299,6 +299,8 @@ class NotifyEngine:
             raise NotifyConfigError("unknown alias '%s'" % alias)
         registry = self._registry or default_registry()
         provider = registry.get(entry["provider"])
+        if isinstance(provider, UnimplementedProvider):
+            provider._refuse()  # a seam is unroutable: config error, no receipt
         return provider, self._context(aliases)
 
     # -- test (-005) -------------------------------------------------------
@@ -352,13 +354,13 @@ class NotifyEngine:
         ok, error, message_id = True, "", None
         try:
             target = provider.resolve_target(alias, ctx)
-            try:
-                provider.validate_target(target)
-            except NotifyConfigError as exc:  # routed + resolved, then refused: still a receipted send
-                raise NotifySendError(str(exc)) from None
+            provider.validate_target(target)
             message_id = provider.send(target, message).provider_message_id
-        except (NotifySecretError, NotifySendError) as exc:
-            ok, error = False, str(exc)
+        except NotifyError as exc:  # routed, so every failure from here on is a receipted send
+            ok, error = False, str(exc)  # our own messages never carry the target
+        except Exception as exc:  # noqa: BLE001 - e.g. a future provider's unexpected failure
+            # a foreign exception's text may embed the target: record its type only
+            ok, error = False, "provider error (%s)" % type(exc).__name__
         receipt: Dict[str, Any] = {
             "id": "ntc-" + uuid.uuid4().hex[:12], "ts": self._clock(), "provider": provider.name,
             "alias": alias, "template": template or "", "ok": ok, "error": error,
