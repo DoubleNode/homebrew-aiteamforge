@@ -12067,68 +12067,147 @@ function viewReleaseItems(releaseId) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// PROMOTE MODAL (XACA-0026)
-// 3-step wizard for promoting release platforms to next environment
+// PROMOTE MODAL (XACA-0026, redesigned XACA-1346-048/047/049)
+//
+// Stage state is RELEASE-LEVEL, so the modal is about the RELEASE, not its platforms:
+//   1. REVIEW: one preview "current stage -> target stage", computed by the SERVER
+//      (POST /promote {dryRun:true}: the real gate, no write, no log). Unmet conditions are
+//      listed. Platforms are shown read-only (they all move together).
+//   2. RESULT: on confirm ONE request {targetStage: <previewed stage>, actor, confirmDeploy:false}.
+//      Sending the previewed stage means a STALE preview is refused (409), never skipped past.
+// The UI never confirms a production deploy: the server has no auth and leads are CLI-attested
+// (decision XACA-1346-038), so a GAMMA / lead-only refusal shows the CLI path forward.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 let promoteModalState = {
     releaseId: null,
     releaseData: null,
     currentStep: 1,
-    selectedPlatforms: [],
-    promotionResults: []
+    preview: null,
+    result: null
 };
+
+// >>> PROMOTE-MODAL-PURE-START (DOM-free; sliced by lcars-ui/tests/test-xaca-1346-promote-modal-single-request.js)
+function promotePlatformLabel(platform) {
+    const known = { ios: 'iOS', android: 'Android', firebase: 'Firebase', web: 'Web' };
+    const p = String(platform);
+    return known[p] || (p.charAt(0).toUpperCase() + p.slice(1));
+}
+
+/** True when a refusal is about a lead-only action (GAMMA deploy confirmation, waivers). */
+function promoteNeedsLead(target, reasons) {
+    if (target === 'GAMMA') return true;
+    return (reasons || []).some(r => /\blead\b|releaseConfig\.leads/i.test(String(r)));
+}
+
+function promotePathForward(releaseId, target, reasons) {
+    if (!promoteNeedsLead(target, reasons)) return null;
+    return "GAMMA requires a release lead's deploy confirmation: run `kb-release promote " +
+        releaseId + " --confirm-deploy --actor <lead>`";
+}
+
+/**
+ * View model for the REVIEW step from the server's dry-run payload
+ * ({allowed, mode, from, to, next, reasons, error}).
+ */
+function buildPromotePreviewModel(release, preview) {
+    const reasons = Array.isArray(preview && preview.reasons) ? preview.reasons.map(String) : [];
+    const to = (preview && preview.to) || null;
+    const from = (preview && preview.from) || null;
+    const allowed = !!(preview && preview.allowed === true && to);
+    const platforms = Object.keys((release && release.platforms) || {}).map(promotePlatformLabel);
+    const warnings = [];
+    if (to === 'PROD') warnings.push('This promotes the release to PRODUCTION.');
+    if (to === 'GAMMA') warnings.push('GAMMA is live in production: the release lead must confirm the deploy.');
+    let reasonsHeading = null;
+    if (reasons.length) {
+        reasonsHeading = allowed
+            ? 'The gate would refuse this promotion in enforce mode (it will still proceed in report mode):'
+            : 'This promotion is refused:';
+    }
+    if (!to && !reasons.length) {
+        reasons.push((preview && preview.error) || 'The server did not return a target stage.');
+        reasonsHeading = 'This promotion is refused:';
+    }
+    return {
+        from: from, to: to, canPromote: allowed,
+        mode: (preview && preview.mode) || null,
+        platformsInfo: platforms.length ? 'Platforms moving together: ' + platforms.join(', ') : null,
+        warnings: warnings, reasons: reasons, reasonsHeading: reasonsHeading,
+        pathForward: promotePathForward(release && release.id, to, reasons)
+    };
+}
+
+/**
+ * View model for the RESULT step. outcome = {ok, status, data}: data is the server's JSON body
+ * (or {error} for a transport failure).
+ */
+function buildPromoteResultModel(releaseId, preview, outcome) {
+    const data = (outcome && outcome.data) || {};
+    if (outcome && outcome.ok) {
+        const reasons = Array.isArray(data.reasons) ? data.reasons.map(String) : [];
+        const from = data.from || data.previousEnvironment || (preview && preview.from);
+        const to = data.to || data.newEnvironment || (preview && preview.to);
+        return {
+            success: true, from: from, to: to,
+            title: 'Release promoted: ' + from + ' → ' + to,
+            reasons: reasons,
+            reasonsHeading: reasons.length ? 'Promoted; the gate would have refused in enforce mode:' : null,
+            pathForward: null,
+            toast: 'Release ' + releaseId + ' promoted to ' + to
+        };
+    }
+    let reasons = Array.isArray(data.reasons) ? data.reasons.map(String) : [];
+    if (!reasons.length) reasons = [data.error || ('HTTP ' + (outcome && outcome.status))];
+    const target = (preview && preview.to) || data.to || null;
+    return {
+        success: false, from: (preview && preview.from) || null, to: target,
+        title: 'Promotion refused',
+        reasons: reasons, reasonsHeading: 'Unmet conditions:',
+        pathForward: promotePathForward(releaseId, target, reasons),
+        toast: 'Promotion refused: ' + reasons[0]
+    };
+}
+// <<< PROMOTE-MODAL-PURE-END
 
 /**
  * Show the promote modal for a release (XACA-0026)
  * @param {string} releaseId - The release ID to promote
  */
 async function promoteRelease(releaseId) {
-    console.log('Opening promote modal for release:', releaseId);
+    promoteModalState = { releaseId: releaseId, releaseData: null, currentStep: 1, preview: null, result: null };
 
-    // Reset state
-    promoteModalState = {
-        releaseId: releaseId,
-        releaseData: null,
-        currentStep: 1,
-        selectedPlatforms: [],
-        promotionResults: [],
-        flowConfig: null
-    };
-
-    // Fetch release data and flow config in parallel (include team for correct scoping)
     try {
-        const [releaseResponse, configResponse] = await Promise.all([
-            fetch(apiUrl(`/api/releases/${releaseId}`)),
-            fetch(apiUrl(`/api/release-config?team=${encodeURIComponent(CONFIG.team)}`))
-        ]);
-
+        const releaseResponse = await fetch(apiUrl(`/api/releases/${releaseId}`));
         if (!releaseResponse.ok) {
             showToast(`Failed to load release: ${releaseId}`, 'error');
             return;
         }
-        const releaseData = await releaseResponse.json();
-        promoteModalState.releaseData = releaseData;
-
-        // Load flow config
-        if (configResponse.ok) {
-            const configData = await configResponse.json();
-            promoteModalState.flowConfig = configData.flowConfig || null;
-            // XACA-0163: per-project stage overrides from the same response
-            promoteModalState.projectEnvironments = configData.projectEnvironments || {};
-        }
+        promoteModalState.releaseData = await releaseResponse.json();
     } catch (error) {
         console.error('Error loading release for promotion:', error);
         showToast('Failed to load release data', 'error');
         return;
     }
 
-    // Populate and show modal
-    populatePromoteStep1();
+    // The preview is the SERVER's verdict (real gate, dry run: no write, no log).
+    try {
+        const response = await apiFetch(apiUrl(`/api/releases/${releaseId}/promote`), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ dryRun: true, actor: 'lcars-ui', confirmDeploy: false })
+        });
+        const data = await response.json().catch(() => ({}));
+        promoteModalState.preview = response.ok
+            ? data
+            : { allowed: false, reasons: Array.isArray(data.reasons) ? data.reasons : [data.error || `HTTP ${response.status}`] };
+    } catch (error) {
+        promoteModalState.preview = { allowed: false, reasons: [error.message] };
+    }
+
+    populatePromotePreview();
     updatePromoteStepIndicator(1);
     showPromoteStep(1);
-
-    // Show modal
     document.getElementById('promote-modal').style.display = 'flex';
 }
 
@@ -12137,95 +12216,55 @@ async function promoteRelease(releaseId) {
  */
 function hidePromoteModal() {
     document.getElementById('promote-modal').style.display = 'none';
-    promoteModalState = {
-        releaseId: null,
-        releaseData: null,
-        currentStep: 1,
-        selectedPlatforms: [],
-        promotionResults: []
-    };
+    promoteModalState = { releaseId: null, releaseData: null, currentStep: 1, preview: null, result: null };
+}
+
+function promoteListHtml(items) {
+    return `<ul class="warning-list">${items.map(i => `<li>${escapeHtml(String(i))}</li>`).join('')}</ul>`;
 }
 
 /**
- * Populate Step 1 - Platform selection (XACA-0026)
+ * REVIEW step: one release-level preview (current stage -> server-computed target)
  */
-function populatePromoteStep1() {
+function populatePromotePreview() {
     const release = promoteModalState.releaseData;
     if (!release) return;
+    const m = buildPromotePreviewModel(release, promoteModalState.preview);
+    promoteModalState.previewModel = m;
 
-    // Update release info
     document.getElementById('promote-release-info').innerHTML = `
-        <span class="release-name">${release.name || 'Unnamed Release'}</span>
-        <span class="release-id">${release.id}</span>
+        <span class="release-name">${escapeHtml(release.name || 'Unnamed Release')}</span>
+        <span class="release-id">${escapeHtml(release.id)}</span>
     `;
 
-    // Build platform checkboxes
-    const platformsContainer = document.getElementById('promote-platforms');
-    const platforms = release.platforms || {};
-
-    // Filter environments based on flowConfig (XACA-0027, XACA-0163)
-    const flowConfig = promoteModalState.flowConfig;
-    const environments = getReleaseEnvironments(release, flowConfig, promoteModalState.projectEnvironments);
-
     let html = '';
-    for (const [platform, data] of Object.entries(platforms)) {
-        const currentEnv = data.environment || 'DEV';
-        const currentIdx = environments.indexOf(currentEnv);
-        const isAtFinal = currentIdx >= environments.length - 1;
-        const nextEnv = isAtFinal ? null : environments[currentIdx + 1];
-
-        const platformIcon = platform === 'ios' ? '🍎' : platform === 'android' ? '🤖' : '🔥';
-        const platformLabel = platform.charAt(0).toUpperCase() + platform.slice(1);
-
+    if (m.to) {
         html += `
-            <div class="platform-checkbox-item ${isAtFinal ? 'disabled' : ''}" data-platform="${platform}">
-                <label class="platform-checkbox-label">
-                    <input type="checkbox" class="platform-checkbox" value="${platform}"
-                           ${isAtFinal ? 'disabled' : ''} onchange="updatePromoteSelection()">
-                    <span class="platform-checkbox-custom"></span>
-                    <span class="platform-icon">${platformIcon}</span>
-                    <span class="platform-name">${platformLabel}</span>
-                </label>
-                <div class="platform-env-info">
-                    <span class="env-current">${currentEnv}</span>
-                    ${nextEnv ? `<span class="env-arrow">→</span><span class="env-next">${nextEnv}</span>` : '<span class="env-final">AT FINAL</span>'}
+            <div class="promote-preview-item">
+                <div class="preview-transition">
+                    <span class="env-badge env-${escapeHtml(String(m.from).toLowerCase())}">${escapeHtml(m.from)}</span>
+                    <span class="transition-arrow">→</span>
+                    <span class="env-badge env-${escapeHtml(m.to.toLowerCase())}">${escapeHtml(m.to)}</span>
                 </div>
-            </div>
-        `;
+            </div>`;
     }
+    if (m.platformsInfo) {
+        html += `<p class="promote-instruction">${escapeHtml(m.platformsInfo)}</p>`;
+    }
+    if (m.reasons.length) {
+        html += `<div class="promote-warnings"><h4 class="warning-title">${escapeHtml(m.reasonsHeading)}</h4>${promoteListHtml(m.reasons)}</div>`;
+    }
+    if (m.warnings.length) {
+        html += `<div class="promote-warnings"><h4 class="warning-title">WARNINGS</h4>${promoteListHtml(m.warnings)}</div>`;
+    }
+    if (m.pathForward) {
+        html += `<p class="promote-instruction">${escapeHtml(m.pathForward)}</p>`;
+    }
+    document.getElementById('promote-preview').innerHTML = html;
 
-    platformsContainer.innerHTML = html || '<p class="no-platforms">No platforms configured for this release.</p>';
-
-    // Update button state
-    updatePromoteNextButtonState();
-}
-
-/**
- * Update selection tracking when checkboxes change
- */
-function updatePromoteSelection() {
-    const checkboxes = document.querySelectorAll('#promote-platforms .platform-checkbox:checked');
-    promoteModalState.selectedPlatforms = Array.from(checkboxes).map(cb => cb.value);
-    updatePromoteNextButtonState();
-}
-
-/**
- * Update the Next button state based on current step
- */
-function updatePromoteNextButtonState() {
     const nextBtn = document.getElementById('promote-next-btn');
-    const step = promoteModalState.currentStep;
-
-    if (step === 1) {
-        nextBtn.disabled = promoteModalState.selectedPlatforms.length === 0;
-        nextBtn.textContent = 'NEXT';
-    } else if (step === 2) {
-        nextBtn.disabled = false;
-        nextBtn.textContent = 'PROMOTE';
-    } else if (step === 3) {
-        nextBtn.textContent = 'DONE';
-        nextBtn.disabled = false;
-    }
+    nextBtn.disabled = !m.canPromote;
+    nextBtn.textContent = 'PROMOTE';
 }
 
 /**
@@ -12246,306 +12285,92 @@ function updatePromoteStepIndicator(step) {
  * Show a specific step and hide others
  */
 function showPromoteStep(step) {
-    for (let i = 1; i <= 3; i++) {
+    for (let i = 1; i <= 2; i++) {
         const stepEl = document.getElementById(`promote-step-${i}`);
         if (stepEl) {
             stepEl.style.display = i === step ? 'block' : 'none';
         }
     }
-
-    // Update back button visibility
-    const backBtn = document.getElementById('promote-back-btn');
-    backBtn.style.display = step > 1 && step < 3 ? 'inline-block' : 'none';
-
-    // Update cancel button text on final step
     const cancelBtn = document.getElementById('promote-cancel-btn');
-    cancelBtn.style.display = step === 3 && promoteModalState.promotionResults.length > 0 ? 'none' : 'inline-block';
+    cancelBtn.style.display = step === 2 && promoteModalState.result ? 'none' : 'inline-block';
 }
 
 /**
- * Move to next step
+ * Footer button: PROMOTE on the review step, DONE on the result step
  */
 function promoteStepNext() {
     const step = promoteModalState.currentStep;
-
     if (step === 1) {
-        if (promoteModalState.selectedPlatforms.length === 0) {
-            showPromoteError(1, 'Please select at least one platform to promote.');
-            return;
-        }
+        if (!promoteModalState.previewModel || !promoteModalState.previewModel.canPromote) return;
         promoteModalState.currentStep = 2;
-        populatePromoteStep2();
         updatePromoteStepIndicator(2);
         showPromoteStep(2);
-        updatePromoteNextButtonState();
-    } else if (step === 2) {
-        promoteModalState.currentStep = 3;
-        populatePromoteStep3();
-        updatePromoteStepIndicator(3);
-        showPromoteStep(3);
+        document.getElementById('promote-progress').style.display = 'block';
+        document.getElementById('promote-results').style.display = 'none';
+        document.getElementById('promote-next-btn').disabled = true;
         executePromotion();
-    } else if (step === 3) {
+    } else {
         hidePromoteModal();
         loadReleases(); // Refresh releases list
     }
 }
 
 /**
- * Move to previous step
- */
-function promoteStepBack() {
-    const step = promoteModalState.currentStep;
-
-    if (step === 2) {
-        promoteModalState.currentStep = 1;
-        updatePromoteStepIndicator(1);
-        showPromoteStep(1);
-        updatePromoteNextButtonState();
-    }
-}
-
-/**
- * Show error in a specific step
- */
-function showPromoteError(step, message) {
-    const errorEl = document.getElementById(`promote-error-${step}`);
-    if (errorEl) {
-        errorEl.textContent = message;
-        errorEl.style.display = 'block';
-    }
-}
-
-/**
- * Clear error in a specific step
- */
-function clearPromoteError(step) {
-    const errorEl = document.getElementById(`promote-error-${step}`);
-    if (errorEl) {
-        errorEl.style.display = 'none';
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// PROMOTE MODAL STEP 2 - Validation & Review (XACA-0026)
-// ═══════════════════════════════════════════════════════════════════════════════
-
-/**
- * Populate Step 2 - Validation and preview
- */
-function populatePromoteStep2() {
-    const release = promoteModalState.releaseData;
-    const platforms = release.platforms || {};
-    // XACA-0163: honor flowConfig and projectEnvironments so Step 2
-    // matches Step 1's filtered list.
-    const environments = getReleaseEnvironments(
-        release,
-        promoteModalState.flowConfig,
-        promoteModalState.projectEnvironments
-    );
-    const selected = promoteModalState.selectedPlatforms;
-
-    // Build preview list
-    const previewContainer = document.getElementById('promote-preview');
-    let previewHtml = '';
-    const warnings = [];
-
-    selected.forEach(platform => {
-        const data = platforms[platform];
-        const currentEnv = data?.environment || 'DEV';
-        const currentIdx = environments.indexOf(currentEnv);
-        const nextEnv = environments[currentIdx + 1] || currentEnv;
-
-        const platformIcon = platform === 'ios' ? '🍎' : platform === 'android' ? '🤖' : '🔥';
-        const platformLabel = platform.charAt(0).toUpperCase() + platform.slice(1);
-
-        previewHtml += `
-            <div class="promote-preview-item">
-                <div class="preview-platform">
-                    <span class="platform-icon">${platformIcon}</span>
-                    <span class="platform-name">${platformLabel}</span>
-                </div>
-                <div class="preview-transition">
-                    <span class="env-badge env-${currentEnv.toLowerCase()}">${currentEnv}</span>
-                    <span class="transition-arrow">→</span>
-                    <span class="env-badge env-${nextEnv.toLowerCase()}">${nextEnv}</span>
-                </div>
-                <div class="preview-version">
-                    v${data?.version || '?.?.?'} (${data?.buildNumber || '?'})
-                </div>
-            </div>
-        `;
-
-        // Check for warnings
-        if (nextEnv === 'PROD') {
-            warnings.push(`${platformLabel} will be promoted to PRODUCTION environment.`);
-        }
-        if (currentEnv === 'DEV' && nextEnv !== 'QA') {
-            warnings.push(`${platformLabel} is jumping from DEV directly to ${nextEnv}.`);
-        }
-    });
-
-    previewContainer.innerHTML = previewHtml;
-
-    // Show warnings if any
-    const warningsContainer = document.getElementById('promote-warnings');
-    const warningsList = document.getElementById('warning-list');
-
-    if (warnings.length > 0) {
-        warningsList.innerHTML = warnings.map(w => `<li>${w}</li>`).join('');
-        warningsContainer.style.display = 'block';
-    } else {
-        warningsContainer.style.display = 'none';
-    }
-
-    clearPromoteError(2);
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// PROMOTE MODAL STEP 3 - Confirmation & Execute (XACA-0026)
-// ═══════════════════════════════════════════════════════════════════════════════
-
-/**
- * Populate Step 3 - Summary before execution
- */
-function populatePromoteStep3() {
-    const release = promoteModalState.releaseData;
-    const summaryContainer = document.getElementById('promote-summary');
-
-    summaryContainer.innerHTML = `
-        <div class="summary-header">
-            <span class="summary-release">${release.name}</span>
-            <span class="summary-count">${promoteModalState.selectedPlatforms.length} platform(s)</span>
-        </div>
-        <p class="summary-message">Initiating promotion sequence...</p>
-    `;
-
-    // Show progress, hide results
-    document.getElementById('promote-progress').style.display = 'block';
-    document.getElementById('promote-results').style.display = 'none';
-    document.getElementById('promote-next-btn').disabled = true;
-}
-
-/**
- * Execute the promotion. XACA-1346: stage state is RELEASE-LEVEL, so this sends ONE request
- * per user action (the server picks the next enabled stage), never one per selected platform:
- * a per-platform loop advanced the release once per platform. A refusal (409) carries the unmet
- * gate conditions in `reasons[]`/`error`; show those, not "HTTP 409".
+ * Execute the promotion: ONE request carrying the PREVIEWED target stage. If the release moved
+ * since the preview, the server refuses (409) rather than advancing past what the user saw.
  */
 async function executePromotion() {
     const releaseId = promoteModalState.releaseId;
-    const selected = promoteModalState.selectedPlatforms;
-    const label = selected.join(', ');
-
+    const preview = promoteModalState.preview;
     const progressBar = document.getElementById('promote-progress-bar');
     const progressMessage = document.getElementById('progress-message');
-    progressMessage.textContent = `Promoting ${label}...`;
+    progressMessage.textContent = `Promoting ${releaseId} to ${preview && preview.to}...`;
     progressBar.style.width = '50%';
 
-    let result;
+    let outcome;
     try {
         const response = await apiFetch(apiUrl(`/api/releases/${releaseId}/promote`), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ actor: 'lcars-ui', confirmDeploy: false })
+            body: JSON.stringify({ targetStage: preview.to, actor: 'lcars-ui', confirmDeploy: false })
         });
-
-        if (!response.ok) {
-            const errorData = await response.json().catch(() => ({}));
-            const reasons = Array.isArray(errorData.reasons) ? errorData.reasons.join('; ') : '';
-            result = {
-                platform: label,
-                success: false,
-                error: reasons || errorData.error || `HTTP ${response.status}`
-            };
-        } else {
-            const data = await response.json();
-            result = {
-                platform: label,
-                success: true,
-                previousEnvironment: data.previousEnvironment || data.from,
-                newEnvironment: data.newEnvironment || data.to
-            };
-        }
+        const data = await response.json().catch(() => ({}));
+        outcome = { ok: response.ok, status: response.status, data: data };
     } catch (error) {
-        result = { platform: label, success: false, error: error.message };
+        outcome = { ok: false, status: 0, data: { error: error.message } };
     }
-    const results = [result];
+    const model = buildPromoteResultModel(releaseId, preview, outcome);
 
     progressBar.style.width = '100%';
-    promoteModalState.promotionResults = results;
+    promoteModalState.result = model;
     progressMessage.textContent = 'Complete!';
-
-    // Short delay then show results
-    setTimeout(() => {
-        displayPromotionResults(results);
-    }, 500);
+    displayPromotionResult(model);
 }
 
 /**
- * Display promotion results
+ * Display the promotion result (one release-level outcome)
  */
-function displayPromotionResults(results) {
-    const progressEl = document.getElementById('promote-progress');
+function displayPromotionResult(model) {
+    document.getElementById('promote-progress').style.display = 'none';
     const resultsEl = document.getElementById('promote-results');
-    const summaryEl = document.getElementById('promote-summary');
 
-    progressEl.style.display = 'none';
-
-    const successCount = results.filter(r => r.success).length;
-    const failCount = results.filter(r => !r.success).length;
-
-    let html = `<div class="results-summary">`;
-
-    if (failCount === 0) {
-        html += `<div class="results-status success">✓ All promotions successful!</div>`;
-    } else if (successCount === 0) {
-        html += `<div class="results-status error">✗ All promotions failed</div>`;
-    } else {
-        html += `<div class="results-status partial">⚠ ${successCount} succeeded, ${failCount} failed</div>`;
+    let html = `<div class="results-summary"><div class="results-status ${model.success ? 'success' : 'error'}">${model.success ? '✓' : '✗'} ${escapeHtml(model.title)}</div>`;
+    if (model.reasons.length) {
+        html += `<div class="results-list"><p class="promote-instruction">${escapeHtml(model.reasonsHeading || '')}</p>${promoteListHtml(model.reasons)}</div>`;
     }
-
-    html += `<div class="results-list">`;
-
-    results.forEach(r => {
-        const platformIcon = r.platform === 'ios' ? '🍎' : r.platform === 'android' ? '🤖' : '🔥';
-
-        if (r.success) {
-            html += `
-                <div class="result-item success">
-                    <span class="result-icon">${platformIcon}</span>
-                    <span class="result-platform">${r.platform}</span>
-                    <span class="result-detail">${r.previousEnvironment} → ${r.newEnvironment}</span>
-                </div>
-            `;
-        } else {
-            html += `
-                <div class="result-item error">
-                    <span class="result-icon">${platformIcon}</span>
-                    <span class="result-platform">${r.platform}</span>
-                    <span class="result-error">${r.error}</span>
-                </div>
-            `;
-        }
-    });
-
-    html += `</div></div>`;
-
+    if (model.pathForward) {
+        html += `<p class="promote-instruction">${escapeHtml(model.pathForward)}</p>`;
+    }
+    html += '</div>';
     resultsEl.innerHTML = html;
     resultsEl.style.display = 'block';
-    summaryEl.style.display = 'none';
 
-    // Update buttons for final state
-    document.getElementById('promote-next-btn').disabled = false;
-    document.getElementById('promote-next-btn').textContent = 'DONE';
+    const nextBtn = document.getElementById('promote-next-btn');
+    nextBtn.disabled = false;
+    nextBtn.textContent = 'DONE';
     document.getElementById('promote-cancel-btn').style.display = 'none';
-    document.getElementById('promote-back-btn').style.display = 'none';
 
-    // Show toast
-    if (failCount === 0) {
-        showToast(`Successfully promoted ${successCount} platform(s)`, 'success');
-    } else {
-        showToast(`Promotion completed with ${failCount} error(s)`, 'warning');
-    }
+    showToast(model.toast, model.success ? (model.reasons.length ? 'warning' : 'success') : 'error');
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

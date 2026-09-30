@@ -1658,12 +1658,17 @@ _PATH_LOCKS: dict = {}  # resolved-path-str -> threading.RLock
 _PATH_LOCKS_REGISTRY_LOCK = threading.Lock()
 
 
-def _cut_release_branch(release, board):
+def _cut_release_branch(release, board, dry_run=False):
     """PLANNED->DEV branch-cut hook (XACA-1346 decision -002; STUB until XACA-1352).
 
     CONTRACT for XACA-1352, which replaces this body (keep the name and signature):
       release: the release dict from the board (READ-ONLY: do not mutate it)
       board:   the raw board JSON dict (READ-ONLY)
+      dry_run: passed (as True) ONLY by a `{"dryRun": true}` promote preview; it is omitted on a
+               real promote, so a two-argument implementation keeps working. When True the hook
+               MUST NOT create or touch anything (no branch, no ref, no fetch that mutates); it
+               must still raise whenever the real cut would refuse, so a preview reports the
+               same verdict as the real call, and may return a preview {branch, branchBaseSha}.
       returns: {"branch": "releases/<ver>", "branchBaseSha": "<sha of develop HEAD>"}
                (both non-empty strings), which handle_promote_release records in the SAME
                locked write that sets release.stage.
@@ -8475,12 +8480,17 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     def handle_promote_release(self, release_id):
         """POST /api/releases/<id>/promote - the single gated stage promote (spec 5.3).
 
-        Body {"targetStage": S, "actor": name, "confirmDeploy": bool}; the legacy
+        Body {"targetStage": S, "actor": name, "confirmDeploy": bool, "dryRun": bool}; the legacy
         {"platform", "targetEnvironment"} form is accepted (platform ignored: stage state is
-        release-level). No targetStage = the gate's `next`. The gate is evaluated BEFORE any
-        write. releaseConfig.gateEnforcement: 'enforce' (default when absent) refuses with 409
-        and writes nothing; 'report' evaluates + logs and lets a structurally sane forward
-        move proceed. Backward/same/terminal/disabled-target moves are refused in BOTH modes.
+        release-level; a legacy body WITHOUT a target is a 400). No targetStage = the gate's
+        `next`. The gate is evaluated BEFORE any write. releaseConfig.gateEnforcement:
+        'report' (the default when the key is ABSENT, _GATE_ENFORCEMENT_DEFAULT, XACA-1346-045)
+        evaluates + logs and lets a structurally sane forward move proceed; 'enforce' (explicit
+        opt-in, or an invalid value) refuses with 409 and writes nothing.
+        Backward/same/terminal/disabled-target moves are refused in BOTH modes.
+        dryRun=true (the LCARS modal preview) runs the SAME evaluation and answers 200
+        {allowed, dryRun, mode, from, to, next, reasons, error}: no write, no manifest mirror,
+        no activity-log entry; `allowed` is what the real call would do.
         """
         try:
             if self._gate_unavailable():
@@ -8496,6 +8506,9 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     return self._send_json_response({"error": "%s must be a string" % label}, status=400)
             if 'confirmDeploy' in body and not isinstance(body['confirmDeploy'], bool):
                 return self._send_json_response({"error": "confirmDeploy must be a boolean"}, status=400)
+            if 'dryRun' in body and not isinstance(body['dryRun'], bool):
+                return self._send_json_response({"error": "dryRun must be a boolean"}, status=400)
+            dry_run = body.get('dryRun') is True
             target = (target or '').strip() or None
             legacy_target = (legacy_target or '').strip() or None
             # A LEGACY body ({"platform", "targetEnvironment"}, no targetStage) can be a per-platform
@@ -8535,8 +8548,9 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     # Idempotent legacy replay: nothing is evaluated or written. The activity entry
                     # is appended by the except clause below, AFTER the board lock is released
                     # (log_activity can spawn a 2s tmux subprocess; never under the lock).
-                    noop_log = dict(stage=legacy_target, actor=actor, mode=mode,
-                                    platform=body.get('platform'), configWarning=cfg_warning)
+                    if not dry_run:
+                        noop_log = dict(stage=legacy_target, actor=actor, mode=mode,
+                                        platform=body.get('platform'), configWarning=cfg_warning)
                     noop_payload = {"allowed": True, "noop": True, "mode": mode, "from": legacy_target,
                                     "to": legacy_target, "reasons": [], "success": True,
                                     "previousEnvironment": legacy_target, "newEnvironment": legacy_target}
@@ -8551,7 +8565,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 cur = _release_gate.current_stage(release)
                 order = _release_gate.enabled_stages(flow, cr_support_enabled=cr_on)
                 later = [s for s in order if _release_schema.STAGES.index(s) > _release_schema.STAGES.index(cur)]
-                eff_target = target or (later[0] if later else None)
+                nxt = later[0] if later else None
+                eff_target = target or nxt
                 verdict = _release_gate.evaluate(release, eff_target or cur, flow, cr_support_enabled=cr_on,
                                                  actor=actor, context=ctx)
                 reasons = list(verdict['reasons'])
@@ -8566,14 +8581,17 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 cut = None
                 if proceed and cur == 'PLANNED' and eff_target == 'DEV' and not release.get('branch'):
                     try:  # decision -002: XACA-1346's gated write is the SOLE caller of the cut
-                        cut = _validate_branch_cut(_cut_release_branch(copy.deepcopy(release), board_raw))
+                        _rel_copy = copy.deepcopy(release)
+                        cut = _validate_branch_cut(
+                            _cut_release_branch(_rel_copy, board_raw, dry_run=True) if dry_run
+                            else _cut_release_branch(_rel_copy, board_raw))
                     except NotImplementedError as e:
                         reasons.append("PLANNED->DEV: %s" % e)
                     except Exception as e:  # any failure: nothing was cut, never proceed as if it was
                         reasons.append("PLANNED->DEV: branch cut failed: %s" % e)
                     if cut is None and mode == 'enforce':
                         proceed = False
-                if proceed:
+                if proceed and not dry_run:
                     now = self._get_timestamp()
                     self._apply_stage_move(release, data, cur, eff_target, now, 'promote')
                     if cut:  # same locked write as the stage change
@@ -8589,6 +8607,14 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             base = {"mode": mode, "from": cur, "to": eff_target, "reasons": reasons}
             if cfg_warning:
                 base["configWarning"] = cfg_warning
+            if dry_run:
+                # PREVIEW: same evaluation, same verdict, NO write, NO manifest mirror and NO
+                # activity-log entry (an audit trail of state-affecting outcomes must not fill up
+                # every time someone opens the promote modal). `allowed` = what a real call would do.
+                return self._send_json_response(
+                    dict(base, allowed=bool(proceed), dryRun=True, next=nxt,
+                         error=None if proceed and not reasons else self._reasons_error(reasons)),
+                    status=200)
             logctx = dict(actor=actor, mode=mode, reasons=reasons, confirmDeploy=confirm,
                           cut=cut, configWarning=cfg_warning)
             if not written:

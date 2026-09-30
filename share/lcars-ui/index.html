@@ -2293,56 +2293,34 @@
                 <button class="lcars-modal-close" onclick="hidePromoteModal()">&times;</button>
             </div>
             <div class="lcars-modal-body">
-                <!-- Step indicator -->
+                <!-- Step indicator (XACA-1346-048: release-level, two steps) -->
                 <div class="promote-steps">
                     <div class="promote-step active" data-step="1">
                         <span class="step-number">1</span>
-                        <span class="step-label">SELECT</span>
+                        <span class="step-label">REVIEW</span>
                     </div>
                     <div class="promote-step-connector"></div>
                     <div class="promote-step" data-step="2">
                         <span class="step-number">2</span>
-                        <span class="step-label">REVIEW</span>
-                    </div>
-                    <div class="promote-step-connector"></div>
-                    <div class="promote-step" data-step="3">
-                        <span class="step-number">3</span>
-                        <span class="step-label">CONFIRM</span>
+                        <span class="step-label">RESULT</span>
                     </div>
                 </div>
 
-                <!-- Step 1: Platform Selection -->
+                <!-- Step 1: release-level preview (server dry run: current stage -> target stage) -->
                 <div class="promote-content" id="promote-step-1">
                     <div class="promote-release-info" id="promote-release-info">
                         <span class="release-name">--</span>
                         <span class="release-id">--</span>
                     </div>
-                    <p class="promote-instruction">Select platforms to promote to the next environment:</p>
-                    <div class="platform-checkboxes" id="promote-platforms">
-                        <!-- Populated dynamically -->
-                    </div>
-                    <div class="modal-error" id="promote-error-1" style="display: none;"></div>
-                </div>
-
-                <!-- Step 2: Validation & Review -->
-                <div class="promote-content" id="promote-step-2" style="display: none;">
                     <h3 class="promote-section-title">PROMOTION PREVIEW</h3>
                     <div class="promote-preview-list" id="promote-preview">
                         <!-- Populated dynamically -->
                     </div>
-                    <div class="promote-warnings" id="promote-warnings" style="display: none;">
-                        <h4 class="warning-title">WARNINGS</h4>
-                        <ul class="warning-list" id="warning-list"></ul>
-                    </div>
-                    <div class="modal-error" id="promote-error-2" style="display: none;"></div>
                 </div>
 
-                <!-- Step 3: Confirmation & Execute -->
-                <div class="promote-content" id="promote-step-3" style="display: none;">
-                    <h3 class="promote-section-title">CONFIRM PROMOTION</h3>
-                    <div class="promote-summary" id="promote-summary">
-                        <!-- Populated dynamically -->
-                    </div>
+                <!-- Step 2: progress and result -->
+                <div class="promote-content" id="promote-step-2" style="display: none;">
+                    <h3 class="promote-section-title">PROMOTION</h3>
                     <div class="promote-progress" id="promote-progress" style="display: none;">
                         <div class="progress-message" id="progress-message">Promoting...</div>
                         <div class="progress-bar-container">
@@ -2350,14 +2328,12 @@
                         </div>
                     </div>
                     <div class="promote-results" id="promote-results" style="display: none;"></div>
-                    <div class="modal-error" id="promote-error-3" style="display: none;"></div>
                 </div>
             </div>
             <div class="lcars-modal-footer">
                 <button class="modal-btn modal-btn-cancel" id="promote-cancel-btn" onclick="hidePromoteModal()">CANCEL</button>
                 <div class="modal-footer-spacer"></div>
-                <button class="modal-btn modal-btn-secondary" id="promote-back-btn" onclick="promoteStepBack()" style="display: none;">BACK</button>
-                <button class="modal-btn modal-btn-confirm" id="promote-next-btn" onclick="promoteStepNext()">NEXT</button>
+                <button class="modal-btn modal-btn-confirm" id="promote-next-btn" onclick="promoteStepNext()">PROMOTE</button>
             </div>
         </div>
     </div>
@@ -2812,7 +2788,7 @@
     <script src="js/vendor/jspdf.umd.min.js?v=1"></script>
 <!-- XACA-0292-005: Reusable filter-bar component — must load before lcars.js -->
 <script src="js/lcars-filter-bar.js?v=1.1"></script>
-<script src="js/lcars.js?v=3.88"></script>
+<script src="js/lcars.js?v=3.89"></script>
 <!-- XACA-0293-001: CR cycle-time compute module — must load before lcars-cr-tab.js (no DOM/network deps) -->
 <script src="js/lcars-cr-metrics.js"></script>
 <!-- XACA-0293-013: Shared poll bus — single 5s interval for all tile modules; must load after lcars-cr-metrics.js and before tile scripts -->
