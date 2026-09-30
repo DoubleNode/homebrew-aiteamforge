@@ -331,7 +331,7 @@ _RELEASES_JSON=$(curl -sf --max-time 10 \
 
 if [ -z "$_RELEASES_JSON" ]; then
     echo "[kb-release-push-promote] WARNING: LCARS not running at ${_LCARS_BASE}." >&2
-    echo "  Release not promoted. Run: kb-release promote <id> <plat> when LCARS is running." >&2
+    echo "  Release not promoted. Run: kb-release promote <id> [--to STAGE] when LCARS is running." >&2
     exit 0
 fi
 
@@ -507,7 +507,7 @@ for platform, target_env in platform_env_map.items():
             "message": (
                 f"Multiple active releases eligible for auto-promotion of "
                 f"'{platform}' to '{target_env}' with same createdAt. "
-                f"Run: kb-release promote <id> {platform} manually. "
+                f"Run: kb-release promote <id> [--to STAGE] manually. "
                 f"Candidates: {[r['id'] for r in best]}"
             )
         }))
@@ -734,7 +734,7 @@ print(json.dumps({'platform': sys.argv[1], 'targetEnvironment': sys.argv[2]}))
                 # Connection failure — LCARS not running (non-fatal)
                 echo "[kb-release-push-promote] WARNING: LCARS not running at ${_LCARS_BASE} — promote API unreachable." >&2
                 echo "  Recovery: when LCARS is running, run:" >&2
-                echo "    kb-release promote ${_release_id} ${_platform}" >&2
+                echo "    kb-release promote ${_release_id} [--to STAGE]" >&2
                 if [ "$OPT_DRY_RUN" -ne 1 ]; then
                     rm -f "$_promote_response_file"
                 fi

@@ -549,6 +549,40 @@ class TestDoPOSTRouteDispatchForPlan(unittest.TestCase):
 # Section D — kb-release dispatcher sanity checks (grep-based, no live server)
 # ---------------------------------------------------------------------------
 
+def _shell_function_body(text, name):
+    """Return the text of the column-1 shell function `name() {` ... `}` (or None).
+
+    Function-scoped on purpose: kanban-helpers.sh is ~30k lines, so a whole-file
+    substring assertion passes on any unrelated match anywhere in it.
+    """
+    lines = text.splitlines()
+    start = None
+    for i, line in enumerate(lines):
+        if line.startswith(name + "() {"):
+            start = i
+            break
+    if start is None:
+        return None
+    for j in range(start + 1, len(lines)):
+        if lines[j] == "}":
+            return "\n".join(lines[start:j + 1])
+    return None
+
+
+def _plan_reaches_plan_endpoint(plan_body, post_body):
+    """True when kb-release-plan POSTs reason+actor to <id>/plan through the shared
+    helper AND that helper builds /api/releases/<subpath> with a POST."""
+    if plan_body is None or post_body is None:
+        return False
+    return (
+        '_kb_release_api_post "${release_id}/plan"' in plan_body
+        and "reason" in plan_body
+        and "actor" in plan_body
+        and "/api/releases/${subpath}" in post_body
+        and "-X POST" in post_body
+    )
+
+
 class TestKbReleasePlanDispatcher(unittest.TestCase):
     """
     Verify that the kb-release dispatcher and kb-release-plan helper are
@@ -556,7 +590,12 @@ class TestKbReleasePlanDispatcher(unittest.TestCase):
 
     These are static analysis checks — we do not source the file or spin a
     live server, because the helper requires a running LCARS instance and a
-    real team context.
+    real team context. (The behavioural coverage, against a stub server, is in
+    tests/test-xaca-1346-007-release-gate-cli.zsh.)
+
+    XACA-1346 PR 3b: kb-release-plan is now a thin client of the shared
+    _kb_release_api_post, so every assertion is scoped to the specific
+    function it is about rather than grepping the whole file.
     """
 
     @classmethod
@@ -567,66 +606,77 @@ class TestKbReleasePlanDispatcher(unittest.TestCase):
                 f"kanban-helpers.sh not found at {cls.helpers_path} — skipping dispatcher checks"
             )
         cls.helpers_text = cls.helpers_path.read_text(encoding="utf-8")
+        cls.plan_body = _shell_function_body(cls.helpers_text, "kb-release-plan")
+        cls.post_body = _shell_function_body(cls.helpers_text, "_kb_release_api_post")
+        cls.fail_body = _shell_function_body(cls.helpers_text, "_kb_release_fail")
+        cls.dispatch_body = _shell_function_body(cls.helpers_text, "kb-release")
 
     def test_d1_kb_release_plan_function_is_defined(self):
         """kanban-helpers.sh must define the kb-release-plan() function."""
-        self.assertIn(
-            "kb-release-plan()",
-            self.helpers_text,
-            "kb-release-plan() function not found in kanban-helpers.sh",
+        self.assertIsNotNone(
+            self.plan_body, "kb-release-plan() function not found in kanban-helpers.sh"
         )
 
     def test_d2_dispatcher_routes_plan_to_kb_release_plan(self):
         """The kb-release dispatcher must route 'plan)' to kb-release-plan."""
-        # Look for the plan) case and the kb-release-plan call in proximity
+        self.assertIsNotNone(self.dispatch_body, "kb-release() dispatcher not found")
+        arm = self.dispatch_body.split("        plan)", 1)
+        self.assertEqual(len(arm), 2, "'plan)' case not found in kb-release dispatcher")
+        # the arm ends at its ';;' — kb-release-plan must be invoked inside it
         self.assertIn(
-            "plan)",
-            self.helpers_text,
-            "'plan)' case not found in kb-release dispatcher",
-        )
-        self.assertIn(
-            "kb-release-plan",
-            self.helpers_text,
-            "kb-release-plan invocation not found in kanban-helpers.sh",
+            'kb-release-plan "$@"',
+            arm[1].split(";;", 1)[0],
+            "the 'plan)' arm does not invoke kb-release-plan",
         )
 
     def test_d3_help_text_documents_plan_subcommand(self):
-        """kb-release --help output must mention 'plan' with a description."""
-        # The help) branch must contain a line documenting the plan subcommand
-        self.assertIn(
-            "kb-release plan",
-            self.helpers_text,
-            "'kb-release plan' not documented in the help) branch",
-        )
-        self.assertIn(
-            "PLANNED",
-            self.helpers_text,
-            "Help text for kb-release plan must mention PLANNED",
-        )
+        """kb-release help must document `plan` with its required --reason and PLANNED."""
+        self.assertIsNotNone(self.dispatch_body)
+        plan_help = [ln for ln in self.dispatch_body.splitlines()
+                     if "kb-release plan" in ln and "echo" in ln]
+        self.assertTrue(plan_help, "'kb-release plan' not documented in the help) branch")
+        self.assertIn("--reason", plan_help[0], "plan help line must show the required --reason")
+        self.assertIn("PLANNED", plan_help[0], "Help text for kb-release plan must mention PLANNED")
 
     def test_d4_plan_function_hits_api_releases_plan_endpoint(self):
-        """kb-release-plan must call the /api/releases/<id>/plan endpoint."""
-        self.assertIn(
-            "/api/releases/${release_id}/plan",
-            self.helpers_text,
-            "Expected /api/releases/${release_id}/plan endpoint call in kb-release-plan",
+        """kb-release-plan must POST reason+actor to <id>/plan via _kb_release_api_post,
+        and that helper must build /api/releases/<subpath> with a POST."""
+        self.assertTrue(
+            _plan_reaches_plan_endpoint(self.plan_body, self.post_body),
+            "kb-release-plan does not reach POST /api/releases/<id>/plan through "
+            "_kb_release_api_post with reason and actor",
         )
+
+    def test_d4_control_removing_the_call_goes_red(self):
+        """Failing control: the SAME predicate must be False for a plan body whose
+        _kb_release_api_post call is removed, and for a helper that lost its POST —
+        otherwise d4 would pass on anything."""
+        self.assertIsNotNone(self.plan_body)
+        no_call = self.plan_body.replace('_kb_release_api_post "${release_id}/plan"', ":")
+        self.assertNotEqual(no_call, self.plan_body, "control setup: mutation changed nothing")
+        self.assertFalse(_plan_reaches_plan_endpoint(no_call, self.post_body))
+        wrong_path = self.plan_body.replace('"${release_id}/plan"', '"${release_id}/promote"')
+        self.assertNotEqual(wrong_path, self.plan_body)
+        self.assertFalse(_plan_reaches_plan_endpoint(wrong_path, self.post_body))
+        no_reason = self.plan_body.replace("reason", "why")
+        self.assertFalse(_plan_reaches_plan_endpoint(no_reason, self.post_body))
+        no_actor = self.plan_body.replace("actor", "who")
+        self.assertFalse(_plan_reaches_plan_endpoint(no_actor, self.post_body))
+        no_post = self.post_body.replace("-X POST", "-X GET")
+        self.assertFalse(_plan_reaches_plan_endpoint(self.plan_body, no_post))
 
     def test_d5_plan_function_handles_help_flag(self):
-        """kb-release-plan must handle --help / -h / empty release_id gracefully."""
-        self.assertIn(
-            "--help",
-            self.helpers_text,
-            "kb-release-plan does not appear to handle --help flag",
-        )
+        """kb-release-plan must handle --help / -h (inside ITS body)."""
+        self.assertIsNotNone(self.plan_body)
+        self.assertIn("--help|-h)", self.plan_body, "kb-release-plan does not handle --help")
 
-    def test_d6_plan_function_handles_404_response(self):
-        """kb-release-plan must have a case arm for HTTP 404."""
-        self.assertIn(
-            "404)",
-            self.helpers_text,
-            "kb-release-plan does not appear to handle 404 response code",
-        )
+    def test_d6_plan_function_maps_404_response(self):
+        """kb-release-plan must route non-200 statuses through _kb_release_fail, and that
+        function must have a 404 arm (plan's 404 is no longer an inline case arm)."""
+        self.assertIsNotNone(self.plan_body)
+        self.assertIn('_kb_release_fail "plan ', self.plan_body)
+        self.assertIsNotNone(self.fail_body, "_kb_release_fail not found")
+        self.assertIn("404)", self.fail_body, "_kb_release_fail has no 404 arm")
 
 
 if __name__ == "__main__":

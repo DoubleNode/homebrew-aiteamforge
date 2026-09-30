@@ -24406,6 +24406,10 @@ kb-release-reschedule() {
 # Validate an identifier that is interpolated into a URL path.
 # Usage: _kb_release_valid_token <value>
 _kb_release_valid_token() {
+    # '.' and '..' match the charset but curl normalizes them out of the URL
+    # path (promote '..' -> POST /api/promote), so they are refused outright;
+    # '/' is outside the charset already.
+    [[ "${1-}" != "." && "${1-}" != ".." ]] || return 1
     [[ "${1-}" =~ ^[A-Za-z0-9._-]+$ ]]
 }
 
@@ -24462,6 +24466,14 @@ _kb_release_api_post() {
         remedy="${_kb_reason#*$'\n'}"
         echo "Error: LCARS server on port $port — $cause." >&2
         echo "  $remedy" >&2
+        case "$curl_exit" in
+            18|28|52|55|56)
+                # The request may have reached the server before the transport failed
+                # (timeout / empty reply / send or recv error): the change can have been
+                # applied. A blind retry of promote would advance a SECOND stage.
+                echo "  the request may have been applied on the server — check \`kb-release show ${subpath%%/*}\` before retrying" >&2
+                ;;
+        esac
         echo "  (release state is only changed by the server; there is no offline fallback)" >&2
         return 1
     fi
@@ -24469,52 +24481,62 @@ _kb_release_api_post() {
 }
 
 # Print .reasons[] from a response body, one per line.
-# Usage: _kb_release_print_reasons <body> [header]
+# Usage: _kb_release_print_reasons <body> [header] [stderr]
+# A third argument of "stderr" sends the text to stderr (refusals and errors).
 _kb_release_print_reasons() {
-    local body="${1-}" header="${2-}" lines line
+    local body="${1-}" header="${2-}" dest="${3-}" lines text line
     lines=$(printf '%s' "$body" | jq -r \
         '(.reasons // [])[] | if type == "string" then . else (.message // .reason // tostring) end' \
         2>/dev/null)
     [[ -z "$lines" ]] && return 0
-    [[ -n "$header" ]] && echo "$header"
+    text=""
+    [[ -n "$header" ]] && text="$header"$'\n'
     while IFS= read -r line; do
-        echo "  - $line"
+        text+="  - $line"$'\n'
     done <<< "$lines"
+    if [[ "$dest" == "stderr" ]]; then
+        printf '%s' "$text" >&2
+    else
+        printf '%s' "$text"
+    fi
     return 0
 }
 
-# Map a non-success HTTP status to a message + exit code.
+# Map a non-success HTTP status to a message + exit code. Everything goes to
+# STDERR (consistent with usage errors). The server's `error` text is derived
+# from the same reasons, so it is printed only when there are no reasons.
 # Usage: _kb_release_fail <what> ; reads _KB_REL_CODE / _KB_REL_BODY.
 _kb_release_fail() {
-    local what="${1-request}" err
+    local what="${1-request}" err nreasons
     err=$(printf '%s' "$_KB_REL_BODY" | jq -r '.error // .message // empty' 2>/dev/null)
+    nreasons=$(printf '%s' "$_KB_REL_BODY" | jq -r '(.reasons // []) | length' 2>/dev/null)
     case "$_KB_REL_CODE" in
         409)
-            echo "Refused: $what"
-            _kb_release_print_reasons "$_KB_REL_BODY" "gate refused:"
+            echo "Refused: $what" >&2
+            _kb_release_print_reasons "$_KB_REL_BODY" "gate refused:" stderr
             return 3
             ;;
         403)
-            echo "Error: not a release lead — $what refused"
-            _kb_release_print_reasons "$_KB_REL_BODY"
-            [[ -n "$err" ]] && echo "  $err"
+            echo "Error: not a release lead — $what refused" >&2
+            _kb_release_print_reasons "$_KB_REL_BODY" "" stderr
+            [[ -n "$err" && "${nreasons:-0}" == "0" ]] && echo "  $err" >&2
             return 5
             ;;
         404)
-            echo "Error: not found: $what (HTTP 404)"
-            [[ -n "$err" ]] && echo "  $err"
+            echo "Error: not found: $what (HTTP 404)" >&2
+            [[ -n "$err" ]] && echo "  $err" >&2
             return 4
             ;;
         400)
-            echo "Error: request rejected: $what (HTTP 400)"
-            [[ -n "$err" ]] && echo "  $err"
-            _kb_release_print_reasons "$_KB_REL_BODY"
+            echo "Error: request rejected: $what (HTTP 400)" >&2
+            _kb_release_print_reasons "$_KB_REL_BODY" "" stderr
+            [[ -n "$err" && "${nreasons:-0}" == "0" ]] && echo "  $err" >&2
             return 2
             ;;
         *)
-            echo "Error: $what failed (HTTP ${_KB_REL_CODE:-?})"
-            [[ -n "$err" ]] && echo "  $err"
-            [[ -z "$err" && -n "$_KB_REL_BODY" ]] && echo "  $_KB_REL_BODY"
+            echo "Error: $what failed (HTTP ${_KB_REL_CODE:-?})" >&2
+            [[ -n "$err" ]] && echo "  $err" >&2
+            [[ -z "$err" && -n "$_KB_REL_BODY" ]] && echo "  $_KB_REL_BODY" >&2
             return 1
             ;;
     esac
@@ -24614,8 +24636,8 @@ kb-release-promote() {
             return 0
             ;;
         409)
-            echo "Refused: release $release_id  ${from:-?} -> ${to:-?}  (mode: ${mode:-enforce})"
-            _kb_release_print_reasons "$_KB_REL_BODY" "gate refused:"
+            echo "Refused: release $release_id  ${from:-?} -> ${to:-?}  (mode: ${mode:-enforce})" >&2
+            _kb_release_print_reasons "$_KB_REL_BODY" "gate refused:" stderr
             return 3
             ;;
         *)
@@ -24747,6 +24769,9 @@ kb-release-waive() {
     if [[ -z "${opt_reason//[[:space:]]/}" ]]; then
         echo "Error: --reason is required (a waiver must say why)" >&2; echo "$usage" >&2; return 2
     fi
+    if [[ -z "${opt_tests//[,[:space:]]/}" ]]; then
+        echo "Error: --tests <t1,t2> is required (name at least one test to waive)" >&2; echo "$usage" >&2; return 2
+    fi
     [[ -z "$opt_by" ]] && opt_by=$(_kb_release_default_actor)
 
     local payload
@@ -24772,14 +24797,17 @@ kb-release-waive() {
 # reason (400 without one), so --reason is required here too (rc 2 before
 # any HTTP call).  Shares _kb_release_api_post with promote/regress/waive.
 kb-release-plan() {
-    local release_id="" opt_reason=""
-    local usage="Usage: kb-release plan <release-id> --reason \"<why>\""
+    local release_id="" opt_reason="" opt_actor=""
+    local usage="Usage: kb-release plan <release-id> --reason \"<why>\" [--actor <name>]"
 
     while [[ $# -gt 0 ]]; do
         case "${1-}" in
             --reason|-r)
                 if [[ $# -lt 2 ]]; then echo "Error: --reason needs a value" >&2; echo "$usage" >&2; return 2; fi
                 opt_reason="${2-}"; shift 2 ;;
+            --actor)
+                if [[ $# -lt 2 ]]; then echo "Error: --actor needs a value" >&2; echo "$usage" >&2; return 2; fi
+                opt_actor="${2-}"; shift 2 ;;
             --help|-h)
                 echo "$usage"
                 echo ""
@@ -24788,6 +24816,7 @@ kb-release-plan() {
                 echo ""
                 echo "  release-id: Release ID (e.g., REL-2026-Q1-001)"
                 echo "  --reason:   Why the release is being pulled back (required)"
+                echo "  --actor:    Who is demoting it (default: \$USER)"
                 echo ""
                 echo "Example:"
                 echo "  kb-release plan REL-2026-Q1-007 --reason \"created active by mistake\""
@@ -24821,8 +24850,10 @@ kb-release-plan() {
         return 2
     fi
 
+    [[ -z "$opt_actor" ]] && opt_actor=$(_kb_release_default_actor)
+
     local payload
-    payload=$(jq -n --arg reason "$opt_reason" '{reason: $reason}') || return 1
+    payload=$(jq -n --arg reason "$opt_reason" --arg actor "$opt_actor" '{reason: $reason, actor: $actor}') || return 1
 
     _kb_release_api_post "${release_id}/plan" "$payload" || return 1
 
