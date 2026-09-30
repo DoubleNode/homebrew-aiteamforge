@@ -18,9 +18,11 @@ Deliberate fail-closed choices (a stream that hits one has zero results, which g
   * TAP: a pass line is lowercase `ok` followed by a test number, `-`, or end of line. Bare
     `ok some prose` is valid TAP but is treated as noise, never as a pass (XACA-1347-024).
     `not ok` detection stays case/whitespace tolerant and accepts any trailing text.
-  * JUnit: every <testcase> must sit directly in a <testsuite> and is graded exactly once; any
-    other placement, or a <testsuites> below the root, is a parse error. Declared failures/errors
-    and (on aggregates) declared tests= above what the subtree holds are parse errors.
+  * JUnit: the whole tree is checked against a structural (element, allowed parents) allowlist
+    (_JUNIT_PARENTS); unknown, namespaced, case-variant or misplaced elements are parse errors
+    (XACA-1347-025/-026). Every <testcase> is graded exactly once and every failure/error must
+    sit directly in a graded <testcase>. Declared failures/errors
+    are parse errors. `tests=` is NOT reconciled (pytest 9 counts subtests; see _check_junit_counts).
 """
 import json
 import re
@@ -180,26 +182,61 @@ def _junit_int(suite, attr):
     return val
 
 
-def _check_junit_counts(suite, is_leaf):
-    """Declared totals must agree with the <testcase> elements actually present. Applied at EVERY
-    level (<testsuites> root, parent suites, leaves): declared failures+errors must be matched by
-    at least that many failing <testcase> in the element's SUBTREE, else the report is lying or
-    truncated (fail closed). Declared LOWER than actual is fine here: the failing cases still FAIL.
-    `tests=` is an exact-equality check on leaves; on aggregates only the fail-closed direction
-    is checked (declared MORE than the subtree holds = truncated report; fewer is tolerated)."""
-    tests = _junit_int(suite, "tests")
+def _check_junit_counts(suite):
+    """Declared failures+errors must be matched by at least that many <failure>/<error> ELEMENTS in
+    the suite's subtree, else the report is lying or truncated (fail closed). Applied at every level.
+    Declared LOWER than actual is fine: the failing cases still FAIL. Elements are counted, not
+    failing testcases, because pytest 9 emits one <failure> per failing SUBTEST and several can sit
+    in one <testcase> (measured: failures="3" with 2 failing testcases and 3 <failure> elements).
+
+    `tests=` is deliberately NOT reconciled (XACA-1347-025 round 4): producers disagree on what it
+    counts. Measured, pytest 9 counts subtests, e.g. tests="106" over 38 <testcase> for a report
+    with no failure at all, so any equality or over-declaration check false-fails a genuine pass.
+    Truncation is caught two other ways: a cut-off XML report does not parse (already an error), and
+    tests that never ran fail the gate through the expected set built from listCommand. The value is
+    still required to be a non-negative integer when present."""
+    _junit_int(suite, "tests")
     declared = sum(v for v in (_junit_int(suite, "failures"), _junit_int(suite, "errors")) if v)
-    subtree = list(suite.iter("testcase"))
-    name = suite.get("name") or suite.tag
-    if is_leaf and tests is not None and tests != len(subtree):
-        raise _ParseError("JUnit suite %r declares tests=%d but has %d <testcase>" % (name, tests, len(subtree)))
-    if not is_leaf and tests is not None and tests > len(subtree):
-        raise _ParseError("JUnit <%s> %r declares tests=%d but only %d <testcase> in its subtree"
-                          % (suite.tag, name, tests, len(subtree)))
-    actual = sum(1 for tc in subtree if tc.find("failure") is not None or tc.find("error") is not None)
+    actual = sum(1 for el in suite.iter() if el.tag in ("failure", "error"))
     if declared > actual:
-        raise _ParseError("JUnit <%s> %r declares %d failure(s)/error(s) but only %d failing <testcase> in its subtree"
+        name = suite.get("name") or suite.tag
+        raise _ParseError("JUnit <%s> %r declares %d failure(s)/error(s) but only %d <failure>/<error> in its subtree"
                           % (suite.tag, name, declared, actual))
+
+
+# XACA-1347-025/-026: structural allowlist. element -> tags allowed as its parent (None = may be the
+# root). Every element of the document must appear here under an allowed parent, else the report
+# is rejected. Anything not listed (unknown, namespaced `{ns}tag`, case variants such as <Failure>)
+# has no grading path, so accepting it could silently drop a recorded result: fail closed instead.
+_JUNIT_PARENTS = {
+    "testsuites": (None,),
+    "testsuite": (None, "testsuites", "testsuite"),
+    "testcase": ("testsuite",),
+    "failure": ("testcase",),
+    "error": ("testcase",),
+    "skipped": ("testcase",),
+    "properties": ("testsuites", "testsuite", "testcase"),
+    "property": ("properties",),
+    "system-out": ("testsuite", "testcase"),
+    "system-err": ("testsuite", "testcase"),
+}
+
+
+def _check_junit_structure(root):
+    """Validate the WHOLE tree against _JUNIT_PARENTS; return the child->parent map."""
+    parent_of = {}
+    for par in root.iter():
+        for child in par:
+            parent_of[child] = par
+    for el in root.iter():
+        par = parent_of.get(el)
+        ptag = par.tag if par is not None else None
+        allowed = _JUNIT_PARENTS.get(el.tag) if isinstance(el.tag, str) else None
+        if allowed is None or ptag not in allowed:
+            raise _ParseError("JUnit element <%s> is not allowed under %s (allowed JUnit structure only; "
+                              "unknown, namespaced and case-variant elements are rejected)"
+                              % (el.tag, "<%s>" % ptag if ptag else "the document root"))
+    return parent_of
 
 
 def _parse_junit(text, default_test):
@@ -212,19 +249,15 @@ def _parse_junit(text, default_test):
         raise _ParseError("invalid or truncated JUnit XML: %s" % exc)
     if root.tag not in ("testsuite", "testsuites"):
         raise _ParseError("JUnit root element must be <testsuites> or <testsuite>, got <%s>" % root.tag)
-    if root.tag == "testsuites" and root.findall("testcase"):
-        raise _ParseError("JUnit <testcase> directly under <testsuites> (no <testsuite>) is not supported")
-    for el in root.iter("testsuites"):      # only the root may aggregate; a nested one is never reconciled
-        if el is not root:
-            raise _ParseError("JUnit <testsuites> nested below the root is not supported")
+    parent_of = _check_junit_structure(root)
     suites = list(root.iter("testsuite"))   # includes root and NESTED suites: none may be skipped
     if root.tag == "testsuites":
-        _check_junit_counts(root, False)    # the aggregate root is reconciled too (XACA-1347-015)
+        _check_junit_counts(root)    # the aggregate root is reconciled too (XACA-1347-015)
     results = []
     graded = []
     for suite in suites:
         cases = suite.findall("testcase")
-        _check_junit_counts(suite, suite.find("testsuite") is None)
+        _check_junit_counts(suite)
         if not cases:
             continue
         name = suite.get("name") or suite.get("file") or default_test or "(unnamed suite)"
@@ -254,6 +287,11 @@ def _parse_junit(text, default_test):
     if len(graded_ids) != len(set(graded_ids)):
         raise _ParseError("JUnit <testcase> graded more than once (internal inconsistency)")
     seen = set(graded_ids)
+    # Result carriers: every failure/error must be a direct child of a graded testcase (belt and
+    # braces over the structure walk; it makes "a recorded failure is never dropped" self-evident).
+    for el in root.iter():
+        if el.tag in ("failure", "error") and id(parent_of.get(el)) not in seen:
+            raise _ParseError("JUnit <%s> is not inside a graded <testcase> (would be ungraded)" % el.tag)
     orphans = [tc for tc in root.iter("testcase") if id(tc) not in seen]
     if orphans:
         names = ", ".join(repr((tc.get("classname") + "." if tc.get("classname") else "") + (tc.get("name") or "(unnamed)"))
