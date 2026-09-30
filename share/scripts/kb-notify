@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+"""kb-notify: send release-workflow notices to notify.json aliases (XACA-1345).
+
+Thin argparse dispatcher over kanban-hooks/release_notify.py. Aliases resolve
+from the CALLING team's notify.json; the destination behind an alias is a
+secretRef the provider resolves just-in-time and this CLI never sees or prints.
+
+  kb-notify send --to <alias> (--template <name> --data <json> | --text <str>)
+                 [--ref REL-xxxx|CR-xxxx] [--team T] [--json]
+  kb-notify test --to <alias> [--team T]     (verifies route + secret; sends NOTHING)
+
+Exit codes:
+  0  ok (send: delivered and receipted; test: route and secret are good)
+  1  notify failure: config/alias/template/secret problem, or the provider
+     failed. A delivery failure ALSO writes an ok:false receipt. Never retried.
+  2  usage error (argparse; bad --data, --ref, missing argument)
+  3  RECEIPT_FAILED: the receipt could not be written (the notice may have gone)
+
+Receipts: {id, ts, provider, alias, template, ok, error, providerMessageId?}
+appended to notices[] of the --ref record on the team board; without --ref, to
+<kanban>/notify-log.jsonl.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+EXIT_OK, EXIT_NOTIFY_ERROR, EXIT_USAGE, EXIT_RECEIPT_FAILED = 0, 1, 2, 3
+REF_RE = re.compile(r"^(REL|CR)-[A-Za-z0-9][A-Za-z0-9._-]*(?![\s\S])")  # not $: it matches before a final \n
+ALIAS_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}(?![\s\S])")
+
+
+def _find_hooks_dir():
+    """kanban-hooks/ is a sibling of scripts/ in the dev tree and in the tap's
+    share/ layout; a flattened tap install puts the modules next to this file."""
+    here = Path(__file__).resolve().parent
+    for cand in (here.parent / "kanban-hooks", here):
+        if (cand / "release_notify.py").is_file():
+            return cand
+    return None
+
+
+def _ref(value):
+    if not REF_RE.match(value):
+        raise argparse.ArgumentTypeError("invalid ref %r (expected REL-... or CR-...)" % value)
+    return value
+
+
+def _alias(value):
+    if not ALIAS_RE.match(value):
+        raise argparse.ArgumentTypeError("invalid alias %r" % value)
+    return value
+
+
+def _data(value):
+    try:
+        obj = json.loads(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("--data is not valid JSON") from None
+    if not isinstance(obj, dict):
+        raise argparse.ArgumentTypeError("--data must be a JSON object")
+    return obj
+
+
+def build_parser():
+    p = argparse.ArgumentParser(prog="kb-notify", description="Release-workflow notifier.")
+    sub = p.add_subparsers(dest="command", metavar="<subcommand>")
+    sub.required = True
+
+    def add(name, help_):
+        s = sub.add_parser(name, help=help_, description=help_)
+        s.add_argument("--to", required=True, type=_alias, help="alias from the team's notify.json")
+        s.add_argument("--team", help="team id (default: $KB_TEAM)")
+        return s
+
+    s = add("send", "render (or take) a message and deliver it to an alias")
+    body = s.add_mutually_exclusive_group(required=True)
+    body.add_argument("--template", help="notice template name (profiles/notice/<name>.md)")
+    body.add_argument("--text", help="literal message text")
+    s.add_argument("--data", type=_data, default=None, help="JSON object of template facts (with --template)")
+    s.add_argument("--ref", type=_ref, help="REL-/CR- record that receives the receipt")
+    s.add_argument("--json", action="store_true", help="print the receipt as JSON")
+    add("test", "verify route and secret resolve; sends nothing")
+    return p
+
+
+def main(argv=None, _engine_factory=None):
+    args = build_parser().parse_args(argv)
+    if args.command == "send" and args.data is not None and args.template is None:
+        build_parser().error("--data requires --template")
+    team = args.team or os.environ.get("KB_TEAM", "")
+    if not team:
+        build_parser().error("no team: pass --team or set $KB_TEAM")
+    hooks = _find_hooks_dir()
+    if hooks is None:
+        print("kb-notify: release_notify.py not found", file=sys.stderr)
+        return EXIT_NOTIFY_ERROR
+    sys.path.insert(0, str(hooks))
+    import release_notify as rn  # noqa: PLC0415 - path set just above
+
+    try:
+        engine = (_engine_factory or rn.NotifyEngine)(team)
+        if args.command == "test":
+            provider = engine.test(args.to)
+            print("kb-notify: test ok provider=%s alias=%s" % (provider, args.to))
+            return EXIT_OK
+        receipt = engine.send(args.to, template=args.template, data=args.data,
+                              text=args.text, ref=args.ref)
+    except rn.NotifyReceiptError as exc:
+        print("kb-notify: %s" % exc, file=sys.stderr)
+        return EXIT_RECEIPT_FAILED
+    except rn.NotifyError as exc:
+        print("kb-notify: %s" % exc, file=sys.stderr)
+        return EXIT_NOTIFY_ERROR
+    except Exception as exc:  # noqa: BLE001 - never dump a traceback that could carry a secret
+        print("kb-notify: unexpected error (%s)" % type(exc).__name__, file=sys.stderr)
+        return EXIT_NOTIFY_ERROR
+
+    if args.json:
+        print(json.dumps(receipt, sort_keys=True))
+    elif receipt["ok"]:
+        print("kb-notify: sent provider=%s alias=%s receipt=%s" % (
+            receipt["provider"], receipt["alias"], receipt["id"]))
+    if not receipt["ok"]:
+        print("kb-notify: delivery failed provider=%s alias=%s receipt=%s: %s" % (
+            receipt["provider"], receipt["alias"], receipt["id"], receipt["error"]), file=sys.stderr)
+        return EXIT_NOTIFY_ERROR
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main())

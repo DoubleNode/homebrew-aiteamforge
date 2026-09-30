@@ -6,6 +6,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1345** — new `kb-notify` command for release notices, with a Microsoft Teams provider.
+  - `kb-notify send --to <alias> (--template <name> --data <json> | --text <str>) [--ref REL-…|CR-…]` delivers to an alias from the calling team's `notify.json`; `kb-notify test --to <alias>` checks the route and secret and sends nothing.
+  - Teams supports a Power Automate flow (`shape: "flow"`, the default) or a plain incoming webhook (`shape: "webhook"`); `notify.schema.json` gains the optional `shape` field.
+  - Every send writes a receipt to the `--ref` record's `notices[]`, or to `notify-log.jsonl`. A failed send exits non-zero with an `ok:false` receipt and is never retried. Webhook URLs never appear in output, logs or receipts.
 
 ## [0.20.28] - 2026-09-29
 - **XACA-1151 (PR-F)** — the review and test launchers now honour `--delta` and `--round`, and their prompts carry the severity rules.

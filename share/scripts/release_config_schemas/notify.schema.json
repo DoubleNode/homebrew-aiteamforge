@@ -23,6 +23,11 @@
             "description": "§ 10.1: teams (HTTP flow / incoming webhook) first; slack, sms, email later, behind the same interface.",
             "enum": ["teams", "slack", "sms", "email"]
           },
+          "shape": {
+            "type": "string",
+            "description": "XACA-1345: teams provider only -- payload shape. 'flow' (default when absent) = Power Automate HTTP-triggered flow (Adaptive Card message envelope); 'webhook' = plain Teams incoming webhook ({\"text\": ...}). Ignored by other providers.",
+            "enum": ["flow", "webhook"]
+          },
           "target": {
             "type": "object",
             "description": "Never a literal destination (URL/number) -- always a secretRef (§ 2.2, § 11.4).",
