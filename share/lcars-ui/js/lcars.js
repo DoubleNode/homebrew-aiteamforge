@@ -656,8 +656,10 @@ function showAssetBanner() {
         bar = document.createElement('div');
         bar.id = ASSET_BANNER_ID;
         bar.className = 'lcars-asset-banner';
-        bar.setAttribute('role', 'status');
-        bar.setAttribute('aria-live', 'polite');
+        // The bar is a labelled region (buttons findable); announcements go
+        // through the boot-time live region below, not this freshly built node.
+        bar.setAttribute('role', 'region');
+        bar.setAttribute('aria-label', 'LCARS update notice');
 
         const msg = document.createElement('span');
         msg.className = 'lcars-asset-banner-text';
@@ -690,8 +692,51 @@ function refreshAssetBannerMode() {
     const warn = isModalOpenForAssetBanner();
     bar.classList.toggle('lcars-asset-banner-warn', warn);
     const msg = bar.querySelector('.lcars-asset-banner-text');
-    if (msg) msg.textContent = warn ? ASSET_BANNER_MODAL_TEXT : ASSET_BANNER_TEXT;
+    const text = warn ? ASSET_BANNER_MODAL_TEXT : ASSET_BANNER_TEXT;
+    if (msg) msg.textContent = text;
+    announceAssetBanner(text);
     syncAssetBannerModalOffset(warn ? bar : null);
+}
+
+/**
+ * XACA-1376-022 (WCAG 4.1.3): screen readers announce a CHANGE inside a live
+ * region that already existed. A role=status node created and filled in the
+ * same tick (or re-shown via hidden=false) is often never read, so a single
+ * empty, visually hidden region is created at boot and only its text changes:
+ * '' -> message on show (announced), message -> other message on a mode
+ * switch (announced), cleared on hide so the next show is a change again.
+ */
+const ASSET_LIVE_ID = 'lcars-asset-banner-live';
+
+function ensureAssetLiveRegion() {
+    try {
+        if (!document.body) return null;
+        let live = document.getElementById(ASSET_LIVE_ID);
+        if (!live) {
+            live = document.createElement('div');
+            live.id = ASSET_LIVE_ID;
+            live.className = 'sr-only';
+            live.setAttribute('role', 'status');
+            live.setAttribute('aria-live', 'polite');
+            live.setAttribute('aria-atomic', 'true');
+            document.body.appendChild(live);
+        }
+        return live;
+    } catch (e) {
+        return null;
+    }
+}
+
+function announceAssetBanner(text) {
+    const live = ensureAssetLiveRegion();
+    if (live && live.textContent !== text) live.textContent = text;
+}
+
+// Create the (empty) live region at boot. lcars.js loads at the end of <body>,
+// so body normally exists; otherwise wait for the DOM.
+if (typeof document !== 'undefined') {
+    if (document.body) ensureAssetLiveRegion();
+    else if (document.addEventListener) document.addEventListener('DOMContentLoaded', ensureAssetLiveRegion);
 }
 
 /**
@@ -722,6 +767,7 @@ function dismissAssetBanner() {
 function hideAssetBanner() {
     const bar = document.getElementById(ASSET_BANNER_ID);
     if (bar) bar.hidden = true;
+    announceAssetBanner('');
     syncAssetBannerModalOffset(null);
 }
 

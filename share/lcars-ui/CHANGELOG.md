@@ -17,6 +17,7 @@ All notable changes to the LCARS Kanban Workflow Monitor will be documented in t
   (Reload / Dismiss-until-next-change; stronger wording when a modal is open). Styles in `lcars.css`; bumped `lcars.js?v=3.92`, `lcars.css?v=32.39`.
   Fix: the modal check now counts only RENDERED modals (hidden ones are always in the DOM), so the stronger wording no longer always shows (`lcars.js?v=3.93`).
   Warn mode now pushes open modals below the banner (body class + `--lcars-asset-banner-h`) instead of covering their header/close X (`lcars.js?v=3.95`, `lcars.css?v=32.41`).
+  The same reserve covers the Activity Timeline panel; the banner announces through a boot-time `sr-only` live region so screen readers actually read it (`lcars.js?v=3.96`, `lcars.css?v=32.42`).
   Gate round 1: fingerprint hashes index.html as SERVED (unstamped files' serve-time `?v=<mtime>` included); served index.html carries
   `<meta name="lcars-asset-version">` used as the client's boot baseline (cached-tab case); banner z-index raised to 100001 to clear the
   fullscreen home; clearer warn copy; Reload confirms when a modal is open; mode re-evaluated on every check (`lcars.js?v=3.94`, `lcars.css?v=32.40`).

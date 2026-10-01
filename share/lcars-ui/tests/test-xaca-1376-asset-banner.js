@@ -106,8 +106,11 @@ test('mismatch shows an accessible, non-modal banner with Reload + Dismiss', () 
     t.api.checkAssetVersion(resp('bbb'));
     const b = banner(t);
     assert(b && !b.hidden);
-    assert.strictEqual(b.attrs.role, 'status');
-    assert.strictEqual(b.attrs['aria-live'], 'polite');
+    // XACA-1376-022: the bar is a labelled region; announcements go through
+    // the boot-time live region (see the live-region tests below).
+    assert.strictEqual(b.attrs.role, 'region');
+    assert.strictEqual(b.attrs['aria-label'], 'LCARS update notice');
+    assert.strictEqual(b.attrs['aria-live'], undefined, 'bar must not be a second live region');
     const btns = b.children.filter(c => c.tag === 'button');
     assert.deepStrictEqual(btns.map(x => x.textContent), ['Reload', 'Dismiss']);
     assert(btns.every(x => x.attrs.type === undefined && x.type === 'button'));
@@ -254,8 +257,39 @@ test('warn mode reserves the bar height above open modals; normal mode and hide 
 
 test('CSS reserves the bar height on BOTH modal containers and not twice on the nested release dialog', () => {
     const css = fs.readFileSync(path.join(__dirname, '..', 'css', 'lcars.css'), 'utf8');
-    assert(/body\.lcars-asset-banner-warn-active \.lcars-modal,\s*body\.lcars-asset-banner-warn-active \.lcars-modal-overlay \{[^}]*padding-top: calc\(var\(--lcars-asset-banner-h/.test(css));
+    assert(/body\.lcars-asset-banner-warn-active \.lcars-modal,\s*body\.lcars-asset-banner-warn-active \.lcars-modal-overlay,\s*body\.lcars-asset-banner-warn-active \.activity-timeline-modal \{[^}]*padding-top: calc\(var\(--lcars-asset-banner-h/.test(css),
+        'warn-mode reserve must cover .lcars-modal, .lcars-modal-overlay AND the activity side panel (XACA-1376-021)');
     assert(/body\.lcars-asset-banner-warn-active \.lcars-modal-overlay \.lcars-modal \{\s*padding-top: 0;/.test(css));
+});
+
+const live = t => t.doc.getElementById('lcars-asset-banner-live');
+
+test('an EMPTY live region exists at boot, before any mismatch (XACA-1376-022)', () => {
+    const t = setup();
+    const l = live(t);
+    assert(l, 'live region must be created when lcars.js loads');
+    assert.strictEqual(l.attrs.role, 'status');
+    assert.strictEqual(l.attrs['aria-live'], 'polite');
+    assert.strictEqual(l.className, 'sr-only');
+    assert.strictEqual(l.textContent, '');
+    assert.strictEqual(banner(t), null, 'the visual bar is still built lazily');
+});
+
+test('live region: filled on show, cleared on hide, re-announced on re-show, updated on mode switch', () => {
+    const t = setup();
+    t.api.checkAssetVersion(resp('aaa'));
+    assert.strictEqual(live(t).textContent, '', 'no announcement without a mismatch');
+    t.api.checkAssetVersion(resp('bbb'));
+    assert(/reload to get the latest version/.test(live(t).textContent), 'show must announce');
+    t.api.checkAssetVersion(resp('aaa'));
+    assert.strictEqual(live(t).textContent, '', 'hide must clear so the next show is a change');
+    t.api.checkAssetVersion(resp('ccc'));
+    assert(/reload to get the latest version/.test(live(t).textContent), 're-show must announce again');
+    t.api.setModal(true);
+    t.api.checkAssetVersion(resp('ccc'));
+    assert(/outdated requests/.test(live(t).textContent), 'warn-mode switch must change the announced text');
+    t.api.dismissAssetBanner();
+    assert.strictEqual(live(t).textContent, '', 'dismiss must clear');
 });
 
 test('warn vs normal mode is recomputed on every check, not only on pause/resume', () => {
