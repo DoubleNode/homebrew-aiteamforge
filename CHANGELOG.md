@@ -6,6 +6,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1323** — mode-only: `share/scripts/cc-credential-team-resolver.sh` and `share/scripts/kb-release-config-validate.sh` are now 100755 to match their canonical sources (`sync-tap.sh` is mode-blind, so the exec bit is set by hand in the tap).
 
 ## [0.20.29] - 2026-10-01
 - **XACA-1308** — Stage B of the compaction P=50 rollout (stage gate PASSED 2026-10-01): `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=50` now ships in `share/templates/claude/settings.json.template` (`env`) and in `_xaca1283_upgrade_settings_key_paths` so upgrades deliver it; `tests/test-xaca-1283-settings-merge-env-and-scalar.sh` flipped to `XACA1283_STAGE=B`; test M1 relabelled "extracted-function harness" and its comment corrected, since the shipped upgrade script defines `_aitf_file_mode` (XACA-1308-012).
