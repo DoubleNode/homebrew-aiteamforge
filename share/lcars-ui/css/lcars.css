@@ -18677,14 +18677,20 @@ body.roadmap-printing #roadmap-content {
 }
 
 /* ── XACA-1376: stale-asset "LCARS was updated - reload" banner ───────────────
-   Non-blocking: fixed strip above modals, never covers the page; only the bar
-   itself takes pointer events. Tokens only, so it follows the active palette. */
+   Non-blocking: fixed strip above modals AND the fullscreen home, never covers
+   the page; only the bar itself takes pointer events. Tokens only, so it follows the active palette. */
 .lcars-asset-banner {
     position: fixed;
     top: 8px;
     left: 50%;
     transform: translateX(-50%);
-    z-index: 10001;
+    /* Must clear EVERY other layer: the highest in this codebase is
+       .home-fullscreen .home-section.active at 100000 !important (kiosk tab -
+       the long-lived one most likely to go stale), then .home-fullscreen at
+       99999 and .activity-timeline-modal at 11000. 100001 is the next free
+       value; it is a fixed, pointer-events-limited bar so it blocks nothing
+       beyond its own box. */
+    z-index: 100001;
     display: flex;
     align-items: center;
     flex-wrap: wrap;

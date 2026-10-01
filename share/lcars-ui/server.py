@@ -4057,37 +4057,104 @@ _COPYRIGHT_PLACEHOLDER_VALUES: frozenset = frozenset({'<TBD-per-engagement>', '<
 
 
 # ── XACA-1376: asset fingerprint ("LCARS was updated - reload") ─────────────
-# A short stable hash of the local `?v=` cache-buster stamps in index.html AS IT
-# WOULD BE SERVED NOW. A tab whose boot-time value differs from what the server
-# says now is running stale JS/CSS. Recomputed whenever index.html's (mtime, size)
-# changes, so a `git pull` without a server restart still moves the value.
+# A short stable hash of every local .js/.css URL in index.html AS IT IS SERVED
+# (i.e. after the XACA-0569 serve-time `?v=<mtime>` stamping), so it moves when
+# a hand-bumped stamp changes AND when an unstamped file is touched on disk.
+# Recomputed per call (one small file read + a few stats) - no cache to go stale,
+# so a `git pull` without a server restart still moves the value.
 ASSET_VERSION_HEADER = 'X-LCARS-Asset-Version'
-_ASSET_STAMP_RE = re.compile(r'(?:src|href)="([^"?:]+)\?v=([^"]+)"')
-_ASSET_VERSION_CACHE = {'key': None, 'value': None}
-_ASSET_VERSION_LOCK = threading.Lock()
+ASSET_VERSION_META_NAME = 'lcars-asset-version'
+
+# XACA-0569: regex used to inject ?v=<mtime> into local <script src> / <link href>
+# refs. Skips absolute URLs (http/https/protocol-relative/data:) and refs that
+# already carry a query string, so hand-versioned tags (e.g. lcars.css?v=31.1)
+# stay untouched until someone removes the hand-coded version.
+# Lookbehind `(?<=[\s<])` (XACA-0569-009) requires the attr name to follow
+# whitespace or `<` so `data-src="..."` / `data-href="..."` / other suffixed
+# attribute names don't get over-matched by a bare `\b(src|href)=`.
+# `[^"\'?#]+\.(?:js|css)` (XACA-0569-010) excludes `#` from the URL portion
+# so fragmented refs (e.g. `foo.css#dark`) are simply skipped rather than
+# mis-rewritten - fragment placement after the query string is RFC-3986
+# territory not worth the complexity for an unused case.
+_STATIC_REF_RE = re.compile(rb'(?<=[\s<])(src|href)=(["\'])([^"\'?#]+\.(?:js|css))\2')
+
+# Every src/href value in the SERVED html (used only by the fingerprint).
+_SERVED_URL_RE = re.compile(rb'(?<=[\s<])(?:src|href)=(["\'])([^"\'#]+)\1')
+_HEAD_OPEN_RE = re.compile(rb'<head(?:\s[^>]*)?>', re.IGNORECASE)
+
+
+def version_html_refs(html_bytes, base_dir=None):
+    """Append ?v=<mtime> to local .js/.css refs in HTML for cache-busting (XACA-0569).
+
+    Module-level so the serving path AND the asset fingerprint share ONE
+    implementation (XACA-1376-014). mtime is read from the file under base_dir
+    (default UI_DIR); a missing/unreadable file leaves the ref alone so a
+    versioning failure never breaks a page.
+    """
+    base = Path(base_dir) if base_dir is not None else UI_DIR
+
+    def _sub(match):
+        attr, quote, url = match.group(1), match.group(2), match.group(3)
+        url_str = url.decode('utf-8', errors='replace')
+        # Skip absolute / protocol-relative / data: URLs.
+        if url_str.startswith(('http://', 'https://', '//', 'data:')):
+            return match.group(0)
+        ref_path = base / url_str.lstrip('/')
+        try:
+            mtime = int(ref_path.stat().st_mtime)
+        except OSError:
+            return match.group(0)
+        return b'%s=%s%s?v=%d%s' % (attr, quote, url, mtime, quote)
+
+    return _STATIC_REF_RE.sub(_sub, html_bytes)
+
+
+def asset_fingerprint_from_served(served_html):
+    """12-hex fingerprint of the local .js/.css URLs in already-served HTML bytes.
+
+    Order-insensitive; external URLs and non-asset attributes are ignored.
+    Returns None when the page references no local asset at all.
+    """
+    urls = set()
+    for m in _SERVED_URL_RE.finditer(served_html):
+        url = m.group(2).decode('utf-8', errors='replace')
+        path_part = url.split('?', 1)[0]
+        if ':' in path_part or path_part.startswith('//'):
+            continue  # http(s)://, data:, protocol-relative -> external
+        if path_part.endswith(('.js', '.css')) or '?v=' in url:
+            urls.add(url)
+    if not urls:
+        return None
+    return hashlib.sha256('\n'.join(sorted(urls)).encode('utf-8')).hexdigest()[:12]
 
 
 def compute_asset_version(index_path=None):
-    """Return the 12-hex asset fingerprint, or None on ANY error (fail soft)."""
+    """Return the 12-hex asset fingerprint of index.html AS SERVED, or None on ANY error."""
     try:
         path = Path(index_path) if index_path is not None else UI_DIR / 'index.html'
-        st = path.stat()
-        key = (str(path), st.st_mtime_ns, st.st_size)
-        with _ASSET_VERSION_LOCK:
-            if _ASSET_VERSION_CACHE['key'] == key:
-                return _ASSET_VERSION_CACHE['value']
-        html = path.read_text(encoding='utf-8', errors='replace')
-        stamps = sorted({f'{m.group(1)}?v={m.group(2)}'
-                         for m in _ASSET_STAMP_RE.finditer(html)})
-        if not stamps:
-            return None
-        value = hashlib.sha256('\n'.join(stamps).encode('utf-8')).hexdigest()[:12]
-        with _ASSET_VERSION_LOCK:
-            _ASSET_VERSION_CACHE['key'] = key
-            _ASSET_VERSION_CACHE['value'] = value
-        return value
+        served = version_html_refs(path.read_bytes(), base_dir=path.parent)
+        return asset_fingerprint_from_served(served)
     except Exception:
         return None
+
+
+def inject_asset_version_meta(served_html):
+    """Insert <meta name="lcars-asset-version"> after <head>; no-op when not computable.
+
+    XACA-1376-013: gives the client a BOOT-time baseline, so a tab restored from
+    cache after a deploy still warns on its first board response. Computed from
+    the same served bytes as the header, so the two always agree.
+    """
+    try:
+        fp = asset_fingerprint_from_served(served_html)
+        m = _HEAD_OPEN_RE.search(served_html)
+        if not fp or not m:
+            return served_html
+        tag = b'\n    <meta name="%s" content="%s">' % (
+            ASSET_VERSION_META_NAME.encode(), fp.encode())
+        return served_html[:m.end()] + tag + served_html[m.end():]
+    except Exception:
+        return served_html
 
 
 class LCARSHandler(http.server.SimpleHTTPRequestHandler):
@@ -19143,41 +19210,13 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             # Serve other static files (images, fonts) with default caching
             super().do_GET()
 
-    # XACA-0569: regex used to inject ?v=<mtime> into local <script src> / <link href>
-    # refs. Skips absolute URLs (http/https/protocol-relative/data:) and refs that
-    # already carry a query string, so hand-versioned tags (e.g. lcars.css?v=31.1)
-    # stay untouched until someone removes the hand-coded version.
-    # Lookbehind `(?<=[\s<])` (XACA-0569-009) requires the attr name to follow
-    # whitespace or `<` so `data-src="..."` / `data-href="..."` / other suffixed
-    # attribute names don't get over-matched by a bare `\b(src|href)=`.
-    # `[^"\'?#]+\.(?:js|css)` (XACA-0569-010) excludes `#` from the URL portion
-    # so fragmented refs (e.g. `foo.css#dark`) are simply skipped rather than
-    # mis-rewritten — fragment placement after the query string is RFC-3986
-    # territory not worth the complexity for an unused case.
-    _STATIC_REF_RE = re.compile(rb'(?<=[\s<])(src|href)=(["\'])([^"\'?#]+\.(?:js|css))\2')
+    # XACA-0569 / XACA-1376-014: the rewrite lives at module level
+    # (version_html_refs) so the asset fingerprint hashes the very same output.
+    _STATIC_REF_RE = _STATIC_REF_RE
 
     def _version_html_refs(self, html_bytes):
-        """Append ?v=<mtime> to local .js/.css refs in HTML for cache-busting.
-
-        Used by serve_no_cache_static when serving .html files. mtime is read
-        from the file on disk under UI_DIR; if the file is missing or its
-        mtime can't be read, the ref is left alone so we never break a page
-        because of a versioning failure.
-        """
-        def _sub(match):
-            attr, quote, url = match.group(1), match.group(2), match.group(3)
-            url_str = url.decode('utf-8', errors='replace')
-            # Skip absolute / protocol-relative / data: URLs.
-            if url_str.startswith(('http://', 'https://', '//', 'data:')):
-                return match.group(0)
-            ref_path = UI_DIR / url_str.lstrip('/')
-            try:
-                mtime = int(ref_path.stat().st_mtime)
-            except OSError:
-                return match.group(0)
-            return b'%s=%s%s?v=%d%s' % (attr, quote, url, mtime, quote)
-
-        return self._STATIC_REF_RE.sub(_sub, html_bytes)
+        """Append ?v=<mtime> to local .js/.css refs in HTML (see version_html_refs)."""
+        return version_html_refs(html_bytes)
 
     def serve_no_cache_static(self, path, head_only=False):
         """Serve JS/HTML/CSS files with no-cache headers to prevent stale code.
@@ -19208,6 +19247,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 content_type = 'text/html'
                 # XACA-0569: stamp mtime version on local script/link refs.
                 data = self._version_html_refs(data)
+                if path == '/index.html':
+                    # XACA-1376-013: boot-time baseline for the stale-asset banner.
+                    # Injected BEFORE Content-Length is computed below.
+                    data = inject_asset_version_meta(data)
             elif path.endswith('.css'):
                 content_type = 'text/css'
             elif path.endswith('.woff2'):

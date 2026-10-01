@@ -35,11 +35,13 @@ function makeEl(tag) {
 // Modal stubs mirror the real page: many modals are ALWAYS in the DOM, hidden
 // (getClientRects() empty); only an open one is rendered.
 const modalStub = rendered => ({ getClientRects: () => (rendered ? [{}] : []) });
-function setup({ modalOpen = false, hiddenModals = 3 } = {}) {
+function setup({ modalOpen = false, hiddenModals = 3, meta = null, confirmResult = true } = {}) {
     const body = makeEl('body');
     const doc = {
         body,
         createElement: makeEl,
+        querySelector: sel => (meta !== null && sel === 'meta[name="lcars-asset-version"]'
+            ? { getAttribute: () => meta } : null),
         getElementById: id => body.children.find(c => c.id === id) || null,
         querySelectorAll: () => {
             const els = Array.from({ length: hiddenModals }, () => modalStub(false));
@@ -54,12 +56,15 @@ function setup({ modalOpen = false, hiddenModals = 3 } = {}) {
         return el;
     };
     let reloaded = 0;
-    const ctx = { document: doc, location: { reload: () => { reloaded++; } }, window: {}, console };
-    const fn = new Function('document', 'location', 'window', 'console', 'refreshPaused',
+    const confirms = [];
+    const ctx = { document: doc, location: { reload: () => { reloaded++; } }, window: {}, console,
+        confirm: msg => { confirms.push(msg); return confirmResult; } };
+    const fn = new Function('document', 'location', 'window', 'console', 'confirm', 'refreshPaused',
         block + '\nreturn { checkAssetVersion, evaluateAssetVersion, dismissAssetBanner, ' +
+        'setModal: on => { refreshPaused = on; }, ' +
         'getState: () => ({ b: assetVersionBaseline, d: assetVersionDismissed, c: assetVersionCurrent }) };');
-    const api = fn(ctx.document, ctx.location, ctx.window, ctx.console, false);
-    return { api, doc, body, reloaded: () => reloaded };
+    const api = fn(ctx.document, ctx.location, ctx.window, ctx.console, ctx.confirm, false);
+    return { api, doc, body, reloaded: () => reloaded, confirms };
 }
 const resp = v => ({ headers: { get: () => v } });
 const banner = t => t.doc.getElementById('lcars-asset-banner');
@@ -133,7 +138,7 @@ test('stronger wording when a modal is open', () => {
     t.api.checkAssetVersion(resp('aaa'));
     t.api.checkAssetVersion(resp('bbb'));
     const b = banner(t);
-    assert(/finish or reload before saving/.test(b.children[0].textContent));
+    assert(/may send outdated requests\. Reload before saving \(unsaved changes will be lost\)\./.test(b.children[0].textContent));
     assert(b.classes.has('lcars-asset-banner-warn'));
 });
 
@@ -152,10 +157,86 @@ test('a throwing response object never propagates', () => {
     t.api.checkAssetVersion({ headers: { get() { throw new Error('x'); } } });
 });
 
-test('loadBoardData calls the comparator and adds no new timer', () => {
-    assert(/checkAssetVersion\(response\);/.test(src));
-    const sect = src.slice(start, end);
-    assert(!/setInterval|setTimeout/.test(sect), 'banner block must not add timers');
+test('loadBoardData calls the comparator INSIDE its own body and adds no new timer', () => {
+    const fStart = src.indexOf('async function loadBoardData()');
+    const fEnd = src.indexOf('\nfunction loadEmbeddedData', fStart);
+    assert(fStart > 0 && fEnd > fStart, 'loadBoardData body not found');
+    const body = src.slice(fStart, fEnd);
+    assert(/checkAssetVersion\(response\);/.test(body), 'comparator must be called inside loadBoardData');
+    assert.strictEqual(src.slice(start, end).match(/setInterval|setTimeout/), null, 'banner block must not add timers');
+});
+
+test('boot meta is the baseline: a first response that differs SHOWS the banner (cached-tab case)', () => {
+    const t = setup({ meta: 'old111' });
+    t.api.checkAssetVersion(resp('new222'));
+    assert.strictEqual(t.api.getState().b, 'old111');
+    assert(banner(t) && !banner(t).hidden, 'cached tab must warn on its very first response');
+});
+
+test('boot meta equal to the first response stays silent', () => {
+    const t = setup({ meta: 'same' });
+    t.api.checkAssetVersion(resp('same'));
+    assert.strictEqual(banner(t), null);
+    assert.strictEqual(t.api.getState().b, 'same');
+});
+
+test('no meta (old server) keeps the first-response baseline behaviour', () => {
+    const t = setup({ meta: null });
+    t.api.checkAssetVersion(resp('aaa'));
+    t.api.checkAssetVersion(resp('bbb'));
+    assert.strictEqual(t.api.getState().b, 'aaa');
+    assert(banner(t) && !banner(t).hidden);
+});
+
+test('meta present but header missing never alarms', () => {
+    const t = setup({ meta: 'old111' });
+    t.api.checkAssetVersion(resp(null));
+    assert.strictEqual(banner(t), null);
+});
+
+test('empty meta content is ignored (falls back to first response)', () => {
+    const t = setup({ meta: '  ' });
+    t.api.checkAssetVersion(resp('aaa'));
+    assert.strictEqual(t.api.getState().b, 'aaa');
+    assert.strictEqual(banner(t), null);
+});
+
+test('Reload in normal mode reloads directly with NO confirm', () => {
+    const t = setup();
+    t.api.checkAssetVersion(resp('aaa'));
+    t.api.checkAssetVersion(resp('bbb'));
+    banner(t).children[1].handlers.click();
+    assert.strictEqual(t.confirms.length, 0);
+    assert.strictEqual(t.reloaded(), 1);
+});
+
+test('Reload in warn mode asks first; cancel keeps the page, OK reloads', () => {
+    const no = setup({ modalOpen: true, confirmResult: false });
+    no.api.checkAssetVersion(resp('aaa'));
+    no.api.checkAssetVersion(resp('bbb'));
+    banner(no).children[1].handlers.click();
+    assert.deepStrictEqual(no.confirms, ['Reload now? Unsaved changes in the open dialog will be lost.']);
+    assert.strictEqual(no.reloaded(), 0, 'declined confirm must not reload');
+    const yes = setup({ modalOpen: true, confirmResult: true });
+    yes.api.checkAssetVersion(resp('aaa'));
+    yes.api.checkAssetVersion(resp('bbb'));
+    banner(yes).children[1].handlers.click();
+    assert.strictEqual(yes.confirms.length, 1);
+    assert.strictEqual(yes.reloaded(), 1);
+});
+
+test('warn vs normal mode is recomputed on every check, not only on pause/resume', () => {
+    const t = setup();
+    t.api.checkAssetVersion(resp('aaa'));
+    t.api.checkAssetVersion(resp('bbb'));
+    assert(!banner(t).classes.has('lcars-asset-banner-warn'));
+    t.api.setModal(true);                      // modal opens WITHOUT pauseAutoRefresh hook firing the refresh
+    t.api.checkAssetVersion(resp('bbb'));      // next poll, same mismatching value
+    assert(banner(t).classes.has('lcars-asset-banner-warn'));
+    assert(/Reload before saving/.test(banner(t).children[0].textContent));
+    t.api.setModal(false);
+    t.api.checkAssetVersion(resp('bbb'));
+    assert(!banner(t).classes.has('lcars-asset-banner-warn'));
 });
 
 console.log(`\n${n} tests passed`);

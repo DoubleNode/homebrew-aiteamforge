@@ -221,9 +221,36 @@ test('PROMOTE step refuses to advance while loading', () => {
     assert.ok(/if \(promoteModalState\.inFlight \|\| promoteModalState\.loading\) return;/.test(STEP_NEXT));
 });
 
+// A LOWER bound, not an exact pin: an exact `?v=3.91` match broke this suite on
+// the very next lcars.js bump (XACA-1376 -> 3.93). What this test protects is
+// that the 3.91 fix is not served under an OLDER cache-buster.
+function lcarsJsVersionAtLeast(html, min) {
+    const m = /js\/lcars\.js\?v=([0-9]+(?:\.[0-9]+)*)"/.exec(html);
+    if (!m) return false;
+    const a = m[1].split('.').map(Number);
+    const b = min.split('.').map(Number);
+    for (let i = 0; i < Math.max(a.length, b.length); i++) {
+        const x = a[i] || 0, y = b[i] || 0;
+        if (x !== y) return x > y;
+    }
+    return true;
+}
+
+[
+    ['equal',            '<script src="js/lcars.js?v=3.91"></script>', true],
+    ['higher minor',     '<script src="js/lcars.js?v=3.93"></script>', true],
+    ['higher major',     '<script src="js/lcars.js?v=4.0"></script>',  true],
+    ['lower is refused', '<script src="js/lcars.js?v=3.90"></script>', false],
+    ['missing stamp',    '<script src="js/lcars.js"></script>',        false],
+].forEach(([label, html, want]) => {
+    test('lcars.js version lower bound: ' + label, () => {
+        assert.strictEqual(lcarsJsVersionAtLeast(html, '3.91'), want);
+    });
+});
+
 test('index.html carries the bumped lcars.js asset version', () => {
     const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
-    assert.ok(/js\/lcars\.js\?v=3\.91"/.test(html));
+    assert.ok(lcarsJsVersionAtLeast(html, '3.91'));
 });
 
 process.on('beforeExit', () => {

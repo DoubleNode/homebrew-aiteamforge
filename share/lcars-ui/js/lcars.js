@@ -565,6 +565,11 @@ function calculateViewportPosition(element, preferredX, preferredY, options = {}
 // The server stamps board data / /api/status with X-LCARS-Asset-Version, a hash of
 // the ?v= cache-busters in index.html as served NOW. We keep the first value seen
 // as this tab's baseline; a later different value means this tab runs stale JS/CSS.
+// BOOT BASELINE (XACA-1376-013): the server injects <meta name="lcars-asset-version">
+// into index.html with the fingerprint of the page it served, so that value (what
+// THIS tab actually loaded) is preferred over the first board response - a tab
+// restored from cache after a deploy would otherwise adopt the new value and never
+// warn. No meta (old server) -> fall back to the first response.
 // Piggybacks on loadBoardData() - deliberately NO new timer. A missing/empty header
 // (old server) never alarms.
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -575,7 +580,25 @@ let assetVersionCurrent = null;    // latest mismatching fingerprint (drives the
 
 const ASSET_BANNER_ID = 'lcars-asset-banner';
 const ASSET_BANNER_TEXT = 'LCARS was updated \u2014 reload to get the latest version';
-const ASSET_BANNER_MODAL_TEXT = 'LCARS was updated \u2014 finish or reload before saving: this tab may send outdated requests';
+const ASSET_BANNER_MODAL_TEXT = 'LCARS was updated \u2014 this tab may send outdated requests. Reload before saving (unsaved changes will be lost).';
+const ASSET_RELOAD_CONFIRM_TEXT = 'Reload now? Unsaved changes in the open dialog will be lost.';
+
+/** Fingerprint of the page this tab loaded, from the server-injected <meta>; null if absent. */
+function readBootAssetVersion() {
+    try {
+        const meta = document.querySelector('meta[name="lcars-asset-version"]');
+        const v = meta ? (meta.getAttribute('content') || '').trim() : '';
+        return v || null;
+    } catch (e) {
+        return null;
+    }
+}
+
+/** Reload click: direct in normal mode; confirm first when a modal may hold unsaved input. */
+function reloadFromAssetBanner() {
+    if (isModalOpenForAssetBanner() && !confirm(ASSET_RELOAD_CONFIRM_TEXT)) return;
+    location.reload();
+}
 
 /** True when a modal (a place where a mutating action may be pending) is open. */
 function isModalOpenForAssetBanner() {
@@ -612,6 +635,7 @@ function evaluateAssetVersion(state, headerValue) {
 function checkAssetVersion(response) {
     try {
         const header = response && response.headers ? response.headers.get('X-LCARS-Asset-Version') : null;
+        if (assetVersionBaseline === null) assetVersionBaseline = readBootAssetVersion();
         const next = evaluateAssetVersion(
             { baseline: assetVersionBaseline, dismissed: assetVersionDismissed, current: assetVersionCurrent },
             header
@@ -620,6 +644,7 @@ function checkAssetVersion(response) {
         assetVersionCurrent = next.current;
         if (next.action === 'show') showAssetBanner();
         else if (next.action === 'hide') hideAssetBanner();
+        refreshAssetBannerMode();  // re-pick warn vs normal on every check, not only pause/resume
     } catch (e) {
         console.log('[LCARS] asset version check skipped:', e);
     }
@@ -642,7 +667,7 @@ function showAssetBanner() {
         reload.type = 'button';
         reload.className = 'lcars-asset-banner-btn lcars-asset-banner-reload';
         reload.textContent = 'Reload';
-        reload.addEventListener('click', () => location.reload());
+        reload.addEventListener('click', reloadFromAssetBanner);
         bar.appendChild(reload);
 
         const dismiss = document.createElement('button');
