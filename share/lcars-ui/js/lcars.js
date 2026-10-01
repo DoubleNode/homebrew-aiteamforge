@@ -691,6 +691,27 @@ function refreshAssetBannerMode() {
     bar.classList.toggle('lcars-asset-banner-warn', warn);
     const msg = bar.querySelector('.lcars-asset-banner-text');
     if (msg) msg.textContent = warn ? ASSET_BANNER_MODAL_TEXT : ASSET_BANNER_TEXT;
+    syncAssetBannerModalOffset(warn ? bar : null);
+}
+
+/**
+ * XACA-1376-020: while the warn bar is up, push open modals below it instead of
+ * covering their header/close X (anchoring the bar to the bottom would cover
+ * their Save footer instead). Pass the bar to apply, null to clear. CSS reads
+ * body.lcars-asset-banner-warn-active + --lcars-asset-banner-h.
+ */
+function syncAssetBannerModalOffset(bar) {
+    try {
+        const body = document.body;
+        if (!body || !body.classList) return;
+        body.classList.toggle('lcars-asset-banner-warn-active', !!bar);
+        if (bar && document.documentElement && document.documentElement.style) {
+            const h = bar.offsetHeight || 56;
+            document.documentElement.style.setProperty('--lcars-asset-banner-h', h + 'px');
+        }
+    } catch (e) {
+        // cosmetic only - never let layout bookkeeping break the banner
+    }
 }
 
 function dismissAssetBanner() {
@@ -701,6 +722,7 @@ function dismissAssetBanner() {
 function hideAssetBanner() {
     const bar = document.getElementById(ASSET_BANNER_ID);
     if (bar) bar.hidden = true;
+    syncAssetBannerModalOffset(null);
 }
 
 if (typeof window !== 'undefined') {

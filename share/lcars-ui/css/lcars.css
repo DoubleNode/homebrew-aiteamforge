@@ -18747,6 +18747,27 @@ body.roadmap-printing #roadmap-content {
     outline-offset: 2px;
 }
 
+/* XACA-1376-020: warn mode means a modal is open. Instead of overlapping its
+   header/close X (or, if anchored to the bottom, its Save footer), reserve the
+   bar's measured height (--lcars-asset-banner-h, set by lcars.js) at the top
+   of the full-screen modal containers so they centre in the space below it. */
+body.lcars-asset-banner-warn-active .lcars-modal,
+body.lcars-asset-banner-warn-active .lcars-modal-overlay {
+    padding-top: calc(var(--lcars-asset-banner-h, 56px) + 16px);
+    box-sizing: border-box;
+}
+
+/* The release dialog is a .lcars-modal NESTED in an overlay: it is the box,
+   not a container, so it must not get the reserve twice. */
+body.lcars-asset-banner-warn-active .lcars-modal-overlay .lcars-modal {
+    padding-top: 0;
+}
+
+body.lcars-asset-banner-warn-active .lcars-modal-content,
+body.lcars-asset-banner-warn-active .lcars-modal-overlay .lcars-modal {
+    max-height: min(90vh, calc(100vh - var(--lcars-asset-banner-h, 56px) - 32px));
+}
+
 @media (max-width: 600px) {
     .lcars-asset-banner {
         left: 8px;

@@ -37,8 +37,11 @@ function makeEl(tag) {
 const modalStub = rendered => ({ getClientRects: () => (rendered ? [{}] : []) });
 function setup({ modalOpen = false, hiddenModals = 3, meta = null, confirmResult = true } = {}) {
     const body = makeEl('body');
+    body.classList = { toggle: (c, on) => (on ? body.classes.add(c) : body.classes.delete(c)) };
+    const rootVars = {};
     const doc = {
         body,
+        documentElement: { style: { setProperty: (k, v) => { rootVars[k] = v; } } },
         createElement: makeEl,
         querySelector: sel => (meta !== null && sel === 'meta[name="lcars-asset-version"]'
             ? { getAttribute: () => meta } : null),
@@ -64,7 +67,7 @@ function setup({ modalOpen = false, hiddenModals = 3, meta = null, confirmResult
         'setModal: on => { refreshPaused = on; }, ' +
         'getState: () => ({ b: assetVersionBaseline, d: assetVersionDismissed, c: assetVersionCurrent }) };');
     const api = fn(ctx.document, ctx.location, ctx.window, ctx.console, ctx.confirm, false);
-    return { api, doc, body, reloaded: () => reloaded, confirms };
+    return { api, doc, body, rootVars, reloaded: () => reloaded, confirms };
 }
 const resp = v => ({ headers: { get: () => v } });
 const banner = t => t.doc.getElementById('lcars-asset-banner');
@@ -223,6 +226,36 @@ test('Reload in warn mode asks first; cancel keeps the page, OK reloads', () => 
     banner(yes).children[1].handlers.click();
     assert.strictEqual(yes.confirms.length, 1);
     assert.strictEqual(yes.reloaded(), 1);
+});
+
+test('warn mode reserves the bar height above open modals; normal mode and hide clear it (XACA-1376-020)', () => {
+    const OFFSET = 'lcars-asset-banner-warn-active';
+    // normal mode: no modal open -> no offset
+    const n1 = setup();
+    n1.api.checkAssetVersion(resp('aaa'));
+    n1.api.checkAssetVersion(resp('bbb'));
+    assert(!n1.body.classes.has(OFFSET), 'normal mode must not shift modals');
+    // warn mode: offset on, height var published (stub has no layout -> 56px fallback)
+    const w = setup({ modalOpen: true });
+    w.api.checkAssetVersion(resp('aaa'));
+    w.api.checkAssetVersion(resp('bbb'));
+    assert(w.body.classes.has(OFFSET), 'warn mode must push modals below the bar');
+    assert.strictEqual(w.rootVars['--lcars-asset-banner-h'], '56px');
+    // returning to baseline hides the bar -> offset cleared
+    w.api.checkAssetVersion(resp('aaa'));
+    assert(!w.body.classes.has(OFFSET), 'hidden bar must release the modal offset');
+    // dismiss also clears it
+    const d = setup({ modalOpen: true });
+    d.api.checkAssetVersion(resp('aaa'));
+    d.api.checkAssetVersion(resp('bbb'));
+    d.api.dismissAssetBanner();
+    assert(!d.body.classes.has(OFFSET), 'dismiss must release the modal offset');
+});
+
+test('CSS reserves the bar height on BOTH modal containers and not twice on the nested release dialog', () => {
+    const css = fs.readFileSync(path.join(__dirname, '..', 'css', 'lcars.css'), 'utf8');
+    assert(/body\.lcars-asset-banner-warn-active \.lcars-modal,\s*body\.lcars-asset-banner-warn-active \.lcars-modal-overlay \{[^}]*padding-top: calc\(var\(--lcars-asset-banner-h/.test(css));
+    assert(/body\.lcars-asset-banner-warn-active \.lcars-modal-overlay \.lcars-modal \{\s*padding-top: 0;/.test(css));
 });
 
 test('warn vs normal mode is recomputed on every check, not only on pause/resume', () => {
