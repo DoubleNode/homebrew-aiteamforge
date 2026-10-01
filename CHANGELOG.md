@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+
+## [0.20.29] - 2026-10-01
 - **XACA-1308** — Stage B of the compaction P=50 rollout (stage gate PASSED 2026-10-01): `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=50` now ships in `share/templates/claude/settings.json.template` (`env`) and in `_xaca1283_upgrade_settings_key_paths` so upgrades deliver it; `tests/test-xaca-1283-settings-merge-env-and-scalar.sh` flipped to `XACA1283_STAGE=B`; test M1 relabelled "extracted-function harness" and its comment corrected, since the shipped upgrade script defines `_aitf_file_mode` (XACA-1308-012).
 - **XACA-1376** — LCARS stale-tab banner: `share/lcars-ui/server.py` sends `X-LCARS-Asset-Version` (hash of `index.html`'s `?v=` stamps, recomputed when index.html changes, no restart needed) on board data and `/api/status`, exposed via CORS; `lcars.js` compares it on the existing board refresh and shows a non-blocking "LCARS was updated - reload" bar (Reload / Dismiss; stronger wording only when a modal is actually open). Asset `lcars.js ?v=3.93`, `lcars.css ?v=32.39`.
   - XACA-1376 (gate round 1): the fingerprint hashes the SERVED form (incl. the serve-time `?v=<mtime>` on unstamped refs); index.html carries a boot-time `<meta name="lcars-asset-version">` so a cache-restored tab still warns; banner z-index above fullscreen home; clearer warn copy; Reload confirms when a dialog is open (`lcars.js ?v=3.94`, `lcars.css ?v=32.40`).
@@ -7745,7 +7747,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.28...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.29...HEAD
+[0.20.29]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.28...v0.20.29
 [0.20.28]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.27...v0.20.28
 [0.20.27]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.26...v0.20.27
 [0.20.26]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.25...v0.20.26
