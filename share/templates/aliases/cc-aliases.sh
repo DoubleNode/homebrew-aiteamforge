@@ -124,6 +124,21 @@ _cc_encode_project_dir() {
     echo "$dir" | sed 's|[/ ]|-|g; s|^-||'
 }
 
+# XACA-1074-018: does a transcript for <uuid> exist? Looks in the project dir
+# for <dir> (default $PWD) using the SAME cwd->project-dir encoding
+# _cc_save_session uses, then falls back to any project dir: that encoding only
+# maps "/" and " ", so a cwd containing "." or "_" would otherwise read as a
+# false "missing" and a perfectly good session would be treated as phantom.
+# A uuid is unique, so the any-dir match cannot hit another window's session.
+_cc_transcript_exists() {
+    local _tx_id="${1:-}" _tx_dir="${2:-$PWD}"
+    [[ -n "$_tx_id" ]] || return 1
+    [[ -f "$HOME/.claude/projects/-$(_cc_encode_project_dir "$_tx_dir")/${_tx_id}.jsonl" ]] && return 0
+    local -a _tx_hits
+    _tx_hits=( "$HOME"/.claude/projects/*/"${_tx_id}".jsonl(N) )
+    (( ${#_tx_hits} > 0 ))
+}
+
 # Print "-w<window_index>" when running inside tmux; return non-zero otherwise.
 # Scopes saved session files to a specific tmux window so two windows running
 # the same persona don't clobber each other's resume state.
@@ -630,6 +645,21 @@ ccc() {
         # work with --resume.
         local session_id saved_name saved_dir
         IFS='|' read -r session_id saved_name saved_dir < "$session_file"
+        # XACA-1074-018: self-heal a phantom sidecar. A pinned --continue whose
+        # claude wrote no transcript (no conversation / early exit) used to
+        # leave a sidecar for a uuid that does not exist; --resume of it fails
+        # and every re-stamp below would write it straight back, wedging the
+        # window. No transcript = no saved session: fall through to --continue.
+        # This MUST run before the launch-time re-stamp below. The sidecar is
+        # left in place (evidence; parking/migration belongs to XACA-1016).
+        if [[ -n "$session_id" ]]; then
+            local _ccc_chk_dir="$PWD"
+            [[ -n "$saved_dir" && -d "$saved_dir" ]] && _ccc_chk_dir="$saved_dir"
+            if ! _cc_transcript_exists "$session_id" "$_ccc_chk_dir"; then
+                print -u2 "ccc: XACA-1074-018: sidecar ${session_file##*/} records session ${session_id} but no transcript exists for it; treating as no saved session (sidecar left in place)"
+                session_id=""
+            fi
+        fi
         if [[ -n "$session_id" ]]; then
             # XACA-0977 D1/D2 parity: cross-account resume guard, via the
             # shared helper (design §1.1, §5) — same implementation dev ccc
@@ -664,7 +694,14 @@ ccc() {
             # XACA-1074-002: pass the id this branch already resumed. The bare
             # call fell back to `ls -t` on the shared project dir, so windows
             # sharing a cwd stamped each other's newest transcript here.
-            _cc_save_session "$session_id"
+            # XACA-1074-018: only if claude actually left a transcript for this
+            # id; re-stamping a phantom (or one that vanished) is what wedged
+            # the window. Absent -> no write, any existing sidecar stays.
+            if _cc_transcript_exists "$session_id"; then
+                _cc_save_session "$session_id"
+            else
+                print -u2 "ccc: XACA-1074-018: no transcript for ${session_id}; not saving it for ${SESSION_CODE}${window_suffix}"
+            fi
             _cc_record_session_account "$session_id" "$resolved_account_id" "$resolved_account_nickname"
             if command -v kb-clear &> /dev/null; then
                 kb-clear
@@ -693,7 +730,19 @@ ccc() {
     _cc_run_claude_with_auth "$_CC_RESOLVED_TOKEN" "$_CC_RESOLVED_AUTH_TYPE" \
         --permission-mode bypassPermissions "${_ccc_cont_args[@]}"
     local _ccc_claude_rc=$?
-    _cc_save_session "$_ccc_cont_sid"
+    # XACA-1074-018: a pinned id is only real if claude wrote its transcript.
+    # `--continue` with no prior conversation exits 1 ("No conversation found
+    # to continue") and creates nothing, and a user who quits before the first
+    # message may leave nothing either; saving the pin then plants a phantom.
+    # Skip the save entirely in that case. The unpinned fallback keeps the bare
+    # save (probe + sibling guard), which finds real transcripts only.
+    if [[ -z "$_ccc_cont_sid" ]]; then
+        _cc_save_session
+    elif _cc_transcript_exists "$_ccc_cont_sid"; then
+        _cc_save_session "$_ccc_cont_sid"
+    else
+        print -u2 "ccc: XACA-1074-018: claude left no transcript for pinned session ${_ccc_cont_sid} (rc=${_ccc_claude_rc}); not saving it"
+    fi
     if command -v kb-clear &> /dev/null; then
         kb-clear
     fi

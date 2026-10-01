@@ -7,6 +7,9 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 - **XACA-1074**: `share/templates/aliases/cc-aliases.sh` mirrors the dev `ccc` shared-cwd fix: the post-`--resume` save passes the resumed session id, the `--continue` path pins a fresh uuid via `--continue --fork-session --session-id` (feature-detected, falls back to bare `--continue`), and `_cc_save_session`'s `ls -t` fallback refuses a uuid already recorded in another window's sidecar. Windows sharing a cwd no longer stamp each other's conversation.
+  XACA-1074-018: the post-exit saves in `ccc` are gated on the pinned/resumed id's transcript existing (a pinned `--continue` that wrote no
+  transcript no longer plants a phantom sidecar), and the resume branch treats a sidecar with no transcript as no saved session and falls
+  through to `--continue` with a stderr notice (sidecar kept). Mirrors the dev change.
 - **XACA-1323** — mode-only: `share/scripts/cc-credential-team-resolver.sh` and `share/scripts/kb-release-config-validate.sh` are now 100755 to match their canonical sources (`sync-tap.sh` is mode-blind, so the exec bit is set by hand in the tap).
 - **XACA-1347** (PR B3): `release_walkthrough.py` says why an answer was rejected, shows `Case N of M` and a resume cue, and prints a readable end summary (on its own line); `kb-release walkthrough --json` (template + `release_stage_cli.py`) keeps the one-line JSON summary.
 
