@@ -49,9 +49,16 @@
 # Each run appends exactly ONE line to the watch log (default
 # ~/aiteamforge-backups/compaction-watch/watch.log, override with
 # $COMPACTION_WATCH_LOG — the test suite always does):
-#   kb-compaction-quality-watch: RESULT=<verdict> host=<h> since=<t> anchors=<n>
-#     M=<pp> X=<pp> s1=<r> rc=<n> mode=<m> at=<ISO8601 UTC>      (one line)
+#   <ISO8601 UTC> kb-compaction-quality-watch: RESULT=<verdict> host=<h> since=<t>
+#     anchors=<n> M=<pp> X=<pp> s1=<r> rc=<n> mode=<m> at=<ISO8601 UTC> trigger=<scheduled|manual>
+#                                                                   (one line)
 # Figures on that line are family 1M's. ERROR runs log RESULT=ERROR.
+# XACA-1359-004: every line is DATE-STAMPED at the front (so a per-day G4 count
+# is greppable) and carries trigger=. trigger=scheduled is set ONLY when the
+# variable CQW_TRIGGER is exactly "scheduled" (the LaunchAgent sets it);
+# anything else - including unset - is trigger=manual. Fail toward manual: an
+# ad-hoc run can never count as a scheduled one. Lines written before this
+# change have no leading timestamp and no trigger= and are uncountable for G4.
 #
 # RUNTIME CONTRACT (doc §4): /bin/bash 3.2 and bash 5.x; python3 STDLIB ONLY;
 # no jq, no git, no repo-relative paths, no sourcing of kanban-helpers.sh or
@@ -75,8 +82,10 @@ _cqw_log_error() {
     mkdir -p "$_cqw_dir" 2>/dev/null
     _cqw_host=$(hostname 2>/dev/null | tr -s ' \t' '__')
     _cqw_now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    printf 'kb-compaction-quality-watch: RESULT=ERROR host=%s reason=%s rc=2 at=%s\n' \
-        "${_cqw_host:-unknown}" "$1" "$_cqw_now" >>"$_cqw_log" 2>/dev/null
+    _cqw_trig=manual
+    [ "${CQW_TRIGGER:-}" = "scheduled" ] && _cqw_trig=scheduled
+    printf '%s kb-compaction-quality-watch: RESULT=ERROR host=%s reason=%s rc=2 at=%s trigger=%s\n' \
+        "$_cqw_now" "${_cqw_host:-unknown}" "$1" "$_cqw_now" "$_cqw_trig" >>"$_cqw_log" 2>/dev/null
 }
 
 if ! command -v python3 >/dev/null 2>&1; then
@@ -478,10 +487,12 @@ def log_line(verdict, host, since, fields, rc, mode):
     path = os.environ.get("COMPACTION_WATCH_LOG") or os.path.join(
         os.path.expanduser("~"), "aiteamforge-backups", "compaction-watch", "watch.log")
     h = re.sub(r"\s+", "_", host or "unknown")
-    line = "%s: RESULT=%s host=%s since=%s" % (TOOL, verdict, h, since or "-")
+    ts = iso(now_utc())
+    trig = "scheduled" if os.environ.get("CQW_TRIGGER") == "scheduled" else "manual"
+    line = "%s %s: RESULT=%s host=%s since=%s" % (ts, TOOL, verdict, h, since or "-")
     for kk, vv in fields:
         line += " %s=%s" % (kk, "NA" if vv is None else vv)
-    line += " rc=%d mode=%s at=%s\n" % (rc, mode, iso(now_utc()))
+    line += " rc=%d mode=%s at=%s trigger=%s\n" % (rc, mode, ts, trig)
     try:
         d = os.path.dirname(path)
         if d and not os.path.isdir(d):

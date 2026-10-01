@@ -668,6 +668,31 @@ echo "A. Formula shape and constants in the installed binary"
 # matches on STRUCTURE with wildcard identifiers, never on a specific name.
 IDENT='[A-Za-z0-9_$]+'
 
+# XACA-1359-003: the W6 max-output clamp anchor (A0, and A5's identifier harvest).
+# ONE definition, used by both sites -- they were copy-pasted before, and a
+# shape drift that fixes one and not the other would leave A5 reading a
+# different site than A0 vouched for.
+#
+# SHAPE HISTORY (the minifier renames identifiers every build; only the SHAPE of
+# the clamp's first argument has moved):
+#   2.1.274/275 (derived):  let r=Math.min(h4e(e),Lkn),s=f()?...      arg = call on a PLAIN ident
+#   2.1.282..2.1.286:       let r=Math.min(jit(e.model),Xmt),s=Zf()?n:void 0,...
+#                                                                     arg = call on a MEMBER expr
+# Derived against 2.1.286 (2026-09-30). Drift first SEEN in 2.1.282 -- the
+# earliest build on disk when it was investigated; first-drift version is
+# somewhere in 2.1.276-2.1.282 and was never measured. The clamp itself was NOT
+# removed or changed (K=20000, one definition site); only the call's argument
+# became `e.model`. The old pattern `IDENT\(IDENT\)` could not match the dot, so
+# A0 reported "GONE" and A5/B/C cascaded to could-not-verify.
+#
+# The optional `(\.IDENT)?` accepts BOTH shapes. It is a real ERE group
+# quantifier (portable under BSD and GNU grep -E); the trailing `\(\)\?` is
+# deliberately LITERAL `()?` -- in ERE a backslash before a special char makes it
+# literal, so it matches the ternary `s=f()?x:y`, NOT an optional group.
+# Cardinality is asserted EXACTLY ONCE (0 = cannot locate, >1 = ambiguous), and
+# the pattern embeds no expected value -- K is wildcarded and read, then compared.
+A0_ANCHOR="Math\.min\(${IDENT}\(${IDENT}(\.${IDENT})?\),${IDENT}\),${IDENT}=${IDENT}\(\)\?"
+
 bin_has() { LC_ALL=C grep -a -q -E "$1" "$BIN"; }
 
 # XACA-1277-018 (PR #927 review): escape `$` before interpolating a harvested
@@ -718,10 +743,10 @@ RESERVE_HEADROOM=$(LC_ALL=C grep -a -o -E "=${IDENT}-[0-9]+,${IDENT}=${IDENT}\.t
 # "matches EXACTLY ONCE"; head -1 asserted no such thing. Enforce the claim
 # rather than merely stating it -- a second match means we cannot tell which
 # site is the real W6, and picking one would be a guess dressed as a reading.
-_A0_HITS=$(LC_ALL=C grep -a -o -E "Math\.min\(${IDENT}\(${IDENT}\),${IDENT}\),${IDENT}=${IDENT}\(\)\?" "$BIN" | wc -l | tr -d ' ')
+_A0_HITS=$(LC_ALL=C grep -a -o -E "$A0_ANCHOR" "$BIN" | wc -l | tr -d ' ')
 case "$_A0_HITS" in ''|*[!0-9]*) _A0_HITS=0 ;; esac
 if [ "$_A0_HITS" -eq 1 ]; then
-  RESERVE_OUTPUT_ID=$(LC_ALL=C grep -a -o -E "Math\.min\(${IDENT}\(${IDENT}\),${IDENT}\),${IDENT}=${IDENT}\(\)\?" "$BIN" \
+  RESERVE_OUTPUT_ID=$(LC_ALL=C grep -a -o -E "$A0_ANCHOR" "$BIN" \
                        | head -1 | sed -E 's/^Math\.min\([^,]*,([A-Za-z0-9_$]+)\).*$/\1/')
 else
   RESERVE_OUTPUT_ID=""
@@ -770,6 +795,10 @@ fi
 #   function W6(e,n){let r=Math.min(h4e(e),Lkn)
 # is 2.1.275's
 #   function T6(e,n){let r=Math.min(dKe(e),xkn)
+# and (XACA-1359-003, derived against 2.1.286; drift first seen <= 2.1.282) the
+# current shape moved the argument to a member expression:
+#   function rV(e,n){let r=Math.min(jit(e.model),Xmt),s=Zf()?n:void 0,{window:g}=Ww(e,s);return g-r}
+# See A0_ANCHOR above for the accepted-shape history.
 # A check keyed on `function W6\(` therefore reports "PREMISE DRIFTED" on EVERY
 # release regardless of whether the formula changed -- and a ratchet that cries
 # wolf each release is one nobody reads.
@@ -783,10 +812,19 @@ fi
 # -- `precomputeBufferFraction` (A2), `tengu_amber_rokovoko` (A3),
 # `testPctOverride` (A4). Measured: the name-free shape below matches EXACTLY
 # ONCE in both 2.1.274 and 2.1.275.
-if bin_has "Math\.min\(${IDENT}\(${IDENT}\),${IDENT}\),${IDENT}=${IDENT}\(\)\?"; then
-  SHAPE_TOTAL=$((SHAPE_TOTAL+1)); pass "A0 W6 max-output clamp site present: W6 = window - min(maxOutputTokens, K)"
+# XACA-1359-003: strict cardinality. Exactly one site passes; zero and >1 both
+# FAIL (non-zero rc). The wording says only what was MEASURED: the anchor could
+# not be located. Whether the clamp was removed, or merely re-shaped by the
+# minifier (what actually happened in 2.1.282), is not decidable from a grep
+# miss -- asserting "GONE"/"formula changed" as fact is what sent the first
+# investigation after a clamp that was intact.
+SHAPE_TOTAL=$((SHAPE_TOTAL+1))
+if [ "$_A0_HITS" -eq 1 ]; then
+  pass "A0 W6 max-output clamp site present (exactly 1): W6 = window - min(maxOutputTokens, K)"
+elif [ "$_A0_HITS" -gt 1 ]; then
+  SHAPE_FAILS=$((SHAPE_FAILS+1)); fail "A0 the W6 max-output clamp anchor matched $_A0_HITS sites — ambiguous; refusing to guess which is the real one. Re-derive the anchor against this build."
 else
-  SHAPE_TOTAL=$((SHAPE_TOTAL+1)); SHAPE_FAILS=$((SHAPE_FAILS+1)); fail "A0 the W6 max-output clamp site is GONE from the binary — the formula's shape has changed; re-derive it before trusting any threshold below."
+  SHAPE_FAILS=$((SHAPE_FAILS+1)); fail "A0 could not locate the W6 max-output clamp anchor (0 matches) — the clamp was removed OR the minified shape drifted; a grep miss cannot tell which. Re-derive from the binary (see the A0_ANCHOR shape history) before trusting any threshold below."
 fi
 
 if bin_has "Math\.min\(Math\.floor\(${IDENT}\*\(${IDENT}/100\)\),${IDENT}\)"; then
