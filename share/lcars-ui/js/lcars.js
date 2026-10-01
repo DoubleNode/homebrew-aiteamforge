@@ -561,6 +561,128 @@ function calculateViewportPosition(element, preferredX, preferredY, options = {}
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// STALE-ASSET BANNER (XACA-1376)
+// The server stamps board data / /api/status with X-LCARS-Asset-Version, a hash of
+// the ?v= cache-busters in index.html as served NOW. We keep the first value seen
+// as this tab's baseline; a later different value means this tab runs stale JS/CSS.
+// Piggybacks on loadBoardData() - deliberately NO new timer. A missing/empty header
+// (old server) never alarms.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+let assetVersionBaseline = null;   // fingerprint captured from the first response that carried one
+let assetVersionDismissed = null;  // mismatching fingerprint the user dismissed (re-arms when it changes)
+let assetVersionCurrent = null;    // latest mismatching fingerprint (drives the banner)
+
+const ASSET_BANNER_ID = 'lcars-asset-banner';
+const ASSET_BANNER_TEXT = 'LCARS was updated \u2014 reload to get the latest version';
+const ASSET_BANNER_MODAL_TEXT = 'LCARS was updated \u2014 finish or reload before saving: this tab may send outdated requests';
+
+/** True when a modal (a place where a mutating action may be pending) is open. */
+function isModalOpenForAssetBanner() {
+    if (typeof refreshPaused !== 'undefined' && refreshPaused) return true;
+    // ~100 modals live permanently in index.html, hidden via display:none, so
+    // presence means nothing - only a RENDERED one counts. getClientRects() is
+    // empty for display:none (self or ancestor) and works for position:fixed.
+    return Array.prototype.some.call(
+        document.querySelectorAll('.lcars-modal, .lcars-modal-overlay'),
+        el => el.getClientRects().length > 0
+    );
+}
+
+/**
+ * Pure comparator: given the response header value, return the next state.
+ * Exported on window for tests. action: 'none' | 'show' | 'hide'.
+ */
+function evaluateAssetVersion(state, headerValue) {
+    const v = (headerValue || '').trim();
+    if (!v) return { baseline: state.baseline, dismissed: state.dismissed, current: state.current, action: 'none' };
+    if (state.baseline === null) {
+        return { baseline: v, dismissed: state.dismissed, current: null, action: 'none' };
+    }
+    if (v === state.baseline) {
+        return { baseline: state.baseline, dismissed: state.dismissed, current: null, action: 'hide' };
+    }
+    if (v === state.dismissed) {
+        return { baseline: state.baseline, dismissed: state.dismissed, current: v, action: 'none' };
+    }
+    return { baseline: state.baseline, dismissed: state.dismissed, current: v, action: 'show' };
+}
+
+/** Called from loadBoardData with the fetch Response. Never throws. */
+function checkAssetVersion(response) {
+    try {
+        const header = response && response.headers ? response.headers.get('X-LCARS-Asset-Version') : null;
+        const next = evaluateAssetVersion(
+            { baseline: assetVersionBaseline, dismissed: assetVersionDismissed, current: assetVersionCurrent },
+            header
+        );
+        assetVersionBaseline = next.baseline;
+        assetVersionCurrent = next.current;
+        if (next.action === 'show') showAssetBanner();
+        else if (next.action === 'hide') hideAssetBanner();
+    } catch (e) {
+        console.log('[LCARS] asset version check skipped:', e);
+    }
+}
+
+function showAssetBanner() {
+    let bar = document.getElementById(ASSET_BANNER_ID);
+    if (!bar) {
+        bar = document.createElement('div');
+        bar.id = ASSET_BANNER_ID;
+        bar.className = 'lcars-asset-banner';
+        bar.setAttribute('role', 'status');
+        bar.setAttribute('aria-live', 'polite');
+
+        const msg = document.createElement('span');
+        msg.className = 'lcars-asset-banner-text';
+        bar.appendChild(msg);
+
+        const reload = document.createElement('button');
+        reload.type = 'button';
+        reload.className = 'lcars-asset-banner-btn lcars-asset-banner-reload';
+        reload.textContent = 'Reload';
+        reload.addEventListener('click', () => location.reload());
+        bar.appendChild(reload);
+
+        const dismiss = document.createElement('button');
+        dismiss.type = 'button';
+        dismiss.className = 'lcars-asset-banner-btn lcars-asset-banner-dismiss';
+        dismiss.textContent = 'Dismiss';
+        dismiss.addEventListener('click', dismissAssetBanner);
+        bar.appendChild(dismiss);
+
+        document.body.appendChild(bar);
+    }
+    bar.hidden = false;
+    refreshAssetBannerMode();
+}
+
+/** Re-pick the wording (stronger when a modal is open). Safe to call anytime. */
+function refreshAssetBannerMode() {
+    const bar = document.getElementById(ASSET_BANNER_ID);
+    if (!bar || bar.hidden) return;
+    const warn = isModalOpenForAssetBanner();
+    bar.classList.toggle('lcars-asset-banner-warn', warn);
+    const msg = bar.querySelector('.lcars-asset-banner-text');
+    if (msg) msg.textContent = warn ? ASSET_BANNER_MODAL_TEXT : ASSET_BANNER_TEXT;
+}
+
+function dismissAssetBanner() {
+    assetVersionDismissed = assetVersionCurrent;
+    hideAssetBanner();
+}
+
+function hideAssetBanner() {
+    const bar = document.getElementById(ASSET_BANNER_ID);
+    if (bar) bar.hidden = true;
+}
+
+if (typeof window !== 'undefined') {
+    window.evaluateAssetVersion = evaluateAssetVersion;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // DATA LOADING
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -583,6 +705,7 @@ async function loadBoardData() {
         if (!response.ok) {
             throw new Error(`HTTP error! status: ${response.status}`);
         }
+        checkAssetVersion(response);  // XACA-1376: stale-asset banner (no extra request)
         boardData = await response.json();
 
         // XACA-0056: Also fetch archived releases for release name lookups
@@ -10514,6 +10637,7 @@ function stopAutoRefresh() {
  */
 function pauseAutoRefresh() {
     refreshPaused = true;
+    refreshAssetBannerMode();  // XACA-1376
     console.log('[LCARS] Auto-refresh paused (modal open)');
 }
 
@@ -10523,6 +10647,7 @@ function pauseAutoRefresh() {
  */
 function resumeAutoRefresh() {
     refreshPaused = false;
+    refreshAssetBannerMode();  // XACA-1376
     console.log('[LCARS] Auto-refresh resumed');
 }
 

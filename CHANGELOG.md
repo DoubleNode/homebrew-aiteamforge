@@ -6,6 +6,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1376** — LCARS stale-tab banner: `share/lcars-ui/server.py` sends `X-LCARS-Asset-Version` (hash of `index.html`'s `?v=` stamps, recomputed when index.html changes, no restart needed) on board data and `/api/status`, exposed via CORS; `lcars.js` compares it on the existing board refresh and shows a non-blocking "LCARS was updated - reload" bar (Reload / Dismiss; stronger wording only when a modal is actually open). Asset `lcars.js ?v=3.93`, `lcars.css ?v=32.39`.
 - **XACA-1359** — `share/scripts/kb-compaction-premise-check.sh`: A0 anchor accepts the 2.1.282+ minified clamp shape (`jit(e.model)`) as well as the old one, requires exactly one match (fail-closed); `share/scripts/kb-compaction-quality-watch.sh`: watch.log lines are UTC date-stamped and tagged `trigger=scheduled|manual`.
 - **XACA-1347** — new `kanban-hooks/release_providers.py` (per-team `test-providers.json` loader/validator, `release-test-providers/v1`, GAMMA readOnly/prodSafe enforcement) and `kanban-hooks/release_parsers.py` (tap/junit/jsonl/line-regex stage-test output parsers, spec 6.4 parent/child grading, `<provider>::harness` FAIL). Not wired in yet.
   - XACA-1347 (PR B1): new `kanban-hooks/release_runner.py` (stage test runner) and `POST /api/releases/<id>/stages/<STAGE>/tests` in `lcars-ui/server.py`; `release_parsers.py` accepts Maven Surefire rerun elements (non-grading).

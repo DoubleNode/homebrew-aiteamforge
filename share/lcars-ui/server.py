@@ -4056,6 +4056,40 @@ def _build_by_account_response(
 _COPYRIGHT_PLACEHOLDER_VALUES: frozenset = frozenset({'<TBD-per-engagement>', '<TBD>'})
 
 
+# ── XACA-1376: asset fingerprint ("LCARS was updated - reload") ─────────────
+# A short stable hash of the local `?v=` cache-buster stamps in index.html AS IT
+# WOULD BE SERVED NOW. A tab whose boot-time value differs from what the server
+# says now is running stale JS/CSS. Recomputed whenever index.html's (mtime, size)
+# changes, so a `git pull` without a server restart still moves the value.
+ASSET_VERSION_HEADER = 'X-LCARS-Asset-Version'
+_ASSET_STAMP_RE = re.compile(r'(?:src|href)="([^"?:]+)\?v=([^"]+)"')
+_ASSET_VERSION_CACHE = {'key': None, 'value': None}
+_ASSET_VERSION_LOCK = threading.Lock()
+
+
+def compute_asset_version(index_path=None):
+    """Return the 12-hex asset fingerprint, or None on ANY error (fail soft)."""
+    try:
+        path = Path(index_path) if index_path is not None else UI_DIR / 'index.html'
+        st = path.stat()
+        key = (str(path), st.st_mtime_ns, st.st_size)
+        with _ASSET_VERSION_LOCK:
+            if _ASSET_VERSION_CACHE['key'] == key:
+                return _ASSET_VERSION_CACHE['value']
+        html = path.read_text(encoding='utf-8', errors='replace')
+        stamps = sorted({f'{m.group(1)}?v={m.group(2)}'
+                         for m in _ASSET_STAMP_RE.finditer(html)})
+        if not stamps:
+            return None
+        value = hashlib.sha256('\n'.join(stamps).encode('utf-8')).hexdigest()[:12]
+        with _ASSET_VERSION_LOCK:
+            _ASSET_VERSION_CACHE['key'] = key
+            _ASSET_VERSION_CACHE['value'] = value
+        return value
+    except Exception:
+        return None
+
+
 class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     """Custom handler for LCARS Kanban Monitor"""
 
@@ -4251,6 +4285,18 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             _log_cors_refusal(host, origin)
             return
         self.send_header('Access-Control-Allow-Origin', allowed)
+        # XACA-1376: cross-port fetches can only read custom response headers
+        # that are explicitly exposed.
+        self.send_header('Access-Control-Expose-Headers', ASSET_VERSION_HEADER)
+
+    def _send_asset_version_header(self):
+        """XACA-1376: emit X-LCARS-Asset-Version; omit (never fail) on any error."""
+        try:
+            value = compute_asset_version()
+            if value:
+                self.send_header(ASSET_VERSION_HEADER, value)
+        except Exception:
+            pass
 
     def _send_auth_401(self):
         """Contract §4 — byte-exact 401. Deliberately does NOT reuse
@@ -19939,6 +19985,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_header('Content-Type', 'application/json')
                 self._send_cors_headers()
                 self.send_header('Cache-Control', 'no-cache')
+                self._send_asset_version_header()
                 self.end_headers()
                 self.wfile.write(json.dumps(data, indent=2).encode())
             except Exception as e:
@@ -19985,6 +20032,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
         self._send_cors_headers()
+        self._send_asset_version_header()
         self.end_headers()
         self.wfile.write(json.dumps(status, indent=2).encode())
 

@@ -11,6 +11,12 @@ All notable changes to the LCARS Kanban Workflow Monitor will be documented in t
 
 ## [Unreleased]
 
+- **XACA-1376: stale-asset "LCARS was updated - reload" banner.** Server sends `X-LCARS-Asset-Version` (hash of index.html's `?v=` stamps,
+  recomputed when index.html's mtime/size changes) on board data and `/api/status`, exposed via CORS. `lcars.js` baselines the first value,
+  compares inside the existing `loadBoardData()` (no new poller, missing header never alarms) and shows a non-blocking aria-live bar
+  (Reload / Dismiss-until-next-change; stronger wording when a modal is open). Styles in `lcars.css`; bumped `lcars.js?v=3.92`, `lcars.css?v=32.39`.
+  Fix: the modal check now counts only RENDERED modals (hidden ones are always in the DOM), so the stronger wording no longer always shows (`lcars.js?v=3.93`).
+
 - **XACA-1184-003: the legacy `anthropic_*` projection is retired from `server.py` — write side
   and read side.** `_set_team_ai_credential()` now writes `ai.credential` and nothing else; the
   three derived `anthropic_account_id` / `anthropic_account_nickname` / `anthropic_api_key_env_var`

@@ -18675,3 +18675,78 @@ body.roadmap-printing #roadmap-content {
         display: none !important;
     }
 }
+
+/* ── XACA-1376: stale-asset "LCARS was updated - reload" banner ───────────────
+   Non-blocking: fixed strip above modals, never covers the page; only the bar
+   itself takes pointer events. Tokens only, so it follows the active palette. */
+.lcars-asset-banner {
+    position: fixed;
+    top: 8px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 10001;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+    max-width: calc(100vw - 32px);
+    padding: 8px 14px;
+    background: var(--lcars-darker);
+    color: var(--lcars-peach);
+    border: 2px solid var(--lcars-orange);
+    border-radius: 20px;
+    box-shadow: 0 0 18px rgba(255, 153, 0, 0.35);
+    font-size: 0.9rem;
+    line-height: 1.3;
+}
+
+.lcars-asset-banner[hidden] {
+    display: none;
+}
+
+.lcars-asset-banner.lcars-asset-banner-warn {
+    border-color: var(--lcars-red);
+    color: var(--lcars-white);
+    box-shadow: 0 0 18px rgba(204, 68, 68, 0.5);
+}
+
+.lcars-asset-banner-text {
+    flex: 1 1 200px;
+}
+
+.lcars-asset-banner-btn {
+    border: none;
+    border-radius: 14px;
+    padding: 4px 14px;
+    min-height: 28px;
+    font: inherit;
+    font-weight: bold;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--lcars-black);
+    background: var(--lcars-orange);
+    cursor: pointer;
+}
+
+.lcars-asset-banner-dismiss {
+    background: var(--lcars-lavender);
+}
+
+.lcars-asset-banner-btn:hover {
+    filter: brightness(1.15);
+}
+
+.lcars-asset-banner-btn:focus-visible {
+    outline: 2px solid var(--lcars-white);
+    outline-offset: 2px;
+}
+
+@media (max-width: 600px) {
+    .lcars-asset-banner {
+        left: 8px;
+        right: 8px;
+        transform: none;
+        max-width: none;
+        justify-content: flex-end;
+    }
+}
