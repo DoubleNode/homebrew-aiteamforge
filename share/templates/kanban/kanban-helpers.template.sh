@@ -25010,8 +25010,8 @@ kb-release-test() {
 # Interactive manual walkthrough for the CURRENT stage's manual provider.
 # Usage: kb-release walkthrough <REL-ID> [--provider <name>] [--lead <name>]
 kb-release-walkthrough() {
-    local release_id="" opt_provider="" opt_lead=""
-    local usage="Usage: kb-release walkthrough <release-id> [--provider <name>] [--lead <name>]"
+    local release_id="" opt_provider="" opt_lead="" opt_json=0
+    local usage="Usage: kb-release walkthrough <release-id> [--provider <name>] [--lead <name>] [--json]"
 
     while [[ $# -gt 0 ]]; do
         case "${1-}" in
@@ -25021,12 +25021,16 @@ kb-release-walkthrough() {
             --lead)
                 if [[ $# -lt 2 ]]; then echo "Error: --lead needs a value" >&2; echo "$usage" >&2; return 2; fi
                 opt_lead="${2-}"; shift 2 ;;
+            --json)
+                opt_json=1; shift ;;
             --help|-h)
                 echo "$usage"
                 echo ""
                 echo "Walk the current stage's MANUAL provider's cases one at a time; each answer"
                 echo "(Pass/Fail/Skip) is recorded through the server. --provider is optional when"
                 echo "the stage has exactly one manual provider. --lead defaults to \$USER."
+                echo "--json prints the end summary as one JSON line (the LAST stdout line) instead"
+                echo "of the readable summary; the prompts are unchanged."
                 echo ""
                 echo "Exit codes: 0 walkthrough complete, 1 incomplete/transport, 2 usage/config"
                 return 0 ;;
@@ -25053,6 +25057,7 @@ kb-release-walkthrough() {
     _kb_release_stage_ctx || return 1
     local args=(walkthrough --release "$release_id" --kanban-dir "$_KB_RS_KDIR" --port "$_KB_RS_PORT" --lead "$opt_lead")
     [[ -n "$opt_provider" ]] && args+=(--provider "$opt_provider")
+    (( opt_json )) && args+=(--json)
     python3 "$_KB_RS_CLI" "${args[@]}"
 }
 

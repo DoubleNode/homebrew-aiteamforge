@@ -201,7 +201,7 @@ def cmd_walkthrough(a):
         return RC_USAGE
     return release_walkthrough.main(["--release", a.release, "--stage", stage, "--provider", name,
                                      "--kanban-dir", a.kanban_dir, "--lead", a.lead,
-                                     "--port", str(a.port)])
+                                     "--port", str(a.port)] + (["--json"] if getattr(a, "json", False) else []))
 
 
 def build_parser():
@@ -220,6 +220,7 @@ def build_parser():
     w.add_argument("--port", type=int, required=True)
     w.add_argument("--lead", required=True)
     w.add_argument("--provider", default=None)
+    w.add_argument("--json", action="store_true", help="end summary as one JSON line (XACA-1347-045)")
     return ap
 
 

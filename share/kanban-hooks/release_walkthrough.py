@@ -100,23 +100,40 @@ def answer_record(case, stage, sha, env_label, lead, result, note, now=None):
             "runBy": lead.strip(), "notes": note}
 
 
+class _Invalid(object):
+    """_ask's result when MAX_ASKS answers were all invalid (distinct from None = quit/EOF)."""
+
+    def __repr__(self):
+        return "<no valid answer>"
+
+
+INVALID = _Invalid()
+_INVALID_DETAIL = "no valid answer after %d attempts" % MAX_ASKS
+
+
 def _ask(prompt, question, choices):
-    """Ask up to MAX_ASKS times for a valid answer; return the canonical choice / text or None."""
+    """Ask up to MAX_ASKS times for a valid answer; return the canonical choice / text, None on
+    quit/EOF/Ctrl-C, or INVALID when every attempt was invalid. A retry re-asks with a line saying
+    WHY the last answer was rejected (XACA-1347-041: it used to re-prompt silently)."""
+    q = question
     for _ in range(MAX_ASKS):
         try:
-            raw = prompt(question, choices)
+            raw = prompt(q, choices)
         except (EOFError, KeyboardInterrupt):
             return None
         raw = (raw or "").strip()
         if choices is None:
             if raw:
                 return raw
+            q = "A note is required here; it cannot be blank.\n" + question
             continue
         low = raw.lower()
         for c in choices:
             if low and (low == c.lower() or low == c[0].lower()):
                 return c
-    return None
+        q = ("%r is not a valid answer; enter one of %s (or its first letter).\n%s"
+             % (raw, "/".join(choices), question))
+    return INVALID
 
 
 def _filter_cases(provider, stage, cases):
@@ -126,6 +143,24 @@ def _filter_cases(provider, stage, cases):
                               "refusing to walk it" % provider.get("name"))
         return [c for c in cases if c.get("prodSafe")]
     return list(cases)
+
+
+_STATUS_TEXT = {"complete": "complete", "stopped": "stopped", "post-failed": "STOPPED (result NOT recorded)",
+                "device-not-confirmed": "not started (device prerequisite not confirmed)"}
+
+
+def format_summary(s, release_id=None, provider=None):
+    """The human end-of-walkthrough text (XACA-1347-043: it used to be a raw one-line JSON blob)."""
+    lines = ["Walkthrough %s: %d answered, %d remaining."
+             % (_STATUS_TEXT.get(s.get("status"), s.get("status")), s.get("answered", 0), s.get("remaining", 0))]
+    if s.get("detail"):
+        lines.append("  Reason: %s" % s["detail"])
+    for e in s.get("hookErrors") or []:
+        lines.append("  Warning (recorded, but a follow-up hook failed): %s" % e)
+    if s.get("status") != "complete" and s.get("remaining"):
+        lines.append("  Resume: kb-release walkthrough %s%s  (picks up at the first unanswered case)"
+                     % (release_id or "<RELEASE-ID>", " --provider %s" % provider if provider else ""))
+    return "\n".join(lines)
 
 
 def _summary(status, answered, remaining, hook_errors, detail=None):
@@ -145,7 +180,9 @@ def run_walkthrough(provider, cases, release, stage, *, lead, prompt, post, now=
     if not sha:
         raise RunnerError("release has no stageSha for %s; record the stage SHA first" % stage)
     env_label = provider.get("envLabel") or stage
-    todo = pending_cases(_filter_cases(provider, stage, cases), release.get("tests"), stage, sha)
+    in_scope = _filter_cases(provider, stage, cases)
+    todo = pending_cases(in_scope, release.get("tests"), stage, sha)
+    total, already = len(in_scope), len(in_scope) - len(todo)
     answered, hook_errors = 0, []
     if not todo:
         return _summary("complete", 0, 0, hook_errors)
@@ -153,20 +190,28 @@ def run_walkthrough(provider, cases, release, stage, *, lead, prompt, post, now=
     device = provider.get("device") if isinstance(provider.get("device"), dict) else {}
     if device.get("required"):
         q = "Device prerequisite: %s -- confirmed and ready?" % (device.get("description") or "required device")
-        if _ask(prompt, q, ["Yes", "No"]) != "Yes":
-            return _summary("device-not-confirmed", 0, len(todo), hook_errors)
+        ans = _ask(prompt, q, ["Yes", "No"])
+        if ans != "Yes":
+            return _summary("device-not-confirmed", 0, len(todo), hook_errors,
+                            _INVALID_DETAIL if ans is INVALID else None)
 
     for i, case in enumerate(todo):
-        q = "%s\n\nResult for %s?" % (format_case(case, provider), case["id"])
+        # XACA-1347-042: say where the lead is, and that a resumed run is a resume, not a restart.
+        head = "Case %d of %d" % (already + i + 1, total)
+        if i == 0 and already:
+            head += "  (resuming: %d already recorded at this SHA)" % already
+        q = "%s\n%s\n\nResult for %s?" % (head, format_case(case, provider), case["id"])
         ans = _ask(prompt, q, list(_ANSWERS))
-        if ans is None or ans == "Quit":
-            return _summary("stopped", answered, len(todo) - i, hook_errors)
+        if ans is None or ans == "Quit" or ans is INVALID:
+            return _summary("stopped", answered, len(todo) - i, hook_errors,
+                            _INVALID_DETAIL if ans is INVALID else None)
         note = ""
         if ans in ("Fail", "Skip"):
             note = _ask(prompt, "Note for %s (%s)" % (case["id"], "reason for skipping" if ans == "Skip"
                                                       else "what failed"), None)
-            if note is None:
-                return _summary("stopped", answered, len(todo) - i, hook_errors, "no note given")
+            if note is None or note is INVALID:
+                return _summary("stopped", answered, len(todo) - i, hook_errors,
+                                _INVALID_DETAIL if note is INVALID else "no note given")
         rec = answer_record(case, stage, sha, env_label, lead, ans.upper(), note, now)
         try:
             ids = post([rec])
@@ -180,9 +225,11 @@ def run_walkthrough(provider, cases, release, stage, *, lead, prompt, post, now=
                 hook_errors.append("%s: %s" % (case["id"], e))
         left = len(todo) - i - 1
         if ans == "Fail" and left:
-            if _ask(prompt, "%s failed. Continue with the %d remaining case(s) or stop?" % (case["id"], left),
-                    ["Continue", "Stop"]) != "Continue":
-                return _summary("stopped", answered, left, hook_errors)
+            go = _ask(prompt, "%s failed. Continue with the %d remaining case(s) or stop?" % (case["id"], left),
+                      ["Continue", "Stop"])
+            if go != "Continue":
+                return _summary("stopped", answered, left, hook_errors,
+                                _INVALID_DETAIL if go is INVALID else None)
     return _summary("complete", answered, 0, hook_errors)
 
 
@@ -290,6 +337,9 @@ def main(argv=None):
     ap.add_argument("--kanban-dir", required=True)
     ap.add_argument("--lead", required=True)
     ap.add_argument("--port", type=int, default=int(os.environ.get("KB_LCARS_PORT", "0") or 0))
+    ap.add_argument("--json", action="store_true",
+                    help="print the end summary as one JSON line (the last stdout line) instead of the "
+                         "readable summary; kb-release walkthrough --json forwards here")
     a = ap.parse_args(argv)
     try:
         from release_providers import load_providers, providers_for_stage
@@ -317,7 +367,9 @@ def main(argv=None):
     except Exception as e:  # noqa: BLE001 -- CLI boundary: one-line named error, nonzero exit
         print("release_walkthrough: %s" % (e,), file=sys.stderr)
         return 2
-    print(json.dumps(s))
+    # Leading newline: the last prompt ("> ") has no newline of its own when input ends, so without it the
+    # summary (or the JSON line scripts parse) would share that line.
+    print("\n" + (json.dumps(s) if a.json else format_summary(s, a.release, a.provider)))
     return 0 if s["status"] == "complete" else 1
 
 
