@@ -39,7 +39,7 @@
 # Stage B flips this ONE line to B, which flips the G1 guard (template + key
 # list must now CARRY env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE="50") and the U1/P1
 # expectations. Until then G1 FAILS if P=50 leaks into the shipped tap early.
-XACA1283_STAGE=A
+XACA1283_STAGE=B
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TAP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -387,18 +387,20 @@ fi
 # ═══ M*: XACA-1283-021 — settings.json file MODE must be preserved ════════
 # _aitf_file_mode (defined in aiteamforge-upgrade.sh) is NOT visible to
 # _xaca1283_refresh_settings_json_keys in either real call shape exercised by
-# this suite: the "real upgrade path" below sources only the EXTRACTED
-# update_claude_settings function body (never the sibling _aitf_file_mode
-# definition elsewhere in aiteamforge-upgrade.sh -- see UPD_FN_SRC above),
-# and the fixture/"installer sourced alone" path sources
+# this suite: the "extracted-function harness" below sources only the
+# EXTRACTED update_claude_settings function body (never the sibling
+# _aitf_file_mode definition elsewhere in aiteamforge-upgrade.sh -- see
+# UPD_FN_SRC above), and the fixture/"installer sourced alone" path sources
 # install-claude-config.sh by itself. Both must fall back to a SELF-CONTAINED
 # mode lookup, not silently widen 0600 -> 0644 (reviewer-verified regression,
-# PR #934).
+# PR #934). Note: the SHIPPED aiteamforge-upgrade.sh defines _aitf_file_mode,
+# so only these harnesses hit the 0644 widening, not the real upgrade path
+# (XACA-1308-012).
 sb="$TEST_TMP_DIR/m1"; mkdir -p "$sb/home/.claude" "$sb/aiteamforge"
 printf '%s\n' "$SEED_ABSENT" > "$sb/home/.claude/settings.json"
 chmod 0600 "$sb/home/.claude/settings.json"
 run_upgrade_in "$sb"
-test_start "M1 (real upgrade path): a 0600 settings.json stays 0600 after an add"
+test_start "M1 (extracted-function harness): a 0600 settings.json stays 0600 after an add"
 _got_mode="$(stat -f '%Lp' "$sb/home/.claude/settings.json" 2>/dev/null || stat -c '%a' "$sb/home/.claude/settings.json" 2>/dev/null)"
 if [ "$(jget "$sb/home/.claude/settings.json" '.skipDangerousModePermissionPrompt')" = 'true' ] && [ "$_got_mode" = "600" ]; then
     test_pass

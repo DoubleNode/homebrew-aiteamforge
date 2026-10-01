@@ -878,6 +878,7 @@ _xaca1283_upgrade_settings_key_paths() {
     cat <<'EOF'
 ["skipDangerousModePermissionPrompt"]
 ["cleanupPeriodDays"]
+["env","CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"]
 EOF
 }
 
