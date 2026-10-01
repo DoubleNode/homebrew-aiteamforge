@@ -240,8 +240,10 @@ PY
 #
 # XACA-0541 — Optional $1: a known session UUID (pinned via --session-id at
 # launch). When supplied and valid, skips the ls -t heuristic entirely — no
-# project_dir lookup needed. Callers that don't supply $1 (ccc --resume /
-# --continue) keep the existing ls -t fallback behaviour unchanged.
+# project_dir lookup needed. Callers that don't supply $1 keep the ls -t
+# fallback, now guarded against claiming a uuid another window's sidecar owns
+# (XACA-1074-004); ccc passes an id on both its --resume and --continue paths
+# (XACA-1074-002/003).
 _cc_save_session() {
     [[ -z "$SESSION_CODE" ]] && return 0
 
@@ -274,6 +276,29 @@ _cc_save_session() {
 
         # Validate UUID format
         [[ "$session_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || return 0
+
+        # XACA-1074-004: the newest transcript in a shared project dir is not
+        # necessarily ours. If a DIFFERENT window's sidecar already records
+        # this uuid, refuse the claim and leave our own sidecar as it was.
+        # Every sidecar counts whatever its SESSION_CODE: distinct tmux
+        # sessions can share one cwd and so one project dir. Only real
+        # sidecar names are considered (-w@<N>, legacy -w<index>, -k<key>);
+        # hand-made backups such as *.bak-<stamp>, *.tmp or *~ hold stale
+        # uuids and must never block a save. Only the first |-field is parsed.
+        local _cc_sib _cc_sib_id _cc_sib_base
+        local _cc_sib_re='^[^.~]+-(w@?[0-9]+|k[A-Za-z0-9_@:%-]+)$'
+        local _cc_own="$HOME/.claude/terminal-sessions/${SESSION_CODE}${window_suffix}"
+        while IFS= read -r _cc_sib; do
+            [[ -z "$_cc_sib" || "$_cc_sib" == "$_cc_own" ]] && continue
+            _cc_sib_base="${_cc_sib##*/}"
+            [[ "$_cc_sib_base" =~ $_cc_sib_re ]] || continue
+            _cc_sib_id=""
+            IFS='|' read -r _cc_sib_id _ < "$_cc_sib" 2>/dev/null
+            if [[ "$_cc_sib_id" == "$session_id" ]]; then
+                print -u2 "_cc_save_session: XACA-1074: session ${session_id} belongs to another window (${_cc_sib_base}); not claiming it for ${SESSION_CODE}${window_suffix}"
+                return 0
+            fi
+        done < <(find "$HOME/.claude/terminal-sessions" -maxdepth 1 -type f 2>/dev/null)
     fi
 
     local session_name
@@ -636,7 +661,10 @@ ccc() {
             _cc_run_claude_with_auth "$_CC_RESOLVED_TOKEN" "$_CC_RESOLVED_AUTH_TYPE" \
                 --permission-mode bypassPermissions --resume "$session_id"
             local _ccc_claude_rc=$?
-            _cc_save_session
+            # XACA-1074-002: pass the id this branch already resumed. The bare
+            # call fell back to `ls -t` on the shared project dir, so windows
+            # sharing a cwd stamped each other's newest transcript here.
+            _cc_save_session "$session_id"
             _cc_record_session_account "$session_id" "$resolved_account_id" "$resolved_account_nickname"
             if command -v kb-clear &> /dev/null; then
                 kb-clear
@@ -649,10 +677,23 @@ ccc() {
     # XACA-1303: no resume cost warning here — no session id to locate a
     # transcript by until claude has already picked one.
     print -u2 $'\e[2m'"ccc: no saved session for this window — using --continue; billed to ${resolved_account_nickname:-default OAuth}"$'\e[0m'
+    # XACA-1074-003: pin a fresh session id so the post-exit save needn't guess
+    # via `ls -t` (windows sharing a cwd share one project dir, so the newest
+    # transcript is routinely another window's). claude rejects --session-id
+    # with --continue unless --fork-session accompanies it, so the pin forks
+    # the continued conversation into a NEW session this window owns. Both
+    # flags are feature-detected; if either is missing we keep the bare
+    # --continue and rely on _cc_save_session's sibling-sidecar guard.
+    local -a _ccc_cont_args=(--continue)
+    local _ccc_cont_sid=""
+    if _cc_probe_has_session_id && claude --help 2>/dev/null | grep -q -- "--fork-session"; then
+        _ccc_cont_sid=$(uuidgen | tr 'A-Z' 'a-z')
+        _ccc_cont_args=(--continue --fork-session --session-id "$_ccc_cont_sid")
+    fi
     _cc_run_claude_with_auth "$_CC_RESOLVED_TOKEN" "$_CC_RESOLVED_AUTH_TYPE" \
-        --permission-mode bypassPermissions --continue
+        --permission-mode bypassPermissions "${_ccc_cont_args[@]}"
     local _ccc_claude_rc=$?
-    _cc_save_session
+    _cc_save_session "$_ccc_cont_sid"
     if command -v kb-clear &> /dev/null; then
         kb-clear
     fi
