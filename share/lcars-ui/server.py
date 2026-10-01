@@ -162,9 +162,11 @@ except ImportError as e:
 try:
     import release_gate as _release_gate
     import release_schema as _release_schema
+    import release_supersede as _release_supersede
 except ImportError as e:  # pragma: no cover
     _release_gate = None
     _release_schema = None
+    _release_supersede = None
     print(f"[LCARS] Warning: release_gate unavailable, release promote/regress/waiver fail closed: {e}")
 
 # Import integration providers
@@ -5070,6 +5072,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             # POST /api/releases/<id>/stages/<STAGE>/tests — the ONE writer of expected[] + tests[] (XACA-1347-004)
             release_id, _sep, tail = path[len('/api/releases/'):].partition('/stages/')
             self.handle_release_stage_tests(release_id, tail[:-len('/tests')])
+        elif path.startswith('/api/releases/') and path.endswith('/new-sha'):
+            # POST /api/releases/<id>/new-sha — supersede on a new commit (XACA-1347-006, spec 6.5)
+            release_id = path[len('/api/releases/'):-len('/new-sha')]
+            self.handle_release_new_sha(release_id)
         elif path.startswith('/api/releases/') and path.endswith('/regress'):
             # POST /api/releases/<id>/regress — the only sanctioned backward move (XACA-1346-006)
             release_id = path[len('/api/releases/'):-len('/regress')]
@@ -8395,9 +8401,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
     # Fields the generic PUT /api/releases/<id> must never accept: each has ONE
     # sanctioned, gated writer.
-    _RELEASE_STAGE_STATE_FIELDS = ('environment', 'stage', 'stages', 'stageSha', 'tests')
+    _RELEASE_STAGE_STATE_FIELDS = ('environment', 'stage', 'stages', 'stageSha', 'tests', 'pendingSha',
+                                   'waiverHistory')
     _RELEASE_GATE_MODES = ('enforce', 'report')
-    # Cap for the bulk release-state POST (/stages/<S>/tests), enforced from Content-Length
+    # Cap for the bulk release-state POSTs (/stages/<S>/tests, /new-sha), enforced from Content-Length
     # BEFORE the body is read (413). Measured 2026-09-30: a full per-file run of a 6,585-record suite
     # (records + expected) is 2.95 MiB, 6.1 MiB with 500-byte notes on every record; 16 MiB is ~2.6x
     # the worst case and stays under the global MAX_POST_BODY_BYTES (50 MiB) that do_POST already applies.
@@ -8547,7 +8554,63 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         head = self._release_branch_head(release, team)
         if head:
             ctx["branch_head"] = head
+        # XACA-1347-006: a new commit reported while the release is in CR or later is recorded as
+        # release.pendingSha (stageSha.CR is NOT overwritten). Feeding it to the gate as the branch
+        # HEAD makes the CR exit check ("HEAD != stageSha.CR") refuse GAMMA even if the local git
+        # read still shows the old HEAD. Only a regress BELOW CR applies it (_apply_pending_sha), or a
+        # new-sha back to stageSha.CR clears it; a regress to CR keeps it.
+        pend = release.get('pendingSha')
+        if isinstance(pend, dict) and isinstance(pend.get('sha'), str) and pend['sha']:
+            ctx["branch_head"] = pend['sha']
         return ctx
+
+    def _apply_pending_sha(self, release, data, to, flow, cr_on, now, on_new_sha):
+        """XACA-1347-006 (PR #1010 round 1): what a regress does with a recorded pendingSha (caller
+        holds the board lock; `release` already sits at `to`). Returns (error, applied_sha): error is
+        None or a (status, payload) refusal after which the caller must NOT save; applied_sha is the SHA applied (for the activity log)
+        or None. An applied restart stage stays 'pending' like any regress target (new-sha's own
+        restart is 'running'; a regress is not a run).
+
+        to < CR  : the pending SHA is APPLIED as a new SHA (stageSha moves to it, records superseded,
+                   waivers voided), restarting at the EARLIER of `to` and releaseConfig.onNewSha's stage
+                   (round 2: restarting at `to` alone let a regress CR -> BETA carry the new SHA to CR
+                   with QA/ALPHA still graded at the old one, breaking spec 6.5's one-SHA rule).
+                   Dropping it instead left the release on the abandoned SHA, so kb-release test
+                   steered the lead to the OLD commit. An invalid onNewSha refuses the regress.
+        to PLANNED: dropped (PLANNED carries no stage SHA; every stage re-enters from scratch).
+        otherwise: KEPT. A regress GAMMA -> CR re-runs nothing, so the gate must keep refusing GAMMA
+                   rather than fall back to a possibly stale local branch ref."""
+        pend = release.get('pendingSha')
+        if not isinstance(pend, dict):
+            return None, None
+        if to == 'PLANNED':
+            release.pop('pendingSha', None)
+            return None, None
+        if _release_supersede is None:
+            return (500, {"error": "release_supersede module unavailable; cannot apply the recorded pendingSha "
+                                   "(fails closed)"}), None
+        if to not in _release_supersede._RESTART_STAGES:
+            return None, None
+        order = _release_gate.enabled_stages(flow, cr_support_enabled=cr_on)
+        try:
+            new_rel, summary = _release_supersede.apply_new_sha(
+                release, pend.get('sha'), on_new_sha=on_new_sha, cr_enabled=cr_on,
+                stages_order=order, now=now)
+        except ValueError as ve:
+            return (400, {"error": "refusing regress: recorded pendingSha cannot be applied: %s" % ve,
+                          "setting": "releaseConfig.onNewSha"}), None
+        violations = _release_schema.check_append_only(release.get('tests') or [], new_rel.get('tests') or [])
+        if violations:
+            return (500, {"error": "refusing: append-only violation: %s" % violations[0]}), None
+        release.clear()
+        release.update(new_rel)
+        eff = summary.get('to')
+        if eff and eff != to:   # restarted EARLIER than the regress target: move the legacy mirror too
+            self._apply_stage_move(release, data, to, eff, now, 'regress')
+        srec = (release.get('stages') or {}).get(eff)
+        if isinstance(srec, dict):
+            srec['status'] = 'pending'
+        return None, summary.get('sha')
 
     def _legacy_environment_for_stage(self, release, data, stage):
         """The value to MIRROR into platforms.<p>.environment: the stage itself when the
@@ -8801,7 +8864,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         (no report mode). Returns (status, payload). Logs every outcome for a known release.
         Decides inside the lock and RETURNS (never raises a deferred response, never writes to
         the socket): the caller sends the response after the lock is released."""
-        written = False
+        written, applied_sha = False, None
         with self._board_write_transaction():
             data = self._load_releases_config(_lock_held=True)
             release = self._find_release_by_id(data, release_id)
@@ -8821,6 +8884,12 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             if not reasons:
                 now = self._get_timestamp()
                 self._apply_stage_move(release, data, cur, to, now, 'regress')
+                pend_err, applied_sha = self._apply_pending_sha(
+                    release, data, to, flow, cr_on, now,
+                    self._release_cfg(board_raw).get('onNewSha', _release_supersede.DEFAULT_ON_NEW_SHA
+                                                     if _release_supersede is not None else None))
+                if pend_err:
+                    return pend_err
                 if reset_status:
                     release['status'] = "in_progress"
                 if not self._save_releases_config(data, _lock_held=True):
@@ -8828,13 +8897,25 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 written = True
                 snapshot = copy.deepcopy(release)
         logctx = dict(actor=actor, reason=reason, reasons=reasons)
+        landed = to
+        if written and applied_sha:
+            # Round 3: applying pendingSha can restart EARLIER than requested (onNewSha); report and
+            # log the stage the release actually landed on, keeping the request alongside.
+            landed = snapshot.get('stage') or to
+            logctx['appliedPendingSha'] = applied_sha
+            if landed != to:
+                logctx['requestedTo'] = to
         if not written:
             self._log_release_activity(release_id, 'release_regress_refused', cur, to, **logctx)
             return 409, {"allowed": False, "from": cur, "to": to, "reasons": reasons,
                          "error": self._reasons_error(reasons)}
         self._mirror_release_manifest(snapshot)
-        self._log_release_activity(release_id, 'release_regress', cur, to, **logctx)
-        return 200, {"allowed": True, "from": cur, "to": to, "release": snapshot}
+        self._log_release_activity(release_id, 'release_regress', cur, landed, **logctx)
+        payload = {"allowed": True, "from": cur, "to": landed, "release": snapshot}
+        if landed != to:
+            payload["requestedTo"] = to
+            payload["appliedPendingSha"] = applied_sha
+        return 200, payload
 
     def handle_regress_release(self, release_id):
         """POST /api/releases/<id>/regress - the ONLY sanctioned backward move (spec 13.1).
@@ -9103,7 +9184,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 for t in existing:
                     m = re.fullmatch(r'T(\d+)', str(t.get('id'))) if isinstance(t, dict) else None
                     top = max(top, int(m.group(1))) if m else top
-                ids, refmap, tests, bad = [], {}, list(existing), []
+                refmap, fulls = {}, []
                 for i, r in enumerate(body['records']):
                     top += 1
                     rid = 'T%04d' % top
@@ -9112,16 +9193,34 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     # gate's current-record lookup is exact; an upper-case copy would never count).
                     full.update(id=rid, notes=r.get('notes', ''), parent=refmap.get(r.get('parentRef')),
                                supersededBy=None, sha=graded)
-                    try:
-                        tests = _release_schema.append_test_record(tests, full)
-                    except ValueError as ve:
-                        bad.append("records[%d]: %s" % (i, ve))
-                        continue
+                    # A ref is mapped even if its record is later rejected: any rejection 400s the whole
+                    # post below, so a child pointing at it is never saved.
                     if r.get('ref'):
                         refmap[r['ref']] = rid
-                    ids.append(rid)
+                    fulls.append(full)
+                # one batch: append_test_record per record re-scanned + re-copied tests[] (O(N^2) under
+                # the board lock, PR #1010 round 1)
+                tests, problems = _release_schema.append_test_records(existing, fulls)
+                bad = ["records[%d]: %s" % (i, msg) for i, msg in problems]
+                ids = [f['id'] for f in fulls]
                 if bad:
                     raise _DeferredResponse.json({"error": bad[0], "problems": bad}, 400)
+                # XACA-1347-006 (spec 6.5): an older record of THIS stage superseded by the placeholder
+                # "sha:<this sha>" now has a real target: the FIRST new record for the same test.
+                # Only set_superseded_many (-> supersede_transition_ok) may write it; an illegal
+                # transition is skipped, leaving the placeholder in place. One index + one pass: the
+                # old per-pair scan was O(N^2) under the board lock (PR #1010 round 1).
+                first_new = {}
+                for t in tests[len(existing):]:          # append-only: the new records are the tail
+                    first_new.setdefault((t.get('test'), 'sha:' + str(t.get('sha')).lower()), t['id'])
+                updates = []
+                for old in existing:
+                    if isinstance(old, dict) and isinstance(old.get('id'), str) and old.get('stage') == stage:
+                        nid = first_new.get((old.get('test'), old.get('supersededBy')))
+                        if nid:
+                            updates.append((old['id'], nid))
+                tests, applied = _release_schema.set_superseded_many(tests, updates, skip_illegal=True)
+                resolved = len(applied)
                 release['tests'] = tests
                 stages = release.get('stages') if isinstance(release.get('stages'), dict) else {}
                 release['stages'] = stages
@@ -9141,13 +9240,116 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 snapshot = copy.deepcopy(release)
             self._mirror_release_manifest(snapshot)
             self._log_release_activity(release_id, 'release_tests_recorded', cur, stage,
-                                       actor='pipeline', count=len(ids), first=ids[:1], last=ids[-1:])
+                                       actor='pipeline', count=len(ids), first=ids[:1], last=ids[-1:], resolvedPlaceholders=resolved)
             return self._send_json_response({"ok": True, "ids": ids})
         except _DeferredResponse as deferred:
             deferred.emit(self)
             return
         except Exception as e:
             self.send_error(500, f"Error recording stage tests: {e}")
+
+    def handle_release_new_sha(self, release_id):
+        """POST /api/releases/<id>/new-sha (XACA-1347-006, spec 6.5 / 13.1) - a new commit landed on
+        the release branch. Body {"sha": <40hex>, "reason"?: str, "actor"?: str}.
+
+        Pre-CR: supersedes the restart stage's and later stages' records (placeholder
+        "sha:<sha>"), overwrites stageSha, sends the release back to the restart stage (running).
+        The restart stage is releaseConfig.onNewSha ("restart-from:<STAGE>", default
+        "restart-from:QA"); an INVALID value is a 400 naming the setting, never a silent default.
+        CR or later: nothing is re-run; release.pendingSha records the SHA and the gate refuses
+        CR -> GAMMA until the lead regresses. Answers: 404 unknown release, 400 bad sha / bad
+        setting, 409 release is PLANNED or PROD, 200 {"ok": true, "summary": {...}} (a SHA equal
+        to the current stageSha is a no-op: summary.action == "noop", nothing written or logged;
+        EXCEPT when a pendingSha is recorded: the branch was reverted to stageSha, so it is cleared,
+        summary.action == "pending-cleared")."""
+        try:
+            if self._gate_unavailable():
+                return
+            if _release_supersede is None:
+                return self._send_json_response(
+                    {"error": "release_supersede module unavailable; refusing (fails closed)"}, status=500)
+            body, err = self._read_release_json_body(max_bytes=self._RELEASE_STATE_BODY_MAX_BYTES)
+            if err and err.startswith(self._BODY_TOO_LARGE):
+                return self._send_json_response({"error": err}, status=413)
+            if err:
+                return self._send_json_response({"error": err}, status=400)
+            sha, reason, actor = body.get('sha'), body.get('reason'), body.get('actor')
+            if not isinstance(sha, str) or not re.fullmatch(r'[0-9a-fA-F]{40}', sha):
+                return self._send_json_response({"error": "'sha' must be a 40-character hex string"}, status=400)
+            for label, v in (('reason', reason), ('actor', actor)):
+                if v is not None and not isinstance(v, str):
+                    return self._send_json_response({"error": "%s must be a string" % label}, status=400)
+            sha = sha.lower()
+            snapshot, summary = None, None
+            with self._board_write_transaction():
+                data = self._load_releases_config(_lock_held=True)
+                release = self._find_release_by_id(data, release_id)
+                if not release:
+                    raise _DeferredResponse.json({"error": "Release not found: %s" % release_id}, 404)
+                board_raw = self._read_board_raw_locked()
+                rcfg = self._release_cfg(board_raw)
+                cr_on = self._crsupport_enabled(board_raw)
+                cur = _release_gate.current_stage(release)
+                if cur in ('PLANNED', 'PROD'):
+                    raise _DeferredResponse.json(
+                        {"error": "release is at %s: a new SHA is not applicable (PLANNED has no stage SHA; "
+                                  "PROD is terminal)" % cur}, 409)
+                setting = rcfg.get('onNewSha', _release_supersede.DEFAULT_ON_NEW_SHA)
+                try:
+                    _release_supersede.parse_on_new_sha(setting, cr_on)
+                except ValueError as ve:
+                    raise _DeferredResponse.json({"error": str(ve), "setting": "releaseConfig.onNewSha"}, 400)
+                graded = _release_gate.graded_sha(release, cur)
+                pend = release.get('pendingSha')
+                pend_sha = pend.get('sha') if isinstance(pend, dict) else None
+                at_graded = bool(graded) and graded.lower() == sha
+                reverted = at_graded and isinstance(pend, dict)
+                if not reverted and (at_graded or (isinstance(pend_sha, str) and pend_sha.lower() == sha)):
+                    raise _DeferredResponse.json(
+                        {"ok": True, "summary": {"action": "noop", "from": cur, "to": cur, "sha": sha,
+                                                 "superseded": []}}, 200)
+                flow = data.get('flowConfig') or {}
+                order = _release_gate.enabled_stages(flow, cr_support_enabled=cr_on)
+                now = self._get_timestamp()
+                if reverted:
+                    # Spec 13.2 "Branch moved": the lead may REVERT the change. HEAD is back on the graded
+                    # SHA, so the recorded pendingSha is moot; leaving it would keep the gate refusing
+                    # CR -> GAMMA (it is fed in as the branch HEAD) until a needless regress.
+                    new_rel = copy.deepcopy(release)
+                    new_rel.pop('pendingSha', None)
+                    summary = {"from": cur, "to": cur, "sha": sha, "previousSha": pend_sha,
+                               "superseded": [], "action": "pending-cleared"}
+                else:
+                    try:
+                        new_rel, summary = _release_supersede.apply_new_sha(
+                            release, sha, on_new_sha=setting, cr_enabled=cr_on, stages_order=order, now=now)
+                    except ValueError as ve:
+                        raise _DeferredResponse.json({"error": str(ve)}, 400)
+                violations = _release_schema.check_append_only(release.get('tests') or [],
+                                                               new_rel.get('tests') or [])
+                if violations:  # defence in depth: the helper only uses set_superseded
+                    raise _DeferredResponse.json(
+                        {"error": "refusing: append-only violation: %s" % violations[0]}, 500)
+                release.clear()
+                release.update(new_rel)
+                if summary['action'] == 'restart':
+                    # legacy per-platform mirror + stages[to] bookkeeping, then the restart
+                    # stage is RUNNING (spec 6.5), not the regress default 'pending'.
+                    self._apply_stage_move(release, data, cur, summary['to'], now, 'regress')
+                    release['stages'][summary['to']]['status'] = 'running'
+                if not self._save_releases_config(data, _lock_held=True):
+                    raise _DeferredResponse.json({"error": "board write failed"}, 500)
+                snapshot = copy.deepcopy(release)
+            self._mirror_release_manifest(snapshot)
+            self._log_release_activity(release_id, 'release_new_sha', summary['from'], summary['to'],
+                                       actor=(actor or '').strip() or None, reason=reason, sha=sha,
+                                       outcome=summary['action'], superseded=len(summary['superseded']))
+            return self._send_json_response({"ok": True, "summary": summary})
+        except _DeferredResponse as deferred:
+            deferred.emit(self)
+            return
+        except Exception as e:
+            self.send_error(500, f"Error applying new SHA: {e}")
 
     def handle_plan_release(self, release_id):
         """POST /api/releases/<id>/plan — send a release BACK to the PLANNED holding state.

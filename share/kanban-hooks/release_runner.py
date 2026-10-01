@@ -349,7 +349,7 @@ def _iso(now):
         return v.strftime("%Y-%m-%dT%H:%M:%SZ")
     if isinstance(v, str) and v:
         return v
-    return datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 class _Records(object):
@@ -534,7 +534,7 @@ def run_stage(release, stage, providers, *, repo_dir, kanban_dir, env_label_defa
         raise RunnerError("release has no stageSha.%s; nothing to verify or run against" % stage)
     verify(repo_dir, sha)
     environ = os.environ if environ is None else environ
-    ts = _iso(now if now is not None else datetime.datetime.utcnow)
+    ts = _iso(now if now is not None else (lambda: datetime.datetime.now(datetime.timezone.utc)))
     rec = _Records(stage, sha, ts)
     per_provider = _disjoint([(p,) + _provider_expected(p, repo_dir, kanban_dir, environ, run, list_timeout)
                               for p in providers])

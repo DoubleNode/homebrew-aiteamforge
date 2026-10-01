@@ -3315,6 +3315,106 @@ kb-pr() {
     kb-status "pr_review"
 }
 
+# _kb_pr_merged_record <ITEM-ID|""> <PR#>   (XACA-1347-029)
+# Record item.prMerged = {pr, mergeSha, mergedAt, repo} on the kanban item a MERGED PR belongs to.
+# The DEV->QA release gate (release_gate.py) refuses an item unless status==completed AND prMerged
+# is truthy; nothing else ever writes it. Writer = this helper, via the sanctioned kb-backlog
+# path (_kb_jq_update: locked + atomic board write, field_update activity row) - no direct JSON edit.
+#   * Verifies with gh that the PR is really MERGED; never records an open/closed PR.
+#   * ITEM-ID empty -> resolved from the PR head branch name, else the PR title; unresolvable ->
+#     warn + skip (rc 2), never guess. A subitem id (XACA-1347-005) maps to its parent item.
+#   * Idempotent: same PR + repo already recorded = no-op (rc 0). A DIFFERENT PR on the same item
+#     OVERWRITES (latest merge wins; an item spans several PRs, the gate only tests truthiness).
+# rc: 0 recorded/already recorded, 1 gh/board/usage failure, 2 item unresolvable, 3 PR not merged.
+_kb_pr_merged_record() {
+    local item="${1-}" pr="${2-}"
+    [[ "$pr" =~ ^[0-9]+$ ]] || { echo "Error: PR number required (got '$pr')" >&2; return 1; }
+    _kb_ensure_jq || return 1
+
+    local info="" _try _st _oid
+    for _try in 1 2 3; do
+        info=$(gh pr view "$pr" --json state,mergeCommit,mergedAt,headRefName,title,url 2>/dev/null) || info=""
+        [[ -n "$info" ]] || break
+        _st=$(printf '%s' "$info" | jq -r '.state // ""' 2>/dev/null)
+        _oid=$(printf '%s' "$info" | jq -r '.mergeCommit.oid // ""' 2>/dev/null)
+        # gh can lag a beat behind a just-completed merge; wait for the merge oid, don't record blank.
+        [[ "$_st" == "MERGED" && -z "$_oid" ]] || break
+        sleep 1
+    done
+    [[ -n "$info" ]] || { echo "Error: could not read PR #$pr via 'gh pr view'" >&2; return 1; }
+
+    local state sha merged_at head title url repo
+    state=$(printf '%s' "$info" | jq -r '.state // ""')
+    sha=$(printf '%s' "$info" | jq -r '.mergeCommit.oid // ""')
+    merged_at=$(printf '%s' "$info" | jq -r '.mergedAt // ""')
+    head=$(printf '%s' "$info" | jq -r '.headRefName // ""')
+    title=$(printf '%s' "$info" | jq -r '.title // ""')
+    url=$(printf '%s' "$info" | jq -r '.url // ""')
+    if [[ "$state" != "MERGED" ]]; then
+        echo "Error: PR #$pr is $state, not MERGED - refusing to record prMerged" >&2
+        return 3
+    fi
+    if [[ -z "$sha" || -z "$merged_at" ]]; then
+        echo "Error: PR #$pr is MERGED but gh returned no mergeCommit/mergedAt" >&2
+        return 1
+    fi
+    repo=$(printf '%s' "$url" | sed -nE 's#^https?://[^/]+/([^/]+/[^/]+)/pull/[0-9]+.*#\1#p')
+
+    if [[ -z "$item" ]]; then
+        local src
+        for src in "$head" "$title"; do
+            item=$(printf '%s' "$src" | grep -oiE '[A-Z]{3,5}-[0-9]{3,5}' | head -1 | tr '[:lower:]' '[:upper:]')
+            [[ -n "$item" ]] && break
+        done
+        if [[ -z "$item" ]]; then
+            echo "Warning: no ticket id in PR #$pr head branch '$head' or title; prMerged not recorded" >&2
+            return 2
+        fi
+    fi
+    # Subitem id (XACA-1347-005) -> parent item: prMerged lives on the top-level item.
+    _kb_is_subitem_id "$item" 2>/dev/null && item="${item%-*}"
+
+    local context team board_file idx
+    context=$(_kb_detect_context 2>/dev/null) || { echo "Error: cannot detect kanban team context" >&2; return 1; }
+    team="${context%%:*}"
+    board_file=$(_kb_get_board_file "$team") && [[ -f "$board_file" ]] \
+        || { echo "Error: no kanban board for team '$team'" >&2; return 1; }
+    idx=$(_kb_find_by_id "$board_file" "$item")
+    if [[ -z "$idx" || "$idx" == "-1" ]]; then
+        echo "Warning: item $item (from PR #$pr) not found on the $team board; prMerged not recorded" >&2
+        return 2
+    fi
+
+    local cur_pr cur_repo
+    cur_pr=$(_kb_jq_read "$board_file" ".backlog[$idx].prMerged.pr // empty" -r 2>/dev/null)
+    cur_repo=$(_kb_jq_read "$board_file" ".backlog[$idx].prMerged.repo // empty" -r 2>/dev/null)
+    if [[ "$cur_pr" == "$pr" && "$cur_repo" == "$repo" ]]; then
+        echo "[$item] prMerged already records PR #$pr - nothing to do"
+        return 0
+    fi
+
+    local ts; ts=$(_kb_get_timestamp)
+    _kb_jq_update "$board_file" \
+        '.backlog[$idx].prMerged = {pr: $pr, mergeSha: $sha, mergedAt: $at, repo: $repo} | .backlog[$idx].updatedAt = $ts | .lastUpdated = $ts' \
+        --argjson idx "$idx" --argjson pr "$pr" --arg sha "$sha" --arg at "$merged_at" --arg repo "$repo" --arg ts "$ts" \
+        || return 1
+    echo "✓ Recorded prMerged on [$item]: PR #$pr ${sha:0:8} ($repo)"
+    _kb_log_activity "field_update" "$item" "item" "prMerged" "${cur_pr:+PR #$cur_pr}" "PR #$pr" "" 2>/dev/null
+    return 0
+}
+
+# Fail-soft wrapper for kb-merge: the merge already happened, so a recording failure only warns
+# (naming the retry command) and NEVER changes kb-merge's exit status. Always returns 0.
+_kb_merge_record_safe() {
+    local pr="${1-}" rc=0
+    _kb_pr_merged_record "" "$pr" || rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+        echo "⚠️  kb-merge: PR #$pr merged, but item.prMerged was NOT recorded (rc=$rc) - the DEV->QA gate needs it." >&2
+        echo "    Retry: kb-backlog pr-merged <ITEM-ID> $pr" >&2
+    fi
+    return 0
+}
+
 # kb-merge — wrap `gh pr merge` with worktree-lock fallback handling.
 # When the auto-merge loop runs from inside a worktree, `gh pr merge --delete-branch`
 # fails locally because the develop branch is checked out elsewhere. The API merge
@@ -3336,6 +3436,7 @@ kb-merge() {
     local out
     if out=$(gh pr merge "$pr" "$strategy" --delete-branch --admin 2>&1); then
         echo "$out"
+        _kb_merge_record_safe "$pr"
         return 0
     fi
 
@@ -3351,15 +3452,18 @@ kb-merge() {
         if [[ -n "$branch" && -n "$remote" ]]; then
             if git push "$remote" --delete "$branch" 2>&1; then
                 echo "✓ kb-merge: PR #$pr merged via API; remote branch '$branch' deleted manually (worktree-lock fallback)."
+                _kb_merge_record_safe "$pr"
                 return 0
             else
                 echo "⚠️  kb-merge: PR #$pr merged via API but remote branch '$branch' delete failed." >&2
                 echo "    Run manually: git push $remote --delete $branch" >&2
+                _kb_merge_record_safe "$pr"
                 return 0  # the merge itself succeeded
             fi
         fi
         echo "⚠️  kb-merge: PR #$pr merged via API but could not auto-detect branch/remote for cleanup." >&2
         echo "$out" >&2
+        _kb_merge_record_safe "$pr"
         return 0
     fi
 
@@ -8279,6 +8383,19 @@ kb-backlog() {
                     echo "  (no estimate)"
                 fi
             fi
+            ;;
+
+        pr-merged)
+            # XACA-1347-029: record item.prMerged for an ALREADY-MERGED PR (manual retry / backfill
+            # of old items before XACA-1352 flips gate enforcement). kb-merge does this automatically.
+            #   kb-backlog pr-merged <ITEM-ID> <PR#>
+            local pm_item="${1-}" pm_pr="${2-}"
+            if [[ -z "$pm_item" || -z "$pm_pr" ]]; then
+                echo "Usage: kb-backlog pr-merged <ITEM-ID> <PR#>   Record item.prMerged (PR must be MERGED per gh)"
+                return 1
+            fi
+            _kb_pr_merged_record "$pm_item" "$pm_pr"
+            return $?
             ;;
 
         unestimated)
@@ -24389,7 +24506,7 @@ kb-release-reschedule() {
 # ---------------------------------------------------------------------------
 # XACA-1346-007 / -006: release stage transitions are SERVER-decided.
 #
-# promote, regress, waive and plan are thin clients of the LCARS release gate
+# promote, regress, waive and plan (and, XACA-1347-007, new-sha) are thin clients of the LCARS release gate
 # endpoints.  The CLI never orders stages, never evaluates the gate and never
 # writes release state itself: every state change goes through
 #   POST /api/releases/<id>/{promote,regress,plan}
@@ -24786,6 +24903,225 @@ kb-release-waive() {
         return 0
     fi
     _kb_release_fail "waive $release_id stage $opt_stage"
+    return $?
+}
+
+# ---------------------------------------------------------------------------
+# XACA-1347-007: stage test runner wiring.  test / walkthrough / new-sha.
+#
+# `test` and `walkthrough` are thin shells around kanban-hooks/release_stage_cli.py
+# (all logic lives in release_runner / release_walkthrough); `new-sha` is a plain
+# client of POST /api/releases/<id>/new-sha like regress/waive.  Nothing here writes
+# release state: results reach the board only through the server's /tests endpoint.
+#
+# SHA handling is VERIFY ONLY.  Spec 7.2 has the engine check out stageSha[STAGE];
+# that belongs to the release worktree (XACA-1352 / XACA-1350).  Until that exists
+# `kb-release test` refuses when HEAD != stageSha[STAGE] or the tree is dirty and
+# tells you which SHA to check out -- it never runs `git checkout` itself.
+#
+# Exit codes (test): 0 ok  1 server/transport  2 usage/config  3 refused (SHA/tree
+# check or 409)  4 not found  6 recorded, but a top-level result is FAIL.
+# ---------------------------------------------------------------------------
+
+# Resolve <team> <kanban-dir> <port> for the stage commands.
+# Usage: _kb_release_stage_ctx   -> sets _KB_RS_KDIR _KB_RS_PORT _KB_RS_CLI (rc 1 = message printed)
+_kb_release_stage_ctx() {
+    local context team hooks_script
+    context=$(_kb_detect_context 2>/dev/null)
+    team="${context%%:*}"
+    if [[ -z "$team" || "$team" == "ERROR:"* ]]; then
+        echo "Error: Could not determine team context" >&2
+        return 1
+    fi
+    _KB_RS_KDIR=$(_kb_get_kanban_dir "$team") || { echo "Error: no kanban dir for team '$team'" >&2; return 1; }
+    _KB_RS_PORT=$(_kb_team_lcars_port "$team") || {
+        echo "Warning: no LCARS port known for team '$team', falling back to 8080" >&2
+        _KB_RS_PORT="8080"
+    }
+    hooks_script=$(_kb_board_settings_script) || { echo "Error: cannot locate kanban-hooks/" >&2; return 1; }
+    _KB_RS_CLI="$(dirname "$hooks_script")/release_stage_cli.py"
+    [[ -f "$_KB_RS_CLI" ]] || { echo "Error: missing $_KB_RS_CLI" >&2; return 1; }
+    return 0
+}
+
+# Run the CURRENT stage's automated test providers and record the results.
+# Usage: kb-release test <REL-ID> [--repo-dir <path>] [--include-scheduled] [--dry-run]
+kb-release-test() {
+    local release_id="" opt_repo="" opt_sched=0 opt_dry=0
+    local usage="Usage: kb-release test <release-id> [--repo-dir <path>] [--include-scheduled] [--dry-run]"
+
+    while [[ $# -gt 0 ]]; do
+        case "${1-}" in
+            --repo-dir)
+                if [[ $# -lt 2 ]]; then echo "Error: --repo-dir needs a value" >&2; echo "$usage" >&2; return 2; fi
+                opt_repo="${2-}"; shift 2 ;;
+            --include-scheduled) opt_sched=1; shift ;;
+            --dry-run) opt_dry=1; shift ;;
+            --help|-h)
+                echo "$usage"
+                echo ""
+                echo "Run the release's CURRENT stage's automated providers (from"
+                echo "<kanban>/config/test-providers.json) and record the results through the"
+                echo "server. Manual providers are run with 'kb-release walkthrough'."
+                echo ""
+                echo "  --repo-dir <path>    Repo to test (default: current directory)"
+                echo "  --include-scheduled  Also run 'schedule'd (soak) providers"
+                echo "  --dry-run            Show providers + expected set; run no tests, post nothing"
+                echo "                       (listCommand IS run to enumerate the expected set)"
+                echo ""
+                echo "SHA handling is VERIFY ONLY: the repo's HEAD must equal the release's"
+                echo "stageSha for the current stage and the tree must be clean, otherwise the"
+                echo "command refuses and names the SHA to check out. It never runs git checkout"
+                echo "(the engine-managed release worktree is XACA-1352/1350)."
+                echo ""
+                echo "Exit codes: 0 ok, 1 server/transport, 2 usage/config, 3 refused (SHA check"
+                echo "            or 409), 4 not found, 6 recorded but a result is FAIL"
+                return 0 ;;
+            -*)
+                echo "Error: Unknown option: ${1-}" >&2; echo "$usage" >&2; return 2 ;;
+            *)
+                if [[ -z "$release_id" ]]; then
+                    release_id="${1-}"
+                else
+                    echo "Error: Unexpected argument: ${1-}" >&2; echo "$usage" >&2; return 2
+                fi
+                shift ;;
+        esac
+    done
+
+    if [[ -z "$release_id" ]]; then
+        echo "Error: Release ID is required" >&2; echo "$usage" >&2; return 2
+    fi
+    if ! _kb_release_valid_token "$release_id"; then
+        echo "Error: invalid release id: $release_id" >&2; return 2
+    fi
+    [[ -z "$opt_repo" ]] && opt_repo="$PWD"
+    if [[ ! -d "$opt_repo" ]]; then
+        echo "Error: --repo-dir is not a directory: $opt_repo" >&2; return 2
+    fi
+
+    _kb_release_stage_ctx || return 1
+    local args=(test --release "$release_id" --kanban-dir "$_KB_RS_KDIR" --repo-dir "$opt_repo" --port "$_KB_RS_PORT")
+    [[ "$opt_sched" -eq 1 ]] && args+=(--include-scheduled)
+    [[ "$opt_dry" -eq 1 ]] && args+=(--dry-run)
+    python3 "$_KB_RS_CLI" "${args[@]}"
+}
+
+# Interactive manual walkthrough for the CURRENT stage's manual provider.
+# Usage: kb-release walkthrough <REL-ID> [--provider <name>] [--lead <name>]
+kb-release-walkthrough() {
+    local release_id="" opt_provider="" opt_lead=""
+    local usage="Usage: kb-release walkthrough <release-id> [--provider <name>] [--lead <name>]"
+
+    while [[ $# -gt 0 ]]; do
+        case "${1-}" in
+            --provider)
+                if [[ $# -lt 2 ]]; then echo "Error: --provider needs a value" >&2; echo "$usage" >&2; return 2; fi
+                opt_provider="${2-}"; shift 2 ;;
+            --lead)
+                if [[ $# -lt 2 ]]; then echo "Error: --lead needs a value" >&2; echo "$usage" >&2; return 2; fi
+                opt_lead="${2-}"; shift 2 ;;
+            --help|-h)
+                echo "$usage"
+                echo ""
+                echo "Walk the current stage's MANUAL provider's cases one at a time; each answer"
+                echo "(Pass/Fail/Skip) is recorded through the server. --provider is optional when"
+                echo "the stage has exactly one manual provider. --lead defaults to \$USER."
+                echo ""
+                echo "Exit codes: 0 walkthrough complete, 1 incomplete/transport, 2 usage/config"
+                return 0 ;;
+            -*)
+                echo "Error: Unknown option: ${1-}" >&2; echo "$usage" >&2; return 2 ;;
+            *)
+                if [[ -z "$release_id" ]]; then
+                    release_id="${1-}"
+                else
+                    echo "Error: Unexpected argument: ${1-}" >&2; echo "$usage" >&2; return 2
+                fi
+                shift ;;
+        esac
+    done
+
+    if [[ -z "$release_id" ]]; then
+        echo "Error: Release ID is required" >&2; echo "$usage" >&2; return 2
+    fi
+    if ! _kb_release_valid_token "$release_id"; then
+        echo "Error: invalid release id: $release_id" >&2; return 2
+    fi
+    [[ -z "$opt_lead" ]] && opt_lead=$(_kb_release_default_actor)
+
+    _kb_release_stage_ctx || return 1
+    local args=(walkthrough --release "$release_id" --kanban-dir "$_KB_RS_KDIR" --port "$_KB_RS_PORT" --lead "$opt_lead")
+    [[ -n "$opt_provider" ]] && args+=(--provider "$opt_provider")
+    python3 "$_KB_RS_CLI" "${args[@]}"
+}
+
+# Tell the gate a new commit landed on the release branch (supersedes stale results).
+# Usage: kb-release new-sha <REL-ID> <sha> [--reason <text>]
+kb-release-new-sha() {
+    local release_id="" sha="" opt_reason="" opt_actor=""
+    local usage="Usage: kb-release new-sha <release-id> <sha> [--reason <text>] [--actor <name>]"
+
+    while [[ $# -gt 0 ]]; do
+        case "${1-}" in
+            --reason|-r)
+                if [[ $# -lt 2 ]]; then echo "Error: --reason needs a value" >&2; echo "$usage" >&2; return 2; fi
+                opt_reason="${2-}"; shift 2 ;;
+            --actor)
+                if [[ $# -lt 2 ]]; then echo "Error: --actor needs a value" >&2; echo "$usage" >&2; return 2; fi
+                opt_actor="${2-}"; shift 2 ;;
+            --help|-h)
+                echo "$usage"
+                echo ""
+                echo "Report a new commit on the release branch. Before CR the server supersedes"
+                echo "the affected stages' results and restarts the release at the configured stage;"
+                echo "at CR or later nothing is re-run and the gate holds CR -> GAMMA until a lead"
+                echo "regresses. A sha equal to the current stageSha is a no-op. The SERVER decides."
+                echo ""
+                echo "Exit codes: 0 ok, 1 server/transport, 2 usage/rejected, 3 refused (409),"
+                echo "            4 release not found"
+                return 0 ;;
+            -*)
+                echo "Error: Unknown option: ${1-}" >&2; echo "$usage" >&2; return 2 ;;
+            *)
+                if [[ -z "$release_id" ]]; then
+                    release_id="${1-}"
+                elif [[ -z "$sha" ]]; then
+                    sha="${1-}"
+                else
+                    echo "Error: Unexpected argument: ${1-}" >&2; echo "$usage" >&2; return 2
+                fi
+                shift ;;
+        esac
+    done
+
+    if [[ -z "$release_id" ]]; then
+        echo "Error: Release ID is required" >&2; echo "$usage" >&2; return 2
+    fi
+    if ! _kb_release_valid_token "$release_id"; then
+        echo "Error: invalid release id: $release_id" >&2; return 2
+    fi
+    if [[ ! "$sha" =~ ^[0-9a-fA-F]{40}$ ]]; then
+        echo "Error: <sha> must be a full 40-character hex commit id" >&2; echo "$usage" >&2; return 2
+    fi
+    [[ -z "$opt_actor" ]] && opt_actor=$(_kb_release_default_actor)
+
+    local payload
+    payload=$(jq -n --arg sha "$sha" --arg reason "$opt_reason" --arg actor "$opt_actor" \
+        '{sha: $sha, actor: $actor} + (if $reason == "" then {} else {reason: $reason} end)') || return 1
+
+    _kb_release_api_post "${release_id}/new-sha" "$payload" || return 1
+
+    if [[ "$_KB_REL_CODE" == "200" ]]; then
+        local action from to nsup
+        action=$(printf '%s' "$_KB_REL_BODY" | jq -r '.summary.action // empty' 2>/dev/null)
+        from=$(printf '%s' "$_KB_REL_BODY" | jq -r '.summary.from // empty' 2>/dev/null)
+        to=$(printf '%s' "$_KB_REL_BODY" | jq -r '.summary.to // empty' 2>/dev/null)
+        nsup=$(printf '%s' "$_KB_REL_BODY" | jq -r '(.summary.superseded // []) | length' 2>/dev/null)
+        echo "✓ new-sha $release_id: ${action:-?}  ${from:-?} -> ${to:-?}  (superseded: ${nsup:-0})"
+        return 0
+    fi
+    _kb_release_fail "new-sha $release_id"
     return $?
 }
 
@@ -25347,6 +25683,18 @@ kb-release() {
             # XACA-1346-006: lead-approved gate waiver (server checks the lead list)
             kb-release-waive "$@"
             ;;
+        test)
+            # XACA-1347-007: run the current stage's automated providers
+            kb-release-test "$@"
+            ;;
+        walkthrough)
+            # XACA-1347-007: interactive manual-provider walkthrough
+            kb-release-walkthrough "$@"
+            ;;
+        new-sha)
+            # XACA-1347-007: supersede results on a new release-branch commit
+            kb-release-new-sha "$@"
+            ;;
         reschedule)
             kb-release-reschedule "$@"
             ;;
@@ -25375,6 +25723,12 @@ kb-release() {
             echo "                                              Move back to an earlier stage (reason required)"
             echo "  kb-release waive <id> --stage STAGE --reason \"...\" --tests t1,t2 [--by NAME]"
             echo "                                              Lead-approved gate waiver"
+            echo "  kb-release test <id> [--repo-dir PATH] [--include-scheduled] [--dry-run]"
+            echo "                                              Run the current stage's automated test providers (XACA-1347)"
+            echo "  kb-release walkthrough <id> [--provider NAME] [--lead NAME]"
+            echo "                                              Interactive manual-provider walkthrough (XACA-1347)"
+            echo "  kb-release new-sha <id> <sha> [--reason \"...\"]"
+            echo "                                              New commit on the release branch: supersede stale results"
             echo "  kb-release plan <id> --reason \"...\"       Demote back to PLANNED (XACA-0729; reason required)"
             echo "  kb-release reschedule <id> <date>          Change target date"
             echo "  kb-release link-cr <rel> <cr>              Link a CR to this release (XACA-0657)"

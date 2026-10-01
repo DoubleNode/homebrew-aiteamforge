@@ -177,6 +177,24 @@ def _current_record(tests, stage, name, sha):
     return found
 
 
+def _current_index(tests, stage, sha):
+    """{name: _current_record(tests, stage, name, sha)} for every name that has one, in ONE pass.
+    _grade used to call _current_record once per expected name: O(names x records), 26 s of a 42 s
+    /tests POST at 2,000 records (PR #1010 round 1). Same predicate, same last-wins rule; only string
+    names are indexed because _grade refuses every non-string expected name before looking one up."""
+    out = {}
+    if not sha:
+        return out
+    for r in tests or []:
+        if not isinstance(r, dict):
+            continue
+        name = r.get("test")
+        if (isinstance(name, str) and (stage is None or r.get("stage") == stage)
+                and r.get("sha") == sha and not r.get("supersededBy")):
+            out[name] = r  # later in append-only list wins
+    return out
+
+
 def _waiver_problem(waiver):
     """Why a stored waiver is void regardless of SHA (defence in depth), or None."""
     if not isinstance(waiver, dict):
@@ -212,6 +230,7 @@ def _grade(expected, tests, sha, waiver, stage=None):
     w_ok = bool(waiver) and bad is None and bool(sha) and waiver.get("sha") == sha
     covered = _waiver_tests(waiver) if waiver and bad is None else set()
     rows = []
+    current = _current_index(tests, stage, sha)
     for name, optional in _norm_expected(expected):
         if not isinstance(name, str) or not name.strip():
             # XACA-1346-033: an unhashable/blank expected `test` must be a NAMED refusal,
@@ -219,7 +238,7 @@ def _grade(expected, tests, sha, waiver, stage=None):
             rows.append(("<malformed>", FAILED, "expected test entry is malformed: 'test' must be a "
                          "non-empty string (got %r)" % (name,)))
             continue
-        rec = _current_record(tests, stage, name, sha)
+        rec = current.get(name)
         if rec and rec.get("result") == "PASS":
             rows.append((name, PASSED, ""))
             continue

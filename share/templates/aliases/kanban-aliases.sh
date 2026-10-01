@@ -1316,6 +1316,19 @@ kb-backlog() {
             echo "Current team   : $team"
             ;;
 
+        pr-merged)
+            # XACA-1347-029: canonical records item.prMerged here (kb-backlog pr-merged
+            # <ITEM-ID> <PR#>) via _kb_pr_merged_record. This minimal fallback file has no
+            # such helper (nor _kb_log_activity / _kb_ensure_jq / gh-backed PR lookup) and is
+            # standalone by design -- it is only used when kanban-helpers.template.sh is
+            # absent -- so the logic is deliberately NOT duplicated. Fail loud instead of
+            # falling through to "Unknown command", so the DEV->QA release gate's prMerged
+            # requirement is never silently skipped.
+            echo "Error: 'kb-backlog pr-merged' requires the full kanban-helpers (kanban-helpers.template.sh)." >&2
+            echo "       This minimal fallback does not record item.prMerged; run 'aiteamforge upgrade'." >&2
+            return 1
+            ;;
+
         *)
             echo "Unknown command: $cmd"
             echo "Run 'kb-backlog help' for usage"

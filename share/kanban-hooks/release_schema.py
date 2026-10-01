@@ -84,11 +84,43 @@ def append_test_record(tests, rec):
     return list(tests) + [copy.deepcopy(rec)]
 
 
+def append_test_records(tests, recs):
+    """Batch append_test_record -> (new tests[], [(index into recs, message)]). Same validation and
+    the same messages, but ids are tracked in a set and the list is copied once: calling
+    append_test_record per record re-scanned and re-copied tests[] each time, O(N^2) for a large
+    post under the board lock (PR #1010 round 1). A rejected record is skipped, not appended;
+    callers that must be all-or-nothing check `problems` before saving. Never mutates the input."""
+    out = list(tests)
+    seen = {t.get("id") for t in tests if isinstance(t, dict) and isinstance(t.get("id"), str)}
+    problems = []
+    for i, rec in enumerate(recs):
+        bad = validate_test_record(rec)
+        if bad:
+            problems.append((i, "invalid test record: " + "; ".join(bad)))
+            continue
+        if rec["id"] in seen:
+            problems.append((i, "duplicate test record id: %s" % rec["id"]))
+            continue
+        seen.add(rec["id"])
+        out.append(copy.deepcopy(rec))
+    return out, problems
+
+
 def _ids(tests):
     return {t["id"]: t for t in tests if isinstance(t, dict) and isinstance(t.get("id"), str)}
 
 
-def supersede_transition_ok(rec, new_value, tests):
+def _index(tests):
+    """(id -> record [last wins, as _ids], id -> FIRST position). Built once per snapshot so a batch of
+    transitions is O(N), not O(N) per transition (PR #1010 round 1: O(N^2) under the board lock)."""
+    order = {}
+    for i, t in enumerate(tests):
+        if isinstance(t, dict) and isinstance(t.get("id"), str):
+            order.setdefault(t["id"], i)
+    return _ids(tests), order
+
+
+def supersede_transition_ok(rec, new_value, tests, _idx=None):
     """THE single supersededBy transition rule (spec 6.5), used by set_superseded AND
     check_append_only. `rec` is the record as it stands, `tests` the snapshot that
     must contain the target. Spec 6.5: the target is "the first new record for the
@@ -126,13 +158,10 @@ def supersede_transition_ok(rec, new_value, tests):
         return False
     if new_value.startswith("sha:"):
         return False  # reserved prefix: never an id target
-    target = _ids(tests).get(new_value)
+    ids, order = _idx if _idx is not None else _index(tests)
+    target = ids.get(new_value)
     if target is None or new_value == rec.get("id") or target.get("test") != rec.get("test"):
         return False
-    order = {}
-    for i, t in enumerate(tests):
-        if isinstance(t, dict) and isinstance(t.get("id"), str):
-            order.setdefault(t["id"], i)
     if rec.get("id") not in order or order[new_value] <= order[rec["id"]]:
         return False
     target_sha = str(target.get("sha")).lower()
@@ -156,6 +185,36 @@ def set_superseded(tests, rec_id, superseded_by):
     return [dict(t, supersededBy=superseded_by) if t is rec else t for t in tests]
 
 
+def set_superseded_many(tests, updates, skip_illegal=False):
+    """Batch form of set_superseded: `updates` is [(rec_id, superseded_by), ...]. Every transition
+    is checked by supersede_transition_ok against ONE index of the input snapshot, then all are
+    applied in one pass -> (new tests[], [applied rec_ids in update order]). Equivalent to applying
+    them one by one because the rule reads only the target's id/test/sha/position and the record's
+    OWN supersededBy, so each record may appear at most once (a repeat raises ValueError).
+    skip_illegal=False raises on the first illegal transition (nothing applied); True skips it.
+    """
+    idx = _index(tests)
+    ids = idx[0]
+    chosen, applied = {}, []
+    for rec_id, value in updates:
+        if rec_id in chosen:
+            raise ValueError("record %s appears twice in one supersede batch" % rec_id)
+        rec = ids.get(rec_id)
+        if rec is None:
+            raise ValueError("no test record with id: %s" % rec_id)
+        if not supersede_transition_ok(rec, value, tests, _idx=idx):
+            if skip_illegal:
+                continue
+            raise ValueError("illegal supersededBy transition for %s: %r -> %r"
+                             % (rec_id, rec.get("supersededBy"), value))
+        chosen[rec_id] = value
+        applied.append(rec_id)
+    if not chosen:
+        return list(tests), applied
+    targets = {id(ids[r]): v for r, v in chosen.items()}
+    return [dict(t, supersededBy=targets[id(t)]) if id(t) in targets else t for t in tests], applied
+
+
 def check_append_only(old_tests, new_tests):
     """Return violations between two tests[] snapshots ([] = only legal changes).
 
@@ -171,6 +230,7 @@ def check_append_only(old_tests, new_tests):
     if len(new_tests) < len(old_tests):
         return ["records removed (%d -> %d)" % (len(old_tests), len(new_tests))]
     seen = set()
+    idx = _index(new_tests)   # once per snapshot: per-record transition checks stay O(1)
     for i, new in enumerate(new_tests):
         if not isinstance(new, dict):
             errs.append("new[%d]: not an object" % i)
@@ -184,14 +244,14 @@ def check_append_only(old_tests, new_tests):
                 if k != "supersededBy" and old[k] != new[k]:
                     errs.append("%s: field %s modified" % (rid, k))
             if "supersededBy" in old and "supersededBy" in new and old["supersededBy"] != new["supersededBy"] \
-                    and not supersede_transition_ok(old, new["supersededBy"], new_tests):
+                    and not supersede_transition_ok(old, new["supersededBy"], new_tests, _idx=idx):
                 errs.append("%s: illegal supersededBy transition %r -> %r"
                             % (rid, old["supersededBy"], new["supersededBy"]))
         else:
             for p in validate_test_record(new):
                 errs.append("appended %s: %s" % (rid, p))
             if new.get("supersededBy") is not None and \
-                    not supersede_transition_ok(dict(new, supersededBy=None), new["supersededBy"], new_tests):
+                    not supersede_transition_ok(dict(new, supersededBy=None), new["supersededBy"], new_tests, _idx=idx):
                 errs.append("appended %s: illegal supersededBy %r" % (rid, new["supersededBy"]))
         if isinstance(rid, str):
             if rid in seen:
