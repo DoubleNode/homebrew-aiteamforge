@@ -131,6 +131,9 @@ _cc_encode_project_dir() {
 # false "missing" and a perfectly good session would be treated as phantom.
 # A uuid is unique, so the any-dir match cannot hit another window's session.
 _cc_transcript_exists() {
+    # Bare (N) qualifier below: force BARE_GLOB_QUAL for this function only, so
+    # a caller's NO_BARE_GLOB_QUAL cannot turn the glob into "bad pattern" (XACA-0737).
+    setopt LOCAL_OPTIONS BARE_GLOB_QUAL
     local _tx_id="${1:-}" _tx_dir="${2:-$PWD}"
     [[ -n "$_tx_id" ]] || return 1
     [[ -f "$HOME/.claude/projects/-$(_cc_encode_project_dir "$_tx_dir")/${_tx_id}.jsonl" ]] && return 0
@@ -651,7 +654,7 @@ ccc() {
         # and every re-stamp below would write it straight back, wedging the
         # window. No transcript = no saved session: fall through to --continue.
         # This MUST run before the launch-time re-stamp below. The sidecar is
-        # left in place (evidence; parking/migration belongs to XACA-1016).
+        # left in place (evidence; parking/migration belongs to XACA-1075 / PR #1016).
         if [[ -n "$session_id" ]]; then
             local _ccc_chk_dir="$PWD"
             [[ -n "$saved_dir" && -d "$saved_dir" ]] && _ccc_chk_dir="$saved_dir"

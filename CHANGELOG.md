@@ -10,6 +10,7 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   XACA-1074-018: the post-exit saves in `ccc` are gated on the pinned/resumed id's transcript existing (a pinned `--continue` that wrote no
   transcript no longer plants a phantom sidecar), and the resume branch treats a sidecar with no transcript as no saved session and falls
   through to `--continue` with a stderr notice (sidecar kept). Mirrors the dev change.
+  Follow-up: `_cc_transcript_exists` forces `BARE_GLOB_QUAL` function-scoped; the C15 resume fixture only adds a stand-in transcript when the case wrote none (an empty duplicate shadowed C15a's ~206K one).
 - **XACA-1323** — mode-only: `share/scripts/cc-credential-team-resolver.sh` and `share/scripts/kb-release-config-validate.sh` are now 100755 to match their canonical sources (`sync-tap.sh` is mode-blind, so the exec bit is set by hand in the tap).
 - **XACA-1347** (PR B3): `release_walkthrough.py` says why an answer was rejected, shows `Case N of M` and a resume cue, and prints a readable end summary (on its own line); `kb-release walkthrough --json` (template + `release_stage_cli.py`) keeps the one-line JSON summary.
 
