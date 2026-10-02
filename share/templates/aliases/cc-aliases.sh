@@ -968,6 +968,25 @@ _cc_launch() {
         return 0
     fi
 
+    # XACA-0668 (subitem 005): migrate this window's legacy "-w<index>" sidecar to
+    # the new "-w<window_id>" key BEFORE the launch-time save below, so the save
+    # writes (and any concurrent ccc reads) use the new scheme. No-op outside tmux.
+    _cc_migrate_window_sidecar
+
+    # XACA-0668 (subitem 001): crash-safe LAUNCH-time sidecar save.
+    # The old code only saved AFTER `claude` returned, so a machine crash
+    # mid-session left the sidecar pointing at the PREVIOUS cleanly-exited session
+    # and the resume pointer was lost. When we have a pinned UUID (--session-id
+    # supported), write the sidecar NOW with the correct uuid + PWD. The display
+    # name may be empty at this point (kanban/transcript not ready yet) — that's
+    # fine; the post-exit _cc_save_session below refreshes it. When --session-id
+    # is NOT supported (_cc_pinned_id empty) there is no UUID to pin at launch, so
+    # we skip the launch-time save and rely on the existing post-exit ls -t
+    # fallback (unchanged).
+    # XACA-1380: ported from dev (tap had the launch-time account record below
+    # but never this save, so a crash left the sidecar on the previous session).
+    [[ -n "$_cc_pinned_id" ]] && _cc_save_session "$_cc_pinned_id"
+
     # XACA-1312 (design doc §0 D3 correction, §4 CLAUDE_BILLED_ACCOUNT_ID
     # contract): record via the shared helper with the GATED billed
     # identity _cc_route_prepare just resolved — NOT the old headless
