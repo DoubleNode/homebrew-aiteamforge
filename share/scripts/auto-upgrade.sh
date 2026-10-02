@@ -9,7 +9,7 @@
 #      (each bail path logs its own completion marker before exiting).
 #   2. Run `brew update`.
 #   3. Check if aiteamforge is outdated.
-#   4. If outdated: check version-pin sentinel (~/.aiteamforge/version-pin).
+#   4. If outdated: check version-pin sentinel ($AITEAMFORGE_DIR/version-pin).
 #      - If available version > pinned version: refuse upgrade, log + notify.
 #      - Otherwise: run `brew upgrade aiteamforge`.
 #        On success: fire macOS success notification (opt-out via quiet flag).
@@ -17,13 +17,13 @@
 #   5. If already up-to-date: log and exit 0.
 #
 # Version-pin sentinel:
-#   ~/.aiteamforge/version-pin — single line, e.g. "v0.12.3" or "0.12.3"
+#   $AITEAMFORGE_DIR/version-pin — single line, e.g. "v0.12.3" or "0.12.3"
 #   Empty / missing = no pin (upgrade freely).
 #   Unparseable = warn + treat as no pin.
 #
 # Notification opt-out:
 #   Set AITEAMFORGE_AUTO_UPGRADE_QUIET=1 in environment or in
-#   ~/.aiteamforge/auto-upgrade.env to suppress all osascript notifications.
+#   $AITEAMFORGE_DIR/auto-upgrade.env to suppress all osascript notifications.
 #
 # Log rotation: rotates auto-upgrade.log when it exceeds 5 MB.
 #
@@ -33,7 +33,9 @@ set -euo pipefail
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-AITEAMFORGE_DIR="${AITEAMFORGE_DIR:-$HOME/.aiteamforge}"
+# Default is the WORKING dir ~/aiteamforge (not the ~/.aiteamforge config dir),
+# matching the tap CLI and the LaunchAgent (XACA-1384).
+AITEAMFORGE_DIR="${AITEAMFORGE_DIR:-$HOME/aiteamforge}"
 LOG_DIR="$AITEAMFORGE_DIR/logs"
 LOG_FILE="$LOG_DIR/auto-upgrade.log"
 LOG_MAX_BYTES=5242880  # 5 MB

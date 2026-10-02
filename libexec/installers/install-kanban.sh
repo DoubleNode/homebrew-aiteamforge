@@ -514,7 +514,7 @@ install_kanban_helpers() {
     local target="$AITEAMFORGE_DIR/kanban-helpers.sh"
 
     # XACA-0559 / XACA-0564: refuse to overwrite a git-tracked kanban-helpers.sh.
-    # On a real install $AITEAMFORGE_DIR is ~/.aiteamforge (never a git repo) so
+    # On a real install $AITEAMFORGE_DIR is ~/aiteamforge (never a git repo) so
     # this guard is a no-op.  On a dev checkout the sed-redirect would silently
     # replace the full source-of-truth helpers with a stale/different copy.
     # Set AITEAMFORGE_ALLOW_DEV_OVERWRITE=1 to override (sandboxed tests only).
@@ -2015,8 +2015,9 @@ test_lcars_server() {
 # Plist:               ~/Library/LaunchAgents/com.aiteamforge.auto-upgrade.plist
 # Log:                 $AITEAMFORGE_DIR/logs/auto-upgrade.log
 #
-# Version-pin:  echo "v0.12.3" > ~/.aiteamforge/version-pin
-# Quiet mode:   echo "AITEAMFORGE_AUTO_UPGRADE_QUIET=1" > ~/.aiteamforge/auto-upgrade.env
+# Version-pin:  echo "v0.12.3" > $AITEAMFORGE_DIR/version-pin
+# Quiet mode:   echo "AITEAMFORGE_AUTO_UPGRADE_QUIET=1" > $AITEAMFORGE_DIR/auto-upgrade.env
+# (Working dir, not the ~/.aiteamforge config dir — XACA-1384.)
 #
 # XACA-0571-014 SIBLING-DRIFT NOTE: this installer uses inline sed for first-time
 # render. A SECOND renderer lives at libexec/commands/aiteamforge-upgrade.sh

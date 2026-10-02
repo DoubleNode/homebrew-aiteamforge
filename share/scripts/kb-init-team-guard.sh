@@ -95,15 +95,11 @@ _kbitg_cyan()   { printf '\033[0;36m%s\033[0m\n' "$*" >&2; }
 #      template — covers the pre-registration window before team-paths.json has
 #      the entry on disk.
 #   3. The input team-id unchanged (already an instance, or a single-instance team).
-_kb_resolve_instance_id() {
-    local team_id="$1"
-    local kanban_dir="$2"
-    local resolved=""
-
-    # 1. team-paths.json lookup by kanban_dir (generic, table-free).
-    local cfg="${AITEAMFORGE_CONFIG:-$HOME/.aiteamforge/team-paths.json}"
-    if [[ -f "$cfg" ]] && command -v python3 &>/dev/null; then
-        resolved="$(python3 - "$cfg" "$kanban_dir" "$team_id" << 'PYEOF' 2>/dev/null
+# XACA-1384: the python bodies live in helper functions, never in a heredoc
+# inside $( ). macOS /bin/bash 3.2 scans such a heredoc for quotes, so an
+# apostrophe in a python comment made the whole file unparseable there.
+_kb_resolve_instance_from_cfg() {
+    python3 - "$1" "$2" "$3" 2>/dev/null << 'PYEOF'
 import json, os, sys
 cfg, want_dir, team_id = sys.argv[1], sys.argv[2], sys.argv[3]
 def norm(p): return os.path.normpath(os.path.expanduser(p))
@@ -119,7 +115,17 @@ for key, entry in teams.items():
     if kd and norm(kd) == want and (key == team_id or key.startswith(team_id + "-")):
         print(key); sys.exit(0)
 PYEOF
-)"
+}
+
+_kb_resolve_instance_id() {
+    local team_id="$1"
+    local kanban_dir="$2"
+    local resolved=""
+
+    # 1. team-paths.json lookup by kanban_dir (generic, table-free).
+    local cfg="${AITEAMFORGE_CONFIG:-$HOME/.aiteamforge/team-paths.json}"
+    if [[ -f "$cfg" ]] && command -v python3 &>/dev/null; then
+        resolved="$(_kb_resolve_instance_from_cfg "$cfg" "$kanban_dir" "$team_id")"
     fi
 
     # 2. Built-in fallback for the canonical first-project instances.
@@ -268,6 +274,20 @@ _kb_stub_paths_for_instance() {
     esac
 }
 
+# ── _kb_stub_item_count <stub-file> ───────────────────────────────────────────
+# Prints the stub's backlog length, or 0 when it can't be read. A helper, not a
+# heredoc inside $( ), for /bin/bash 3.2 (XACA-1384; see _kb_resolve_instance_from_cfg).
+_kb_stub_item_count() {
+    python3 - "$1" 2>/dev/null << 'PYEOF'
+import json, sys
+try:
+    b = json.load(open(sys.argv[1]))
+    print(len(b.get('backlog', [])))
+except Exception:
+    print(0)
+PYEOF
+}
+
 # ── _kb_detect_and_quarantine_stub <instance-id> <canonical-board-file> ───────
 # XACA-0649: Detect a legacy-default stub that coexists with the canonical board
 # and auto-quarantine it so LCARS server start-up never hits the dual-board FATAL.
@@ -345,15 +365,7 @@ _kb_detect_and_quarantine_stub() {
     fi
 
     local item_count=0
-    item_count=$(python3 - "$stub_path" 2>/dev/null <<'PYEOF'
-import json, sys
-try:
-    b = json.load(open(sys.argv[1]))
-    print(len(b.get('backlog', [])))
-except Exception:
-    print(0)
-PYEOF
-)
+    item_count=$(_kb_stub_item_count "$stub_path")
     # If python3 ran but produced non-numeric output, treat as non-empty (safe).
     if ! [[ "$item_count" =~ ^[0-9]+$ ]]; then
         item_count=1
@@ -367,7 +379,8 @@ PYEOF
     fi
 
     # Empty stub: move it to a quarantine directory.
-    local _atf_dir="${AITEAMFORGE_DIR:-${HOME}/.aiteamforge}"
+    # Working-dir default ~/aiteamforge, not the ~/.aiteamforge config dir (XACA-1384).
+    local _atf_dir="${AITEAMFORGE_DIR:-${HOME}/aiteamforge}"
     local _ts
     _ts=$(date -u +%Y%m%d-%H%M%S)
     local _q_dir="${_atf_dir}/quarantine/runtime-stub-stash/${_ts}-${instance_id}"

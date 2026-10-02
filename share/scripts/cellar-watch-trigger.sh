@@ -12,7 +12,9 @@
 
 set -eo pipefail
 
-AITEAMFORGE_DIR="${AITEAMFORGE_DIR:-$HOME/.aiteamforge}"
+# Default is the WORKING dir ~/aiteamforge (not the ~/.aiteamforge config dir),
+# matching the tap CLI and the LaunchAgent (XACA-1384).
+AITEAMFORGE_DIR="${AITEAMFORGE_DIR:-$HOME/aiteamforge}"
 LOG_FILE="${AITEAMFORGE_DIR}/logs/cellar-watch.log"
 mkdir -p "$(dirname "$LOG_FILE")"
 

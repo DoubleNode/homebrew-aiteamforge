@@ -1302,11 +1302,18 @@ _spd_find_kanban_helpers() {
         printf '%s\n' "$HOME/dev-team/kanban-helpers.sh"
         return 0
     fi
-    local atfd="${AITEAMFORGE_DIR:-$HOME/.aiteamforge}"
-    if [ -f "$atfd/spacedock/kanban/kanban-helpers.sh" ]; then
-        printf '%s\n' "$atfd/spacedock/kanban/kanban-helpers.sh"
-        return 0
-    fi
+    # XACA-1384: AITEAMFORGE_DIR is the WORKING dir (default ~/aiteamforge, no
+    # dot); ~/.aiteamforge is the CONFIG dir. The installer writes
+    # kanban-helpers.sh at the top of the working dir; the old
+    # spacedock/kanban/ subpath is kept as a compatibility second candidate.
+    local atfd="${AITEAMFORGE_DIR:-$HOME/aiteamforge}"
+    local cand
+    for cand in "$atfd/kanban-helpers.sh" "$atfd/spacedock/kanban/kanban-helpers.sh"; do
+        if [ -f "$cand" ]; then
+            printf '%s\n' "$cand"
+            return 0
+        fi
+    done
     return 1
 }
 
@@ -1341,11 +1348,14 @@ _spd_find_lcars_health_check() {
         printf '%s\n' "$HOME/dev-team/lcars-health-check.sh"
         return 0
     fi
-    local atfd="${AITEAMFORGE_DIR:-$HOME/.aiteamforge}"
-    if [ -f "$atfd/scripts/lcars-health-check.sh" ]; then
-        printf '%s\n' "$atfd/scripts/lcars-health-check.sh"
-        return 0
-    fi
+    local atfd="${AITEAMFORGE_DIR:-$HOME/aiteamforge}"
+    local cand
+    for cand in "$atfd/lcars-health-check.sh" "$atfd/scripts/lcars-health-check.sh"; do
+        if [ -f "$cand" ]; then
+            printf '%s\n' "$cand"
+            return 0
+        fi
+    done
     return 1
 }
 
@@ -1412,8 +1422,8 @@ _spd_find_mandatory_teams_lib() {
         p2="\$AITEAMFORGE_HOME/libexec/lib/mandatory-teams.sh (AITEAMFORGE_HOME unset)"
     fi
 
-    atfd="${AITEAMFORGE_DIR:-$HOME/.aiteamforge}"
-    p3="\${AITEAMFORGE_DIR:-\$HOME/.aiteamforge}/libexec/lib/mandatory-teams.sh ($atfd/libexec/lib/mandatory-teams.sh)"
+    atfd="${AITEAMFORGE_DIR:-$HOME/aiteamforge}"
+    p3="\${AITEAMFORGE_DIR:-\$HOME/aiteamforge}/libexec/lib/mandatory-teams.sh ($atfd/libexec/lib/mandatory-teams.sh)"
     if [ -f "$atfd/libexec/lib/mandatory-teams.sh" ]; then
         SPD_MANDATORY_TEAMS_LIB="$atfd/libexec/lib/mandatory-teams.sh"
         return 0
@@ -1668,7 +1678,7 @@ _spd_check_kb_sweep_stubs() {
 # reading a documented log format, not inventing a health judgement.
 # ---------------------------------------------------------------------------
 _spd_check_auto_upgrade_log() {
-    local log="${KB_SPACEDOCK_AUTO_UPGRADE_LOG:-${AITEAMFORGE_DIR:-$HOME/.aiteamforge}/logs/auto-upgrade.log}"
+    local log="${KB_SPACEDOCK_AUTO_UPGRADE_LOG:-${AITEAMFORGE_DIR:-$HOME/aiteamforge}/logs/auto-upgrade.log}"
     if [ ! -f "$log" ]; then
         _spd_emit "auto-upgrade-log" "skip" "not present — no tap install / no upgrade runs recorded on this host" "" ""
         return
