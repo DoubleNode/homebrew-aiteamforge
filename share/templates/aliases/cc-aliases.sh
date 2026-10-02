@@ -124,37 +124,373 @@ _cc_encode_project_dir() {
     echo "$dir" | sed 's|[/ ]|-|g; s|^-||'
 }
 
-# XACA-1074-018: does a transcript for <uuid> exist? Looks in the project dir
-# for <dir> (default $PWD) using the SAME cwd->project-dir encoding
-# _cc_save_session uses, then falls back to any project dir: that encoding only
-# maps "/" and " ", so a cwd containing "." or "_" would otherwise read as a
-# false "missing" and a perfectly good session would be treated as phantom.
-# A uuid is unique, so the any-dir match cannot hit another window's session.
-_cc_transcript_exists() {
-    # Bare (N) qualifier below: force BARE_GLOB_QUAL for this function only, so
-    # a caller's NO_BARE_GLOB_QUAL cannot turn the glob into "bad pattern" (XACA-0737).
-    setopt LOCAL_OPTIONS BARE_GLOB_QUAL
-    local _tx_id="${1:-}" _tx_dir="${2:-$PWD}"
-    [[ -n "$_tx_id" ]] || return 1
-    [[ -f "$HOME/.claude/projects/-$(_cc_encode_project_dir "$_tx_dir")/${_tx_id}.jsonl" ]] && return 0
-    local -a _tx_hits
-    _tx_hits=( "$HOME"/.claude/projects/*/"${_tx_id}".jsonl(N) )
-    (( ${#_tx_hits} > 0 ))
+# XACA-1075: ask tmux a format question about THIS window (pane-targeted when
+# $TMUX_PANE is known, so a background caller still asks about its own window).
+_cc_tmux_fmt() {
+    if [[ -n "$TMUX_PANE" ]]; then
+        tmux display-message -t "$TMUX_PANE" -p "$1" 2>/dev/null
+    else
+        tmux display-message -p "$1" 2>/dev/null
+    fi
 }
 
-# Print "-w<window_index>" when running inside tmux; return non-zero otherwise.
-# Scopes saved session files to a specific tmux window so two windows running
-# the same persona don't clobber each other's resume state.
+# XACA-1075: restart-stable window key. Echoes a sanitized key, or nothing when
+# the window has no trustworthy name-based identity (caller falls back to the
+# window-id). $1 = this window's #{window_id}. Priority:
+#   a. the window user-option @cc_window_key, if set;
+#   b. else, when the window name was set EXPLICITLY (a window-LOCAL
+#      automatic-rename of off, i.e. `new-window -n` / `new-session -n` /
+#      `rename-window`; every team startup script uses -n; XACA-1074-013) and no OTHER window in this session carries the same name, lazily
+#      stamp @cc_window_key = name and use it. The startup scripts recreate the
+#      same names after a restart, so the key re-derives identically — the
+#      option itself is LOST on restart, the name is not.
+# Names that a shell/tmux sets on its own (zsh, bash, tmux, ...) are never keys:
+# a hand-made window is not the same window after a restart. Reorder never moves
+# a name or an option, so the XACA-0668-004 reorder-stability property holds.
+_cc_window_key() {
+    local wid="$1" key="" name="" auto="" allow="" sid="" listing="" line="" dupes=0 mine="" lkey="" lname=""
+    local share="" unk="" ssid="" scode="" rest="" lwid=""
+    key=$(tmux show-options -w -v -q -t "$wid" @cc_window_key 2>/dev/null)
+    if [[ -z "$key" ]]; then
+        # XACA-1074-013: read the WINDOW-LOCAL automatic-rename, not the effective
+        # #{automatic-rename} format. The product tmux.conf sets it off GLOBALLY,
+        # so the effective value is 0 for every window and a name tmux merely
+        # auto-filled from the running command ("sleep") looked explicit. Measured
+        # (tmux 3.6a): `new-window -n`, `new-session -n` and `rename-window` set the
+        # option on the window itself; a window named by tmux has NO local value
+        # even when the global one is off. `show-options -w -v -q` prints only the
+        # local value (empty when unset), so empty/"on" = not explicit.
+        auto=$(tmux show-options -w -v -q -t "$wid" automatic-rename 2>/dev/null)
+        name=$(_cc_tmux_fmt '#{window_name}')
+        case "$name" in zsh|bash|sh|dash|ksh|fish|tmux) name="" ;; esac
+        # XACA-1074-014: ...and only while allow-rename is off. With allow-rename
+        # ON any program in the pane can set the window name (ESC k), and tmux then
+        # sets the window-local automatic-rename off exactly as `-n` does; measured
+        # (tmux 3.6a): the local option, #{window_name} and the window-renamed hook
+        # all look the same after the fact (the hook does not fire for `-n`, but it
+        # cannot be relied on: it must pre-exist the rename). So a name is trusted
+        # only while the pane cannot have been titled by a program: #{allow-rename}
+        # must read 0 (the product tmux.conf sets it off). Anything else -- on, or
+        # unreadable -- fails closed to the identity-guarded "-w@N" key. A name
+        # stamped into @cc_window_key earlier stays authoritative (branch a above).
+        allow=$(_cc_tmux_fmt '#{allow-rename}')
+        if [[ "$auto" == "off" && "$allow" == "0" && -n "$name" ]]; then
+            sid=$(_cc_tmux_fmt '#{session_id}')
+            # XACA-1074-016: sidecars are keyed per SESSION_CODE, not per tmux
+            # session, so uniqueness must hold across every session that SHARES
+            # this SESSION_CODE. That is NOT guaranteed: 83 of 85 startup
+            # new-session sites name the session after SESSION_CODE, but MainEvent
+            # qualifies it with the project while home-scripts/.zshrc_* re-derive
+            # it project-less, and SESSION_CODE is a plain shell variable.
+            # tmux does not record it, so claiming a key stamps the session with
+            # @cc_session_code. Sessions are then classified:
+            #   share   = stamped with OUR code        (names AND stamped keys count)
+            #   unknown = no stamp (e.g. keys stamped before this change)
+            #             presumed shared             (stamped keys count: fail closed)
+            #   other   = stamped with a DIFFERENT code (ignored: a different sidecar)
+            # With no SESSION_CODE nothing can be shared-by-code: own session only.
+            share="" unk="" ssid="" scode=""
+            if [[ -n "$SESSION_CODE" ]]; then
+                while IFS= read -r line; do
+                    ssid="${line%% *}"; scode=""
+                    [[ "$line" == *" "* ]] && scode="${line#* }"
+                    [[ -z "$ssid" || "$ssid" == "$sid" ]] && continue
+                    if [[ -z "$scode" ]]; then unk="${unk}${ssid}"$'\n'
+                    elif [[ "$scode" == "$SESSION_CODE" ]]; then share="${share}${ssid}"$'\n'; fi
+                done < <(tmux list-sessions -F '#{session_id} #{@cc_session_code}' 2>/dev/null)
+            fi
+            listing=""
+            [[ -n "$sid" ]] && listing=$(tmux list-windows -a -F '#{session_id} #{window_id} #{window_name}' 2>/dev/null)
+            # No listing => cannot prove the name is unique => do not stamp.
+            if [[ -n "$listing" ]]; then
+                # Unique means unique AFTER sanitizing (the filename form): "a b"
+                # and "a_b", "a/b" and "a|b", or two non-ASCII names would all
+                # share one sidecar. It must also not equal another window's
+                # already-stamped @cc_window_key (a window renamed INTO a name
+                # another window was stamped under would adopt its session).
+                # Names and keys come from two listings: either may contain
+                # any character, so neither can share a line with the other
+                # (the free-text field is always LAST).
+                mine=$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')
+                while IFS= read -r line; do
+                    ssid="${line%% *}"; rest="${line#* }"; lwid="${rest%% *}"
+                    [[ "$lwid" == "$wid" ]] && continue
+                    lname=""; [[ "$rest" == *" "* ]] && lname="${rest#* }"
+                    if [[ "$ssid" == "$sid" ]] || { [[ -n "$share" ]] && printf '%s' "$share" | grep -qxF -- "$ssid"; }; then
+                        if [[ "$lname" == "$name" || "$(printf '%s' "$lname" | tr -c 'A-Za-z0-9._-' '_')" == "$mine" ]]; then
+                            dupes=$((dupes + 1))
+                        fi
+                    fi
+                done <<< "$listing"
+                listing=$(tmux list-windows -a -F '#{session_id} #{window_id} #{@cc_window_key}' 2>/dev/null)
+                while IFS= read -r line; do
+                    ssid="${line%% *}"; rest="${line#* }"; lwid="${rest%% *}"
+                    [[ "$lwid" == "$wid" || "$rest" != *" "* ]] && continue
+                    lkey="${rest#* }"
+                    [[ -n "$lkey" && "$(printf '%s' "$lkey" | tr -c 'A-Za-z0-9._-' '_')" == "$mine" ]] || continue
+                    if [[ "$ssid" == "$sid" ]] || { [[ -n "$share" ]] && printf '%s' "$share" | grep -qxF -- "$ssid"; } \
+                        || { [[ -n "$SESSION_CODE" && -n "$unk" ]] && printf '%s' "$unk" | grep -qxF -- "$ssid"; }; then
+                        dupes=$((dupes + 1))
+                    fi
+                done <<< "$listing"
+                if (( dupes == 0 )); then
+                    # Stamp the session FIRST: a later window in another session
+                    # sharing this code must already be able to see this claim.
+                    [[ -n "$SESSION_CODE" ]] && tmux set-option -t "$sid" @cc_session_code "$SESSION_CODE" 2>/dev/null
+                    tmux set-option -w -t "$wid" @cc_window_key "$name" 2>/dev/null && key="$name"
+                fi
+            fi
+        fi
+    fi
+    [[ -z "$key" ]] && return 0
+    printf '%s' "$key" | tr -c 'A-Za-z0-9._-' '_'
+}
+
+# Print the sidecar key suffix for this tmux window; return non-zero outside
+# tmux. Scopes saved session files to a specific tmux window so two windows
+# running the same persona don't clobber each other's resume state.
+#
+# XACA-0668 (subitem 004): switched from the window INDEX (#I, e.g. "2") to the
+# stable window-ID (#{window_id}, e.g. "@5"). The index is volatile — tmux
+# reindexes windows when one is added, removed, or moved (move-window /
+# renumber-windows), so a sidecar keyed by index can silently point at the wrong
+# window after the layout changes. The window-id is permanent for the lifetime of
+# the window, so the sidecar→window binding stays correct. '@' is filename-safe.
+# The "-w" prefix is kept for continuity so the lazy migration glob can still
+# locate legacy "-w<index>" files (see _cc_migrate_window_sidecar).
+#
+# XACA-1075: the window-id is only unique within ONE tmux server lifetime — after
+# a restart tmux reissues @0, @1, ... so "-w@N" silently adopted a stranger's
+# sidecar. The key is now "-k<key>" (see _cc_window_key) whenever the window has
+# a restart-stable name; "-w<window_id>" remains the fallback for unnamed windows
+# and is guarded at READ time (_cc_sidecar_usable) by a server-identity check.
 _cc_window_suffix() {
     [[ -z "$TMUX" ]] && return 1
-    local idx
-    if [[ -n "$TMUX_PANE" ]]; then
-        idx=$(tmux display-message -t "$TMUX_PANE" -p '#I' 2>/dev/null)
+    local wid key
+    wid=$(_cc_tmux_fmt '#{window_id}')
+    [[ -z "$wid" ]] && return 1
+    key=$(_cc_window_key "$wid")
+    if [[ -n "$key" ]]; then
+        echo "-k${key}"
     else
-        idx=$(tmux display-message -p '#I' 2>/dev/null)
+        echo "-w${wid}"
     fi
-    [[ -z "$idx" ]] && return 1
-    echo "-w${idx}"
+}
+
+# XACA-1075: live tmux server identity (#{start_time} + #{pid} identify one
+# server lifetime). Sets _CC_LIVE_START/_CC_LIVE_PID (call directly, not in
+# $(...)). Returns non-zero when start_time is not a plain epoch number.
+_cc_live_server_id() {
+    _CC_LIVE_START=$(_cc_tmux_fmt '#{start_time}')
+    _CC_LIVE_PID=$(_cc_tmux_fmt '#{pid}')
+    [[ "$_CC_LIVE_START" =~ ^[0-9]+$ ]] || return 1
+    [[ "$_CC_LIVE_PID" =~ ^[0-9]+$ ]] || _CC_LIVE_PID=""
+    # XACA-1074-015: pin the identity epoch the first time identity-aware code
+    # runs on this HOME (idempotent; every save and every provenance check
+    # passes through here, so it is set before any file could be restored).
+    _cc_identity_epoch >/dev/null 2>&1
+    return 0
+}
+
+# XACA-1074-015: the "identity epoch" = the first moment identity-writing code ran
+# on this HOME (epoch seconds, kept in ~/.claude/.cc-sidecar-identity-epoch -- a
+# dotfile OUTSIDE terminal-sessions/ so no sidecar glob or sweep ever sees it).
+# Every sidecar written from then on carries server_start+server_pid, so an
+# identity-LESS file whose mtime is at/after the epoch cannot be a genuine
+# pre-upgrade file: it is a restore/copy/hand-made file and is unprovable. The
+# marker is written once (mv -n, never overwritten). Echoes the epoch, or returns
+# non-zero when it cannot be read or created (callers fail closed).
+_cc_identity_epoch() {
+    local f="${HOME}/.claude/.cc-sidecar-identity-epoch" v="" tmp=""
+    if [[ ! -s "$f" ]]; then
+        mkdir -p "${HOME}/.claude" 2>/dev/null || return 1
+        tmp="${f}.$$"
+        { date +%s > "$tmp" && mv -n "$tmp" "$f"; } 2>/dev/null
+        [[ -e "$tmp" ]] && unlink "$tmp" 2>/dev/null
+    fi
+    IFS= read -r v < "$f" 2>/dev/null
+    [[ "$v" =~ ^[0-9]+$ ]] || return 1
+    echo "$v"
+}
+
+# XACA-1075: parse a sidecar into _CC_SC_{ID,NAME,DIR,START,PID,WID}. Format is
+# "uuid|name|pwd|server_start|server_pid|window_id"; new fields are LAST, so
+# legacy 1/2/3-field files parse with the trailing vars empty. Every reader goes
+# through here (or reads with 6 vars) — a 3-var read would fold the identity
+# fields into the cwd.
+_cc_sidecar_read() {
+    _CC_SC_ID="" _CC_SC_NAME="" _CC_SC_DIR="" _CC_SC_START="" _CC_SC_PID="" _CC_SC_WID=""
+    [[ -r "$1" ]] || return 1
+    IFS='|' read -r _CC_SC_ID _CC_SC_NAME _CC_SC_DIR _CC_SC_START _CC_SC_PID _CC_SC_WID < "$1" || true
+    return 0
+}
+
+# File mtime as epoch seconds (GNU stat first: BSD stat rejects -c, whereas GNU
+# stat accepts BSD's -f as a different, filesystem mode).
+_cc_file_mtime() {
+    local m
+    m=$(stat -c %Y "$1" 2>/dev/null) || m=$(stat -f %m "$1" 2>/dev/null) || return 1
+    [[ "$m" =~ ^[0-9]+$ ]] || return 1
+    echo "$m"
+}
+
+# XACA-1075: is this sidecar provably from the CURRENT tmux server lifetime?
+# Complete stored identity (server_start AND server_pid) -> must equal the live
+# one. Legacy file (NO identity, written before XACA-1075) -> the mtime proof,
+# tightened by XACA-1074-015: server_start < mtime <= identity epoch.
+#   - STRICTLY after the start: #{start_time} has 1s granularity, so a file the
+#     previous server wrote in the same second a restarted server came up has
+#     mtime == start_time and a ">=" test passed it.
+#   - NOT AFTER the identity epoch (_cc_identity_epoch; "<=" because the old code
+#     may have written the file in the very second the marker was first made, and
+#     a same-second restore is not a realistic race): identity-writing code never
+#     emits an identity-less file, so one with a later mtime is a backup restore
+#     or copy (which refreshes mtimes), not a pre-upgrade file. The proof thereby
+#     also expires on its own: once no server older than the epoch is running,
+#     nothing can satisfy it.
+# Partial identity (start XOR pid), unknown live identity, unreadable file or an
+# unreadable epoch -> NOT provable (fail closed).
+_cc_sidecar_from_this_server() {
+    _cc_sidecar_read "$1" || return 1
+    _cc_live_server_id || return 1
+    if [[ -n "$_CC_SC_START" || -n "$_CC_SC_PID" ]]; then
+        [[ -n "$_CC_SC_START" && -n "$_CC_SC_PID" ]] || return 1
+        [[ "$_CC_SC_START" == "$_CC_LIVE_START" && "$_CC_SC_PID" == "$_CC_LIVE_PID" ]]
+        return
+    fi
+    local m epoch
+    m=$(_cc_file_mtime "$1") || return 1
+    epoch=$(_cc_identity_epoch) || return 1
+    (( m > _CC_LIVE_START && m <= epoch ))
+}
+
+# XACA-1075: does a transcript for this session uuid exist on disk? (UUIDs are
+# unique across projects, so search every project dir rather than re-deriving
+# the cwd slug.)
+_cc_transcript_exists() {
+    local id="$1" base
+    [[ "$id" =~ ^[A-Za-z0-9_-]+$ ]] || return 1
+    for base in "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" "$HOME/.claude"; do
+        [[ -d "$base/projects" ]] || continue
+        [[ -n "$(find "$base/projects" -maxdepth 2 -name "${id}.jsonl" 2>/dev/null | head -n 1)" ]] && return 0
+    done
+    return 1
+}
+
+# XACA-1075: read-time staleness guard. $1 = sidecar path, $2 = the suffix it
+# was found under, $3 = "quiet" to suppress the notice (banner use). Returns
+# non-zero — fail closed to the existing no-stored-session path — when
+#   - the transcript for the stored uuid is not on disk, or
+#   - the key is the "-w@N" window-id fallback and the file cannot be proven to
+#     come from this tmux server lifetime (window ids restart after a server
+#     restart, so a pre-restart "-w@N" file may belong to an unrelated window).
+# Never resumes a stranger; never deletes or edits the file.
+_cc_sidecar_usable() {
+    local f="$1" sfx="$2" quiet="${3:-}"
+    _cc_sidecar_read "$f" || return 1
+    [[ -z "$_CC_SC_ID" ]] && return 1
+    if ! _cc_transcript_exists "$_CC_SC_ID"; then
+        [[ "$quiet" == "quiet" ]] || printf 'ccc: ignoring saved session %s for this window — its transcript is gone\n' "${_CC_SC_ID:0:8}" >&2
+        return 1
+    fi
+    if [[ "$sfx" == -w@* ]] && ! _cc_sidecar_from_this_server "$f"; then
+        [[ "$quiet" == "quiet" ]] || printf 'ccc: ignoring saved session %s for this window — saved under a previous tmux server (window ids restart after a restart, so %s may be a different window now)\n' "${_CC_SC_ID:0:8}" "${sfx#-w}" >&2
+        return 1
+    fi
+    return 0
+}
+
+# XACA-1075: when ccc finds no usable sidecar, list sidecars of this SESSION_CODE
+# that no live window claims and whose stored cwd matches this one, so the user
+# can resume one EXPLICITLY. Never adopts anything: a shared cwd is not proof of
+# ownership (XACA-1074 shape). Advisory only; prints nothing when there are none.
+_cc_sidecar_stray_hint() {
+    [[ -z "$SESSION_CODE" || -z "$TMUX" ]] && return 0
+    local dir="$HOME/.claude/terminal-sessions" cur_sfx f base sfx m when shown=0
+    local live_ids live_keys out=""
+    cur_sfx=$(_cc_window_suffix 2>/dev/null) || cur_sfx=""
+    live_ids=$(tmux list-windows -a -F '#{window_id}' 2>/dev/null)
+    # @cc_window_key holds the RAW name; the "-k" suffix is its sanitized form,
+    # so compare sanitized-to-sanitized (keeping the newlines between keys).
+    live_keys=$(tmux list-windows -a -F '#{@cc_window_key}' 2>/dev/null | tr -c 'A-Za-z0-9._\n-' '_')
+    while IFS= read -r f; do
+        [[ -n "$f" ]] || continue
+        base="${f##*/}"
+        sfx="${base#"$SESSION_CODE"}"
+        case "$sfx" in -w*|-k*) ;; *) continue ;; esac
+        [[ "$sfx" == "$cur_sfx" ]] && continue
+        case "$sfx" in
+            -k*) printf '%s\n' "$live_keys" | grep -qxF -- "${sfx#-k}" && continue ;;
+            -w@*) if printf '%s\n' "$live_ids" | grep -qxF -- "${sfx#-w}" && _cc_sidecar_from_this_server "$f"; then continue; fi ;;
+        esac
+        _cc_sidecar_read "$f" || continue
+        [[ -n "$_CC_SC_ID" && "$_CC_SC_DIR" == "$PWD" ]] || continue
+        _cc_transcript_exists "$_CC_SC_ID" || continue
+        m=$(_cc_file_mtime "$f") || m=""
+        when=""
+        [[ -n "$m" ]] && when=$(date -r "$m" '+%Y-%m-%d %H:%M' 2>/dev/null || date -d "@$m" '+%Y-%m-%d %H:%M' 2>/dev/null)
+        out="${out}    ${_CC_SC_ID}  ${when:-?}  ${_CC_SC_NAME:-(unnamed)}  [${sfx}]"$'\n'
+        shown=$((shown + 1))
+        (( shown >= 5 )) && break
+    done < <(find "$dir" -maxdepth 1 -type f -name "${SESSION_CODE}-*" -exec ls -t {} + 2>/dev/null)
+    (( shown == 0 )) && return 0
+    printf '\e[2mccc: unclaimed saved sessions for %s in this directory (NOT adopted automatically):\n%s    resume one explicitly with: claude --resume <uuid>\e[0m\n' "$SESSION_CODE" "$out" >&2
+}
+
+# XACA-0668 (subitem 005): lazily migrate the CURRENT window's legacy sidecar
+# file to the current key.
+#
+# Why lazy + current-window-only: the index→window_id mapping is only reliable
+# for a live window, because only the current window can read BOTH #I (its old
+# key) and #{window_id} (its new key) in the same breath. A bulk sweep across
+# all windows can't reconstruct which historical index produced which file once
+# the layout has changed, so it could rename the wrong file. By migrating only
+# the window we're actually in, on the next ccc/_cc_launch, the rename is always
+# correct.
+#
+# XACA-1075: the target is now whatever _cc_window_suffix returns ("-k<key>" or
+# "-w<window_id>"), and BOTH "-w<window_id>" and legacy "-w<index>" sources are
+# considered — but only when the source is PROVABLY from this tmux server
+# lifetime (_cc_sidecar_from_this_server). A "-w@N" / "-w<idx>" file that cannot
+# be proven is a pre-restart stray: it is left exactly where it is (never
+# adopted, never deleted — a matching cwd is not proof, XACA-1074 shape);
+# _cc_sidecar_stray_hint surfaces it for an explicit resume.
+#
+# Behavior: if the source exists and the target does NOT, mv source→target (no
+# clobber). If the target already exists, leave the source untouched (do not
+# delete — avoid stranding/overwriting newer state). Outside tmux or with no
+# SESSION_CODE there are no per-window keys, so this is a no-op. Never errors
+# on missing files.
+#
+# Only the terminal-sessions sidecar is window-keyed; the per-account file
+# (~/.claude/.last-session-per-account/...) is keyed by account, not window, and
+# is intentionally NOT migrated here.
+_cc_migrate_window_sidecar() {
+    [[ -z "$TMUX" ]] && return 0
+    [[ -z "$SESSION_CODE" ]] && return 0
+
+    local new_suffix
+    new_suffix=$(_cc_window_suffix) || return 0
+
+    local dir="$HOME/.claude/terminal-sessions"
+    local new_file="${dir}/${SESSION_CODE}${new_suffix}"
+    [[ -e "$new_file" ]] && return 0
+
+    # Candidate old keys, most specific first: this window's id, then its
+    # legacy #I index (recomputed inline so _cc_window_suffix stays clean).
+    local wid idx cand src
+    wid=$(_cc_tmux_fmt '#{window_id}')
+    idx=$(_cc_tmux_fmt '#I')
+    for cand in "-w${wid}" "-w${idx}"; do
+        [[ "$cand" == "-w" || "$cand" == "$new_suffix" ]] && continue
+        src="${dir}/${SESSION_CODE}${cand}"
+        [[ -f "$src" ]] || continue
+        if _cc_sidecar_from_this_server "$src"; then
+            mv -n "$src" "$new_file" 2>/dev/null || true
+            return 0
+        fi
+    done
+    return 0
 }
 
 # Derive a human-readable session name mirroring what the agent panel's
@@ -322,9 +658,40 @@ _cc_save_session() {
     local session_name
     session_name=$(_cc_derive_session_name "$latest_file")
 
+    # XACA-1075: record the tmux server identity + window id with the pointer
+    # (new fields LAST -- see _cc_sidecar_read) so a "-w@N" file can be proven
+    # stale after a server restart. '|' in the name would shift every later
+    # field, so it is flattened.
+    local _cc_srv_start="" _cc_srv_pid="" _cc_wid
+    _cc_live_server_id && { _cc_srv_start="$_CC_LIVE_START"; _cc_srv_pid="$_CC_LIVE_PID"; }
+    _cc_wid=$(_cc_tmux_fmt '#{window_id}')
+    session_name="${session_name//|/ }"
+
     mkdir -p "$HOME/.claude/terminal-sessions"
-    printf '%s|%s|%s\n' "$session_id" "$session_name" "$PWD" \
-        > "$HOME/.claude/terminal-sessions/${SESSION_CODE}${window_suffix}"
+    local _cc_target="$HOME/.claude/terminal-sessions/${SESSION_CODE}${window_suffix}"
+
+    # XACA-1075: a "-w@N" file that cannot be proven to come from this server
+    # lifetime belongs to whatever window held that id before a restart.
+    # Overwriting it would destroy the only pointer to that stranded session, so
+    # park it beside the key (".stray-<mtime>", no clobber) where
+    # _cc_sidecar_stray_hint still lists it. "-k<key>" files are this window's own.
+    if [[ "$window_suffix" == -w@* && -f "$_cc_target" ]] && ! _cc_sidecar_from_this_server "$_cc_target"; then
+        local _cc_park _cc_base _cc_n=0
+        _cc_base="${_cc_target}.stray-$(_cc_file_mtime "$_cc_target" || echo 0)"
+        _cc_park="$_cc_base"
+        while [[ -e "$_cc_park" ]] && (( _cc_n < 100 )); do
+            _cc_n=$((_cc_n + 1)); _cc_park="${_cc_base}-${_cc_n}"
+        done
+        # Could not park it (no free name, or mv failed): skip the write rather
+        # than clobber the only pointer to the stranded session.
+        if [[ -e "$_cc_park" ]] || ! mv "$_cc_target" "$_cc_park" 2>/dev/null; then
+            return 0
+        fi
+    fi
+
+    printf '%s|%s|%s|%s|%s|%s\n' "$session_id" "$session_name" "$PWD" \
+        "$_cc_srv_start" "$_cc_srv_pid" "$_cc_wid" \
+        > "$_cc_target"
 }
 
 # Read the saved-session sidecar for the current tmux window and echo the
@@ -339,8 +706,12 @@ _cc_saved_session_label() {
     local session_file="$HOME/.claude/terminal-sessions/${SESSION_CODE}${window_suffix}"
     [[ -f "$session_file" ]] || return 0
 
+    # XACA-1075: same staleness guard as ccc, silently -- never show a banner
+    # label for a session ccc would refuse to resume.
+    _cc_sidecar_usable "$session_file" "$window_suffix" quiet || return 0
+
     local session_id saved_name saved_dir
-    IFS='|' read -r session_id saved_name saved_dir < "$session_file"
+    IFS='|' read -r session_id saved_name saved_dir _ _ _ < "$session_file"
     printf '%s' "$saved_name"
 }
 
@@ -607,6 +978,12 @@ ccc() {
         esac
     done
 
+    # XACA-0668 / XACA-1075: migrate this window's legacy "-w<index>" /
+    # "-w<window_id>" sidecar to the current key BEFORE we compute the suffix
+    # and read the file, so resume finds the migrated pointer instead of falling
+    # through to --continue. No-op outside tmux / without SESSION_CODE.
+    _cc_migrate_window_sidecar
+
     # Resolve credentials BEFORE reading the sidecar (ordering is
     # load-bearing — see dev ccc()'s own comment on this: the recorder must
     # never run against a pre-resolution empty billed id).
@@ -642,27 +1019,19 @@ ccc() {
     window_suffix=$(_cc_window_suffix) || window_suffix=""
     local session_file="$HOME/.claude/terminal-sessions/${SESSION_CODE}${window_suffix}"
 
-    if [[ -n "$SESSION_CODE" && -n "$window_suffix" && -f "$session_file" ]]; then
-        # Sidecar is "<uuid>|<name>|<project_dir>" — legacy 2-field and
-        # 1-field (uuid only) files parse with empty trailing vars and still
-        # work with --resume.
+    # XACA-1075: _cc_sidecar_usable fails closed (one-line notice, file left
+    # alone) when the transcript is gone or a "-w@N" file cannot be proven to
+    # belong to this tmux server lifetime -- falls through to --continue below.
+    # (It also replaces the XACA-1074-018 phantom-sidecar self-heal that used to
+    # sit here: the same transcript test now lives in the gate itself.)
+    if [[ -n "$SESSION_CODE" && -n "$window_suffix" && -f "$session_file" ]] \
+        && _cc_sidecar_usable "$session_file" "$window_suffix"; then
+        # Sidecar is "<uuid>|<name>|<project_dir>|<server_start>|<server_pid>|
+        # <window_id>" -- legacy 1/2/3-field files parse with empty trailing
+        # vars and still work with --resume. All 6 fields are read so the
+        # identity fields never fold into saved_dir.
         local session_id saved_name saved_dir
-        IFS='|' read -r session_id saved_name saved_dir < "$session_file"
-        # XACA-1074-018: self-heal a phantom sidecar. A pinned --continue whose
-        # claude wrote no transcript (no conversation / early exit) used to
-        # leave a sidecar for a uuid that does not exist; --resume of it fails
-        # and every re-stamp below would write it straight back, wedging the
-        # window. No transcript = no saved session: fall through to --continue.
-        # This MUST run before the launch-time re-stamp below. The sidecar is
-        # left in place (evidence; parking/migration belongs to XACA-1075 / PR #1016).
-        if [[ -n "$session_id" ]]; then
-            local _ccc_chk_dir="$PWD"
-            [[ -n "$saved_dir" && -d "$saved_dir" ]] && _ccc_chk_dir="$saved_dir"
-            if ! _cc_transcript_exists "$session_id" "$_ccc_chk_dir"; then
-                print -u2 "ccc: XACA-1074-018: sidecar ${session_file##*/} records session ${session_id} but no transcript exists for it; treating as no saved session (sidecar left in place)"
-                session_id=""
-            fi
-        fi
+        IFS='|' read -r session_id saved_name saved_dir _ _ _ < "$session_file"
         if [[ -n "$session_id" ]]; then
             # XACA-0977 D1/D2 parity: cross-account resume guard, via the
             # shared helper (design §1.1, §5) — same implementation dev ccc
@@ -716,6 +1085,8 @@ ccc() {
 
     # XACA-1303: no resume cost warning here — no session id to locate a
     # transcript by until claude has already picked one.
+    # XACA-1075: list (never adopt) unclaimed same-cwd sidecars for an explicit resume.
+    _cc_sidecar_stray_hint
     print -u2 $'\e[2m'"ccc: no saved session for this window — using --continue; billed to ${resolved_account_nickname:-default OAuth}"$'\e[0m'
     # XACA-1074-003: pin a fresh session id so the post-exit save needn't guess
     # via `ls -t` (windows sharing a cwd share one project dir, so the newest
