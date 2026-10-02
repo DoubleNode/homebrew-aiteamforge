@@ -810,6 +810,51 @@ _cc_saved_session_label() {
     printf '%s' "$saved_name"
 }
 
+# XACA-1380-004: Claude LIVENESS marker. Written when claude is launched,
+# removed when claude returns control to the shell (any rc, incl. Ctrl-C). A
+# crash or power loss kills the shell first, so the marker survives and tells
+# kb-host-ready (XACA-1380-005) which windows had a live conversation.
+# Key = SESSION_CODE + _cc_window_suffix, i.e. exactly the XACA-1075 sidecar key
+# (never a raw window id). Format (one pipe line, new fields LAST):
+#   1|uuid|launch_pwd|socket|session_name|window_name|server_start|server_pid|set_epoch
+# uuid is empty when no --session-id was pinned (005 treats that as low
+# confidence). No tmux / no SESSION_CODE -> nothing written. Never fails the
+# caller. NB: never name a local "path" -- in zsh it is tied to PATH (a `local
+# path` empties PATH, so mkdir/mv/date silently vanish). Design: kanban/plans/XACA-1380/XACA-1380-001_design.md section 4.
+_cc_live_marker_path() {
+    [[ -n "$SESSION_CODE" ]] || return 1
+    local sfx
+    sfx=$(_cc_window_suffix 2>/dev/null) || return 1
+    [[ -n "$sfx" ]] || return 1
+    print -r -- "${KB_CLAUDE_LIVE_DIR:-$HOME/.aiteamforge/run/claude-live}/${SESSION_CODE}${sfx}"
+}
+
+_cc_live_marker_set() {
+    local uuid="$1" mpath dir tmp sock sname wname
+    mpath=$(_cc_live_marker_path) || return 0
+    dir="${mpath:h}"
+    mkdir -p "$dir" 2>/dev/null || return 0
+    _cc_live_server_id || return 0
+    sock=$(_cc_tmux_fmt '#{socket_path}'); sock="${sock:t}"
+    sname=$(_cc_tmux_fmt '#{session_name}'); sname="${sname//|/ }"
+    wname=$(_cc_tmux_fmt '#{window_name}'); wname="${wname//|/ }"
+    tmp="${mpath}.tmp.$$"
+    if printf '1|%s|%s|%s|%s|%s|%s|%s|%s\n' "$uuid" "${PWD//|/ }" "${sock//|/ }" "$sname" "$wname" \
+        "$_CC_LIVE_START" "$_CC_LIVE_PID" "$(date +%s)" > "$tmp" 2>/dev/null; then
+        mv -f "$tmp" "$mpath" 2>/dev/null || unlink "$tmp" 2>/dev/null
+    else
+        unlink "$tmp" 2>/dev/null
+    fi
+    return 0
+}
+
+_cc_live_marker_clear() {
+    local mpath
+    mpath=$(_cc_live_marker_path) || return 0
+    unlink "$mpath" 2>/dev/null
+    return 0
+}
+
 # XACA-0223 (ported from canonical claude_code_cc_aliases.sh — see FAULT C,
 # XACA-1144): deterministic clear of the iTerm2 tab "C " prefix.
 # The stop-hook daemon (kanban-stop.py) is a heuristic that can miss slow
@@ -943,11 +988,13 @@ _cc_launch() {
     # XACA-1312: from here on claude is genuinely being invoked (dev parity)
     # -- flip the signal BEFORE the call, and inject the resolved credential
     # via the shared scoped-env helper instead of a bare `claude` call.
+    _cc_live_marker_set "$_cc_pinned_id"   # XACA-1380-004
     _CC_LAUNCH_INVOKED=1
     _cc_run_claude_with_auth "$_CC_RESOLVED_TOKEN" "$_CC_RESOLVED_AUTH_TYPE" \
         --permission-mode bypassPermissions "${_cc_extra_args[@]}" --append-system-prompt "$CLAUDE_SYSTEM_PROMPT" \
         "If an AMB heartbeat system reminder is present, call mcp__amb__heartbeat first, then introduce yourself briefly."
     local _cc_launch_claude_rc=$?
+    _cc_live_marker_clear   # XACA-1380-004 (clean return; a crash leaves it)
 
     # Pass the pinned UUID so _cc_save_session can skip the ls -t heuristic.
     _cc_save_session "$_cc_pinned_id"
@@ -1022,9 +1069,11 @@ cc() {
             _cc_fb_sid=$(uuidgen | tr 'A-Z' 'a-z')
             _cc_fb_extra=(--session-id "$_cc_fb_sid")
         fi
+        _cc_live_marker_set "$_cc_fb_sid"   # XACA-1380-004
         _cc_run_claude_with_auth "$_CC_RESOLVED_TOKEN" "$_CC_RESOLVED_AUTH_TYPE" \
             --permission-mode bypassPermissions "${_cc_fb_extra[@]}" "$@"
         local _cc_fb_rc=$?
+        _cc_live_marker_clear   # XACA-1380-004
         # XACA-1312 D3 correction: record via the gated identity, never the
         # headless helper's own rule (see _cc_launch's matching comment).
         _cc_record_session_account "$_cc_fb_sid" "$_CC_BILLED_ID" "$_CC_BILLED_NICKNAME"
@@ -1155,9 +1204,11 @@ ccc() {
             command -v _cc_resume_context_warning >/dev/null 2>&1 && \
                 _cc_resume_context_warning "$session_id"
 
+            _cc_live_marker_set "$session_id"   # XACA-1380-004
             _cc_run_claude_with_auth "$_CC_RESOLVED_TOKEN" "$_CC_RESOLVED_AUTH_TYPE" \
                 --permission-mode bypassPermissions --resume "$session_id"
             local _ccc_claude_rc=$?
+            _cc_live_marker_clear   # XACA-1380-004
             # XACA-1074-002: pass the id this branch already resumed. The bare
             # call fell back to `ls -t` on the shared project dir, so windows
             # sharing a cwd stamped each other's newest transcript here.
@@ -1196,9 +1247,11 @@ ccc() {
         _ccc_cont_sid=$(uuidgen | tr 'A-Z' 'a-z')
         _ccc_cont_args=(--continue --fork-session --session-id "$_ccc_cont_sid")
     fi
+    _cc_live_marker_set "$_ccc_cont_sid"   # XACA-1380-004 (4th site: ccc --continue)
     _cc_run_claude_with_auth "$_CC_RESOLVED_TOKEN" "$_CC_RESOLVED_AUTH_TYPE" \
         --permission-mode bypassPermissions "${_ccc_cont_args[@]}"
     local _ccc_claude_rc=$?
+    _cc_live_marker_clear   # XACA-1380-004
     # XACA-1074-018: a pinned id is only real if claude wrote its transcript.
     # `--continue` with no prior conversation exits 1 ("No conversation found
     # to continue") and creates nothing, and a user who quits before the first
