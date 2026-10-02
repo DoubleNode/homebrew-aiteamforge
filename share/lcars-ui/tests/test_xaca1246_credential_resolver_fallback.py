@@ -189,22 +189,61 @@ class InvokeCredentialResolverFallbackTests(unittest.TestCase):
         self.assertIsNone(result["mode"])
         self.assertIsNone(result["fault"])
 
+    def _isolated_home(self, team_paths):
+        """A throwaway HOME (XACA-1309): the chain's verdict for a team depends on MACHINE STATE it reads from
+        $HOME (team-paths.json, a vault keypair, ~/.zshrc.secrets). The old test used the developer's real
+        HOME, where an unknown team fails closed (a vault keypair exists), and went red in CI, where there is
+        no registry and an unknown team is simply "default Anthropic OAuth" (rc 0, no fault). The fault
+        contract is exercised against state this test OWNS instead."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        home = Path(tmp.name)
+        if team_paths is not None:
+            (home / ".aiteamforge").mkdir()
+            (home / ".aiteamforge" / "team-paths.json").write_text(json.dumps(team_paths))
+        patcher = patch.dict(os.environ, {"HOME": str(home)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        for var in ("XACA1246_UNSET_TOKEN_VAR", "AITEAMFORGE_ALLOW_DEFAULT_OAUTH", "AITEAMFORGE_CONFIG"):
+            os.environ.pop(var, None)
+        return home
+
     def test_present_but_unreachable_team_still_faults_and_is_not_env_direct(self):
         """Script PRESENT (the real file, checked out in this worktree) but
         the chain genuinely fails closed -- must still fault, and that
         fault must be distinguishable from the "no chain installed"
-        fallback (never mode='env-direct')."""
-        # Uses the REAL claude_code_cc_aliases.sh on disk in this repo --
-        # server._CC_ALIASES_SCRIPT is left at its normal computed value.
+        fallback (never mode='env-direct').
+
+        XACA-1309: the fail-closed state is CONSTRUCTED, not inherited from the machine: an isolated HOME
+        whose registry routes the team to an anthropic credential whose env var is unset and with no vault
+        on the machine -- the chain's own rc=1 "declared credential ... is empty" verdict."""
+        self._isolated_home({"schema_version": 2, "teams": {"xaca1246-unreachable": {
+            "working_dir": "/tmp/x", "kanban_dir": "/tmp/x/k",
+            "ai": {"credential": {"account_id": "acct-x", "nickname": "X",
+                                  "env_var_name": "XACA1246_UNSET_TOKEN_VAR",
+                                  "engine_slug": "anthropic", "account_slug": "x"}}}}})
         result = self.handler._invoke_credential_resolver(
-            "xaca1246-definitely-not-a-real-team", want_value=False, env_var_name=""
+            "xaca1246-unreachable", want_value=False, env_var_name=""
         )
         self.assertFalse(result["available"])
         self.assertIsNotNone(result["fault"], "a genuine chain failure must surface a fault")
+        self.assertIn("XACA1246_UNSET_TOKEN_VAR", result["fault"])
         self.assertNotEqual(
             result["mode"], "env-direct",
             "a real chain failure must never be reported as the no-chain-installed fallback",
         )
+
+    def test_unknown_team_with_no_registry_is_default_oauth_not_a_fault(self):
+        """The CI shape, pinned on purpose (XACA-1309): with NO team registry on the machine an unknown team is
+        the documented empty-config fallback (default Anthropic OAuth): rc 0, unavailable, and NOT a fault.
+        Not-a-fault here is correct; the fault contract above needs a team the registry actually routes."""
+        self._isolated_home(None)
+        result = self.handler._invoke_credential_resolver(
+            "xaca1246-definitely-not-a-real-team", want_value=False, env_var_name=""
+        )
+        self.assertFalse(result["available"])
+        self.assertIsNone(result["fault"])
+        self.assertNotEqual(result["mode"], "env-direct")
 
     def test_present_but_timeout_still_faults_and_is_not_env_direct(self):
         original_timeout = server._CC_CREDENTIAL_RESOLVE_TIMEOUT

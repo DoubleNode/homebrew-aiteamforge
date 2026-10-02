@@ -11778,7 +11778,8 @@ function renderReleaseCard(release, flowConfig = null, projectEnvironments = {})
     const unresolvedSuffix = unresolvedCount > 0 ? ` <span class="release-item-unresolved-count" title="${unresolvedCount} item(s) could not be resolved against a team/board and are counted as incomplete">(${unresolvedCount} unresolved)</span>` : '';
 
     // XACA-0056-007: Add archived badge for archived releases
-    const archivedBadge = isArchived ? '<span class="archived-badge">ARCHIVED</span>' : '';
+    const archivedBadge = (isArchived ? '<span class="archived-badge">ARCHIVED</span>' : '') +
+        promoteStrandedBadgeHtml(release);  // XACA-1375-015
 
     // XACA-0056: Add type badge
     // XACA-1005-001 (8th round, PR #795 gate, BLOCKING, reviewer-verified):
@@ -12331,9 +12332,11 @@ function promoteQuoteArg(value) {
     return "'" + String(value).replace(/'/g, "'\\''") + "'";
 }
 
-function promoteGammaCommand(releaseId) {
+function promoteGammaCommand(releaseId, data) {
+    // XACA-1375-013: the confirm stage is GAMMA, or PROD on a team with GAMMA disabled; the server names it.
+    const stage = (data && /^[A-Z]+$/.test(data.stage || '')) ? data.stage : 'GAMMA';
     return PROMOTE_REMEDY_COMMANDS.GAMMA_CONFIRM.command + ' ' + promoteQuoteArg(releaseId) +
-        ' --to GAMMA --confirm-deploy --actor <lead>';
+        ' --to ' + stage + ' --confirm-deploy --actor <lead>';
 }
 
 function promoteWaiveCommand(releaseId, data, by) {
@@ -12375,7 +12378,7 @@ function promoteRemedyFor(code, data, releaseId, conditional, leadsMissing) {
         case 'GAMMA_CONFIRM_REQUIRED':
         case 'GAMMA_ACTOR_NOT_LEAD':
             r = { text: phrase('A release lead must confirm the production deploy', "a release lead's deploy confirmation"),
-                  command: leadCommand(() => promoteGammaCommand(releaseId)) };
+                  command: leadCommand(() => promoteGammaCommand(releaseId, data)) };
             break;
         case 'WAIVER_NEEDED':
             r = { text: phrase('A release lead can waive this test', "a release lead's waiver for this test"),
@@ -12440,16 +12443,51 @@ function promoteEnvClass(stage) {
 }
 
 /**
+ * XACA-1375-014: reason codes that are INFORMATIONAL notes, never refusals. CR_SUPPORT_DISABLED = the
+ * release sits at a CR stage the team no longer has; it can only LEAVE it, and that never blocks. These
+ * must not render as "the gate would refuse" text and must not turn the result toast into a warning.
+ */
+const PROMOTE_INFO_CODES = ['CR_SUPPORT_DISABLED'];
+const PROMOTE_NOTES_HEADING = 'Note: CR support is off; this release can only leave CR';
+
+/** Split {reasons, reasonCodes, reasonData} into the blocking payload and the informational note texts. */
+function promoteSplitReasons(payload) {
+    const reasons = Array.isArray(payload && payload.reasons) ? payload.reasons.map(String) : [];
+    const codes = Array.isArray(payload && payload.reasonCodes) ? payload.reasonCodes : [];
+    const data = Array.isArray(payload && payload.reasonData) ? payload.reasonData : [];
+    const blocking = { reasons: [], reasonCodes: [], reasonData: [] };
+    const notes = [];
+    reasons.forEach((text, i) => {
+        if (PROMOTE_INFO_CODES.indexOf(codes[i]) !== -1) {
+            notes.push(text);
+        } else {
+            blocking.reasons.push(text);
+            blocking.reasonCodes.push(codes[i] || 'other');
+            blocking.reasonData.push(data[i] || null);
+        }
+    });
+    return { blocking: blocking, notes: notes };
+}
+
+/**
+ * XACA-1375-015: badge for a release stranded at a CR stage the team turned off (server-derived
+ * `strandedInCR`). Reuses the existing .archived-badge look; static markup, nothing interpolated.
+ */
+function promoteStrandedBadgeHtml(release) {
+    return (release && release.strandedInCR === true)
+        ? '<span class="archived-badge release-stranded-badge" title="CR support is off for this team; this release is still at the CR stage and can only leave it">STRANDED IN CR: CR OFF, CAN ONLY LEAVE</span>'
+        : '';
+}
+
+/**
  * View model for the REVIEW step from the server's dry-run payload
  * ({allowed, mode, from, to, next, reasons, reasonCodes, reasonData, error}).
  */
 function buildPromotePreviewModel(release, preview) {
     const releaseId = release && release.id;
-    const payload = {
-        reasons: Array.isArray(preview && preview.reasons) ? preview.reasons.slice() : [],
-        reasonCodes: Array.isArray(preview && preview.reasonCodes) ? preview.reasonCodes.slice() : [],
-        reasonData: Array.isArray(preview && preview.reasonData) ? preview.reasonData.slice() : []
-    };
+    const split = promoteSplitReasons(preview);
+    const payload = split.blocking;
+    const notes = split.notes;
     const to = (preview && preview.to) || null;
     const from = (preview && preview.from) || null;
     const allowed = !!(preview && preview.allowed === true && to);
@@ -12462,8 +12500,19 @@ function buildPromotePreviewModel(release, preview) {
     });
     const warnings = [];
     if (to === 'PROD') warnings.push('This promotes the release to PRODUCTION.');
-    if (to === 'GAMMA') warnings.push('GAMMA is live in production: the release lead must confirm the deploy.');
-    if (!to && !payload.reasons.length) {
+    // XACA-1375-016: the confirm stage is whichever stage ENTERS production (GAMMA, or PROD when the team
+    // has no GAMMA). The server names it (`confirmStage`); an older server falls back to GAMMA.
+    const confirmStage = (preview && preview.confirmStage) || 'GAMMA';
+    if (to && to === confirmStage) {
+        warnings.push(to === 'GAMMA'
+            ? 'GAMMA is live in production: the release lead must confirm the deploy.'
+            : to + ' is production: the release lead must confirm the deploy.');
+    }
+    // XACA-1375-015: config drift the server flags (e.g. flowConfig CR still enabled while CR support is off)
+    if (preview && typeof preview.configWarning === 'string' && preview.configWarning) {
+        warnings.push(preview.configWarning);
+    }
+    if (!to && !payload.reasons.length && !notes.length) {
         payload.reasons.push((preview && preview.error) || 'The server did not return a target stage.');
     }
     let reasonsHeading = null;
@@ -12478,6 +12527,7 @@ function buildPromotePreviewModel(release, preview) {
         platformsInfo: platformLines.length ? 'Platforms moving together (read-only):' : null,
         platformLines: platformLines,
         warnings: warnings,
+        notes: notes, notesHeading: notes.length ? PROMOTE_NOTES_HEADING : null,
         reasons: payload.reasons, reasonsHeading: reasonsHeading,
         reasonItems: buildPromoteReasonItems(releaseId, payload, allowed)
     };
@@ -12490,28 +12540,37 @@ function buildPromotePreviewModel(release, preview) {
 function buildPromoteResultModel(releaseId, preview, outcome) {
     const data = (outcome && outcome.data) || {};
     if (outcome && outcome.ok) {
-        const reasons = Array.isArray(data.reasons) ? data.reasons.map(String) : [];
+        const okSplit = promoteSplitReasons(data);
+        const reasons = okSplit.blocking.reasons;
         const from = data.from || data.previousEnvironment || (preview && preview.from);
         const to = data.to || data.newEnvironment || (preview && preview.to);
         return {
             success: true, from: from, to: to,
             title: 'Release promoted: ' + from + ' → ' + to,
             reasons: reasons,
+            notes: okSplit.notes, notesHeading: okSplit.notes.length ? PROMOTE_NOTES_HEADING : null,
             reasonsHeading: reasons.length ? 'Promoted; the gate would have refused in enforce mode:' : null,
-            reasonItems: buildPromoteReasonItems(releaseId, data, true),
+            reasonItems: buildPromoteReasonItems(releaseId, okSplit.blocking, true),
             toast: 'Release ' + releaseId + ' promoted to ' + to
         };
     }
-    let reasons = Array.isArray(data.reasons) ? data.reasons.map(String) : [];
-    let payload = data;
+    const failSplit = promoteSplitReasons(data);
+    let reasons = failSplit.blocking.reasons;
+    let payload = failSplit.blocking;
     if (!reasons.length) {
-        reasons = [data.error || ('HTTP ' + (outcome && outcome.status))];
+        // nothing blocking came back (transport error, or only an informational note). XACA-1375-020: never
+        // promote a NOTE into the refusal line/toast: use the server's `error`, unless that is just the note
+        // echoed back (the server summarises reasons[0]), else 'HTTP <status>'. The note stays in `notes`.
+        const err = (typeof data.error === 'string' && data.error && failSplit.notes.indexOf(data.error) === -1)
+            ? data.error : null;
+        reasons = [err || ('HTTP ' + (outcome && outcome.status))];
         payload = { reasons: reasons };
     }
     const target = (preview && preview.to) || data.to || null;
     return {
         success: false, from: (preview && preview.from) || null, to: target,
         title: 'Promotion refused',
+        notes: failSplit.notes, notesHeading: failSplit.notes.length ? PROMOTE_NOTES_HEADING : null,
         reasons: reasons, reasonsHeading: 'Unmet conditions:',
         reasonItems: buildPromoteReasonItems(releaseId, payload, false),
         toast: 'Promotion refused: ' + reasons[0]
@@ -12563,7 +12622,8 @@ async function promoteRelease(releaseId) {
         preview = response.ok
             ? data
             : { allowed: false, reasons: Array.isArray(data.reasons) ? data.reasons : [data.error || `HTTP ${response.status}`],
-                reasonCodes: data.reasonCodes, reasonData: data.reasonData };
+                reasonCodes: data.reasonCodes, reasonData: data.reasonData,
+                configWarning: data.configWarning, confirmStage: data.confirmStage };
     } catch (error) {
         preview = { allowed: false, reasons: [error.message] };
     }
@@ -12635,6 +12695,7 @@ function populatePromotePreview() {
     document.getElementById('promote-release-info').innerHTML = `
         <span class="release-name">${escapeHtml(release.name || 'Unnamed Release')}</span>
         <span class="release-id">${escapeHtml(release.id)}</span>
+        ${promoteStrandedBadgeHtml(release)}
     `;
 
     let html = '';
@@ -12653,6 +12714,9 @@ function populatePromotePreview() {
     }
     if (m.reasonItems.length) {
         html += `<div class="promote-warnings"><h4 class="warning-title">${escapeHtml(m.reasonsHeading)}</h4>${promoteReasonItemsHtml(m.reasonItems)}</div>`;
+    }
+    if (m.notes && m.notes.length) {
+        html += `<p class="promote-instruction">${escapeHtml(m.notesHeading)}</p>${promoteListHtml(m.notes)}`;
     }
     if (m.warnings.length) {
         html += `<div class="promote-warnings"><h4 class="warning-title">WARNINGS</h4>${promoteListHtml(m.warnings)}</div>`;
@@ -12761,6 +12825,9 @@ function displayPromotionResult(model) {
     let html = `<div class="results-summary"><div class="results-status ${model.success ? 'success' : 'error'}">${model.success ? '✓' : '✗'} ${escapeHtml(model.title)}</div>`;
     if (model.reasonItems.length) {
         html += `<div class="results-list"><p class="promote-instruction">${escapeHtml(model.reasonsHeading || '')}</p>${promoteReasonItemsHtml(model.reasonItems)}</div>`;
+    }
+    if (model.notes && model.notes.length) {
+        html += `<div class="results-list"><p class="promote-instruction">${escapeHtml(model.notesHeading)}</p>${promoteListHtml(model.notes)}</div>`;
     }
     html += '</div>';
     resultsEl.innerHTML = html;

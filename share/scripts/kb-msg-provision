@@ -258,7 +258,15 @@ def has_private_key(keygen_js, slug):
 # (which PRINTS the secret it looks up — not a probe, a leak).
 def _keychain_backend_would_be_used():
     """True exactly when vault-keygen.js's own chooseKeyStorageBackend()
-    would pick 'keychain' — mirrors its logic without invoking node."""
+    would pick 'keychain' — mirrors its logic without invoking node.
+
+    Injectable via KB_MSG_PROVISION_KEYCHAIN_BACKEND=keychain|file (XACA-1375-027), the sibling of the
+    KEYCHAIN_PROBE seam: the real answer depends on the PLATFORM (darwin and a `security` binary), so a
+    test on a Linux runner (CI) could never reach the locked-Keychain refusal at all, and a test on macOS
+    reached it only by accident of the host. The override pins the answer; any other value is ignored."""
+    override = os.environ.get("KB_MSG_PROVISION_KEYCHAIN_BACKEND")
+    if override in ("keychain", "file"):
+        return override == "keychain"
     return sys.platform == "darwin" and shutil.which("security") is not None
 
 

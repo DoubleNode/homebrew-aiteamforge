@@ -335,6 +335,18 @@ if [ -z "$_RELEASES_JSON" ]; then
     exit 0
 fi
 
+# XACA-1375-013: the team's flowConfig, so the "stage immediately before the target" match below skips
+# DISABLED stages (GAMMA now follows flowConfig; the legacy mirror shows the nearest ENABLED stage).
+# Best-effort: any failure leaves it empty and the plan falls back to the full fixed pipeline.
+_FLOW_JSON=$(curl -sf --max-time 10 \
+    "${_LCARS_BASE}/api/release-config?team=${_TEAM}" 2>/dev/null) || _FLOW_JSON=""
+
+# XACA-1375-019: teamConfig.crSupport (the sole CR source of truth). Together with flowConfig it gives the
+# FULL enabled order including CR, which the stage match below needs. Best-effort: unreadable => the plan
+# assumes CR is PRESENT (the stricter reading: only a release actually AT CR matches a GAMMA/PROD push).
+_TEAMCFG_JSON=$(curl -sf --max-time 10 \
+    "${_LCARS_BASE}/api/team-config?team=${_TEAM}" 2>/dev/null) || _TEAMCFG_JSON=""
+
 # Parse releases array out of {"releases": [...]}
 _RELEASES_ARRAY=$(python3 -c "
 import json, sys
@@ -371,7 +383,7 @@ fi
 # promote scripts. RELNOTES promotion is handled by the sourced lib function.
 
 _PROMOTE_PLAN=$(python3 - "$_PATHS_PY_DIR" "$_RELEASES_ARRAY" "$_BRANCH_MAP_VALUE" \
-    "$OPT_PLATFORM" <<'PYEOF'
+    "$OPT_PLATFORM" "$_FLOW_JSON" "$_TEAMCFG_JSON" <<'PYEOF'
 """
 Resolve promotion plan: for each (platform, target_env) pair, pick the right
 active release using the disambiguation rule from SPEC §6.
@@ -397,6 +409,8 @@ py_dir         = sys.argv[1]
 releases_json  = sys.argv[2]
 branch_val_raw = sys.argv[3]  # raw JSON value from branch_env_map
 opt_platform   = sys.argv[4]  # may be empty
+flow_raw       = sys.argv[5] if len(sys.argv) > 5 else ""  # GET /api/release-config body; may be empty
+teamcfg_raw    = sys.argv[6] if len(sys.argv) > 6 else ""  # GET /api/team-config body; may be empty
 
 sys.path.insert(0, py_dir)
 try:
@@ -408,13 +422,83 @@ except Exception as e:
 # Pipeline order used for "immediately before" check
 PIPELINE_ORDER = ["PLANNED", "DEV", "QA", "ALPHA", "BETA", "GAMMA", "PROD"]
 
-def env_before(env: str) -> str | None:
-    """Return the environment immediately before env in the pipeline, or None."""
+# XACA-1375-013: skip stages the team DISABLED in flowConfig (PLANNED/DEV/PROD are never skipped; a
+# missing entry counts as enabled, matching release_gate.enabled_stages). Unreadable/absent flowConfig
+# => the full fixed pipeline (the old behaviour). CR is not in PIPELINE_ORDER and never a target.
+def _enabled_pipeline(raw: str) -> list[str]:
     try:
-        idx = PIPELINE_ORDER.index(env)
+        stages = (json.loads(raw).get("flowConfig") or {}).get("stages") or {}
+        if not isinstance(stages, dict) or not stages:
+            return list(PIPELINE_ORDER)
+    except Exception:
+        return list(PIPELINE_ORDER)
+    out = []
+    for s in PIPELINE_ORDER:
+        cfg = stages.get(s)
+        off = isinstance(cfg, dict) and cfg.get("enabled", True) is False
+        if s in ("PLANNED", "DEV", "PROD") or not off:
+            out.append(s)
+    return out
+
+# XACA-1375-017: PREFER the server's computed order (GET /api/release-config -> enabledStages: CR and the
+# "GAMMA is forced on when crSupport is on" rule already applied). The local computation below is only the
+# fallback for an older/unreachable server and mirrors release_gate.enabled_stages (parity-tested).
+def _server_order(raw: str):
+    try:
+        order = json.loads(raw).get("enabledStages")
+    except Exception:
+        return None
+    ok = isinstance(order, list) and order and all(isinstance(x, str) for x in order)
+    return list(order) if ok and "PLANNED" in order and "PROD" in order else None
+
+SERVER_ORDER = _server_order(flow_raw)
+ENABLED_ORDER = ([x for x in SERVER_ORDER if x != "CR"] if SERVER_ORDER
+                 else _enabled_pipeline(flow_raw))   # legacy stages (no CR): the RELNOTES chain
+
+# XACA-1375-019: the FULL stage order incl. CR (release_gate.STAGES) and the FULL enabled order. CR exists
+# iff teamConfig.crSupport.enabled is exactly True (unreadable => assumed present, the stricter reading).
+STAGES = ["PLANNED", "DEV", "QA", "ALPHA", "BETA", "CR", "GAMMA", "PROD"]
+
+def _cr_enabled(raw: str) -> bool:
+    try:
+        return ((json.loads(raw).get("teamConfig") or {}).get("crSupport") or {}).get("enabled") is True
+    except Exception:
+        return True
+
+if SERVER_ORDER:
+    FULL_ORDER = [s for s in STAGES if s in SERVER_ORDER]
+else:
+    # fallback (mirrors release_gate.enabled_stages): CR iff crSupport; GAMMA forced ON when crSupport is on
+    _cr_on = _cr_enabled(teamcfg_raw)
+    FULL_ORDER = [s for s in STAGES if (s == "CR" and _cr_on) or (s == "GAMMA" and _cr_on)
+                  or (s not in ("CR", "GAMMA") and s in ENABLED_ORDER)
+                  or (s == "GAMMA" and not _cr_on and s in ENABLED_ORDER)]
+    ENABLED_ORDER = [x for x in FULL_ORDER if x != "CR"]   # RELNOTES chain follows the same rule
+
+def env_before(env: str) -> str | None:
+    """The ENABLED legacy environment immediately before env (RELNOTES source), or None."""
+    try:
+        idx = ENABLED_ORDER.index(env)
     except ValueError:
         return None
-    return PIPELINE_ORDER[idx - 1] if idx > 0 else None
+    return ENABLED_ORDER[idx - 1] if idx > 0 else None
+
+def next_enabled_after(stage: str) -> str | None:
+    """The first FULL-order enabled stage after `stage` (which itself may be disabled/stranded)."""
+    if stage not in STAGES:
+        return None
+    for s in STAGES[STAGES.index(stage) + 1:]:
+        if s in FULL_ORDER:
+            return s
+    return None
+
+def current_stage(r: dict, platform: str) -> str | None:
+    """The release-level `stage` (authoritative); only a release with none (pre-XACA-1346) falls back to
+    the legacy platform environment, which is a MIRROR and cannot tell QA from a CR-mirrored-as-QA."""
+    st = r.get("stage")
+    if st in STAGES:
+        return st
+    return r["platforms"][platform].get("environment")
 
 try:
     releases = json.loads(releases_json)
@@ -454,6 +538,18 @@ if opt_platform:
         sys.exit(0)
 
 for platform, target_env in platform_env_map.items():
+    # XACA-1375: CR is never an auto-promote target. It is entered by the CAB workflow only, and
+    # PIPELINE_ORDER has no CR, so env_before("CR") is None and EVERY release would match. The
+    # server refuses a CR entry when teamConfig.crSupport.enabled is not true (both gate modes);
+    # refusing here too keeps a mis-mapped branch from even attempting it.
+    if target_env == "CR":
+        print(json.dumps({
+            "action": "warn",
+            "message": (f"branch map targets 'CR' for platform '{platform}'; CR is never an "
+                        f"auto-promote target (entered via the CR workflow only) — skipping")
+        }))
+        continue
+
     # Build set of candidate releases for this platform + target_env
     # Filter 1: release must have this platform
     candidates = [
@@ -470,27 +566,32 @@ for platform, target_env in platform_env_map.items():
         }))
         continue
 
-    # Filter 2: platform's currentEnvironment must be immediately before target_env
-    expected_from = env_before(target_env)
-    if expected_from is not None:
+    # Filter 2: the release's CURRENT STAGE must be immediately before target_env in the FULL enabled order
+    # (XACA-1375-019: release-level stage, CR included; NOT the legacy mirror, which shows a release at
+    # CR as the stage before it and made a release at DEV/QA look "one step from PROD").
+    expected_from = env_before(target_env)  # legacy RELNOTES source, also printed in the plan
+    if target_env in FULL_ORDER and FULL_ORDER.index(target_env) > 0:
         best = [
             r for r in candidates
-            if r["platforms"][platform].get("environment") == expected_from
+            if next_enabled_after(current_stage(r, platform)) == target_env
         ]
-    else:
+    elif target_env in FULL_ORDER:
         best = candidates  # PLANNED has no "before" — take all
+    else:
+        best = []          # a disabled target stage is never auto-promoted to
 
     if not best:
         # No release at the right stage; warn and skip
         current_envs = [
-            f"{r['id']}:{r['platforms'][platform].get('environment','?')}"
+            f"{r['id']}:{current_stage(r, platform) or '?'}"
             for r in candidates
         ]
         print(json.dumps({
             "action": "warn",
             "message": (
-                f"no active release for platform '{platform}' has environment "
-                f"'{expected_from}' (needed to promote to '{target_env}'). "
+                f"no active release for platform '{platform}' is at the stage immediately before "
+                f"'{target_env}' (previous enabled stage: "
+                f"'{FULL_ORDER[FULL_ORDER.index(target_env) - 1] if target_env in FULL_ORDER and FULL_ORDER.index(target_env) > 0 else '?'}'). "
                 f"Current: {', '.join(current_envs)}"
             )
         }))
@@ -790,9 +891,11 @@ except Exception:
             if [ -n "$_relnotes_dir" ] && command -v kb_relnotes_promote >/dev/null 2>&1; then
                 # Determine env_from for RELNOTES
                 _relnotes_from="$_env_from"
-                # For PROD, SPEC §6 says source is GAMMA
+                # For PROD, SPEC §6 says source is GAMMA. XACA-1375-013: GAMMA follows the team's
+                # flowConfig; when it is disabled the plan's env_from is the nearest ENABLED stage
+                # before PROD, which is the source (identical to GAMMA whenever GAMMA is enabled).
                 if [ "$_target_env" = "PROD" ]; then
-                    _relnotes_from="GAMMA"
+                    _relnotes_from="${_env_from:-GAMMA}"
                 fi
 
                 if [ -z "$_relnotes_from" ]; then

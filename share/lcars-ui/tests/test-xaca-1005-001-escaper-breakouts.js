@@ -318,6 +318,7 @@ try {
         extractFunction('parseLocalDate'),
         extractFunction('formatTargetDate'),
         extractFunction('formatDate'),
+        extractFunction('promoteStrandedBadgeHtml'),  // XACA-1375-015: renderReleaseCard calls it
         extractFunction('renderReleaseCard'),
     ].join('\n\n');
 
@@ -2407,6 +2408,26 @@ function runXaca1005001Round8ReleaseTypeAndEnvironmentTest() {
         normalHtml.slice(normalEnvSpanContentStart, normalEnvSpanContentEnd), 'PROD');
 }
 runXaca1005001Round8ReleaseTypeAndEnvironmentTest();
+
+// XACA-1375-022: renderReleaseCard() now calls promoteStrandedBadgeHtml(); the harness extracts it, and the
+// badge is static markup that renders ONLY for a strict boolean true (a string payload never reaches the DOM).
+function runXaca1375StrandedBadgeTest() {
+    const base = { id: 'REL-STRANDED-1', name: 'Stranded', status: 'active', type: 'feature',
+                   platforms: { other: { environment: 'QA', version: '1.0.0' } } };
+    const hostile = '"><img src=x onerror=alert(1)>';
+    const on = renderReleaseCard(Object.assign({}, base, { strandedInCR: true }));
+    check('LIVE renderReleaseCard(): strandedInCR === true renders the stranded badge (XACA-1375-022)',
+        on.indexOf('release-stranded-badge') !== -1 && on.indexOf('STRANDED IN CR') !== -1, true);
+    const bad = renderReleaseCard(Object.assign({}, base, { strandedInCR: hostile }));
+    check('LIVE renderReleaseCard(): a hostile STRING strandedInCR renders no badge (XACA-1375-022)',
+        bad.indexOf('release-stranded-badge') === -1, true);
+    check('LIVE renderReleaseCard(): a hostile strandedInCR string introduces no raw <img element (XACA-1375-022)',
+        bad.indexOf('<img') === -1 && bad.indexOf('onerror') === -1, true);
+    const off = renderReleaseCard(Object.assign({}, base, { strandedInCR: false }));
+    check('LIVE renderReleaseCard(): strandedInCR === false renders no badge (XACA-1375-022)',
+        off.indexOf('release-stranded-badge') === -1, true);
+}
+runXaca1375StrandedBadgeTest();
 
 function finalize() {
     if (failures > 0) {

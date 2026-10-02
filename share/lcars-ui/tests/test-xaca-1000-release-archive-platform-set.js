@@ -148,6 +148,7 @@ try {
         // reimplementation of them.
         extractFunction('getReleaseEnvironments'),
         extractFunction('buildItemTagsHtml'),
+        extractFunction('promoteStrandedBadgeHtml'),  // XACA-1375-015: renderReleaseCard calls it
         extractFunction('renderReleaseCard'),
     ].join('\n\n');
 

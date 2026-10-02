@@ -24,8 +24,10 @@ CR enablement (lead decision, XACA-1346 round 3): teamConfig.crSupport.enabled i
 SOLE source of truth for whether the CR stage exists (spec 3.1). It arrives as the
 REQUIRED keyword-only `cr_support_enabled` (a real bool, else ValueError; omitted =
 TypeError, never a silent CR skip). flowConfig.stages.CR is IGNORED because the
-flow-config endpoint can toggle it. GAMMA is always enabled (3.1); flowConfig is
-never read for it. `intentionallyEmpty` counts only when it `is True`.
+flow-config endpoint can toggle it. GAMMA (XACA-1375-013/017, user decisions 2026-10-01): when
+crSupport is ON, GAMMA is ALWAYS enabled whatever flowConfig says (it is where the CR is completed:
+CR -> GAMMA -> PROD, `cr-completed` on GAMMA exit); when crSupport is not true GAMMA FOLLOWS flowConfig
+(missing entry = enabled, `enabled: false` skips it: a team with no CR and no GAMMA goes ... -> PROD). `intentionallyEmpty` counts only when it `is True`.
 
 Data the release record does not carry (items, sibling releases, clock, branch
 HEAD, lead deploy confirmation) arrives via the ``context`` dict. A condition
@@ -37,7 +39,9 @@ from datetime import datetime, timezone
 
 from release_schema import STAGES  # single source of truth (XACA-1346-003); re-exported here
 
-ALWAYS_ENABLED = ("PLANNED", "DEV", "GAMMA", "PROD")
+# GAMMA is deliberately NOT here: it follows flowConfig, EXCEPT that it is forced on when crSupport is on
+# (enabled_stages, XACA-1375-017).
+ALWAYS_ENABLED = ("PLANNED", "DEV", "PROD")
 TEST_STAGES = ("DEV", "QA", "ALPHA", "BETA", "GAMMA")  # stages whose exit gate is a test set
 PASSED, FAILED, WAIVED, PENDING, RUNNING = "passed", "failed", "waived", "pending", "running"
 
@@ -54,9 +58,19 @@ CODE_WAIVER_VOID_INVALID = "WAIVER_VOID_INVALID"            # stored waiver malf
 CODE_WAIVER_NOT_LEAD = "WAIVER_NOT_LEAD"                    # grantor is not the release lead
 CODE_NOT_IN_LEADS = "NOT_IN_LEADS"                          # actor not in releaseConfig.leads
 CODE_LEADS_NOT_CONFIGURED = "LEADS_NOT_CONFIGURED"          # releaseConfig.leads missing/empty: NO lead command can succeed
+# XACA-1375: a release STRANDED at CR (crSupport turned off after it entered CR). INFORMATIONAL, never
+# blocking: it replaces the CR exit conditions, and promote OUT of CR stays allowed. See is_blocking().
+CODE_CR_SUPPORT_DISABLED = "CR_SUPPORT_DISABLED"
+# XACA-1375: a forward promote that would skip an ENABLED CR or GAMMA stage. Always BLOCKING and a HARD refusal in
+# BOTH gate modes (report mode included); other forward skips stay "refused in enforce, logged in report".
+CODE_MANDATORY_STAGE_SKIPPED = "MANDATORY_STAGE_SKIPPED"
+MANDATORY_STAGES = ("CR", "GAMMA")
 REASON_CODES = (CODE_OTHER, CODE_GAMMA_CONFIRM_REQUIRED, CODE_GAMMA_ACTOR_NOT_LEAD, CODE_WAIVER_NEEDED,
                 CODE_TEST_MISSING, CODE_WAIVER_VOID_SHA, CODE_WAIVER_VOID_INVALID, CODE_WAIVER_NOT_LEAD,
-                CODE_NOT_IN_LEADS, CODE_LEADS_NOT_CONFIGURED)
+                CODE_NOT_IN_LEADS, CODE_LEADS_NOT_CONFIGURED, CODE_CR_SUPPORT_DISABLED,
+                CODE_MANDATORY_STAGE_SKIPPED)
+INFORMATIONAL_CODES = frozenset((CODE_CR_SUPPORT_DISABLED,))
+CR_SUPPORT_DISABLED_MSG = "CR support disabled"
 
 # The text fragments _grade builds and _row_code classifies on: ONE definition, used by both.
 _VOID_MARK = "; waiver VOID: "
@@ -85,9 +99,20 @@ class Reasons(list):
             for m in other:
                 self.append(m)
 
+    def blocking(self):
+        """The reasons that actually block a move: everything except INFORMATIONAL_CODES."""
+        return [m for m, c in zip(self, self.codes) if c not in INFORMATIONAL_CODES]
+
     def payload(self):
         """{"reasons", "reasonCodes", "reasonData"} as plain JSON-able lists."""
         return {"reasons": list(self), "reasonCodes": list(self.codes), "reasonData": list(self.data)}
+
+
+def deploy_confirm_stage(order):
+    """XACA-1375-013: the stage whose ENTRY needs the lead's production-deploy confirmation:
+    GAMMA when the team has it (GAMMA is the live-prod soak stage), else PROD (the stage that
+    actually enters production). `order` = enabled_stages(...)."""
+    return "GAMMA" if "GAMMA" in order else "PROD"
 
 
 def _cr_flag(v):
@@ -98,7 +123,8 @@ def _cr_flag(v):
 
 def enabled_stages(flow_config, *, cr_support_enabled):
     """Ordered enabled stages. CR exists iff cr_support_enabled (spec 3.1);
-    flowConfig's CR key is ignored. A missing QA/ALPHA/BETA entry counts as ENABLED: fail closed, never
+    flowConfig's CR key is ignored. GAMMA is forced ON when cr_support_enabled, else follows flowConfig
+    (XACA-1375-017). A missing QA/ALPHA/BETA entry counts as ENABLED: fail closed, never
     silently drop a test stage."""
     cfg = (flow_config or {}).get("stages") or {}
     _cr_flag(cr_support_enabled)
@@ -109,9 +135,25 @@ def enabled_stages(flow_config, *, cr_support_enabled):
         elif s == "CR":
             if _cr_flag(cr_support_enabled):
                 out.append(s)
+        elif s == "GAMMA" and _cr_flag(cr_support_enabled):
+            out.append(s)   # XACA-1375-017: a CR team ALWAYS has GAMMA (CR is completed there)
         elif (cfg.get(s) or {}).get("enabled", True) is not False:
             out.append(s)
     return out
+
+
+def later_enabled(order, cur, target):
+    """Enabled stages strictly between `cur` and `target` (what a forward promote cur -> target skips).
+    Disabled stages are not in `order`, so they are never "skipped"."""
+    lo, hi = STAGES.index(cur), STAGES.index(target)
+    return [x for x in order if lo < STAGES.index(x) < hi]
+
+
+def stranded_in_cr(release, cr_support_enabled):
+    """XACA-1375: True iff the release sits AT the CR stage while teamConfig.crSupport.enabled is
+    not true (CR was turned off after the release entered it). Nothing may ENTER CR in that state;
+    a release already there may only leave it."""
+    return current_stage(release) == "CR" and not _cr_flag(cr_support_enabled)
 
 
 def _platforms(release):
@@ -363,7 +405,12 @@ def _exit_conditions(release, cur, cr_on, ctx):
             r.append("DEV: cannot verify DEV deploy SHA == branch HEAD (context.branch_head absent)")
         elif sha != head:
             r.append("DEV: stageSha.DEV %s != release branch HEAD %s" % (sha, head))
-    if cur == "CR":
+    if cur == "CR" and not cr_on:
+        # XACA-1375: CR support was turned off while the release sat at CR. The CR exit conditions
+        # (cr-approved, deploy window, stageSha.CR) describe a stage that no longer exists for this
+        # team, so they are REPLACED by one informational reason. Promote OUT stays allowed.
+        r.append(CR_SUPPORT_DISABLED_MSG, CODE_CR_SUPPORT_DISABLED, {"stage": "CR"})
+    elif cur == "CR":
         cr = release.get("cr") or {}
         state = cr.get("state")
         if state == "emergency-deployed":
@@ -418,20 +465,31 @@ def evaluate(release, target_stage, flow_config, *, cr_support_enabled, actor=No
             reasons.append("release is already at %s" % cur)
         elif STAGES.index(target_stage) < STAGES.index(cur):
             reasons.append("backward move %s -> %s refused; use regress (with a reason)" % (cur, target_stage))
+        elif target_stage == "CR" and not _cr_flag(cr_support_enabled):
+            reasons.append("target CR refused: CR support disabled for this team "
+                           "(teamConfig.crSupport.enabled is not true); next enabled stage is %s" % nxt)
         elif target_stage not in order:
             reasons.append("target %s is disabled for this team; next enabled stage is %s" % (target_stage, nxt))
         elif target_stage != nxt:
-            reasons.append("skipping refused: next enabled stage after %s is %s, not %s" % (cur, nxt, target_stage))
-        if target_stage == "GAMMA" and not ctx.get("deploy_confirmed"):
-            reasons.append("GAMMA: lead must explicitly confirm the production deploy",
-                           CODE_GAMMA_CONFIRM_REQUIRED, {"stage": "GAMMA"})
+            _skipped = [x for x in later_enabled(order, cur, target_stage) if x in MANDATORY_STAGES]
+            if _skipped:
+                reasons.append("mandatory stage %s skipped: next enabled stage after %s is %s, not %s"
+                               % (_skipped[0], cur, nxt, target_stage),
+                               CODE_MANDATORY_STAGE_SKIPPED, {"stage": _skipped[0], "skipped": _skipped})
+            else:
+                reasons.append("skipping refused: next enabled stage after %s is %s, not %s" % (cur, nxt, target_stage))
+        _cs = deploy_confirm_stage(order)
+        if target_stage == _cs and not ctx.get("deploy_confirmed"):
+            reasons.append("%s: lead must explicitly confirm the production deploy" % _cs,
+                           CODE_GAMMA_CONFIRM_REQUIRED, {"stage": _cs})
         reasons.extend(_exit_conditions(release, cur, cr_support_enabled, ctx))
     rec = (release.get("stages") or {}).get(cur) or {}
     status = derive_stage_status(dict(rec, sha=_graded_sha(release, cur)), release.get("tests"), rec.get("expected"), cur) \
         if cur in TEST_STAGES else None
-    return {"allowed": not reasons, "reasons": list(reasons), "reasonCodes": list(reasons.codes),
+    return {"allowed": not reasons.blocking(), "reasons": list(reasons), "reasonCodes": list(reasons.codes),
             "reasonData": list(reasons.data), "current": cur, "target": target_stage,
-            "next": nxt, "actor": actor, "status": status}
+            "next": nxt, "actor": actor, "status": status,
+            "strandedInCR": stranded_in_cr(release, cr_support_enabled)}
 
 
 def evaluate_regress(release, target_stage, flow_config, reason, *, cr_support_enabled):
@@ -445,6 +503,10 @@ def evaluate_regress(release, target_stage, flow_config, reason, *, cr_support_e
         reasons.append("unknown target stage '%s'" % target_stage)
     elif STAGES.index(target_stage) >= STAGES.index(cur):
         reasons.append("regress target %s is not strictly earlier than current stage %s" % (target_stage, cur))
+    elif target_stage == "CR" and not _cr_flag(cr_support_enabled):
+        # XACA-1375: nothing may ENTER CR while CR support is off, regress included.
+        reasons.append("regress target CR refused: CR support disabled for this team "
+                       "(teamConfig.crSupport.enabled is not true)")
     elif target_stage not in order:
         reasons.append("regress target %s is disabled for this team" % target_stage)
     return {"allowed": not reasons, "reasons": reasons, "current": cur, "target": target_stage}

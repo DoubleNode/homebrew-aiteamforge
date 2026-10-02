@@ -9043,6 +9043,13 @@ body {
     letter-spacing: 0.5px;
 }
 
+/* XACA-1375-021: stranded-in-CR badge. LCARS orange on black text (about 10:1), distinct from the gray ARCHIVED. */
+.archived-badge.release-stranded-badge {
+    background: var(--lcars-orange, #ff9900);
+    color: var(--lcars-black, #000000);
+    font-weight: bold;
+}
+
 .release-card-header {
     display: flex;
     justify-content: space-between;
