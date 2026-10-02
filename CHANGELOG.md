@@ -30,6 +30,7 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 - **XACA-1348** (PR B, review round 1): `share/scripts/kb-cr.sh` refuses `reschedule-approval --at` in the past in every case and, on a v2 revert/undo that strips an approval, suppresses the assumed approval (spec 9.3) so the sweep cannot re-mint it; `share/kanban-hooks/approval_providers.py` refuses to stamp when the expected time is before submission or unparseable, and refuses an expected time that falls in a DST spring-forward gap.
 - **XACA-1348-022**: `share/kanban-hooks/approval_providers.py` treats only absent/`None`/the bool `False` as "not suppressed" (a stored `0` previously let the sweep stamp a suppressed CR).
 - **XACA-1348-023/024**: `share/scripts/kb-cr.sh` help lists `approve --by/--name` (aliases `--approver`/`--approver-name`) and points the complete limitation at `kb-cr complete <CR-ID>`.
+- **XACA-1348-025**: `share/scripts/kb-cr.sh` — the remaining "no container variant for complete" help/comment claims now name `complete <CR-ID>`.
 
 ## [0.20.29] - 2026-10-01
 - **XACA-1308** — Stage B of the compaction P=50 rollout (stage gate PASSED 2026-10-01): `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=50` now ships in `share/templates/claude/settings.json.template` (`env`) and in `_xaca1283_upgrade_settings_key_paths` so upgrades deliver it; `tests/test-xaca-1283-settings-merge-env-and-scalar.sh` flipped to `XACA1283_STAGE=B`; test M1 relabelled "extracted-function harness" and its comment corrected, since the shipped upgrade script defines `_aitf_file_mode` (XACA-1308-012).

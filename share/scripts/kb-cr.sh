@@ -65,8 +65,8 @@ fi
 #    Items without crAssignment still use v1 per-item path (true single-item CRs).
 #
 #  • NON-PROPAGATING VERBS:
-#    - complete: has no container variant; routes to v1 only. Known limitation
-#      (see XACA-0327 plan). Propagation for completion left for future work.
+#    - complete <item-id>: v1 only; does not propagate to sibling items.
+#      complete <CR-ID> is the container variant (XACA-1348, v2 lifecycle).
 #    - emergency (v1), emergency-deploy (container): separate verbs.
 #    - backfill (v1 utility): no container equivalent.
 #
@@ -154,7 +154,8 @@ fi
 #   kb-cr deploy-dev  <item-id> [propagates; v1 fallback]
 #   kb-cr deploy-prod <item-id> [propagates; v1 fallback]
 #   kb-cr emergency   <item-id> --justification "text"      [v1 only; no propagation]
-#   kb-cr complete    <item-id>                              [v1 only; no container variant]
+#   kb-cr complete    <item-id>                              [v1 only; no propagation]
+#   kb-cr complete    <CR-ID>                                [container; XACA-1348]
 #   kb-cr backfill    [--apply]
 #   kb-cr backfill    --deploy-timestamps [<CR-ID>] [--apply]
 #   kb-cr show        <item-id> [displays sibling list when crAssignment present;
@@ -3551,9 +3552,8 @@ kb-cr() {
                           _kb_cr_container_start_test _kb_cr_start_test "$@" ;;
             esac ;;
         emergency)   _kb_cr_emergency "$@" ;;
-        # complete has no container variant — routes to v1 only; propagation is
-        # a no-op until _kb_cr_container_complete is implemented (XACA-0327-003).
-        # XACA-1348: CR-* ids route to the container variant (v2 lifecycle).
+        # complete: CR-* ids route to the container variant (_kb_cr_container_complete,
+        # XACA-1348 v2 lifecycle); item ids still route to v1, which does not propagate.
         complete)
             case "${1:-}" in
                 CR-*) _kb_cr_container_complete "$@" ;;
@@ -7243,7 +7243,7 @@ _kb_cr_help() {
     echo "              Record PROD deployment (crState=deployed-prod)."
     echo "  emergency <id> --justification \"reason\"  [v1 only; NO propagation]"
     echo "              Record emergency deployment (crState=emergency-deployed)."
-    echo "  complete <id>    [v1 only; NO propagation; no container variant]"
+    echo "  complete <id>    [v1 only; NO propagation — for a whole CR use 'complete <CR-ID>']"
     echo "              Record CR lifecycle completion timestamp."
     echo "              Also run 'kb-done' to move item to completed status."
     echo "  backfill [--apply]"
