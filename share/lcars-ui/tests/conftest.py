@@ -125,3 +125,30 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
             red=True,
             bold=True,
         )
+
+
+# ── XACA-1382-015: reset the process-level parsed-board cache per test ──────
+#
+# server._cached_board() keys entries on str(path). A test that hands a bare
+# MagicMock in as a board path gets a key derived from the mock's repr (its
+# memory address); a later mock that reuses the address could be served an
+# earlier test's board. Clearing around every test removes that cross-test
+# coupling. Import-safe: it never imports server -- it only clears the cache
+# when some test already has (`sys.modules`). Identical copy in the sibling
+# conftest (tests/ <-> lcars-ui/tests/), independent like the checks above.
+import pytest as _pytest_xaca1382
+
+
+@_pytest_xaca1382.fixture(autouse=True)
+def _xaca1382_clear_board_cache():
+    import sys
+
+    def _clear():
+        mod = sys.modules.get("server")
+        clear = getattr(mod, "_board_cache_clear", None)
+        if callable(clear):
+            clear()
+
+    _clear()
+    yield
+    _clear()

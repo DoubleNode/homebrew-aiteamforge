@@ -813,10 +813,12 @@ class TestServeKanbanData(unittest.TestCase):
                 mock_path.exists.return_value = True
                 mock_gbf.return_value = mock_path
                 # XACA-1382: serve_kanban_data reads through server._cached_board (stat-keyed),
-            # so the mock path no longer reaches builtins.open.
-            with patch("server._cached_board", return_value=board_data):
+                # so the mock path no longer reaches builtins.open. The cache patch must
+                # sit INSIDE the get_board_file mock, or the real ios board path is read.
+                with patch("server._cached_board", return_value=board_data) as mock_cached:
                     handler.serve_kanban_data("ios")
 
+        mock_cached.assert_called_once_with(mock_path)
         self.assertEqual(handler._response_code, 200)
 
     def test_returns_500_on_invalid_json(self):
