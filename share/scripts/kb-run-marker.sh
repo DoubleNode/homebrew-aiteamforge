@@ -9,10 +9,15 @@
 # Design: kanban/plans/XACA-1380/XACA-1380-001_design.md §1-§2.
 #
 # Sourced library (zsh, /bin/bash 3.2, bash 5) AND CLI:
-#   kb_run_marker_write <team> [args...]   live-session gate, atomic write, arms .armed. Always rc 0.
+#   kb_run_marker_write [--match <session-prefix>] <team> [args...]   live-session gate, atomic write, arms .armed. Always rc 0.
 #   kb_run_marker_clear <team> [args...]   set-match delete, only when tmux shows no live match. Always rc 0.
 #   kb_run_marker_dir                      echo the marker directory
 #   kb-run-marker.sh list | forget <prefix> | write ... | clear ...
+#
+# --match: for a team whose tmux sessions are NOT named after its args (<team>-<agent> only), the
+# marker keeps args (to relaunch) but is judged live by this explicit session prefix instead.
+# Stored as an optional "match" field; schema_version stays 1 (old markers read unchanged).
+# Session ownership is EXCLUSIVE: <prefix> or <prefix>-<one hyphen-free word>; "x-y-command" is not x's.
 #
 # Marker dir: ${KB_RUN_MARKER_DIR:-$HOME/.aiteamforge/run/teams-running}  (tests MUST set it)
 #
@@ -99,8 +104,20 @@ def live_sessions(sock):
     return None
 
 
+def belongs(prefix, name):
+    """EXCLUSIVE session match (XACA-1380-013/015). A team's sessions are exactly <prefix> or
+    <prefix>-<base> where <base> is ONE hyphen-free station word (lcars, command, ...). A longer
+    sibling prefix (x-y-command vs x) therefore does NOT belong to x. Keep byte-identical in
+    spirit with _hr_team_already_up in kb-host-ready.sh."""
+    if name == prefix:
+        return True
+    if not name.startswith(prefix + "-"):
+        return False
+    return "-" not in name[len(prefix) + 1:]
+
+
 def matches(prefix, names):
-    return any(n == prefix or n.startswith(prefix + "-") for n in names)
+    return any(belongs(prefix, n) for n in names)
 
 
 def derive(team, args):
@@ -137,18 +154,41 @@ def list_markers():
             and ".tmp." not in n]
 
 
-def cmd_write(team, args):
+def match_key(doc, stem):
+    """The session-name prefix liveness is judged by. Normally the marker's own derived prefix
+    (== stem); a marker written with --match carries an explicit key because its sessions are
+    not named after its args (legacy team-project template: sessions <team>-<agent>, XACA-1380-017).
+    Old markers have no "match" -> stem, unchanged behaviour."""
+    m = doc.get("match") if isinstance(doc, dict) else None
+    if isinstance(m, str) and m and ALLOW.match(m) and not m.startswith("."):
+        return m
+    return stem
+
+
+def load_doc(stem):
+    try:
+        with open(os.path.join(MDIR, stem + ".json")) as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def cmd_write(team, args, match=None):
     bad = validate(team, args)
+    if not bad and match is not None and (not ALLOW.match(match) or match.startswith(".")):
+        bad = "invalid --match %r" % match
     if bad:
         warn("not writing marker: " + bad)
         return
     prefix = derive(team, args)
+    live_key = match.lower() if match is not None else prefix
     names = live_sessions(team)
     if names is None:
         warn("tmux probe failed on socket '%s' — no marker written for %s" % (team, prefix))
         return
-    if not matches(prefix, names):
-        warn("no live session for '%s' on socket '%s' — no marker written" % (prefix, team))
+    if not matches(live_key, names):
+        warn("no live session for '%s' on socket '%s' — no marker written" % (live_key, team))
         return
     srv_pid = srv_start = None
     r = run_tmux(team, "display-message", "-p", "#{pid} #{start_time}")
@@ -170,6 +210,8 @@ def cmd_write(team, args):
         "tmux_server_pid": srv_pid,      # diagnostic only, never a restore gate
         "tmux_server_start": srv_start,  # diagnostic only
     }
+    if match is not None:
+        doc["match"] = live_key      # optional: session prefix to judge liveness by (XACA-1380-017)
     os.makedirs(MDIR, mode=0o700, exist_ok=True)
     final = os.path.join(MDIR, prefix + ".json")
     tmp = os.path.join(MDIR, ".%s.json.tmp.%d" % (prefix, os.getpid()))
@@ -208,7 +250,7 @@ def cmd_clear(team, args):
         warn("tmux probe failed on socket '%s' — markers kept (bias toward restore)" % team)
         return
     for stem in cand:
-        if matches(stem, names):
+        if matches(match_key(load_doc(stem), stem), names):
             warn("sessions for '%s' still alive — marker kept" % stem)
             continue
         try:
@@ -237,7 +279,7 @@ def cmd_list():
         team = d.get("team") or stem.split("-")[0]
         sock = d.get("socket") or team
         names = live_sessions(sock)
-        up = "unknown" if names is None else ("up" if matches(stem, names) else "down")
+        up = "unknown" if names is None else ("up" if matches(match_key(d, stem), names) else "down")
         pid, st = d.get("tmux_server_pid"), d.get("tmux_server_start")
         srv = "n/a"
         if pid is not None and st is not None:
@@ -275,7 +317,13 @@ def main(argv):
     sub, rest = argv[0], argv[1:]
     try:
         if sub == "write" and rest:
-            cmd_write(rest[0], rest[1:])
+            mk = None
+            if rest[0] == "--match":
+                if len(rest) < 3:
+                    sys.stderr.write("usage: kb-run-marker.sh write [--match <session-prefix>] <team> [args...]\n")
+                    return 2
+                mk, rest = rest[1], rest[2:]
+            cmd_write(rest[0], rest[1:], mk)
         elif sub == "clear" and rest:
             cmd_clear(rest[0], rest[1:])
         elif sub == "list":

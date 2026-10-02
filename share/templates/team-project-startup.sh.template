@@ -659,7 +659,9 @@ if [[ -f "$_KRM_HELPER" ]]; then
     source "$_KRM_HELPER" 2>/dev/null || true
 fi
 if (( $+functions[kb_run_marker_write] )); then
-    kb_run_marker_write "$TEAM_ID" "$@" || true
+    # --match: this template names its sessions ${TEAM_ID}-<agent> (no project in the name), so liveness
+    # is judged by TEAM_ID while the marker still records "$@" so restore can relaunch with them.
+    kb_run_marker_write --match "$TEAM_ID" "$TEAM_ID" "$@" || true
 else
     echo "  warn: kb-run-marker.sh missing — this team will not be restored in last-running mode" >&2
 fi

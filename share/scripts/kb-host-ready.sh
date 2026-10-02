@@ -1034,7 +1034,12 @@ else:
                 if filter_team and m_team != filter_team:
                     continue
                 m_host = mdoc.get("host")
-                if not isinstance(m_host, str) or not m_host or (this_host and m_host != this_host):
+                # FAIL CLOSED (XACA-1380-018): an unknown local host rejects every marker, it never
+                # accepts them all. Armed + unknown host restores NOTHING (no static fallback).
+                if not this_host:
+                    work.append(_skip("cannot determine this host (scutil and hostname -s both failed); refusing to trust any marker"))
+                    continue
+                if not isinstance(m_host, str) or not m_host or m_host != this_host:
                     work.append(_skip(f"marker from another host '{_hr_safe_repr(m_host)}' (this host '{_hr_safe_repr(this_host)}')"))
                     continue
                 # Only derive a prefix when team/args are clean: dirty values
@@ -1048,8 +1053,31 @@ else:
                     if stored != derived or stem != derived:
                         work.append(_skip(f"prefix mismatch (file={_hr_safe_repr(stem)}, stored={_hr_safe_repr(stored)}, derived={_hr_safe_repr(derived)})"))
                         continue
-                work.append((i, {"team": m_team, "args": m_args}, None, ""))
+                _mk = mdoc.get("match")
+                if _mk is not None and (not isinstance(_mk, str) or not _mk or _hr_first_bad(_mk) is not None
+                                        or _mk.startswith(".")):
+                    work.append(_skip(f"invalid 'match' key {_hr_safe_repr(_mk)}"))
+                    continue
+                work.append((i, {"team": m_team, "args": m_args, "match": _mk}, None, ""))
 emit("SOURCE", source_kind, source_detail)
+
+# XACA-1380-019: upgrade gap. Once the host is armed, last-running restores ONLY marked teams, so a
+# configured team that was already running before the upgrade (no marker until its next start) is
+# silently dropped after a power loss. Surface the candidates: autostart teams with no marker.
+# check/status probe liveness and WARN (never fail) when one is actually up.
+if source_kind == "last-running" and names is not None:
+    _marked = set(n[:-5] for n in names)
+    _seen_um = set()
+    for _e in autostart_raw:
+        if not isinstance(_e, dict):
+            continue
+        _t, _a = _e.get("team"), _e.get("args", [])
+        if (isinstance(_t, str) and _t and isinstance(_a, list) and all(isinstance(x, str) and x for x in _a)
+                and _hr_first_bad(_t) is None and all(_hr_first_bad(x) is None for x in _a)):
+            _p = _t + "".join("-" + x.lower() for x in _a)
+            if _p not in _marked and _p not in _seen_um:
+                _seen_um.add(_p)
+                emit("UNMARKED", _t, _p)
 
 for idx, entry, _preskip, _disp in work:
     if _preskip is not None:
@@ -1134,6 +1162,10 @@ for idx, entry, _preskip, _disp in work:
 
     args_packed = "\x1e".join(args)
     prefix = team + "".join("-" + a.lower() for a in args)
+    # Marker with an explicit session-match key (XACA-1380-017): the runtime id (gate2) and the
+    # already-up probe use it; args_packed still carries the real args for the relaunch.
+    if isinstance(entry.get("match"), str) and entry.get("match"):
+        prefix = entry["match"].lower()
 
     # Gate 1 — startability: <workdir>/<team>-startup.sh exists, is a
     # regular file, and is readable.
@@ -1206,9 +1238,10 @@ _hr_tmux_sessions() {
     return 0
 }
 
-# True (0) iff at least one live session on $socket equals $prefix or begins
-# with "$prefix-". Prefix-matching (not socket-existence) is required because
-# two projects of one team share a socket (§4.2).
+# True (0) iff at least one live session on $socket equals $prefix or is
+# "$prefix-<base>" (single hyphen-free word). Prefix-matching (not socket-existence)
+# is required because two projects of one team share a socket (§4.2); it must be
+# EXCLUSIVE so "x" is not "up" just because "x-y" is (XACA-1380-013).
 _hr_team_already_up() {
     local tmux_bin="$1" socket="$2" prefix="$3" line
     while IFS= read -r line; do
@@ -1216,8 +1249,15 @@ _hr_team_already_up() {
         if [ "$line" = "$prefix" ]; then
             return 0
         fi
+        # EXCLUSIVE match (XACA-1380-013): "<prefix>-<base>" with a ONE-word, hyphen-free base.
+        # A longer sibling ("x-y-command" for prefix "x") is another team/project's session.
         case "$line" in
-            "${prefix}-"*) return 0 ;;
+            "${prefix}-"*)
+                case "${line#"${prefix}"-}" in
+                    *-*) ;;
+                    *) return 0 ;;
+                esac
+                ;;
         esac
     done <<< "$(_hr_tmux_sessions "$tmux_bin" "$socket")"
     return 1
@@ -1705,6 +1745,7 @@ cmd_status() {
     log "  state file:         $KB_HOST_READY_STATE_FILE"
 
     local resolved state="" lock_configured="false" registry_state="" restore_source="" restore_source_detail=""
+    local unmarked_live=""
     resolved="$(_hr_resolve "")"
     # A truncated stream must NOT be rendered as a complete picture (XACA-1066,
     # fifth shape). Without this, status printed a one-row table and
@@ -1726,6 +1767,11 @@ cmd_status() {
             REGISTRY) registry_state="$f1" ;;
             SOURCE) restore_source="$f1"; restore_source_detail="$f2" ;;
             WARN) warn "$f1" ;;
+            UNMARKED)
+                if [ -n "$tmux_bin" ] && _hr_team_already_up "$tmux_bin" "$f1" "$f2"; then
+                    unmarked_live="${unmarked_live}${f2} "
+                fi
+                ;;
             ENTRY)
                 local idx="$f1" st="$f2" team="$f3" args_packed="$f4" prefix="$f5" gate1="$f6" gate2="$f7"
                 local live="n/a"
@@ -1751,6 +1797,9 @@ cmd_status() {
     fi
     log "  registry state:     ${registry_state:-n/a}"
     log "  restore source:     ${restore_source:-n/a} (${restore_source_detail:-})"
+    if [ -n "$unmarked_live" ]; then
+        warn "status: running with NO run-marker: ${unmarked_live% } — these will NOT be restored after a power loss until restarted once (XACA-1380-019)"
+    fi
     log "  lock_after_login:   $lock_configured"
 
     local mech_line
@@ -1773,6 +1822,7 @@ cmd_status() {
 cmd_check() {
     local problems=0
     local resolved state="" lock_configured="false" registry_state="" restore_source=""
+    local chk_tmux=""
 
     # A path that EXISTS but is not a regular file (classically a directory) is
     # NOT "absent": _hr_resolve reports malformed_json for it and cmd_lock then
@@ -1820,13 +1870,19 @@ cmd_check() {
             LOCK) lock_configured="$f1" ;;
             REGISTRY) registry_state="$f1" ;;
             SOURCE) restore_source="$f1" ;;
+            UNMARKED)
+                [ -z "$chk_tmux" ] && chk_tmux="$(_hr_resolve_tmux 2>/dev/null)"
+                if [ -n "$chk_tmux" ] && _hr_team_already_up "$chk_tmux" "$f1" "$f2"; then
+                    warn "check: $f2 is running but has no run-marker — it will NOT be restored after a power loss until it is restarted once (XACA-1380-019)"
+                fi
+                ;;
             ENTRY)
                 local idx="$f1" st="$f2" team="$f3" reason="$f8"
                 if [ "$st" = "SKIP" ]; then
                     err "check: FAIL — entry $idx ($team): $reason"
                     problems=$((problems + 1))
                 elif [ "$restore_source" != "static" ] && [ -n "$restore_source" ] \
-                     && ! grep -q 'kb_run_marker_write' "${KB_HOST_READY_WORKING_DIR}/${team}-startup.sh" 2>/dev/null; then
+                     && ! grep -qE '^[[:space:]]*kb_run_marker_write[[:space:]]+[A-Za-z"$]' "${KB_HOST_READY_WORKING_DIR}/${team}-startup.sh" 2>/dev/null; then
                     # Non-failing: an unwired/un-rendered startup script never
                     # writes a marker, so the team silently drops out of
                     # last-running restore after its next clean start.
