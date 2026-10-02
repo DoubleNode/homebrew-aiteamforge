@@ -1019,8 +1019,9 @@ _spd_resolve_timeout() {
 #      fallback path below) — it turns out to be general to `wait`, not
 #      fallback-specific, so the GNU path gets the same fix for the same
 #      underlying reason.
-#   2. Portable fallback for a host with neither (stock macOS ships
-#      neither `timeout` nor `gtimeout`): background the command with job
+#   2. Portable fallback for a host with neither (macOS before 27 ships
+#      neither `timeout` nor `gtimeout`; macOS 27+ ships a BSD
+#      /usr/bin/timeout, XACA-1371): background the command with job
 #      control turned on (`set -m`) IMMEDIATELY BEFORE backgrounding it, so
 #      it becomes its own process-group leader (pgid == pid). This is not
 #      a new trick invented here — it is the exact mechanism
