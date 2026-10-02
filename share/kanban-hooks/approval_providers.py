@@ -177,6 +177,21 @@ class AssumedScheduleProvider:
             d += timedelta(days=1)
         # Wall-clock in the zone; zoneinfo resolves the DST offset for THAT date.
         local = datetime.combine(d, at, tzinfo=zone)
+        # XACA-1348 (PR B review, unfiled observation): a wall-clock time inside a DST
+        # spring-forward gap does not exist on that date (zoneinfo fold=0 would silently
+        # read 02:30 as 03:30 local). Fail closed instead of inventing a time: refuse, so no
+        # expected time is recorded and nothing is auto-approved for this CR (the lead
+        # approves explicitly, or reschedule-approval picks a real time). Chosen over
+        # rejecting the profile outright because the gap exists on ONE date per year, so a
+        # profile-level rejection would be too coarse (it would also refuse every other
+        # day), and it cannot be decided without the date. A repeated time (fall-back fold)
+        # is NOT refused: fold=0, the first occurrence, is a real instant and the earlier of
+        # the two -- documented, pinned by a test.
+        rt = local.astimezone(timezone.utc).astimezone(zone)
+        if (rt.year, rt.month, rt.day, rt.hour, rt.minute) != (d.year, d.month, d.day, at.hour, at.minute):
+            raise ProviderError(
+                "profile.approveAt %s does not exist on %s in %s (DST spring-forward gap); "
+                "pick an approveAt outside the gap hour" % (at.strftime("%H:%M"), d.isoformat(), profile.get("tz")))
         return to_iso_z(local)
 
 
@@ -204,6 +219,30 @@ def get_provider(name):
 
 # -- stamping (spec 9.2 / 9.3) ------------------------------------------------
 
+def backdate_refusal(cr):
+    """Reason string if stamping `cr` would backdate / mis-date the approval, else None.
+
+    XACA-1348-020 (second layer; kb-cr reschedule-approval is the first). The stamp writes
+    cr_approved_at = cr_approval_expected_at, so an expected time EARLIER than cr_submitted_at
+    would date an approval before the CR was even submitted (and make the deploy timing gate
+    pass at once). `reschedule-approval --at`, a hand edit or an LCARS write could all produce
+    one. Fail closed: refuse when expected < submitted, or when EITHER value is missing or
+    unparseable (an approval we cannot place in time is not stamped). `expected == submitted`
+    is not a backdate. Pure: never raises.
+    """
+    expected = cr_ts(cr, "cr_approval_expected_at")
+    submitted = cr_ts(cr, "cr_submitted_at")
+    try:
+        exp_dt = parse_iso(expected, "cr_approval_expected_at")
+        sub_dt = parse_iso(submitted, "cr_submitted_at")
+    except ProviderError as e:
+        return "cannot place the approval in time (%s)" % e
+    if exp_dt < sub_dt:
+        return ("cr_approval_expected_at %s is before cr_submitted_at %s; refusing to stamp a "
+                "backdated approval" % (expected, submitted))
+    return None
+
+
 def should_stamp(cr, now):
     """True only for a still-cr-submitted, not-yet-approved CR whose expected time has passed.
 
@@ -225,6 +264,8 @@ def should_stamp(cr, now):
     now_dt = now if isinstance(now, datetime) else parse_iso(now, "now")
     if now_dt.tzinfo is None:
         raise ProviderError("now: timestamp has no timezone")
+    if backdate_refusal(cr):                  # XACA-1348-020: fail closed, never stamp
+        return False
     return now_dt >= parse_iso(expected, "cr_approval_expected_at")
 
 
@@ -233,6 +274,9 @@ def stamp_payload(cr, profile):
     expected = cr_ts(cr, "cr_approval_expected_at")
     if not expected:
         raise ProviderError("cr_approval_expected_at: missing; nothing to stamp")
+    refusal = backdate_refusal(cr)
+    if refusal:
+        raise ProviderError(refusal)
     _z, _d, _a, approver = validate_assumed_profile(profile)
     return {
         "cr_approved_at": to_iso_z(parse_iso(expected, "cr_approval_expected_at")),
@@ -294,7 +338,7 @@ def _state_event(actor, now_iso, note):
             "from_state": STATE_SUBMITTED, "to_state": STATE_APPROVED, "note": note}
 
 
-def stamp_assumed_approvals(board, now, actor="kb-cr", cr_ids=None, events=None):
+def stamp_assumed_approvals(board, now, actor="kb-cr", cr_ids=None, events=None, refusals=None):
     """Stamp every due assumed approval on `board` (in place); return the stamped CR ids.
 
     The rules, applied to each v2 CR (optionally restricted to `cr_ids`), RE-CHECKED here against
@@ -305,7 +349,8 @@ def stamp_assumed_approvals(board, now, actor="kb-cr", cr_ids=None, events=None)
     "assumed-schedule", approval_assumed true, and enters cr-approved the way
     kb-cr.sh _kb_cr_lifecycle_advance does (crState, timestamps.cr_approved_at, updatedAt,
     lastUpdated). `events` (a list, optional) receives (cr_id, event-dict) per stamp for the
-    caller to append to the CR activity log.
+    caller to append to the CR activity log. `refusals` (a list, optional) receives
+    (cr_id, reason) for each otherwise-due CR refused by backdate_refusal (XACA-1348-020).
 
     manual provider -> []. Malformed profile -> ProviderError before anything is touched.
     """
@@ -323,7 +368,16 @@ def stamp_assumed_approvals(board, now, actor="kb-cr", cr_ids=None, events=None)
             continue
         if wanted is not None and cr.get("id") not in wanted:
             continue
-        if cr.get("cr_lifecycle") != LIFECYCLE_MARKER or not should_stamp(cr, now_dt):
+        if cr.get("cr_lifecycle") != LIFECYCLE_MARKER:
+            continue
+        if not should_stamp(cr, now_dt):
+            # Report a due-but-refused CR (backdate guard) so the refusal is visible, not silent.
+            if refusals is not None and cr.get("crState") == STATE_SUBMITTED \
+                    and not cr_ts(cr, "cr_approved_at") and cr_ts(cr, "cr_approval_expected_at") \
+                    and cr.get("approval_assumption_suppressed") in (None, False):
+                reason = backdate_refusal(cr)
+                if reason:
+                    refusals.append((cr.get("id"), reason))
             continue
         payload = stamp_payload(cr, prof)
         cr["crState"] = STATE_APPROVED
@@ -361,7 +415,11 @@ def _board_cli(args):
         set_expected_approval(board, args.cr_id)
     else:
         evs = []
-        ids = stamp_assumed_approvals(board, args.now, actor=args.actor, cr_ids=args.cr_id, events=evs)
+        refused = []
+        ids = stamp_assumed_approvals(board, args.now, actor=args.actor, cr_ids=args.cr_id,
+                                      events=evs, refusals=refused)
+        for rid, why in refused:
+            sys.stderr.write("approval_providers: REFUSED to stamp %s: %s\n" % (rid, why))
         if args.dry_run:                      # read-only probe: ids on stdout, board untouched
             sys.stdout.write(json.dumps(ids) + "\n")
             return 0

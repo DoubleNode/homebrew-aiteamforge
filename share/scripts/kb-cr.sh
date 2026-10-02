@@ -891,7 +891,7 @@ _kb_cr_v2_guard() {
         local _ap_ok
         _ap_ok=$(_kb_jq_read "$board_file" '.crs[$i] | if ((.timestamps.cr_approved_at // "") != "") and (((.approver.login // "") != "") or ((.approver.name // "") != "") or ((.approval_basis // "") != "")) then "yes" else "no" end' -r --argjson i "$cr_idx" 2>/dev/null)
         if [[ "$_ap_ok" != "yes" ]]; then
-            echo "kb-cr $verb: CR '$cr_id' has no recorded approval with an approver; a v2 CR reaches cr-approved only through 'kb-cr approve' (or 'approve --assumed'), never by $verb." >&2
+            echo "kb-cr $verb: CR '$cr_id' has no recorded approval (an approver or an approval_basis); a v2 CR reaches cr-approved only through 'kb-cr approve' (or 'approve --assumed'), never by $verb." >&2
             return 1
         fi
     fi
@@ -1528,6 +1528,10 @@ _kb_cr_container_submit() {
     # profile (manual -> none). Non-fatal: a malformed profile leaves no expected
     # time, so nothing can ever be assumed for this CR (fail closed).
     if _kb_cr_is_v2 "$_cr_board" "$cr_idx"; then
+        # XACA-1348-021: a fresh submission (only reachable from cr-drafted / cr-published
+        # for a v2 CR) gets a fresh expected time, so a suppression left by an earlier
+        # withdrawal (revert/undo) or hold belongs to the PREVIOUS submission.
+        _kb_jq_update "$_cr_board" 'del(.crs[$cidx].approval_assumption_suppressed, .crs[$cidx].approval_assumption_suppressed_at)' --argjson cidx "$cr_idx" || true
         _kb_cr_set_expected_approval "$_cr_board" "$cr_id" || \
             echo "kb-cr submit: WARNING: no expected approval time recorded for '$cr_id' (see message above); it will not be auto-approved by schedule." >&2
     fi
@@ -2021,15 +2025,17 @@ _kb_cr_container_reschedule_approval() {
         return 1
     fi
 
-    local old ts suppressed
+    local old ts
     old=$(_kb_jq_read "$_cr_board" ".crs[$cr_idx].timestamps.cr_approval_expected_at // \"\"" -r 2>/dev/null)
-    suppressed=$(_kb_jq_read "$_cr_board" ".crs[$cr_idx].approval_assumption_suppressed // false" -r 2>/dev/null)
     ts=$(_kb_cr_timestamp)
-    # A hold suppressed the assumed approval (spec 9.3). Rescheduling lifts the
-    # suppression, but only to a moment that has not passed: a past time would
-    # stamp an approval backdated across the hold.
-    if [[ "$suppressed" == "true" && "$normalized" < "$ts" ]]; then
-        echo "kb-cr reschedule-approval: CR '$cr_id' was held (its assumed approval is suppressed); the new expected time must be in the future (now is $ts), otherwise the approval would be backdated across the hold. Approve explicitly with 'kb-cr approve --by <lead>' instead." >&2
+    # XACA-1348-020: the new expected time must not be in the past — in ANY case,
+    # held or not. The sweep stamps cr_approved_at = cr_approval_expected_at, so a
+    # past value would mint an approval dated before anyone acted (a backdate, and
+    # an unattributed "approve now"). `--at == now` and future are accepted; an
+    # immediate approval is the job of `approve --by`. (A hold's suppression is
+    # lifted by this verb, so the held case is covered by the same bound.)
+    if [[ "$normalized" < "$ts" ]]; then
+        echo "kb-cr reschedule-approval: CR '$cr_id': the new expected approval time must not be in the past (now is $ts, got $normalized); a past time would backdate the assumed approval. For an immediate approval use 'kb-cr approve --by <lead>'." >&2
         return 1
     fi
     _kb_jq_update "$_cr_board" '
@@ -3057,15 +3063,37 @@ _kb_cr_container_revert() {
             '{ts: $ts, actor: $actor, operation: $op, from_state: $from, to_state: $to, reason: $reason, stripped_states: $stripped_states, stripped_fields: $stripped_fields}')
     fi
 
+    # XACA-1348-021: a v2 revert/undo that lands at or below cr-submitted AND stripped a
+    # cr_approved_at WITHDRAWS that approval. Without a durable flag `should_stamp` cannot
+    # tell "withdrawn" from "never approved", and the next sweep past
+    # cr_approval_expected_at would silently re-mint the approval (the lead's withdrawal
+    # undone within one sweep interval; `undo` would have no lasting effect). Same rule
+    # `hold` applies (spec 9.3): suppress. Only a FUTURE `reschedule-approval`, an explicit
+    # `approve`, or a fresh `submit` moves the CR on. approval_basis / approval_assumed are
+    # deliberately LEFT in place: cat9 pins them as untouchable by a revert (they are the
+    # surviving evidence that an approval existed), and with cr_approved_at gone they cannot
+    # satisfy _kb_cr_v2_guard's cr-approved check on their own.
+    local suppress_assumption="false"
+    if _kb_cr_is_v2 "$_cr_board" "$cr_idx" \
+       && (( target_rank <= $(_kb_cr_state_rank "cr-submitted") )) \
+       && [[ "$(printf '%s' "$stripped_fields_json" | jq -r '(.["cr-approved"]["timestamps.cr_approved_at"] // "") != ""')" == "true" ]]; then
+        suppress_assumption="true"
+    fi
+
     _kb_jq_update "$_cr_board" '
         .crs[$cidx].crState = $target |
         .crs[$cidx].updatedAt = $now |
         .crs[$cidx].revert_history = ((.crs[$cidx].revert_history // []) + [$entry]) |
+        (if $suppress == "true"
+         then .crs[$cidx].approval_assumption_suppressed = true
+              | .crs[$cidx].approval_assumption_suppressed_at = $now
+         else . end) |
         .lastUpdated = $now
     ' \
     --argjson cidx "$cr_idx" \
     --arg target "$target_state" \
     --arg now "$now" \
+    --arg suppress "$suppress_assumption" \
     --argjson entry "$revert_entry" \
     || return 1
 
