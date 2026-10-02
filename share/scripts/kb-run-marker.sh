@@ -36,7 +36,7 @@ _krm_py() {
         return 0
     fi
     KRM_MARKER_DIR="$(kb_run_marker_dir)" python3 - "$@" <<'KRM_PY'
-import json, os, re, signal, socket as _sock, subprocess, sys, time
+import json, os, re, signal, subprocess, sys, time
 
 ALLOW = re.compile(r'^[A-Za-z0-9._-]+$')
 MDIR = os.environ.get("KRM_MARKER_DIR", "")
@@ -142,7 +142,10 @@ def hostname():
                 return h
         except Exception:
             pass
-    return _sock.gethostname().split(".")[0]
+    # XACA-1380-021: NO socket.gethostname() fallback. The reader (_hr_this_host in kb-host-ready.sh)
+    # uses exactly this chain and treats "empty" as "unknown host -> fail closed". A host the reader
+    # would not derive must never be stored, so the caller skips the write on "".
+    return ""
 
 
 def list_markers():
@@ -190,6 +193,10 @@ def cmd_write(team, args, match=None):
     if not matches(live_key, names):
         warn("no live session for '%s' on socket '%s' — no marker written" % (live_key, team))
         return
+    host = hostname()
+    if not host:
+        warn("cannot determine this host (scutil and hostname -s both failed) — no marker written for %s" % prefix)
+        return
     srv_pid = srv_start = None
     r = run_tmux(team, "display-message", "-p", "#{pid} #{start_time}")
     if r and r[0] == 0:
@@ -203,7 +210,7 @@ def cmd_write(team, args, match=None):
         "args": list(args),          # verbatim argv, ORIGINAL casing (only place it survives)
         "prefix": prefix,
         "socket": team,
-        "host": hostname(),
+        "host": host,
         "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(now)),
         "started_epoch": int(now),
         "startup_pid": os.getppid(),
@@ -242,7 +249,13 @@ def cmd_clear(team, args):
         warn("not clearing markers: " + bad)
         return
     flt = derive(team, args)
-    cand = [n[:-5] for n in list_markers() if n[:-5] == flt or n[:-5].startswith(flt + "-")]
+    # XACA-1380-023: with args, the candidate is EXACTLY that marker (stem == prefix). The old
+    # prefix-family filter let "stop bw" delete a crashed sibling bw-dash's orphan marker. A no-arg
+    # (whole team) clear keeps the set-match: every marker of the team, each kept while live.
+    if args:
+        cand = [n[:-5] for n in list_markers() if n[:-5] == flt]
+    else:
+        cand = [n[:-5] for n in list_markers() if n[:-5] == flt or n[:-5].startswith(flt + "-")]
     if not cand:
         return
     names = live_sessions(team)
@@ -355,7 +368,10 @@ fi
 if [ -n "$_krm_run" ]; then
     unset _krm_run
     case "${1:-}" in
-        write|clear) _krm_cmd="$1"; shift; "kb_run_marker_$_krm_cmd" "$@"; exit 0 ;;
+        # Explicit calls, NOT "kb_run_marker_$sub": a runtime-built helper name is invisible to the
+        # XACA-1151 shipped-script helper scanner (check-dynamic-names fails the real tree on it).
+        write) shift; kb_run_marker_write "$@"; exit 0 ;;
+        clear) shift; kb_run_marker_clear "$@"; exit 0 ;;
         list|forget) _krm_py "$@"; exit $? ;;
         dir) kb_run_marker_dir; exit 0 ;;
         *) echo "usage: kb-run-marker.sh write|clear <team> [args...] | list | forget <prefix> | dir" >&2; exit 2 ;;
