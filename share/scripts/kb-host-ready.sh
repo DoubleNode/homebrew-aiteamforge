@@ -1674,7 +1674,12 @@ cmd_lock() {
 #
 # Inputs it trusts: the liveness markers written by claude_code_cc_aliases.sh
 # (KB_CLAUDE_LIVE_DIR, default ~/.aiteamforge/run/claude-live/), one pipe line:
-#   1|<uuid>|<pwd>|<socket>|<session_name>|<window_name>|<server_start>|<server_pid>|<set_epoch>
+#   2|<uuid>|<pwd>|<socket>|<session_name>|<window_name>|<server_start>|<server_pid>|<set_epoch>|<pane_id>|<shell_pid>|<nonce>
+# XACA-1380-030/031: only v2 markers qualify. A v2 marker is written together with a
+# per-launch guardian that removes it when its pane/shell dies while the tmux server lives on
+# (kill-pane, respawn-pane -k, kill-window, kill-session, shell exit), so a survivor means the
+# whole server died. A v1 marker (written before the guardian existed) carries no such
+# guarantee and is refused marker_version_unsupported.
 # and the XACA-1075 sidecars (~/.claude/terminal-sessions/<SESSION_CODE><sfx>),
 # whose filename is the 1:1 join key with the marker's filename.
 #
@@ -1821,6 +1826,7 @@ def warn(m):
 # Closed enum: one fixed reason per refusal.
 TEXT = {
     "marker_malformed": "liveness marker is malformed or carries unsafe fields",
+    "marker_version_unsupported": "liveness marker is v1 (written before the per-launch guardian existed), so its survival does not prove the conversation was live at the outage",
     "team_not_restored": "its team was not restored by this login",
     "no_prior_server_identity": "no pre-outage tmux server identity is recorded for its socket (no run-marker with a server identity), so the marker cannot be tied to the outage",
     "stale_server_lifetime": "the marker comes from an older tmux server lifetime, not the server that was running before the outage",
@@ -1923,11 +1929,14 @@ def preflight(name):
     ctx = {"label": name}
     line = first_line(os.path.join(LIVE, name))
     f = line.split("|") if line else []
-    if len(f) != 9 or f[0] != "1":
+    if len(f) == 9 and f[0] == "1":
+        return "marker_version_unsupported", ctx
+    if len(f) != 12 or f[0] != "2":
         return "marker_malformed", ctx
     uuid, pwd, sock, session, wname, sstart, spid = f[1], f[2], f[3], f[4], f[5], f[6], f[7]
     if not (SAFE.match(sock) and SAFE.match(session) and wname
-            and (not uuid or UUID.match(uuid)) and pwd.startswith("/")):
+            and (not uuid or UUID.match(uuid)) and pwd.startswith("/")
+            and re.match(r"^%[0-9]+$", f[9]) and f[10].isdigit() and f[11]):
         return "marker_malformed", ctx          # label stays the filename: never echo unsafe fields
     ctx["label"] = "%s:%s" % (session, wname)
     ctx.update(sock=sock, session=session, uuid=uuid)

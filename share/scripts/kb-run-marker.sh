@@ -19,10 +19,12 @@
 # XACA-1380-025 (Claude liveness markers, KB_CLAUDE_LIVE_DIR, written by claude_code_cc_aliases.sh):
 #   - clear ALSO sweeps the liveness markers of the sessions it just confirmed gone: a stopped team
 #     was not running, so its windows' conversations must never be auto-resumed later.
-#   - write ALSO installs a per-server tmux hook window-unlinked[1380] that drops the liveness marker
-#     of a window killed (kill-window / kill-session / pane exit) while its server keeps running.
-#     Measured (tmux 3.6a): the hook does NOT fire on kill-server or a SIGTERM'd server, and nothing
-#     fires on a power loss -- exactly the case whose markers must survive.
+#   - a conversation that ends while its server keeps running (kill-pane, respawn-pane -k,
+#     kill-window, kill-session, shell exit) is handled by the per-launch GUARDIAN that
+#     claude_code_cc_aliases.sh starts with each marker (XACA-1380-030/031), not here. The earlier
+#     window-unlinked[1380] tmux hook is gone: it missed kill-pane / respawn-pane in multi-pane
+#     windows, matched by window NAME (a rename stranded the marker), and did not exist on servers
+#     started before it shipped.
 #
 # --match: for a team whose tmux sessions are NOT named after its args (<team>-<agent> only), the
 # marker keeps args (to relaunch) but is judged live by this explicit session prefix instead.
@@ -45,16 +47,13 @@ _krm_py() {
         echo "warn: kb-run-marker: python3 not found — run marker not updated" >&2
         return 0
     fi
-    KRM_MARKER_DIR="$(kb_run_marker_dir)" KRM_SELF="${_KRM_SELF:-}" \
+    KRM_MARKER_DIR="$(kb_run_marker_dir)" \
         KRM_LIVE_DIR="${KB_CLAUDE_LIVE_DIR:-$HOME/.aiteamforge/run/claude-live}" python3 - "$@" <<'KRM_PY'
 import json, os, re, signal, subprocess, sys, time
 
 ALLOW = re.compile(r'^[A-Za-z0-9._-]+$')
 MDIR = os.environ.get("KRM_MARKER_DIR", "")
 LDIR = os.environ.get("KRM_LIVE_DIR", "")
-# A path baked into a tmux hook body must survive tmux's own parser (single quotes) AND /bin/sh
-# (double quotes) AND run-shell's format expansion (#): no quote, $, `, backslash, #, ; or ~ in it.
-HOOKSAFE = re.compile(r'^/[A-Za-z0-9._/ @+,:=-]+$')
 TMUX_PROBE = ("/opt/homebrew/bin/tmux", "/usr/local/bin/tmux")  # launchd PATH lacks brew (XACA-0713)
 
 
@@ -193,8 +192,9 @@ def load_doc(stem):
 
 
 def live_markers():
-    """(name, fields) for every top-level Claude liveness marker (9-field v1 lines only;
-    anything else is left alone -- kb-host-ready refuses it as malformed anyway)."""
+    """(name, fields) for every top-level Claude liveness marker: 9-field v1 and 12-field v2 lines
+    (fields 0-8 mean the same in both; the sweep may drop either -- kb-host-ready refuses v1 anyway).
+    Anything else is left alone -- kb-host-ready refuses it as malformed."""
     out = []
     try:
         names = sorted(os.listdir(LDIR)) if LDIR else []
@@ -209,7 +209,7 @@ def live_markers():
                 f = fh.readline().rstrip("\n").split("|")
         except OSError:
             continue
-        if len(f) == 9 and f[0] == "1":
+        if (len(f) == 9 and f[0] == "1") or (len(f) == 12 and f[0] == "2"):
             out.append((n, f))
     return out
 
@@ -228,44 +228,6 @@ def sweep_live(sock, names, keys):
             os.unlink(os.path.join(LDIR, n))
         except OSError:
             pass
-
-
-def install_unlink_hook(team):
-    """XACA-1380-025(e): per-server hook removing the liveness marker of a window that is
-    unlinked while the server keeps running. Best effort; never fails the write. One hook per
-    server is correct here (unlike a per-session LCARS tmp dir, XACA-1255): the only value baked
-    in is this helper's path, which is the same for every session of the host; the marker dir is
-    read from the server environment at fire time."""
-    selfp = os.environ.get("KRM_SELF", "")
-    if not selfp:
-        return
-    selfp = os.path.realpath(selfp)
-    if not HOOKSAFE.match(selfp) or not os.path.isfile(selfp):
-        warn("not installing the window-unlinked hook: unusable helper path %r" % selfp)
-        return
-    body = ("run-shell -b '/bin/bash \"%s\" live-unlinked #{q:socket_path} #{q:hook_session_name} "
-            "#{q:hook_window_name} #{pid} #{start_time} >/dev/null 2>&1'" % selfp)
-    r = run_tmux(team, "set-hook", "-g", "window-unlinked[1380]", body)
-    if not r or r[0] != 0:
-        warn("could not install the window-unlinked hook on socket '%s'" % team)
-
-
-def cmd_live_unlinked(sockpath, session, window, pid, start):
-    """Hook handler: window <window> of session <session> on the server (pid, start) at socket
-    <sockpath> was unlinked while that server lived on -> its conversation is not live; drop the
-    liveness marker. Matches the marker's server identity too, so a marker from any other server
-    lifetime is never touched here."""
-    sock = os.path.basename(sockpath)
-    session = session.replace("|", " ")
-    window = window.replace("|", " ")
-    if not (sock and session and window and start.isdigit()):
-        return
-    for n, f in live_markers():
-        if f[3] == sock and f[4] == session and f[5] == window and f[6] == start and f[7] == pid:
-            try:
-                os.unlink(os.path.join(LDIR, n))
-            except OSError:
-                pass
 
 
 def cmd_live_clear_socket(sock):
@@ -316,8 +278,11 @@ def cmd_write(team, args, match=None):
         "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(now)),
         "started_epoch": int(now),
         "startup_pid": os.getppid(),
-        "tmux_server_pid": srv_pid,      # diagnostic only, never a restore gate
-        "tmux_server_start": srv_start,  # diagnostic only
+        # XACA-1380-025: the pre-outage server identity. kb-host-ready snapshots it before restore
+        # and auto-resume REQUIRES a liveness marker's server_start|pid to equal it -- a resume
+        # gate, not a diagnostic. null (probe failed) fails closed: no_prior_server_identity.
+        "tmux_server_pid": srv_pid,
+        "tmux_server_start": srv_start,
     }
     if match is not None:
         doc["match"] = live_key      # optional: session prefix to judge liveness by (XACA-1380-017)
@@ -343,7 +308,6 @@ def cmd_write(team, args, match=None):
         with open(atmp, "w") as f:
             f.write(doc["started_at"] + "\n")
         os.replace(atmp, armed)
-    install_unlink_hook(team)
 
 
 def cmd_clear(team, args):
@@ -447,8 +411,6 @@ def main(argv):
             cmd_clear(rest[0], rest[1:])
         elif sub == "live-clear-socket" and len(rest) == 1:
             cmd_live_clear_socket(rest[0])
-        elif sub == "live-unlinked" and len(rest) == 5:
-            cmd_live_unlinked(*rest)
         elif sub == "list":
             return cmd_list()
         elif sub == "forget" and len(rest) == 1:
@@ -469,15 +431,6 @@ kb_run_marker_write() { _krm_py write "$@" || true; return 0; }
 kb_run_marker_clear() { _krm_py clear "$@" || true; return 0; }
 kb_claude_live_clear_socket() { _krm_py live-clear-socket "$@" || true; return 0; }
 
-# This file's own absolute path, baked into the window-unlinked hook (XACA-1380-025e). zsh: %x is
-# the file being sourced/executed (eval'd so bash never parses the zsh-only expansion).
-if [ -n "${ZSH_VERSION:-}" ]; then
-    _KRM_SELF="$(eval 'printf "%s" "${(%):-%x}"' 2>/dev/null)"
-else
-    _KRM_SELF="${BASH_SOURCE:-$0}"
-fi
-case "$_KRM_SELF" in /*) ;; ?*) _KRM_SELF="$(pwd -P)/$_KRM_SELF" ;; esac
-
 # CLI mode: only when EXECUTED. When sourced we must not touch the caller's "$@".
 _krm_run=""
 if [ -n "${ZSH_VERSION:-}" ]; then
@@ -493,7 +446,6 @@ if [ -n "$_krm_run" ]; then
         write) shift; kb_run_marker_write "$@"; exit 0 ;;
         clear) shift; kb_run_marker_clear "$@"; exit 0 ;;
         live-clear-socket) shift; kb_claude_live_clear_socket "$@"; exit 0 ;;
-        live-unlinked) _krm_py "$@"; exit 0 ;;
         list|forget) _krm_py "$@"; exit $? ;;
         dir) kb_run_marker_dir; exit 0 ;;
         *) echo "usage: kb-run-marker.sh write|clear <team> [args...] | list | forget <prefix> | dir | live-clear-socket <socket>" >&2; exit 2 ;;

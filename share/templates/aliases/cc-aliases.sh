@@ -828,11 +828,46 @@ _cc_saved_session_label() {
 # kb-host-ready (XACA-1380-005) which windows had a live conversation.
 # Key = SESSION_CODE + _cc_window_suffix, i.e. exactly the XACA-1075 sidecar key
 # (never a raw window id). Format (one pipe line, new fields LAST):
-#   1|uuid|launch_pwd|socket|session_name|window_name|server_start|server_pid|set_epoch
+#   2|uuid|launch_pwd|socket|session_name|window_name|server_start|server_pid|set_epoch|pane_id|shell_pid|nonce
 # uuid is empty when no --session-id was pinned (005 treats that as low
 # confidence). No tmux / no SESSION_CODE -> nothing written. Never fails the
 # caller. NB: never name a local "path" -- in zsh it is tied to PATH (a `local
 # path` empties PATH, so mkdir/mv/date silently vanish). Design: kanban/plans/XACA-1380/XACA-1380-001_design.md section 4.
+#
+# XACA-1380-030/031 GUARDIAN (why v2): the marker must outlive its conversation
+# ONLY on a power loss, the one termination where no process runs any cleanup.
+# Every other way a pane dies (kill-pane, respawn-pane -k, kill-window,
+# kill-session, shell exit or SIGKILL) leaves a running process that can see it,
+# so each launch also starts a detached guardian (_CC_LIVE_GUARD_SH, /bin/sh)
+# that polls `kill -0 <shell pid>` and, when the shell dies or it is signalled,
+# decides ONCE:
+#   - tmux server unreachable (or a different server pid) -> KEEP: the whole
+#     server died (power, OS shutdown, kill-server). A deliberate team stop is
+#     swept by kb_run_marker_clear; a manual kill-server outside the shutdown
+#     script therefore looks like a crash, exactly as it does to team restore.
+#   - server answers and (shell dead, or pane gone, or pane_pid changed) ->
+#     REMOVE, re-checked after a 1s grace so a server that is mid-exit still
+#     counts as "unreachable".
+#   - server answers, pane and shell intact -> the guardian alone was signalled:
+#     KEEP and exit.
+#   - SIGTERM -> KEEP, unconditionally, without looking. Planned restarts (Apple
+#     menu, `shutdown -r`, macOS-update and remote restarts) must resume like a
+#     power loss, and a clean OS shutdown SIGTERMs everything at once. Measured
+#     (tmux 3.6a): tmux itself never sends TERM -- kill-pane, respawn-pane -k,
+#     kill-window, kill-session, kill-server and a TERM'd server all deliver HUP to
+#     a guardian sharing the pane's process group, and nothing at all to one in its
+#     own group (job-control shell), which then sees the shell die by polling.
+#     Bias is KEEP: a wrongly kept marker still faces the preflight (server
+#     identity, sidecar, transcript, uuid uniqueness, exact-uuid ccc); a wrongly
+#     removed one silently loses the resume.
+# Removal is compare-and-delete (pane_id + shell_pid + nonce must still match),
+# so an old guardian never deletes a newer launch's marker for the same window.
+# It keys on pane id + shell pid, never on the window name, so a rename cannot
+# strand a marker. v1 markers (no guardian) are refused by the reader.
+# The guardian is exec'd (zsh closes its internal fds, incl. the tty) with
+# stdio on /dev/null and disowned: it prints nothing, holds no pty, and never
+# delays `exit`. On a clean claude return the marker is unlinked and the
+# guardian exits at its next poll (no signal: a pid can be reused).
 _cc_live_marker_path() {
     [[ -n "$SESSION_CODE" ]] || return 1
     local sfx
@@ -841,29 +876,108 @@ _cc_live_marker_path() {
     print -r -- "${KB_CLAUDE_LIVE_DIR:-$HOME/.aiteamforge/run/claude-live}/${SESSION_CODE}${sfx}"
 }
 
+# POSIX sh, argv: marker tmux_bin socket_path pane_id shell_pid pane_pid server_pid nonce poll_s.
+# No single quotes in here (the whole body is one zsh single-quoted string). It never calls
+# _cc_tmux_fmt and never makes an untargeted tmux call: one `-S <socket> list-panes -a` with the
+# socket captured at launch, looked up by the recorded pane id. Empty answer / rc != 0 / another
+# server pid = unknown = "down" = KEEP (fail closed per the design).
+_CC_LIVE_GUARD_SH='m=$1 t=$2 s=$3 p=$4 sp=$5 pp=$6 sv=$7 n=$8 iv=$9 d=0 w=""
+ours() { [ -f "$1" ] || return 1
+  IFS="|" read -r v _ _ _ _ _ _ _ _ mp ms mn < "$1" 2>/dev/null || return 1
+  [ "$v" = 2 ] && [ "$mp" = "$p" ] && [ "$ms" = "$sp" ] && [ "$mn" = "$n" ]; }
+st() { i=0 o=""
+  while [ $i -lt 3 ]; do
+    o=$("$t" -S "$s" list-panes -a -F "#{pid} #{pane_id} #{pane_pid}" 2>/dev/null) && [ -n "$o" ] && break
+    o="" i=$((i + 1)); [ $i -lt 3 ] && sleep 1
+  done
+  [ -n "$o" ] || { echo down; return; }
+  srv="" hit=""
+  while read -r a b c; do srv=$a; [ "$b" = "$p" ] && hit=$c; done <<EOF
+$o
+EOF
+  [ -z "$sv" ] || [ "$srv" = "$sv" ] || { echo down; return; }
+  kill -0 "$sp" 2>/dev/null || { echo gone; return; }
+  [ "$hit" = "$pp" ] || { echo gone; return; }
+  echo alive; }
+keep() { d=1; [ -n "$w" ] && kill "$w" 2>/dev/null; exit 0; }
+dec() { [ $d = 1 ] && return 0; d=1
+  [ -n "$w" ] && kill "$w" 2>/dev/null
+  ours "$m" || return 0
+  [ "$(st)" = gone ] || return 0
+  sleep 1
+  [ "$(st)" = gone ] || return 0
+  x="$m.tmp.reap.$$"
+  mv -f "$m" "$x" 2>/dev/null || return 0
+  if ours "$x"; then unlink "$x"; else ln "$x" "$m" 2>/dev/null; unlink "$x"; fi 2>/dev/null; }
+trap keep TERM
+trap "dec; exit 0" HUP INT
+trap dec EXIT
+while kill -0 "$sp" 2>/dev/null; do
+  ours "$m" || { d=1; exit 0; }
+  sleep "$iv" & w=$!
+  wait "$w"; w=""
+done
+dec'
+
+_cc_live_tmux_bin() {
+    local b
+    for b in "$(whence -p tmux 2>/dev/null)" /opt/homebrew/bin/tmux /usr/local/bin/tmux /usr/bin/tmux; do
+        [[ -n "$b" && -x "$b" ]] && { print -r -- "$b"; return 0; }
+    done
+    return 1
+}
+
 _cc_live_marker_set() {
-    local uuid="$1" mpath dir tmp sock sname wname
+    local uuid="$1" mpath dir tmp sockp sock sname wname pane ppane tbin nonce iv
+    _CC_LIVE_MARKER_PATH="" _CC_LIVE_NONCE="" _CC_LIVE_GUARD_PID=""
+    # Every tmux read below must be about THIS pane: no TMUX_PANE -> no key -> no marker
+    # (an untargeted display-message answers for the most recently active pane).
+    [[ "$TMUX_PANE" =~ ^%[0-9]+$ ]] || return 0
     mpath=$(_cc_live_marker_path) || return 0
     dir="${mpath:h}"
     mkdir -p "$dir" 2>/dev/null || return 0
     _cc_live_server_id || return 0
-    sock=$(_cc_tmux_fmt '#{socket_path}'); sock="${sock:t}"
+    # No guardian -> no marker: a marker nothing watches is exactly the v1 defect.
+    [[ "$_CC_LIVE_PID" =~ ^[0-9]+$ ]] || return 0
+    pane=$(_cc_tmux_fmt '#{pane_id}'); ppane=$(_cc_tmux_fmt '#{pane_pid}')
+    sockp=$(_cc_tmux_fmt '#{socket_path}')
+    [[ "$pane" == "$TMUX_PANE" && "$ppane" =~ ^[0-9]+$ && "$sockp" == /* ]] || return 0
+    tbin=$(_cc_live_tmux_bin) || return 0
+    sock="${sockp:t}"
     sname=$(_cc_tmux_fmt '#{session_name}'); sname="${sname//|/ }"
     wname=$(_cc_tmux_fmt '#{window_name}'); wname="${wname//|/ }"
+    nonce="$$.$RANDOM$RANDOM.$(date +%s)"
+    iv="${KB_CLAUDE_LIVE_GUARD_POLL:-3}"
+    [[ "$iv" =~ ^[1-5]$ ]] || iv=3
     tmp="${mpath}.tmp.$$"
-    if printf '1|%s|%s|%s|%s|%s|%s|%s|%s\n' "$uuid" "${PWD//|/ }" "${sock//|/ }" "$sname" "$wname" \
-        "$_CC_LIVE_START" "$_CC_LIVE_PID" "$(date +%s)" > "$tmp" 2>/dev/null; then
-        mv -f "$tmp" "$mpath" 2>/dev/null || unlink "$tmp" 2>/dev/null
+    if printf '2|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$uuid" "${PWD//|/ }" "${sock//|/ }" "$sname" "$wname" \
+        "$_CC_LIVE_START" "$_CC_LIVE_PID" "$(date +%s)" "$pane" "$$" "$nonce" > "$tmp" 2>/dev/null \
+        && mv -f "$tmp" "$mpath" 2>/dev/null; then
+        _CC_LIVE_MARKER_PATH="$mpath" _CC_LIVE_NONCE="$nonce"
+        /bin/sh -c "$_CC_LIVE_GUARD_SH" cc-live-guard "$mpath" "$tbin" "$sockp" "$pane" "$$" "$ppane" \
+            "$_CC_LIVE_PID" "$nonce" "$iv" </dev/null >/dev/null 2>&1 &!
+        _CC_LIVE_GUARD_PID=$!
     else
         unlink "$tmp" 2>/dev/null
     fi
     return 0
 }
 
+# Clean return: drop THIS launch's marker (the path recorded at set time, so a
+# rename while claude ran cannot strand it), only if it still carries our nonce.
+# The guardian sees the marker gone at its next poll and exits by itself.
+# $1 = claude's rc. 143 (claude SIGTERMed) KEEPS the marker: a clean OS shutdown or
+# planned restart TERMs claude while the interactive shell (which ignores TERM) runs
+# on to this line, and that conversation must resume like a power loss (measured:
+# claude 2.1.287 exits 143 on TERM, 129 on HUP, 0 on INT). The guardian stays on
+# watch, so if the shell later dies while the server lives the marker still goes.
 _cc_live_marker_clear() {
-    local mpath
-    mpath=$(_cc_live_marker_path) || return 0
-    unlink "$mpath" 2>/dev/null
+    local mpath="$_CC_LIVE_MARKER_PATH" nonce="$_CC_LIVE_NONCE" l=""
+    [[ "${1:-}" == 143 ]] && return 0
+    _CC_LIVE_MARKER_PATH="" _CC_LIVE_NONCE=""
+    [[ -n "$mpath" && -n "$nonce" ]] || return 0
+    IFS= read -r l < "$mpath" 2>/dev/null
+    [[ "${l##*|}" == "$nonce" ]] && unlink "$mpath" 2>/dev/null
     return 0
 }
 
@@ -1025,7 +1139,7 @@ _cc_launch() {
         --permission-mode bypassPermissions "${_cc_extra_args[@]}" --append-system-prompt "$CLAUDE_SYSTEM_PROMPT" \
         "If an AMB heartbeat system reminder is present, call mcp__amb__heartbeat first, then introduce yourself briefly."
     local _cc_launch_claude_rc=$?
-    _cc_live_marker_clear   # XACA-1380-004 (clean return; a crash leaves it)
+    _cc_live_marker_clear "$_cc_launch_claude_rc"   # XACA-1380-004 (clean return; a crash leaves it)
 
     # Pass the pinned UUID so _cc_save_session can skip the ls -t heuristic.
     _cc_save_session "$_cc_pinned_id"
@@ -1104,7 +1218,7 @@ cc() {
         _cc_run_claude_with_auth "$_CC_RESOLVED_TOKEN" "$_CC_RESOLVED_AUTH_TYPE" \
             --permission-mode bypassPermissions "${_cc_fb_extra[@]}" "$@"
         local _cc_fb_rc=$?
-        _cc_live_marker_clear   # XACA-1380-004
+        _cc_live_marker_clear "$_cc_fb_rc"   # XACA-1380-004
         # XACA-1312 D3 correction: record via the gated identity, never the
         # headless helper's own rule (see _cc_launch's matching comment).
         _cc_record_session_account "$_cc_fb_sid" "$_CC_BILLED_ID" "$_CC_BILLED_NICKNAME"
@@ -1309,7 +1423,7 @@ ccc() {
             _cc_run_claude_with_auth "$_CC_RESOLVED_TOKEN" "$_CC_RESOLVED_AUTH_TYPE" \
                 --permission-mode bypassPermissions --resume "$session_id"
             local _ccc_claude_rc=$?
-            _cc_live_marker_clear   # XACA-1380-004
+            _cc_live_marker_clear "$_ccc_claude_rc"   # XACA-1380-004
             # XACA-1074-002: pass the id this branch already resumed. The bare
             # call fell back to `ls -t` on the shared project dir, so windows
             # sharing a cwd stamped each other's newest transcript here.
@@ -1359,7 +1473,7 @@ ccc() {
     _cc_run_claude_with_auth "$_CC_RESOLVED_TOKEN" "$_CC_RESOLVED_AUTH_TYPE" \
         --permission-mode bypassPermissions "${_ccc_cont_args[@]}"
     local _ccc_claude_rc=$?
-    _cc_live_marker_clear   # XACA-1380-004
+    _cc_live_marker_clear "$_ccc_claude_rc"   # XACA-1380-004
     # XACA-1074-018: a pinned id is only real if claude wrote its transcript.
     # `--continue` with no prior conversation exits 1 ("No conversation found
     # to continue") and creates nothing, and a user who quits before the first
