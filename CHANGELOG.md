@@ -6,6 +6,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1381** (Perf): `share/lcars-ui/server.py` mirrors the dev fix: `/api/releases` builds one per-team board lookup per request and shares it across every release's progress calculation, so the board is parsed once per team instead of once per release (30 -> 1 loads for 30 active releases). Request-scoped only; single-release endpoints unchanged. This copy also catches up the already-merged XACA-1375 `server.py` changes.
 - **XACA-1074**: `share/templates/aliases/cc-aliases.sh` mirrors the dev `ccc` shared-cwd fix: the post-`--resume` save passes the resumed session id, the `--continue` path pins a fresh uuid via `--continue --fork-session --session-id` (feature-detected, falls back to bare `--continue`), and `_cc_save_session`'s `ls -t` fallback refuses a uuid already recorded in another window's sidecar. Windows sharing a cwd no longer stamp each other's conversation.
   XACA-1074-018: the post-exit saves in `ccc` are gated on the pinned/resumed id's transcript existing (a pinned `--continue` that wrote no
   transcript no longer plants a phantom sidecar), and the resume branch treats a sidecar with no transcript as no saved session and falls

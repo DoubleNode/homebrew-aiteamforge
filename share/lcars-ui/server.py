@@ -6894,7 +6894,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 "platforms": release_config.get('platforms', self.DEFAULT_RELEASE_CONFIG['platforms']),
                 "releaseTypes": release_config.get('releaseTypes', self.DEFAULT_RELEASE_CONFIG['releaseTypes']),
                 "flowConfig": flow_config,
-                "projectEnvironments": release_config.get('projectEnvironments', {})
+                "projectEnvironments": release_config.get('projectEnvironments', {}),
+                # XACA-1375: derived, READ-ONLY (never written back by _save_releases_config).
+                # teamConfig.crSupport.enabled is the sole CR source of truth (spec 3.1).
+                "crSupportEnabled": self._crsupport_enabled(data)
             }
 
         if _lock_held:
@@ -7458,7 +7461,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             return None
         return {item.get('id'): item for item in board_data.get('backlog', [])}
 
-    def _calculate_release_progress(self, release_id):
+    def _calculate_release_progress(self, release_id, board_status_by_team=None):
         """Calculate completion progress for a release by platform.
 
         Uses the BOARD as the source of truth for item status, not the manifest.
@@ -7498,13 +7501,23 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         which builds one `{id: item}` dict per team in a single backlog
         pass, so this stays O(rows + backlog) rather than rescanning the
         backlog per row.
+
+        XACA-1381: `board_status_by_team` lets a LIST request share ONE
+        per-team lookup across every release it computes, so the ~10 MB
+        board is parsed once per team per request instead of once per
+        release. The dict is filled lazily here; a failed board load still
+        caches `{}` for that team. It lives for ONE request only — never
+        across requests (a server-wide cache is a separate follow-up).
+        None (single-release callers) keeps the per-call local dict.
         """
         manifest = self._load_release_manifest(release_id)
         manifest_items = manifest.get('items', [])
 
         # Per-team board status lookups, built lazily and cached for the
-        # duration of this call (a release can span multiple teams).
-        board_status_by_team = {}
+        # duration of this call (a release can span multiple teams), or
+        # for the caller's whole request when it passes its own dict.
+        if board_status_by_team is None:
+            board_status_by_team = {}
 
         def _resolve_board_status(team, item_id):
             # XACA-0948-027: mirror _resolve_release_items' `not team or not
@@ -7686,8 +7699,16 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             # Add progress info and ensure team field for each release
             filtered_releases = []
+            _cr_on = data.get('crSupportEnabled') is True
+            # XACA-1381: one per-team board lookup shared by every release in
+            # this request (active/archived/all all flow through this loop).
+            board_status_by_team = {}
             for release in releases_to_process:
-                release['progress'] = self._calculate_release_progress(release['id'])
+                release['progress'] = self._calculate_release_progress(
+                    release['id'], board_status_by_team=board_status_by_team)
+                # XACA-1375: derived (never persisted): CR support is off but the release sits at CR.
+                release['strandedInCR'] = (_release_gate is not None
+                                           and _release_gate.stranded_in_cr(release, _cr_on))
                 # Ensure team field exists (backward compatibility)
                 if 'team' not in release:
                     release['team'] = config_team
@@ -7732,6 +7753,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             # Add progress and manifest
             release['progress'] = self._calculate_release_progress(release_id)
             release['manifest'] = self._load_release_manifest(release_id)
+            release['strandedInCR'] = (_release_gate is not None and _release_gate.stranded_in_cr(
+                release, data.get('crSupportEnabled') is True))  # XACA-1375: derived, never persisted
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
@@ -7937,6 +7960,11 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 "releaseTypes": data.get('releaseTypes', {}),
                 "flowConfig": data.get('flowConfig', {})
             }
+            # XACA-1375-017: the SERVER's computed enabled order (CR and the forced-GAMMA rule applied), so
+            # clients (kb-release-push-promote) never re-implement it.
+            if _release_gate is not None:
+                config["enabledStages"] = _release_gate.enabled_stages(
+                    config["flowConfig"], cr_support_enabled=data.get('crSupportEnabled') is True)
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
@@ -7961,6 +7989,12 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     def handle_create_release(self):
         """POST /api/releases - Create new release"""
         try:
+            # XACA-1375-025: create reads release_schema.STAGES (born stage, mirror clamp) with no fallback, so
+            # a missing module is refused explicitly, exactly like the gated handlers (_gate_unavailable),
+            # not left to surface as a bare AttributeError -> 500.
+            if _release_schema is None:
+                return self._send_json_response(
+                    {"error": "release schema module unavailable; refusing (fails closed)"}, status=500)
             content_length = int(self.headers['Content-Length'])
             post_data = json.loads(self.rfile.read(content_length))
 
@@ -7984,6 +8018,15 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     environments = data['projectEnvironments'][project]
                 else:
                     environments = post_data.get('environments') or data.get('defaultEnvironments', [])
+                # XACA-1375-025: a malformed list (a non-string entry, or not a list at all) is a client error
+                # (400, nothing written), whether it came from the POST body or from projectEnvironments.
+                if not isinstance(environments, list) or not all(
+                        isinstance(e, str) and e.strip() for e in environments):
+                    raise _DeferredResponse.json(
+                        {"error": "environments must be a list of non-empty stage-name strings (got %s from %s)"
+                                  % (type(environments).__name__,
+                                     "projectEnvironments" if (project and project in data.get('projectEnvironments', {}))
+                                     else "the request body or defaultEnvironments")}, 400)
 
                 # Extract default version: prefer shortTitle (the user-facing
                 # version label, e.g. "v2.10.0"), fall back to name.
@@ -8002,18 +8045,33 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 if isinstance(platforms_input, str):
                     platforms_input = [p.strip() for p in platforms_input.split(',')]
 
-                # XACA-0729: Derive the initial holding environment defensively.
-                # DEFAULT_RELEASE_CONFIG always leads with "PLANNED", but boards whose
-                # defaultEnvironments drifted (e.g. omitting PLANNED) previously caused
-                # environments[0] to be "DEV" — making the release born ACTIVE.
-                # Rule: if "PLANNED" appears anywhere in the resolved environments list,
-                # seed every platform in "PLANNED" regardless of its list position.
-                # Fall back to environments[0] only for boards that have intentionally
-                # opted out of the PLANNED stage entirely.
-                if "PLANNED" in environments:
-                    initial_environment = "PLANNED"
+                # XACA-1375-024: a NEW release is BORN at PLANNED (release.stage + stages.PLANNED), never at
+                # whatever the (unvalidated) environments list happens to start with: an explicit
+                # environments=["CR",...], a projectEnvironments list leading with CR, or one leading with a
+                # disabled stage / GAMMA / PROD used to seed the platforms there with no gate, bypassing the
+                # "nothing enters CR without crSupport" rule. Entering any later stage is the gate's job
+                # (promote), never create's. The stored `environments` list is legacy display data: untouched.
+                # XACA-0729 intent kept: PLANNED anywhere in the list -> PLANNED. The one carve-out is a board
+                # that INTENTIONALLY omits PLANNED and starts its pipeline at DEV ("DEV-first", still pinned
+                # by A3 in test_xaca0729): DEV is always enabled, so such a release is born at DEV. Any other
+                # first entry (CR, QA.., GAMMA, PROD) is NOT trusted: born at PLANNED.
+                if "PLANNED" not in environments and environments and environments[0] == "DEV":
+                    born_stage = "DEV"
                 else:
-                    initial_environment = environments[0] if environments else "PLANNED"
+                    born_stage = "PLANNED"
+                # Legacy platform environment goes through the same mirror as every other stage write; it can
+                # never read as a LATER stage than the release stage (the mirror's forward fallback could).
+                initial_environment = self._legacy_environment_for_stage(
+                    {"environments": environments}, data, born_stage)
+                if (initial_environment in _release_schema.STAGES
+                        and _release_schema.STAGES.index(initial_environment) > _release_schema.STAGES.index(born_stage)):
+                    initial_environment = born_stage
+                # A CUSTOM label that is not a gate stage at all (e.g. a project pipeline ["STAGING","PROD"],
+                # pinned by A3 in test_xaca0729) cannot be CR/GAMMA/PROD or a disabled stage: it keeps seeding
+                # the legacy platform environment as before. The release STAGE is still PLANNED.
+                if ("PLANNED" not in environments and environments and isinstance(environments[0], str)
+                        and environments[0] not in _release_schema.STAGES):
+                    initial_environment = environments[0]
 
                 platforms = {}
                 for platform in platforms_input:
@@ -8038,6 +8096,12 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     "tags": [t.strip() for t in post_data.get('tags', []) if isinstance(t, str) and t.strip()],  # XACA-0209 round 3: strip on write so new data is clean
                     "team": LCARS_TEAM  # Track owning team for validation
                 }
+                # XACA-1375-024: release-level stage state in the spec 6.1 shape (what migrate-release-schema
+                # gives an existing release): release_defaults() + the born stage and its record.
+                release.update(_release_schema.release_defaults())
+                release['stage'] = born_stage
+                release['stages'] = {born_stage: {"enteredAt": release["createdAt"], "status": "pending",
+                                                  "expected": []}}
 
                 data['releases'].append(release)
                 self._save_releases_config(data, _lock_held=True)
@@ -8060,6 +8124,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps(release, indent=2).encode())
 
+        except _DeferredResponse as deferred:
+            # emitted OUTSIDE the board lock (XACA-0890-022); must stay ABOVE the generic except
+            deferred.emit(self)
+            return
         except Exception as e:
             self.send_error(500, f"Error creating release: {e}")
 
@@ -8467,6 +8535,20 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         return isinstance(cs, dict) and cs.get('enabled') is True
 
     @classmethod
+    def _cr_config_warning(cls, board_raw, flow_config):
+        """XACA-1375-004 (WARN ONLY): CR support is off but flowConfig.stages.CR is still enabled.
+        Harmless to the gate (teamConfig.crSupport.enabled wins, flowConfig's CR key is ignored) but
+        it reads as a live CR stage to anyone looking at the flow config. Nothing clears the key."""
+        if cls._crsupport_enabled(board_raw):
+            return None
+        stages = flow_config.get('stages') if isinstance(flow_config, dict) else None
+        cr = stages.get('CR') if isinstance(stages, dict) else None
+        if isinstance(cr, dict) and cr.get('enabled', True) is not False:
+            return ("flowConfig.stages.CR is still enabled but teamConfig.crSupport.enabled is not true; "
+                    "CR support disabled wins and nothing can enter the CR stage")
+        return None
+
+    @classmethod
     def _gate_mode(cls, release_config):
         """(mode, config_warning). ABSENT gateEnforcement = _GATE_ENFORCEMENT_DEFAULT ('report'
         for now). Any other unrecognised value is a config error: treated as enforce, with a warning."""
@@ -8606,26 +8688,55 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         release.update(new_rel)
         eff = summary.get('to')
         if eff and eff != to:   # restarted EARLIER than the regress target: move the legacy mirror too
-            self._apply_stage_move(release, data, to, eff, now, 'regress')
+            self._apply_stage_move(release, data, to, eff, now, 'regress', cr_on)
         srec = (release.get('stages') or {}).get(eff)
         if isinstance(srec, dict):
             srec['status'] = 'pending'
         return None, summary.get('sha')
 
-    def _legacy_environment_for_stage(self, release, data, stage):
-        """The value to MIRROR into platforms.<p>.environment: the stage itself when the
-        legacy environments list knows it, else the nearest earlier stage it does (the CR
-        stage has no legacy tab, so it mirrors as BETA)."""
+    def _legacy_environment_for_stage(self, release, data, stage, cr_on=None):
+        """The value to MIRROR into platforms.<p>.environment (and, via
+        _sync_release_metadata_to_manifest, manifest.currentEnvironment): the stage itself when it
+        is a usable LEGACY stage, else the nearest usable one.
+
+        XACA-1375: "usable" = in the legacy environments list AND ENABLED for this team
+        (flowConfig stage enablement + teamConfig.crSupport, exactly release_gate.enabled_stages).
+        The old rule consulted the legacy list only, so CR (no legacy tab) mirrored as BETA even
+        when BETA was disabled, and LCARS showed the release in a disabled stage.
+
+        Search order: (1) the stage itself, (2) walk BACK to the nearest earlier usable stage
+        (the release is never reported further along than it is), (3) only if nothing earlier is
+        usable, walk FORWARD to the next usable stage, (4) last resort (no usable stage exists at
+        all, a degenerate config) keep `stage` unchanged. Backward is preferred because a forward
+        mirror would claim progress that was never made and could satisfy a "previous stage"
+        match (kb-release-push-promote) it should not.
+
+        `cr_on` = teamConfig.crSupport.enabled. None reads data['crSupportEnabled'] (set by
+        _load_releases_config); absent means False (fail closed: CR is not a usable stage).
+        """
+        if stage not in _release_schema.STAGES:
+            return stage
         envs = release.get('environments') or data.get('defaultEnvironments') or []
-        if stage in envs or stage not in _release_schema.STAGES:
+        if cr_on is None:
+            cr_on = data.get('crSupportEnabled') is True
+        usable = set(envs)
+        if _release_gate is not None:
+            usable &= set(_release_gate.enabled_stages(data.get('flowConfig') or {},
+                                                       cr_support_enabled=cr_on is True))
+        elif not cr_on:
+            usable.discard('CR')
+        if stage in usable:
             return stage
         idx = _release_schema.STAGES.index(stage)
         for s in reversed(_release_schema.STAGES[:idx]):
-            if s in envs:
+            if s in usable:
+                return s
+        for s in _release_schema.STAGES[idx + 1:]:
+            if s in usable:
                 return s
         return stage
 
-    def _apply_stage_move(self, release, data, frm, to, now, kind):
+    def _apply_stage_move(self, release, data, frm, to, now, kind, cr_on=None):
         """The ONE state mutation for promote/regress/plan (caller holds the board lock and
         saves). Sets release.stage, creates-or-completes stages[to] WITHOUT clobbering an
         existing record, then mirrors the legacy per-platform environment."""
@@ -8644,7 +8755,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             if kind == 'regress':  # re-entering a stage: it restarts (records/waivers stay SHA-bound)
                 st['enteredAt'] = now
                 st['status'] = 'pending'
-        legacy = self._legacy_environment_for_stage(release, data, to)
+        legacy = self._legacy_environment_for_stage(release, data, to, cr_on)
         platforms = release.get('platforms')
         for pdata in (platforms.values() if isinstance(platforms, dict) else []):
             if not isinstance(pdata, dict):
@@ -8744,7 +8855,11 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     raise _DeferredResponse.json({"error": "Release not found: %s" % release_id}, 404)
                 board_raw = self._read_board_raw_locked()
                 rcfg = self._release_cfg(board_raw)
-                mode, cfg_warning = self._gate_mode(rcfg)
+                mode, gate_warning = self._gate_mode(rcfg)
+                # XACA-1375-004: the CR-config warning rides the same `configWarning` channel; it is
+                # NOT appended to reasons (only the gate-mode warning is, below).
+                cfg_warning = "; ".join(w for w in (
+                    gate_warning, self._cr_config_warning(board_raw, data.get('flowConfig'))) if w) or None
                 if legacy_style and legacy_target is not None \
                         and legacy_target == _release_gate.current_stage(release):
                     # Idempotent legacy replay: nothing is evaluated or written. The activity entry
@@ -8756,6 +8871,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     noop_payload = {"allowed": True, "noop": True, "mode": mode, "from": legacy_target,
                                     "to": legacy_target, "reasons": [], "reasonCodes": [], "reasonData": [],
                                     "success": True,
+                                    "strandedInCR": _release_gate.stranded_in_cr(
+                                        release, self._crsupport_enabled(board_raw)),
                                     "previousEnvironment": legacy_target, "newEnvironment": legacy_target}
                     if cfg_warning:
                         noop_payload["configWarning"] = cfg_warning
@@ -8768,6 +8885,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 ctx = self._build_gate_context(release, release_id, board_raw, data, LCARS_TEAM,
                                                confirm and is_lead)
                 cur = _release_gate.current_stage(release)
+                stranded_before = _release_gate.stranded_in_cr(release, cr_on)  # XACA-1375-018
                 order = _release_gate.enabled_stages(flow, cr_support_enabled=cr_on)
                 later = [s for s in order if _release_schema.STAGES.index(s) > _release_schema.STAGES.index(cur)]
                 nxt = later[0] if later else None
@@ -8775,10 +8893,12 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 verdict = _release_gate.evaluate(release, eff_target or cur, flow, cr_support_enabled=cr_on,
                                                  actor=actor, context=ctx)
                 reasons = _release_gate.Reasons(verdict['reasons'], verdict['reasonCodes'], verdict['reasonData'])
-                if eff_target == 'GAMMA' and confirm and not is_lead:
-                    reasons.append("GAMMA: deploy confirmation refused: " + lead_reason,
+                # XACA-1375-013: the confirm stage is GAMMA when the team has it, else PROD.
+                _confirm_stage = _release_gate.deploy_confirm_stage(order)
+                if eff_target == _confirm_stage and confirm and not is_lead:
+                    reasons.append("%s: deploy confirmation refused: %s" % (_confirm_stage, lead_reason),
                                    _release_gate.CODE_GAMMA_ACTOR_NOT_LEAD if self._leads_configured(rcfg)
-                                   else _release_gate.CODE_LEADS_NOT_CONFIGURED, {"stage": "GAMMA"})
+                                   else _release_gate.CODE_LEADS_NOT_CONFIGURED, {"stage": _confirm_stage})
                 # A lead command can never succeed while releaseConfig.leads is missing/empty: say so as
                 # its own reason so a UI suggests configuring it instead of a command that is refused.
                 _lead_fixable = {_release_gate.CODE_GAMMA_CONFIRM_REQUIRED, _release_gate.CODE_WAIVER_NEEDED,
@@ -8790,10 +8910,15 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                                    "(fails closed)", _release_gate.CODE_LEADS_NOT_CONFIGURED)
                 # Structurally impossible moves are refused in BOTH modes: report mode must
                 # never write a stage that is unknown, disabled, unchanged, backward or past PROD.
+                # XACA-1375: skipping an ENABLED CR or GAMMA is ALSO structural (refused in both modes).
                 hard = (eff_target is None or cur == 'PROD' or eff_target == cur
                         or eff_target not in order
-                        or _release_schema.STAGES.index(eff_target) < _release_schema.STAGES.index(cur))
-                proceed = (not hard) and (mode == 'report' or not reasons)
+                        or _release_schema.STAGES.index(eff_target) < _release_schema.STAGES.index(cur)
+                        or _release_gate.CODE_MANDATORY_STAGE_SKIPPED in reasons.codes)
+                # XACA-1375: the informational CR_SUPPORT_DISABLED reason (release stranded at CR)
+                # never blocks: promote OUT of CR stays allowed in enforce mode too.
+                blocking = reasons.blocking()
+                proceed = (not hard) and (mode == 'report' or not blocking)
                 cut = None
                 if proceed and cur == 'PLANNED' and eff_target == 'DEV' and not release.get('branch'):
                     try:  # decision -002: XACA-1346's gated write is the SOLE caller of the cut
@@ -8809,7 +8934,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         proceed = False
                 if proceed and not dry_run:
                     now = self._get_timestamp()
-                    self._apply_stage_move(release, data, cur, eff_target, now, 'promote')
+                    self._apply_stage_move(release, data, cur, eff_target, now, 'promote', cr_on)
                     if cut:  # same locked write as the stage change
                         release['branch'] = cut['branch']
                         release['branchBaseSha'] = cut['branchBaseSha']
@@ -8817,13 +8942,19 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         raise _DeferredResponse.json({"error": "board write failed"}, 500)
                     written = True
                     snapshot = copy.deepcopy(release)
-                if not proceed and cfg_warning:
-                    reasons.append(cfg_warning)
+                if not proceed and gate_warning:
+                    reasons.append(gate_warning)
+                # XACA-1375: state AFTER the (possible) write: a promote OUT of CR clears it.
+                stranded = _release_gate.stranded_in_cr(release, cr_on)
 
             # reasons stay strings; reasonCodes/reasonData are PARALLEL lists (XACA-1346-052/054) so
             # the LCARS modal maps a reason to its remedy without pattern-matching prose.
             base = {"mode": mode, "from": cur, "to": eff_target, "reasons": list(reasons),
-                    "reasonCodes": list(reasons.codes), "reasonData": list(reasons.data)}
+                    "reasonCodes": list(reasons.codes), "reasonData": list(reasons.data),
+                    "strandedInCR": stranded,
+                    # XACA-1375-016: the stage whose ENTRY needs the lead's deploy confirmation (the UI
+                    # keys its up-front warning off this, not a hardcoded GAMMA)
+                    "confirmStage": _confirm_stage}
             if cfg_warning:
                 base["configWarning"] = cfg_warning
             if dry_run:
@@ -8832,7 +8963,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 # every time someone opens the promote modal). `allowed` = what a real call would do.
                 return self._send_json_response(
                     dict(base, allowed=bool(proceed), dryRun=True, next=nxt,
-                         error=None if proceed and not reasons else self._reasons_error(reasons)),
+                         error=None if proceed and not blocking else self._reasons_error(reasons)),
                     status=200)
             logctx = dict(actor=actor, mode=mode, reasons=list(reasons), confirmDeploy=confirm,
                           cut=cut, configWarning=cfg_warning)
@@ -8842,8 +8973,12 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     dict(base, allowed=False, error=self._reasons_error(reasons)), status=409)
             self._mirror_release_manifest(snapshot)
             self._log_release_activity(
-                release_id, 'release_promote_report' if reasons else 'release_promote',
+                release_id, 'release_promote_report' if blocking else 'release_promote',
                 cur, eff_target, **logctx)
+            if stranded_before:
+                # XACA-1375-018: IN ADDITION to the normal entry: a release left a CR that no longer exists
+                self._log_release_activity(release_id, 'crSupportDisabledWhileAtCR', cur, eff_target,
+                                           actor=actor, mode=mode, via='promote')
             return self._send_json_response(dict(
                 base, allowed=True, release=snapshot,
                 success=True, previousEnvironment=cur, newEnvironment=eff_target))
@@ -8875,6 +9010,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             flow = data.get('flowConfig') or {}
             verdict = _release_gate.evaluate_regress(release, to, flow, reason, cr_support_enabled=cr_on)
             cur = verdict['current']
+            stranded_before = _release_gate.stranded_in_cr(release, cr_on)  # XACA-1375-018
             reasons = list(verdict['reasons'])
             if reconcile_ok and to == 'PLANNED' and cur == 'PLANNED' and str(reason or '').strip():
                 # XACA-0729 heal: release-level stage is already PLANNED but a platform drifted.
@@ -8883,7 +9019,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     reasons = []
             if not reasons:
                 now = self._get_timestamp()
-                self._apply_stage_move(release, data, cur, to, now, 'regress')
+                self._apply_stage_move(release, data, cur, to, now, 'regress', cr_on)
                 pend_err, applied_sha = self._apply_pending_sha(
                     release, data, to, flow, cr_on, now,
                     self._release_cfg(board_raw).get('onNewSha', _release_supersede.DEFAULT_ON_NEW_SHA
@@ -8896,6 +9032,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     return 500, {"error": "board write failed"}
                 written = True
                 snapshot = copy.deepcopy(release)
+            stranded = _release_gate.stranded_in_cr(release, cr_on)
+            cr_warn = self._cr_config_warning(board_raw, flow)
         logctx = dict(actor=actor, reason=reason, reasons=reasons)
         landed = to
         if written and applied_sha:
@@ -8908,10 +9046,15 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         if not written:
             self._log_release_activity(release_id, 'release_regress_refused', cur, to, **logctx)
             return 409, {"allowed": False, "from": cur, "to": to, "reasons": reasons,
-                         "error": self._reasons_error(reasons)}
+                         "strandedInCR": stranded, "error": self._reasons_error(reasons),
+                         **({"configWarning": cr_warn} if cr_warn else {})}
         self._mirror_release_manifest(snapshot)
         self._log_release_activity(release_id, 'release_regress', cur, landed, **logctx)
-        payload = {"allowed": True, "from": cur, "to": landed, "release": snapshot}
+        if stranded_before:
+            self._log_release_activity(release_id, 'crSupportDisabledWhileAtCR', cur, landed,
+                                       actor=actor, via='regress')
+        payload = {"allowed": True, "from": cur, "to": landed, "release": snapshot,
+                   "strandedInCR": stranded, **({"configWarning": cr_warn} if cr_warn else {})}
         if landed != to:
             payload["requestedTo"] = to
             payload["appliedPendingSha"] = applied_sha
@@ -9585,7 +9728,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                             _new_env = "PLANNED"
                             if _release_gate is not None:
                                 _new_env = self._legacy_environment_for_stage(
-                                    release, data, _release_gate.current_stage(release))
+                                    release, data, _release_gate.current_stage(release),
+                                    self._crsupport_enabled(self._read_board_raw_locked()))
                             existing_platforms[platform] = {
                                 "version": release_version,
                                 "buildNumber": 1,
