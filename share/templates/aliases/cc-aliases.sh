@@ -126,12 +126,15 @@ _cc_encode_project_dir() {
 
 # XACA-1075: ask tmux a format question about THIS window (pane-targeted when
 # $TMUX_PANE is known, so a background caller still asks about its own window).
+# XACA-1074-025: FAIL CLOSED without a pane. With TMUX set and TMUX_PANE empty (tmux hooks and
+# `run-shell` children) an untargeted `display-message -p` answers for the most-recently-active
+# pane, which can belong to ANOTHER session -- a window then derived that session's key and
+# wrote or resumed its sidecar. No pane -> print nothing, return 1: _cc_window_suffix then
+# returns 1 (its existing "no window id" path), the same answer callers already handle for
+# "not in a tmux window", and _cc_window_key derives no key.
 _cc_tmux_fmt() {
-    if [[ -n "$TMUX_PANE" ]]; then
-        tmux display-message -t "$TMUX_PANE" -p "$1" 2>/dev/null
-    else
-        tmux display-message -p "$1" 2>/dev/null
-    fi
+    [[ -n "$TMUX_PANE" ]] || return 1
+    tmux display-message -t "$TMUX_PANE" -p "$1" 2>/dev/null
 }
 
 # XACA-1074-021: session-qualified key. Sidecars are keyed per SESSION_CODE, not per
