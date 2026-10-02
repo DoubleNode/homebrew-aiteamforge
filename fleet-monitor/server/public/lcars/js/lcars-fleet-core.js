@@ -996,7 +996,7 @@ window.LCARS_CORE = window.LCARS_CORE || {};
 
     LCARS.sections = {
         // Available sections in order
-        list: ['overview', 'organizations', 'machines', 'analytics', 'settings', 'admin', 'engines'],
+        list: ['overview', 'organizations', 'machines', 'analytics', 'settings', 'admin', 'engines', 'cicd'],
 
         // Current state
         active: 'overview',

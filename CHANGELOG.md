@@ -6,6 +6,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1388** (Added): LCARS fleet dashboard CI/CD section — new `fleet-monitor/server/public/lcars/js/lcars-cicd.js`, sidebar
+  button + `data-section="cicd"` in `lcars-dashboard.html`, `cicd-*` styles in `lcars-dashboards.css`, refresh wiring in
+  `lcars-dashboard-app.js` / `lcars-fleet-core.js`, jsdom tests + fixtures. Renders `GET /api/ci-runners` (v1 contract,
+  producer XACA-1387); degrades to "CI telemetry not available" until that endpoint ships. Mirrors the dev changes.
 - **XACA-1386** (Fix): `share/scripts/kb-knowledge-sync.sh` reads mtimes GNU-first (`stat -c %Y || stat -f %m`); the BSD-first order
   never fell back on Linux (GNU `stat -f` is filesystem status, rc 0), so the daemon withheld outbound pushes as `mtime-unreadable`.
   `share/scripts/kb-spacedock` passes finding detail to jq via `--rawfile` (Linux caps one argv string at 128 KiB; the 200000 default

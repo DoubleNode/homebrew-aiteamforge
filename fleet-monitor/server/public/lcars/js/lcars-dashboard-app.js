@@ -343,6 +343,13 @@
     // ============================================================================
 
     async function fetchFleetData() {
+        // XACA-1388: CI/CD section refreshes on this cycle ONLY while it is the visible
+        // section. Kept outside the try so a /api/fleet failure doesn't freeze CI data.
+        // LCARSCICD.refresh() never throws or rejects; it is not awaited on purpose.
+        if (window.LCARSCICD && window.LCARS_CORE && LCARS_CORE.sections &&
+            LCARS_CORE.sections.active === 'cicd') {
+            window.LCARSCICD.refresh();
+        }
         try {
             const response = await fetch(CONFIG.apiBase + '/api/fleet');
             if (!response.ok) {
