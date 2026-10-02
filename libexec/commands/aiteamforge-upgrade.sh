@@ -3204,6 +3204,7 @@ iterm2_tab_title_prefix.py
 iterm2_claude_active_watch.py
 kb-init-team-guard.sh
 kb-init-team
+kb-run-marker.sh
 remote-tmux-attach.sh
 lcars-launch-helpers.sh
 lcars-remote-atf-resolve.sh

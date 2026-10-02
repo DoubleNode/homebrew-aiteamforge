@@ -10,6 +10,11 @@
 # Use the same tmux socket as the startup script
 TMUX_SOCKET="freelance"
 
+# XACA-1380: run marker (restore what was RUNNING). Missing helper must never break this script.
+. "${AITEAMFORGE_DIR:-$HOME/dev-team}/scripts/kb-run-marker.sh" 2>/dev/null \
+  || { echo "warn: kb-run-marker.sh missing — this team will not be restored in last-running mode" >&2
+       kb_run_marker_write() { :; }; kb_run_marker_clear() { :; }; }
+
 GROUPID="$1"
 PROJECTID="$2"
 
@@ -95,6 +100,7 @@ if [ -z "$freelance_sessions" ]; then
         echo "   No active Freelance sessions were found"
     fi
     echo ""
+    kb_run_marker_clear freelance "$@"
     exit 0
 fi
 
@@ -114,6 +120,9 @@ while IFS= read -r session; do
         killed_count=$((killed_count + 1))
     fi
 done <<< "$freelance_sessions"
+
+# XACA-1380: drop the run marker (self-verifying: kept if tmux still shows sessions)
+kb_run_marker_clear freelance "$@"
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

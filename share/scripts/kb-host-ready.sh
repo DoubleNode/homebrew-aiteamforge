@@ -385,7 +385,7 @@ _hr_write_state() {
     mkdir -p "$dir" 2>/dev/null || { warn "could not create state dir $dir"; return 1; }
     tmp="$(mktemp "${dir}/.host-ready.state.XXXXXX" 2>/dev/null)" || { warn "mktemp failed for state file"; return 1; }
     STAMP="$stamp" RESTORE="$restore_summary" LOCKSTATUS="$lock_status" LOCKREASON="$lock_reason" \
-        EXITCODE="$exit_code" NOW="$(date '+%Y-%m-%dT%H:%M:%S%z')" python3 - > "$tmp" <<'PY'
+        EXITCODE="$exit_code" RESTORESRC="${_HR_LAST_RESTORE_SOURCE:-}" NOW="$(date '+%Y-%m-%dT%H:%M:%S%z')" python3 - > "$tmp" <<'PY'
 import json, os
 
 def _restore_or_raw():
@@ -404,6 +404,7 @@ doc = {
     # on this file existing, and a persistent write failure would disable it on
     # every later run. Degrade the summary to a diagnostic, never abort the doc.
     "restore": _restore_or_raw(),
+    "restore_source": os.environ.get("RESTORESRC") or None,
     "lock": os.environ.get("LOCKSTATUS") or "NOT_ATTEMPTED",
     "lock_reason": os.environ.get("LOCKREASON") or None,
     "exit_code": int(os.environ.get("EXITCODE", "0")),
@@ -437,6 +438,8 @@ PY
 #   LOCK\t<true|false>
 #   SCHEMA\t<int>
 #   REGISTRY\t<ok|missing|unparseable>
+#   SOURCE\t<static|last-running|static-fallback>\t<detail>   (XACA-1380; once, before ENTRYs)
+#   RESUME\t<true|false>                        (XACA-1380; always false until PR B)
 #   ENTRY\t<index>\t<OK|SKIP>\t<team>\t<args_packed>\t<prefix>\t<gate1>\t<gate2>\t<reason>
 #     gate1 in {PASS,FAIL}; gate2 in {PASS,FAIL,SKIPPED}
 # ─────────────────────────────────────────────────────────────────────────────
@@ -459,6 +462,7 @@ PY
 # view, so a snapshot taken with a different filter must never be substituted.
 _HR_PRERESOLVED=""
 _HR_PRERESOLVED_KEY="__unset__"
+_HR_LAST_RESTORE_SOURCE=""   # XACA-1380: set by cmd_restore from the SOURCE record
 _hr_resolve() {
     local _key="${1:-}"
     if [ -n "$_HR_PRERESOLVED" ] && [ "$_key" = "$_HR_PRERESOLVED_KEY" ]; then
@@ -921,7 +925,136 @@ def _hr_describe_chars_in(s, badset):
             seen_set.add(c)
     return ", ".join(f"'{_hr_safe_repr(c)}' (U+{ord(c):04X})" for c in seen)
 
-for idx, entry in enumerate(autostart_raw):
+# ── XACA-1380-003: entry SOURCE selection (static list vs run-markers) ────
+# restore_mode: "static" (default; autostart list, byte-for-byte the old
+# behaviour) | "last-running" (restore what the per-team startup/shutdown
+# scripts recorded as RUNNING in the marker dir). Absent -> static. Invalid
+# -> WARN + static (the operator's previously working behaviour).
+#
+# last-running + .armed present: ONLY markers are restored; the static list
+# is IGNORED and zero markers means restore NOTHING (user stopped everything).
+# last-running + .armed absent: first boot after upgrade, no startup has run
+# the marker code yet -> fall back to the static list ("static-fallback").
+# Markers feed the SAME per-entry loop below (BAD_CHARS, allowlist, gate1,
+# gate2, already-up, budgets) -- no second validator. Marker-only checks
+# (malformed / schema / host / prefix mismatch) become pre-skipped rows.
+# Login NEVER deletes or edits a marker: stale ones stay as evidence.
+# Armed + unreadable marker dir fails CLOSED (nothing restored); it must
+# never fall back to static, which would start teams the user stopped.
+restore_mode_raw = doc.get("restore_mode", None)
+if restore_mode_raw is None:
+    restore_mode = "static"
+    _mode_note = "restore_mode absent"
+elif restore_mode_raw in ("static", "last-running"):
+    restore_mode = restore_mode_raw
+    _mode_note = "restore_mode " + restore_mode_raw
+else:
+    emit("WARN", f"'restore_mode' must be \"static\" or \"last-running\" (got {_hr_safe_repr(repr(restore_mode_raw))}); treated as static")
+    restore_mode = "static"
+    _mode_note = "restore_mode invalid"
+
+# auto_resume_claude: parsed + validated here; PR B (XACA-1380-005) owns the
+# behaviour. Until it lands the value is forced false.
+_resume_raw = doc.get("auto_resume_claude", False)
+if not isinstance(_resume_raw, bool):
+    emit("WARN", f"'auto_resume_claude' is not a boolean (got {type(_resume_raw).__name__}); treated as false")
+elif _resume_raw:
+    emit("WARN", "'auto_resume_claude' is true but auto-resume is not available in this build; treated as false")
+emit("RESUME", "false")
+
+def _hr_this_host():
+    ov = os.environ.get("KB_HOST_READY_HOSTNAME")
+    if ov:
+        return ov
+    import subprocess
+    for cmd in (["scutil", "--get", "LocalHostName"], ["hostname", "-s"]):
+        try:
+            out = subprocess.run(cmd, capture_output=True, text=True, timeout=5).stdout.strip()
+            if out:
+                return out
+        except Exception:
+            continue
+    return ""
+
+work = []   # (idx, entry_dict_or_None, preskip_reason_or_None, display_team)
+source_kind = "static"
+source_detail = _mode_note
+if restore_mode == "static":
+    work = [(i, e, None, "") for i, e in enumerate(autostart_raw)]
+else:
+    marker_dir = os.environ.get("KB_RUN_MARKER_DIR") or os.path.join(
+        os.path.expanduser("~"), ".aiteamforge", "run", "teams-running")
+    # Only ENOENT/ENOTDIR mean "never armed". Any other stat failure (EACCES on an
+    # unreadable marker dir) is "armed but unreadable" and must fail CLOSED below.
+    _armed_err = None
+    try:
+        os.stat(os.path.join(marker_dir, ".armed"))
+        _is_armed = True
+    except (FileNotFoundError, NotADirectoryError):
+        _is_armed = False
+    except OSError as _e:
+        _is_armed = True
+        _armed_err = _e
+    if not _is_armed:
+        source_kind = "static-fallback"
+        source_detail = "last-running but never armed (no .armed in marker dir); using static autostart list"
+        work = [(i, e, None, "") for i, e in enumerate(autostart_raw)]
+    else:
+        source_kind = "last-running"
+        try:
+            if _armed_err is not None:
+                raise _armed_err
+            names = sorted(n for n in os.listdir(marker_dir)
+                           if n.endswith(".json") and not n.startswith(".") and ".tmp." not in n)
+        except OSError as e:
+            names = None
+            source_detail = f"armed but marker dir unreadable: {_hr_safe_repr(e)}"
+            work = [(0, None, f"armed but marker dir {_hr_safe_repr(marker_dir)} is unreadable ({_hr_safe_repr(e)}); restoring NOTHING (never falling back to static)", "marker-dir")]
+        if names is not None:
+            this_host = _hr_this_host()
+            source_detail = f"{len(names)} marker(s)" if names else "armed, no teams were running"
+            for i, fname in enumerate(names):
+                stem = fname[:-5]
+                fpath = os.path.join(marker_dir, fname)
+                def _skip(reason, team_disp=stem, i=i, fname=fname):
+                    return (i, None, f"marker {_hr_safe_repr(fname)}: {reason}", _hr_safe_repr(team_disp))
+                try:
+                    with open(fpath, "r", encoding="utf-8") as fh:
+                        mdoc = json.load(fh)
+                except Exception:
+                    if not filter_team:
+                        work.append(_skip("malformed marker (unreadable or not valid JSON)"))
+                    continue
+                if not isinstance(mdoc, dict) or mdoc.get("schema_version") != 1:
+                    if not filter_team:
+                        work.append(_skip("malformed marker (root not an object or schema_version != 1)"))
+                    continue
+                m_team = mdoc.get("team")
+                m_args = mdoc.get("args", [])
+                if filter_team and m_team != filter_team:
+                    continue
+                m_host = mdoc.get("host")
+                if not isinstance(m_host, str) or not m_host or (this_host and m_host != this_host):
+                    work.append(_skip(f"marker from another host '{_hr_safe_repr(m_host)}' (this host '{_hr_safe_repr(this_host)}')"))
+                    continue
+                # Only derive a prefix when team/args are clean: dirty values
+                # fall through to the existing BAD_CHARS/allowlist rejections.
+                if (isinstance(m_team, str) and m_team and isinstance(m_args, list)
+                        and all(isinstance(a, str) and a for a in m_args)
+                        and _hr_first_bad(m_team) is None
+                        and all(_hr_first_bad(a) is None for a in m_args)):
+                    derived = m_team + "".join("-" + a.lower() for a in m_args)
+                    stored = mdoc.get("prefix")
+                    if stored != derived or stem != derived:
+                        work.append(_skip(f"prefix mismatch (file={_hr_safe_repr(stem)}, stored={_hr_safe_repr(stored)}, derived={_hr_safe_repr(derived)})"))
+                        continue
+                work.append((i, {"team": m_team, "args": m_args}, None, ""))
+emit("SOURCE", source_kind, source_detail)
+
+for idx, entry, _preskip, _disp in work:
+    if _preskip is not None:
+        emit("ENTRY", idx, "SKIP", _disp, "", "", "FAIL", "SKIPPED", _preskip)
+        continue
     if not isinstance(entry, dict):
         emit("ENTRY", idx, "SKIP", "", "", "", "FAIL", "SKIPPED", f"entry {idx} is not an object")
         continue
@@ -1171,6 +1304,10 @@ cmd_restore() {
                 ;;
             WARN)
                 warn "restore: $f1"
+                ;;
+            SOURCE)
+                _HR_LAST_RESTORE_SOURCE="$f1"
+                log "restore: entry source = $f1 ($f2)"
                 ;;
             ENTRY)
                 local idx="$f1" status="$f2" team="$f3" args_packed="$f4" prefix="$f5" gate1="$f6" gate2="$f7" reason="$f8"
@@ -1494,6 +1631,11 @@ cmd_login() {
     lock_status="${_HR_LAST_LOCK_STATUS:-NOT_ATTEMPTED}"
     lock_reason="${_HR_LAST_LOCK_REASON:-}"
 
+    # XACA-1380 PR B HOOK POINT (subitem 005, NOT implemented here): login
+    # order is restore -> lock -> RESUME (design 3.6). The lock above is the
+    # security property and must never wait on a slow resume. PR B calls
+    # `_hr_auto_resume` right here, gated on auto_resume_claude and only for
+    # teams this run actually STARTED. Until then nothing runs.
     local overall_rc=0
     if [ "$restore_rc" -ne 0 ] || [ "$lock_rc" -ne 0 ]; then
         overall_rc=1
@@ -1562,7 +1704,7 @@ cmd_status() {
     log "  team-paths.json:    $KB_HOST_READY_TEAM_PATHS"
     log "  state file:         $KB_HOST_READY_STATE_FILE"
 
-    local resolved state="" lock_configured="false" registry_state=""
+    local resolved state="" lock_configured="false" registry_state="" restore_source="" restore_source_detail=""
     resolved="$(_hr_resolve "")"
     # A truncated stream must NOT be rendered as a complete picture (XACA-1066,
     # fifth shape). Without this, status printed a one-row table and
@@ -1582,6 +1724,7 @@ cmd_status() {
             STATE) state="$f1" ;;
             LOCK) lock_configured="$f1" ;;
             REGISTRY) registry_state="$f1" ;;
+            SOURCE) restore_source="$f1"; restore_source_detail="$f2" ;;
             WARN) warn "$f1" ;;
             ENTRY)
                 local idx="$f1" st="$f2" team="$f3" args_packed="$f4" prefix="$f5" gate1="$f6" gate2="$f7"
@@ -1607,6 +1750,7 @@ cmd_status() {
         log "  NOTICE:             seeded default, never customized; this host restores nothing and locks nothing. Run: kb-host-ready.sh suggest"
     fi
     log "  registry state:     ${registry_state:-n/a}"
+    log "  restore source:     ${restore_source:-n/a} (${restore_source_detail:-})"
     log "  lock_after_login:   $lock_configured"
 
     local mech_line
@@ -1628,7 +1772,7 @@ cmd_status() {
 # ─────────────────────────────────────────────────────────────────────────────
 cmd_check() {
     local problems=0
-    local resolved state="" lock_configured="false" registry_state=""
+    local resolved state="" lock_configured="false" registry_state="" restore_source=""
 
     # A path that EXISTS but is not a regular file (classically a directory) is
     # NOT "absent": _hr_resolve reports malformed_json for it and cmd_lock then
@@ -1675,11 +1819,18 @@ cmd_check() {
                 ;;
             LOCK) lock_configured="$f1" ;;
             REGISTRY) registry_state="$f1" ;;
+            SOURCE) restore_source="$f1" ;;
             ENTRY)
                 local idx="$f1" st="$f2" team="$f3" reason="$f8"
                 if [ "$st" = "SKIP" ]; then
                     err "check: FAIL — entry $idx ($team): $reason"
                     problems=$((problems + 1))
+                elif [ "$restore_source" != "static" ] && [ -n "$restore_source" ] \
+                     && ! grep -q 'kb_run_marker_write' "${KB_HOST_READY_WORKING_DIR}/${team}-startup.sh" 2>/dev/null; then
+                    # Non-failing: an unwired/un-rendered startup script never
+                    # writes a marker, so the team silently drops out of
+                    # last-running restore after its next clean start.
+                    warn "check: ${team}-startup.sh does not call kb_run_marker_write — $team will not be recorded as running in last-running mode"
                 fi
                 ;;
         esac

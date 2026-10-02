@@ -362,3 +362,9 @@ if [[ -n "$ITERM_STARTUP_LOG" ]] && [[ -s "$ITERM_STARTUP_LOG" ]]; then
 fi
 
 echo "Legal Team ready for duty!"
+
+# XACA-1380: run marker (restore what was RUNNING). Missing helper must never break this script.
+. "${AITEAMFORGE_DIR:-$HOME/dev-team}/scripts/kb-run-marker.sh" 2>/dev/null \
+  || { echo "warn: kb-run-marker.sh missing — this team will not be restored in last-running mode" >&2
+       kb_run_marker_write() { :; }; kb_run_marker_clear() { :; }; }
+kb_run_marker_write legal "$PROJECTID"

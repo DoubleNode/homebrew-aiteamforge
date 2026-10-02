@@ -651,3 +651,15 @@ if [[ -s "$ITERM_STARTUP_LOG" ]]; then
 fi
 
 echo "${TEAM_NAME} — ${DISPLAY_NAME} ready!"
+
+# XACA-1380: run marker (restore what was RUNNING). Sourced late and guarded: a missing helper
+# (older install) must never break startup. Shutdown clears it once tmux confirms the sessions are gone.
+_KRM_HELPER="$AITEAMFORGE_DIR/scripts/kb-run-marker.sh"
+if [[ -f "$_KRM_HELPER" ]]; then
+    source "$_KRM_HELPER" 2>/dev/null || true
+fi
+if (( $+functions[kb_run_marker_write] )); then
+    kb_run_marker_write "$TEAM_ID" "$@" || true
+else
+    echo "  warn: kb-run-marker.sh missing — this team will not be restored in last-running mode" >&2
+fi

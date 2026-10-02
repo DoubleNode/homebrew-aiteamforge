@@ -2408,6 +2408,12 @@ if [[ "$_PARAMETRIC_MODE" == "true" ]]; then
         "$AITEAMFORGE_DIR/scripts/kb-init-team"
     echo "  ✓ scripts/kb-init-team"
 
+    # XACA-1380: run-marker helper sourced by the startup/shutdown scripts (guarded there, so an
+    # absent copy only means "not restored in last-running mode").
+    _xaca0483_install_script "$HOMEBREW_TAP_ROOT/share/scripts/kb-run-marker.sh" \
+        "$AITEAMFORGE_DIR/scripts/kb-run-marker.sh"
+    echo "  ✓ scripts/kb-run-marker.sh"
+
     # XACA-0484: install per-agent startup scripts (and team banner) referenced
     # by the master parametric script. Without these, tmux sessions never form
     # because the master script's [ -f "$script" ] guard silently skips missing files.
@@ -2484,6 +2490,10 @@ PYEOF
         "$AITEAMFORGE_DIR/scripts/iterm2_venv_bootstrap.py"
     chmod +x "$AITEAMFORGE_DIR/scripts/iterm2_venv_bootstrap.py"
     echo "  ✓ scripts/iterm2_venv_bootstrap.py"
+    # XACA-1380: run-marker helper (sourced, guarded, by the rendered startup/shutdown scripts).
+    _xaca0483_install_script "$HOMEBREW_TAP_ROOT/share/scripts/kb-run-marker.sh" \
+        "$AITEAMFORGE_DIR/scripts/kb-run-marker.sh"
+    echo "  ✓ scripts/kb-run-marker.sh"
 else
     echo "  ⚠️  Template not found: $TEAM_STARTUP_SCRIPT.template (will create basic version)"
     cat > "$STARTUP_SCRIPT" <<EOF

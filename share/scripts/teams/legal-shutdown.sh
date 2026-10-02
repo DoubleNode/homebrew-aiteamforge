@@ -7,6 +7,11 @@
 # Use the same tmux socket as the startup script
 TMUX_SOCKET="legal"
 
+# XACA-1380: run marker (restore what was RUNNING). Missing helper must never break this script.
+. "${AITEAMFORGE_DIR:-$HOME/dev-team}/scripts/kb-run-marker.sh" 2>/dev/null \
+  || { echo "warn: kb-run-marker.sh missing — this team will not be restored in last-running mode" >&2
+       kb_run_marker_write() { :; }; kb_run_marker_clear() { :; }; }
+
 # Check if a project ID was provided
 if [ $# -ge 1 ]; then
     PROJECTID="$1"
@@ -94,6 +99,9 @@ for terminal in "${terminal_types[@]}"; do
         not_found_count=$((not_found_count + 1))
     fi
 done
+
+# XACA-1380: drop the run marker (self-verifying: kept if tmux still shows sessions)
+kb_run_marker_clear legal "$@"
 
 echo ""
 echo "  Cleanup complete!"

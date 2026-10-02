@@ -18,6 +18,11 @@ KANBAN_BOARD="finance-${PROJECT_LOWER}"
 # Use the same tmux socket as the startup script
 TMUX_SOCKET="finance"
 
+# XACA-1380: run marker (restore what was RUNNING). Missing helper must never break this script.
+. "${AITEAMFORGE_DIR:-$HOME/dev-team}/scripts/kb-run-marker.sh" 2>/dev/null \
+  || { echo "warn: kb-run-marker.sh missing — this team will not be restored in last-running mode" >&2
+       kb_run_marker_write() { :; }; kb_run_marker_clear() { :; }; }
+
 echo "  Cleaning up Finance terminal sessions for project: $PROJECTID..."
 echo "   tmux socket: $TMUX_SOCKET"
 echo "   session prefix: $SESSION_PREFIX"
@@ -79,6 +84,9 @@ for session in "${sessions[@]}"; do
         ((count++))
     fi
 done
+
+# XACA-1380: drop the run marker (self-verifying: kept if tmux still shows sessions)
+kb_run_marker_clear finance "$@"
 
 # Clean up LCARS port file
 LCARS_PORTS_DIR="${AITEAMFORGE_DIR:-$HOME/dev-team}/lcars-ports"

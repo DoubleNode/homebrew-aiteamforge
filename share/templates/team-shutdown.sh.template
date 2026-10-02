@@ -6,6 +6,7 @@ TEAM_ID="{{TEAM_ID}}"
 TEAM_NAME="{{TEAM_NAME}}"
 TMUX_SOCKET="{{TEAM_TMUX_SOCKET}}"
 LCARS_PORT="{{TEAM_LCARS_PORT}}"
+AITEAMFORGE_DIR="{{AITEAMFORGE_DIR}}"
 
 echo "Shutting down ${TEAM_NAME}..."
 
@@ -20,6 +21,16 @@ fi
 echo "  Stopping tmux sessions..."
 tmux -L "$TMUX_SOCKET" kill-server 2>/dev/null || true
 echo "  ✓ tmux sessions stopped"
+
+# XACA-1380: drop the run marker (self-verifying: kept if tmux still shows sessions).
+# Missing helper (older install) must never break shutdown.
+_KRM_HELPER="$AITEAMFORGE_DIR/scripts/kb-run-marker.sh"
+if [[ -f "$_KRM_HELPER" ]]; then
+    source "$_KRM_HELPER" 2>/dev/null || true
+fi
+if (( $+functions[kb_run_marker_clear] )); then
+    kb_run_marker_clear "$TEAM_ID" "$@" || true
+fi
 
 echo ""
 echo "✓ ${TEAM_NAME} shut down"
