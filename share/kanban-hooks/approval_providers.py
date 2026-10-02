@@ -243,6 +243,16 @@ def backdate_refusal(cr):
     return None
 
 
+def assumption_suppressed(cr):
+    """True unless approval_assumption_suppressed is absent/None or the bool False.
+
+    Identity checks, not ``in (None, False)``: 0 == False in Python, so a membership
+    test would read a stored 0 as "not suppressed" and let the sweep stamp (XACA-1348-022).
+    """
+    value = cr.get("approval_assumption_suppressed")
+    return not (value is None or value is False)
+
+
 def should_stamp(cr, now):
     """True only for a still-cr-submitted, not-yet-approved CR whose expected time has passed.
 
@@ -256,7 +266,7 @@ def should_stamp(cr, now):
     # expected time but before the sweep ran) suppresses the assumed approval for good; resume
     # does not resurrect it. kb-cr.sh hold sets the flag, reschedule-approval clears it.
     # Fail-closed: any value other than absent / null / false counts as suppressed.
-    if cr.get("approval_assumption_suppressed") not in (None, False):
+    if assumption_suppressed(cr):
         return False
     expected = cr_ts(cr, "cr_approval_expected_at")
     if not expected:
@@ -374,7 +384,7 @@ def stamp_assumed_approvals(board, now, actor="kb-cr", cr_ids=None, events=None,
             # Report a due-but-refused CR (backdate guard) so the refusal is visible, not silent.
             if refusals is not None and cr.get("crState") == STATE_SUBMITTED \
                     and not cr_ts(cr, "cr_approved_at") and cr_ts(cr, "cr_approval_expected_at") \
-                    and cr.get("approval_assumption_suppressed") in (None, False):
+                    and not assumption_suppressed(cr):
                 reason = backdate_refusal(cr)
                 if reason:
                     refusals.append((cr.get("id"), reason))
