@@ -254,7 +254,7 @@ def _shell_required_evidence(state):
     return [line for line in proc.stdout.splitlines() if line.strip()]
 
 
-# The 11 canonical states, enumerated from the VALIDATOR's own map rather
+# The 12 canonical states (XACA-1348 added cr-completed), enumerated from the VALIDATOR's own map rather
 # than a hand list — a state added to STATE_ENTRY_TS is automatically
 # covered here.
 _ALL_STATES = list(VALIDATOR.STATE_ENTRY_TS.keys())
@@ -263,8 +263,8 @@ _ALL_STATES = list(VALIDATOR.STATE_ENTRY_TS.keys())
 def test_all_states_enumerated_is_nonempty_and_matches_known_count():
     """Sanity floor: if this ever comes back empty or tiny, every assertion
     below would vacuously pass over nothing."""
-    assert len(_ALL_STATES) == 11, (
-        f"expected 11 canonical crStates, got {len(_ALL_STATES)}: {_ALL_STATES} "
+    assert len(_ALL_STATES) == 12, (
+        f"expected 12 canonical crStates, got {len(_ALL_STATES)}: {_ALL_STATES} "
         "— either the schema grew a state (update this comment, the pin test "
         "still applies) or STATE_ENTRY_TS failed to load correctly."
     )

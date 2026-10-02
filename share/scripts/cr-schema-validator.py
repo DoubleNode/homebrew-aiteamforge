@@ -47,6 +47,7 @@ STATE_ENTRY_TS = {
     "deployed-dev":       "cr_deployed_dev_at",
     "deployed-prod":      "cr_deployed_prod_at",
     "emergency-deployed": "cr_emergency_deployed_at",
+    "cr-completed":       "cr_completed_at",             # XACA-1348
     "cr-closed":          "cr_closed_at",
 }
 
@@ -122,6 +123,12 @@ EVIDENCE_PREREQS = (
     ("cr_started_test_at",  ("cr_submitted_at", "cr_approved_at|cr_approval_waived_at")),
     ("cr_deployed_dev_at",  ("cr_submitted_at", "cr_approved_at|cr_approval_waived_at")),
     ("cr_deployed_prod_at", ("cr_submitted_at", "cr_approved_at|cr_approval_waived_at")),
+    # XACA-1348. cr-completed is entered from deployed-prod, or from
+    # emergency-deployed once a RETROACTIVE approval is recorded. Hence an
+    # OR-group for "was it deployed" and a plain cr_approved_at: a waiver is
+    # not an approval, so it does not satisfy this line (unlike the group the
+    # implementing/deployed-* rows use). Mirrors _kb_cr_state_required_evidence.
+    ("cr_completed_at",     ("cr_deployed_prod_at|cr_emergency_deployed_at", "cr_approved_at")),
 )
 
 # Terminal state whose violations are reported as warnings rather than errors.

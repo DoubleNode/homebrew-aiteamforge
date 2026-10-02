@@ -32,6 +32,7 @@
     "deployed-dev",
     "deployed-prod",
     "emergency-deployed",
+    "cr-completed",
     "cr-closed"
   ],
 
@@ -58,6 +59,46 @@
       "enum_ref": "crStates",
       "required": true,
       "description": "Current CR lifecycle state. Must be a value from the crStates array. Transitions are managed exclusively by kb-cr subcommands."
+    },
+    "cr_lifecycle": {
+      "type": "string",
+      "enum": ["v2"],
+      "required": false,
+      "immutable_after": "create",
+      "description": "XACA-1348. Lifecycle marker stamped by kb-cr create on every NEW CR. Presence (value 'v2') is the ONLY trigger for the simplified-lifecycle rules: implementing/deployed-dev (start-dev, start-test, deploy-dev) are refused, deploy-prod accepts only cr-approved, a rejected CR may only be closed, and publish honours requireLeadDraftApproval. ABSENT on every CR created before this field existed, which therefore keeps its legacy behaviour whether or not it carries legacy_state. Never inferred from legacy_state, timestamps or crState. Immutable: no verb, revert or strip-spec may add, remove or change it."
+    },
+    "cr_draft_approved_by": {
+      "type": "string",
+      "required": false,
+      "description": "XACA-1348. Lead who approved the draft (kb-cr approve-draft --by). Paired with timestamps.cr_draft_approved_at. Recording it is NOT a state change."
+    },
+    "approval_basis": {
+      "type": "string",
+      "enum": ["manual", "assumed-schedule"],
+      "required": false,
+      "description": "XACA-1348. How cr_approved_at was established. 'manual' = explicit kb-cr approve; 'assumed-schedule' = stamped by the approval provider at cr_approval_expected_at."
+    },
+    "approval_assumption_suppressed": {
+      "type": "boolean",
+      "required": false,
+      "description": "XACA-1348 (spec 9.3). v2 CRs only: true once a hold was recorded on a CR that had no approval yet (before OR after cr_approval_expected_at, provided the assumed approval had not been stamped). While true the assumed-schedule provider never stamps; resume does not clear it. Cleared by reschedule-approval (new future expected time). Never stripped by revert."
+    },
+    "approval_assumption_suppressed_at": {
+      "type": "string",
+      "format": "ISO 8601 UTC",
+      "required": false,
+      "description": "XACA-1348. The hold timestamp that set approval_assumption_suppressed."
+    },
+    "held_from": {
+      "type": "string",
+      "enum": ["cr-submitted", "cr-approved"],
+      "required": false,
+      "description": "XACA-1348. v2 CRs only: the state a CR was held from (written by kb-cr hold). kb-cr resume returns the CR to EXACTLY this state without touching cr_approved_at; cleared on resume and on close (history stays in the activity log)."
+    },
+    "approval_assumed": {
+      "type": "boolean",
+      "required": false,
+      "description": "XACA-1348. true when the approval was assumed by schedule; false when a lead explicitly approved (an explicit approve cancels any pending assumption). Absent on legacy CRs."
     },
     "deploy_window_planned": {
       "type": "string",
@@ -336,7 +377,19 @@
     "cr_completed_at": {
       "type": "string",
       "format": "ISO 8601 UTC",
-      "recorded_when": "kb-cr complete is called; item also moves to completed status via kb-done",
+      "recorded_when": "crState transitions to cr-completed (kb-cr complete <CR-ID>, lifecycle-marked CRs); on the legacy per-item path kb-cr complete <item-id> stamps it without a state change and the item moves to completed status via kb-done",
+      "stored_on": "crs[] container record"
+    },
+    "cr_draft_approved_at": {
+      "type": "string",
+      "format": "ISO 8601 UTC",
+      "recorded_when": "kb-cr approve-draft is called (XACA-1348); does not change crState — cr-drafted stays cr-drafted",
+      "stored_on": "crs[] container record"
+    },
+    "cr_approval_expected_at": {
+      "type": "string",
+      "format": "ISO 8601 UTC",
+      "recorded_when": "set when the CR is submitted (approval-provider computed) and replaced by kb-cr reschedule-approval (only while cr-submitted); the old and new values are logged",
       "stored_on": "crs[] container record"
     }
   },

@@ -176,6 +176,16 @@ _KB_CR_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)
 # ─────────────────────────────────────────────────────────────────────────────
 
 _kb_cr_timestamp() {
+    # XACA-1348-005: KB_CR_TEST_NOW is a TEST-ONLY clock override (a fixed
+    # YYYY-MM-DDTHH:MM:SSZ instant). It exists so the suites can drive
+    # time-dependent rules (assumed-approval stamping, the deploy-prod timing
+    # gate) deterministically; it is ignored unless set, and a malformed value
+    # is ignored too (falls back to the real clock) rather than writing garbage
+    # timestamps. Never set it outside tests.
+    if [[ -n "${KB_CR_TEST_NOW:-}" && "$KB_CR_TEST_NOW" =~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' ]]; then
+        printf '%s\n' "$KB_CR_TEST_NOW"
+        return 0
+    fi
     date -u +%Y-%m-%dT%H:%M:%SZ
 }
 
@@ -578,6 +588,12 @@ _kb_cr_state_rank() {
         deployed-dev)       echo 40 ;;
         deployed-prod)      echo 50 ;;
         emergency-deployed) echo 60 ;;
+        # XACA-1348: cr-completed sits ABOVE both deploy states (it is entered
+        # from deployed-prod, or from emergency-deployed after retroactive
+        # approval). cr-closed stays unranked on purpose — reachable from any
+        # state, so it has no position on the ladder (pinned by
+        # test_xaca0924_evidence_maps.py).
+        cr-completed)       echo 70 ;;
         *)                  echo -1 ;;
     esac
 }
@@ -619,6 +635,11 @@ _kb_cr_state_strip_spec() {
         deployed-dev)       printf 'ts\ttimestamps.cr_deployed_dev_at\n' ;;
         deployed-prod)      printf 'ts\ttimestamps.cr_deployed_prod_at\n' ;;
         emergency-deployed) printf 'ts\ttimestamps.cr_emergency_deployed_at\nscalar\temergency_justification\n' ;;
+        # XACA-1348: cr_lifecycle (the lifecycle marker) is deliberately in NO
+        # line of this map. It is stamped once at create and is immutable;
+        # revert must never be able to strip it, or a marked CR could be
+        # laundered into the legacy rules. Pinned by cat6.
+        cr-completed)       printf 'ts\ttimestamps.cr_completed_at\n' ;;
         *)                  return 1 ;;
     esac
     return 0
@@ -656,6 +677,7 @@ _kb_cr_state_entry_ts_field() {
         deployed-dev)       echo "cr_deployed_dev_at"       ;;
         deployed-prod)      echo "cr_deployed_prod_at"      ;;
         emergency-deployed) echo "cr_emergency_deployed_at" ;;
+        cr-completed)       echo "cr_completed_at"          ;;      # XACA-1348
         cr-closed)          echo "cr_closed_at"             ;;
         *)                  return 1 ;;
     esac
@@ -731,6 +753,12 @@ _kb_cr_state_required_evidence() {
         deployed-dev)       printf 'cr_submitted_at\ncr_approved_at|cr_approval_waived_at\n' ;;
         deployed-prod)      printf 'cr_submitted_at\ncr_approved_at|cr_approval_waived_at\n' ;;
         emergency-deployed) ;;                      # break-glass, by design
+        # XACA-1348: completing needs proof the CR was actually deployed (prod
+        # OR break-glass) AND a recorded approval — for the emergency path that
+        # is the RETROACTIVE approval (spec 8.2). A waiver is not an approval,
+        # so it does not satisfy this line (unlike the OR-group used by
+        # implementing/deployed-*).
+        cr-completed)       printf 'cr_deployed_prod_at|cr_emergency_deployed_at\ncr_approved_at\n' ;;
         cr-closed)          ;;                      # reachable from any state
         *)                  return 1 ;;
     esac
@@ -784,6 +812,162 @@ _kb_cr_missing_evidence() {
     done <<< "$required"
 
     [[ -n "$missing" ]] && echo "$missing"
+    return 0
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+# v2 LIFECYCLE MARKER (XACA-1348)
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# `kb-cr create` stamps every NEW CR with  cr_lifecycle: "v2".  The simplified
+# lifecycle rules (spec 8.2) apply ONLY to a CR carrying that marker:
+#   * start-dev / start-test / deploy-dev are refused (legacy CRs only);
+#   * deploy-prod is accepted only from cr-approved (break-glass is
+#     emergency-deploy, a separate verb);
+#   * a rejected CR is never reused — its only exit is cr-closed;
+#   * publish honours requireLeadDraftApproval;
+#   * complete / approve-draft / reschedule-approval are available.
+# A CR WITHOUT the marker is legacy and behaves exactly as before, whether or
+# not it carries legacy_state. kb-cr.sh ships to consumer boards that may never
+# have run the legacy_state migration, so "new" must NEVER be inferred from the
+# absence of legacy_state, from timestamps or from crState — only from the
+# marker. The marker is immutable: it is in no strip-spec line, and no verb
+# writes it after create (pinned by cat6).
+
+# _kb_cr_is_v2 <board_file> <cr_idx>  — return 0 iff the CR carries the marker.
+_kb_cr_is_v2() {
+    local _v2
+    _v2=$(_kb_jq_read "$1" ".crs[$2].cr_lifecycle // \"\"" -r 2>/dev/null)
+    [[ "$_v2" == "v2" ]]
+}
+
+# _kb_cr_v2_refuse_legacy_verb <board_file> <cr_idx> <cr_id> <verb>
+# Return 1 (with a message) when the CR is marked v2; 0 for legacy CRs.
+_kb_cr_v2_refuse_legacy_verb() {
+    local board_file="$1" cr_idx="$2" cr_id="$3" verb="$4"
+    _kb_cr_is_v2 "$board_file" "$cr_idx" || return 0
+    echo "kb-cr $verb: CR '$cr_id' is part of the v2 lifecycle, which has no implementing / deployed-dev stage; $verb is for legacy CRs only." >&2
+    echo "  v2 path: cr-drafted -> cr-published -> cr-submitted -> cr-approved -> deployed-prod -> cr-completed -> cr-closed" >&2
+    return 1
+}
+
+# _kb_cr_require_lead_draft_approval <board_file>  — echo "true"/"false".
+# TODO(XACA-1348): the release-profile flag (cr/profile.json
+# requireLeadDraftApproval) is not resolvable from kb-cr.sh yet — there is no
+# profile loader on this path. Until one is wired, the flag is read from
+# teamConfig.crSupport.requireLeadDraftApproval on the board, default false.
+_kb_cr_require_lead_draft_approval() {
+    local _rq
+    _rq=$(_kb_jq_read "$1" '.teamConfig.crSupport.requireLeadDraftApproval // false' -r 2>/dev/null)
+    [[ "$_rq" == "true" ]] && echo "true" || echo "false"
+}
+
+# _kb_cr_v2_guard <board_file> <cr_idx> <cr_id> <verb> <from_state> <to_state>
+# Central transition rule check for MARKED CRs. Return 0 for legacy CRs
+# unconditionally. Used by `transition` / the LCARS endpoint (via
+# _kb_cr_stamp_state_entry) and by the publish path.
+_kb_cr_v2_guard() {
+    local board_file="$1" cr_idx="$2" cr_id="$3" verb="$4" from="$5" to="$6"
+    _kb_cr_is_v2 "$board_file" "$cr_idx" || return 0
+    case "$to" in
+        implementing|deployed-dev)
+            _kb_cr_v2_refuse_legacy_verb "$board_file" "$cr_idx" "$cr_id" "$verb" ; return $? ;;
+    esac
+    # XACA-1348-007: cr-closed is TERMINAL for a v2 CR (spec 16 G8: a rejected CR
+    # is never reused, and closing one must not be a way to launder it back into
+    # the flow). Every state-changing path funnels through here, with or without
+    # --force. Staying closed (the identity move) is not a change.
+    if [[ "$from" == "cr-closed" && "$to" != "cr-closed" ]]; then
+        echo "kb-cr $verb: CR '$cr_id' is closed; closed is terminal for a v2 CR — it cannot move to '$to'. Create a new CR instead." >&2
+        return 1
+    fi
+    # XACA-1348-007: a v2 CR enters cr-approved only through `approve` /
+    # `approve --assumed`, which record WHO approved (approver) or at least HOW
+    # (approval_basis, set by both verbs; a bare `kb-cr approve` with no --by has a
+    # basis but no approver). A force-write / revert that lands here without an
+    # existing approval recorded by one of those verbs would mint an approverless,
+    # basis-less cr_approved_at out of submit-time evidence.
+    if [[ "$to" == "cr-approved" ]]; then
+        local _ap_ok
+        _ap_ok=$(_kb_jq_read "$board_file" '.crs[$i] | if ((.timestamps.cr_approved_at // "") != "") and (((.approver.login // "") != "") or ((.approver.name // "") != "") or ((.approval_basis // "") != "")) then "yes" else "no" end' -r --argjson i "$cr_idx" 2>/dev/null)
+        if [[ "$_ap_ok" != "yes" ]]; then
+            echo "kb-cr $verb: CR '$cr_id' has no recorded approval with an approver; a v2 CR reaches cr-approved only through 'kb-cr approve' (or 'approve --assumed'), never by $verb." >&2
+            return 1
+        fi
+    fi
+    if [[ "$from" == "cr-rejected" && "$to" != "cr-closed" && "$to" != "cr-rejected" ]]; then
+        echo "kb-cr $verb: CR '$cr_id' was rejected; a rejected v2 CR is never reused — close it (reason \"rejected\") and create a new CR." >&2
+        return 1
+    fi
+    if [[ "$to" == "deployed-prod" && "$from" != "cr-approved" ]]; then
+        echo "kb-cr $verb: CR '$cr_id' is in state '$from'; a v2 CR reaches deployed-prod only from cr-approved (break-glass: kb-cr emergency-deploy)." >&2
+        return 1
+    fi
+    if [[ "$from" == "cr-held" && "$to" != "cr-closed" && "$to" != "cr-held" && "$to" != "cr-rejected" ]]; then
+        local _hf
+        _hf=$(_kb_jq_read "$board_file" ".crs[$cr_idx].held_from // \"\"" -r 2>/dev/null)
+        echo "kb-cr $verb: CR '$cr_id' is on hold${_hf:+ (held from $_hf)}; a v2 CR leaves cr-held only through 'kb-cr resume' (back to the state it was held from) or close." >&2
+        return 1
+    fi
+    if [[ "$to" == "deployed-prod" ]]; then
+        _kb_cr_v2_deploy_prod_timing_gate "$board_file" "$cr_idx" "$cr_id" "$verb" || return 1
+    fi
+    if [[ "$to" == "cr-completed" && "$from" != "deployed-prod" && "$from" != "emergency-deployed" ]]; then
+        echo "kb-cr $verb: CR '$cr_id' is in state '$from'; cr-completed is entered only from deployed-prod or emergency-deployed." >&2
+        return 1
+    fi
+    if [[ "$to" == "cr-published" ]]; then
+        _kb_cr_v2_publish_guard "$board_file" "$cr_idx" "$cr_id" "$verb" || return 1
+    fi
+    return 0
+}
+
+# _kb_cr_v2_deploy_prod_timing_gate <board_file> <cr_idx> <cr_id> <verb>
+# (XACA-1348-001, spec 8.2) A v2 CR may be deployed to prod only once
+# now >= max(cr_approved_at, deploy_window_planned when set). The clock is
+# _kb_cr_timestamp (KB_CR_TEST_NOW in tests). Fail-closed: an unparseable stamp
+# refuses. Emergency deploys use their own verb and never reach this.
+_kb_cr_v2_deploy_prod_timing_gate() {
+    local board_file="$1" cr_idx="$2" cr_id="$3" verb="$4"
+    local now _out
+    now=$(_kb_cr_timestamp)
+    _out=$(_kb_jq_read "$board_file" '
+        .crs[$i] as $c
+        | [ ($c.timestamps.cr_approved_at // ""), ($c.deploy_window_planned // "") ]
+        | map(select(. != "")) as $ts
+        | if ($ts | length) == 0 then "NOAPPROVAL"
+          else (try (($ts | map(fromdateiso8601) | max) as $gate
+                     | if ($now | fromdateiso8601) >= $gate then "OK" else "WAIT " + ($gate | todate) end)
+                catch "BADTS")
+          end
+    ' -r --argjson i "$cr_idx" --arg now "$now" 2>/dev/null)
+    case "$_out" in
+        OK) return 0 ;;
+        WAIT*)
+            echo "kb-cr $verb: CR '$cr_id' cannot be deployed to prod before ${_out#WAIT } (the later of its approval time and its planned deploy window); now is $now." >&2
+            return 1 ;;
+        NOAPPROVAL)
+            echo "kb-cr $verb: CR '$cr_id' has no recorded approval time; a v2 CR is deployed only after its approval (break-glass: kb-cr emergency-deploy)." >&2
+            return 1 ;;
+        *)
+            echo "kb-cr $verb: CR '$cr_id' has an unreadable approval time or deploy window; refusing (fail-closed)." >&2
+            return 1 ;;
+    esac
+}
+
+# _kb_cr_v2_publish_guard <board_file> <cr_idx> <cr_id> <verb>
+# Marked CR + requireLeadDraftApproval=true => publish needs approve-draft first.
+_kb_cr_v2_publish_guard() {
+    local board_file="$1" cr_idx="$2" cr_id="$3" verb="$4"
+    _kb_cr_is_v2 "$board_file" "$cr_idx" || return 0
+    [[ "$(_kb_cr_require_lead_draft_approval "$board_file")" == "true" ]] || return 0
+    local _da
+    _da=$(_kb_jq_read "$board_file" ".crs[$cr_idx].timestamps.cr_draft_approved_at // \"\"" -r 2>/dev/null)
+    if [[ -z "$_da" ]]; then
+        echo "kb-cr $verb: CR '$cr_id' cannot be published — this team requires lead draft approval and none is on record." >&2
+        echo "  Record it with: kb-cr approve-draft $cr_id --by <lead>" >&2
+        return 1
+    fi
     return 0
 }
 
@@ -844,6 +1028,13 @@ _kb_cr_stamp_state_entry() {
         echo "_kb_cr_stamp_state_entry: unknown state '$new_state'." >&2
         return 1
     fi
+
+    # XACA-1348: marked-CR transition rules apply to EVERY force-write path
+    # (kb-cr transition and the LCARS endpoint share this function). Legacy CRs
+    # pass through untouched.
+    local _g_from
+    _g_from=$(_kb_cr_container_get_state "$board_file" "$cr_idx" 2>/dev/null || echo "")
+    _kb_cr_v2_guard "$board_file" "$cr_idx" "$cr_id" "transition" "$_g_from" "$new_state" || return 1
 
     local now
     now=$(_kb_cr_timestamp)
@@ -975,7 +1166,7 @@ _kb_cr_stamp_state_entry() {
 _kb_cr_states_above_rank() {
     local target_rank="$1"
     local s r
-    for s in cr-drafted cr-published cr-submitted cr-rejected cr-held cr-approved implementing deployed-dev deployed-prod emergency-deployed; do
+    for s in cr-drafted cr-published cr-submitted cr-rejected cr-held cr-approved implementing deployed-dev deployed-prod emergency-deployed cr-completed; do
         r=$(_kb_cr_state_rank "$s")
         if (( r > target_rank )); then
             echo "$s"
@@ -1306,6 +1497,11 @@ _kb_cr_container_submit() {
     local current_state
     current_state=$(_kb_cr_container_get_state "$_cr_board" "$cr_idx")
 
+    # XACA-1348: a rejected v2 CR is never reused (spec 16 G8).
+    if [[ "$current_state" == "cr-rejected" || "$current_state" == "cr-held" ]]; then
+        _kb_cr_v2_guard "$_cr_board" "$cr_idx" "$cr_id" "submit" "$current_state" "cr-submitted" || return 1
+    fi
+
     case "$current_state" in
         cr-drafted|cr-published|cr-held|cr-rejected) ;;
         cr-submitted)
@@ -1327,6 +1523,14 @@ _kb_cr_container_submit() {
     ts=$(_kb_cr_timestamp)
     _kb_cr_lifecycle_advance "$_cr_board" "$cr_idx" "$cr_id" "cr-submitted" "cr_submitted_at" "$ts" || return 1
     echo "kb-cr submit: [$cr_id] $current_state -> cr-submitted (cr_submitted_at=$ts)"
+
+    # XACA-1348-005: v2 CRs get cr_approval_expected_at from the team's approval
+    # profile (manual -> none). Non-fatal: a malformed profile leaves no expected
+    # time, so nothing can ever be assumed for this CR (fail closed).
+    if _kb_cr_is_v2 "$_cr_board" "$cr_idx"; then
+        _kb_cr_set_expected_approval "$_cr_board" "$cr_id" || \
+            echo "kb-cr submit: WARNING: no expected approval time recorded for '$cr_id' (see message above); it will not be auto-approved by schedule." >&2
+    fi
 
     # Guard 5 (XACA-0897-002/003): stamp cr_submitted_version. Reached by
     # BOTH the manual `kb-cr submit <CR-ID>` CLI call AND the Confluence
@@ -1351,13 +1555,19 @@ _kb_cr_container_approve() {
         return 1
     fi
 
-    local approver_login="" approver_name=""
+    local approver_login="" approver_name="" assumed_mode=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --approver)       approver_login="${2:-}";  shift 2 ;;
             --approver=*)     approver_login="${1#--approver=}"; shift ;;
             --approver-name)  approver_name="${2:-}";   shift 2 ;;
             --approver-name=*) approver_name="${1#--approver-name=}"; shift ;;
+            --assumed)        assumed_mode=1; shift ;;
+            # XACA-1348: spec 9 spells the explicit approval `--by … --name …`.
+            --by)             approver_login="${2:-}";  shift 2 ;;
+            --by=*)           approver_login="${1#--by=}"; shift ;;
+            --name)           approver_name="${2:-}";   shift 2 ;;
+            --name=*)         approver_name="${1#--name=}"; shift ;;
             *) shift ;;
         esac
     done
@@ -1373,8 +1583,57 @@ _kb_cr_container_approve() {
         return 1
     fi
 
+    # XACA-1348-005: `approve --assumed` delegates to the single stamping function
+    # (python core, re-checks due-ness under the lock). Not a way to approve early.
+    if [[ $assumed_mode -eq 1 ]]; then
+        local _as_rc
+        _kb_cr_stamp_assumed_approval "$cr_id" "$_cr_board"
+        _as_rc=$?
+        if [[ $_as_rc -eq 3 ]]; then
+            echo "kb-cr approve --assumed: CR '$cr_id' is not due for an assumed approval (needs a v2 CR in cr-submitted, no recorded approval, an assumed-schedule profile on this team, and now >= cr_approval_expected_at). Nothing stamped." >&2
+            return 1
+        fi
+        return $_as_rc
+    fi
+
     local current_state
     current_state=$(_kb_cr_container_get_state "$_cr_board" "$cr_idx")
+
+    # XACA-1348: RETROACTIVE approval of a break-glass v2 CR (spec 8.2:
+    # emergency-deployed -> complete needs the approval on record). Records the
+    # approval WITHOUT a state change — the CR stays emergency-deployed until
+    # `kb-cr complete`. Marked CRs only; legacy emergency CRs are unchanged.
+    if [[ "$current_state" == "emergency-deployed" ]] && _kb_cr_is_v2 "$_cr_board" "$cr_idx"; then
+        local _ra_existing
+        _ra_existing=$(_kb_jq_read "$_cr_board" ".crs[$cr_idx].timestamps.cr_approved_at // \"\"" -r 2>/dev/null)
+        if [[ -n "$_ra_existing" ]]; then
+            echo "kb-cr approve: CR '$cr_id' already has a recorded approval (cr_approved_at=$_ra_existing)." >&2
+            return 1
+        fi
+        if [[ -z "$approver_login" ]]; then
+            echo "kb-cr approve: a retroactive approval needs the approver's identity (--by <login>)." >&2
+            return 1
+        fi
+        local _ra_ts
+        _ra_ts=$(_kb_cr_timestamp)
+        _kb_jq_update "$_cr_board" '
+            .crs[$cidx].timestamps.cr_approved_at = $ts |
+            .crs[$cidx].approver.login = $login |
+            (if $aname != "" then .crs[$cidx].approver.name = $aname else . end) |
+            .crs[$cidx].approval_assumed = false |
+            .crs[$cidx].approval_basis = "manual" |
+            .crs[$cidx].updatedAt = $ts |
+            .lastUpdated = $ts
+        ' --argjson cidx "$cr_idx" --arg ts "$_ra_ts" --arg login "$approver_login" --arg aname "$approver_name" || return 1
+        local _ra_evt
+        _ra_evt=$(_kb_cr_activity_event "cr_retroactive_approval" \
+            "from_state=emergency-deployed" "to_state=emergency-deployed" \
+            "field=cr_approved_at" "new_value=$_ra_ts" \
+            "note=retroactive approval recorded by $approver_login; crState unchanged") || true
+        [[ -n "$_ra_evt" ]] && _kb_cr_activity_append "$_cr_board" "$cr_id" "$_ra_evt" 2>/dev/null || true
+        echo "kb-cr approve: [$cr_id] retroactive approval recorded (cr_approved_at=$_ra_ts approver=$approver_login); crState stays emergency-deployed"
+        return 0
+    fi
 
     case "$current_state" in
         cr-submitted) ;;
@@ -1409,6 +1668,19 @@ _kb_cr_container_approve() {
         fi
 
         _kb_jq_update "$_cr_board" "$approver_filter" "${approver_args[@]}" || return 1
+    fi
+
+    # XACA-1348: an explicit approval is CONFIRMED, not assumed — record that
+    # (marked CRs only; legacy records keep their exact pre-existing shape). A
+    # later assumed-schedule stamp cannot overwrite it: approval_providers.
+    # should_stamp refuses any CR that already has cr_approved_at.
+    if _kb_cr_is_v2 "$_cr_board" "$cr_idx"; then
+        _kb_jq_update "$_cr_board" '
+            .crs[$cidx].approval_assumed = false |
+            .crs[$cidx].approval_basis = "manual" |
+            .crs[$cidx].updatedAt = $now |
+            .lastUpdated = $now
+        ' --argjson cidx "$cr_idx" --arg now "$ts" || return 1
     fi
 
     local approver_msg=""
@@ -1609,6 +1881,237 @@ _kb_cr_container_waive_approval() {
     return $rc
 }
 
+# kb-cr approve-draft <CR-ID> --by <lead>   (XACA-1348, spec 8.2 / 16 G11)
+# Records the lead's approval of the DRAFT. NOT a state change: crState stays
+# cr-drafted. Stamps timestamps.cr_draft_approved_at + cr_draft_approved_by and
+# logs a cr_draft_approved event. v2 (marked) CRs only; cr-drafted only; once —
+# a second call would overwrite the original approver/moment, so it is refused.
+_kb_cr_container_approve_draft() {
+    local cr_id="${1:-}"
+    shift 2>/dev/null
+
+    if [[ -z "$cr_id" ]]; then
+        echo "Usage: kb-cr approve-draft <CR-ID> --by <lead>" >&2
+        return 1
+    fi
+
+    local by=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --by)   by="${2:-}"; shift 2 ;;
+            --by=*) by="${1#--by=}"; shift ;;
+            *) shift ;;
+        esac
+    done
+
+    local _cr_team _cr_board _cr_enabled
+    _kb_cr_board_preamble || return 1
+    [[ "$_cr_enabled" != "true" ]] && { _kb_cr_disabled_exit "$_cr_team"; return 0; }
+
+    if [[ -z "${by//[[:space:]]/}" ]]; then
+        echo "kb-cr approve-draft: --by <lead> is required (the lead's identity is the audit trail)." >&2
+        echo "Usage: kb-cr approve-draft <CR-ID> --by <lead>" >&2
+        return 1
+    fi
+
+    local cr_idx
+    cr_idx=$(_kb_cr_find_container "$_cr_board" "$cr_id")
+    if [[ "$cr_idx" == "-1" ]]; then
+        echo "kb-cr approve-draft: CR '$cr_id' not found on board '$_cr_team'." >&2
+        return 1
+    fi
+
+    if ! _kb_cr_is_v2 "$_cr_board" "$cr_idx"; then
+        echo "kb-cr approve-draft: CR '$cr_id' is a legacy CR (no v2 lifecycle marker); draft approval is part of the v2 lifecycle only." >&2
+        return 1
+    fi
+
+    local current_state
+    current_state=$(_kb_cr_container_get_state "$_cr_board" "$cr_idx")
+    if [[ "$current_state" != "cr-drafted" ]]; then
+        echo "kb-cr approve-draft: CR '$cr_id' is in state '$current_state'; draft approval applies only while cr-drafted." >&2
+        return 1
+    fi
+
+    local existing
+    existing=$(_kb_jq_read "$_cr_board" ".crs[$cr_idx].timestamps.cr_draft_approved_at // \"\"" -r 2>/dev/null)
+    if [[ -n "$existing" ]]; then
+        echo "kb-cr approve-draft: CR '$cr_id' draft was already approved (cr_draft_approved_at=$existing)." >&2
+        return 1
+    fi
+
+    local ts
+    ts=$(_kb_cr_timestamp)
+    _kb_jq_update "$_cr_board" '
+        .crs[$cidx].timestamps.cr_draft_approved_at = $ts |
+        .crs[$cidx].cr_draft_approved_by = $by |
+        .crs[$cidx].updatedAt = $ts |
+        .lastUpdated = $ts
+    ' --argjson cidx "$cr_idx" --arg ts "$ts" --arg by "$by" || return 1
+
+    local evt
+    evt=$(_kb_cr_activity_event "cr_draft_approved" \
+        "from_state=cr-drafted" "to_state=cr-drafted" \
+        "field=cr_draft_approved_at" "new_value=$ts" \
+        "note=draft approved by $by; crState unchanged") || true
+    [[ -n "$evt" ]] && _kb_cr_activity_append "$_cr_board" "$cr_id" "$evt" 2>/dev/null || true
+
+    echo "kb-cr approve-draft: [$cr_id] draft approved by $by (cr_draft_approved_at=$ts); crState stays cr-drafted"
+}
+
+# kb-cr reschedule-approval <CR-ID> --at <ISO datetime> --reason "<text>"
+# (XACA-1348, spec 9.3 / 16 G5). Re-times the EXPECTED approval moment while the
+# CR is cr-submitted. Distinct from `reschedule` (deploy_window_planned, untouched).
+# Replaces timestamps.cr_approval_expected_at and logs BOTH the old and the new
+# value plus the reason. v2 (marked) CRs only.
+_kb_cr_container_reschedule_approval() {
+    local cr_id="${1:-}"
+    shift 2>/dev/null
+
+    if [[ -z "$cr_id" ]]; then
+        echo "Usage: kb-cr reschedule-approval <CR-ID> --at <ISO datetime> --reason \"<text>\"" >&2
+        return 1
+    fi
+
+    local at="" reason=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --at)       at="${2:-}"; shift 2 ;;
+            --at=*)     at="${1#--at=}"; shift ;;
+            --reason)   reason="${2:-}"; shift 2 ;;
+            --reason=*) reason="${1#--reason=}"; shift ;;
+            *) shift ;;
+        esac
+    done
+
+    local _cr_team _cr_board _cr_enabled
+    _kb_cr_board_preamble || return 1
+    [[ "$_cr_enabled" != "true" ]] && { _kb_cr_disabled_exit "$_cr_team"; return 0; }
+
+    if [[ -z "$at" || -z "${reason//[[:space:]]/}" ]]; then
+        echo "kb-cr reschedule-approval: --at <ISO datetime> and --reason \"<text>\" are both required." >&2
+        echo "Usage: kb-cr reschedule-approval <CR-ID> --at <ISO datetime> --reason \"<text>\"" >&2
+        return 1
+    fi
+
+    # Full UTC datetime only — a bare date would silently mean midnight UTC.
+    local normalized
+    if [[ "$at" != *T* ]]; then
+        echo "kb-cr reschedule-approval: --at needs a full UTC datetime (YYYY-MM-DDTHH:MM:SSZ), got '$at'." >&2
+        return 1
+    fi
+    normalized=$(_kb_cr_normalize_iso_date "$at") || return 1
+
+    local cr_idx
+    cr_idx=$(_kb_cr_find_container "$_cr_board" "$cr_id")
+    if [[ "$cr_idx" == "-1" ]]; then
+        echo "kb-cr reschedule-approval: CR '$cr_id' not found on board '$_cr_team'." >&2
+        return 1
+    fi
+
+    if ! _kb_cr_is_v2 "$_cr_board" "$cr_idx"; then
+        echo "kb-cr reschedule-approval: CR '$cr_id' is a legacy CR (no v2 lifecycle marker); it has no expected-approval time to reschedule." >&2
+        return 1
+    fi
+
+    local current_state
+    current_state=$(_kb_cr_container_get_state "$_cr_board" "$cr_idx")
+    if [[ "$current_state" != "cr-submitted" ]]; then
+        echo "kb-cr reschedule-approval: CR '$cr_id' is in state '$current_state'; the expected approval time can be moved only while cr-submitted." >&2
+        return 1
+    fi
+
+    local old ts suppressed
+    old=$(_kb_jq_read "$_cr_board" ".crs[$cr_idx].timestamps.cr_approval_expected_at // \"\"" -r 2>/dev/null)
+    suppressed=$(_kb_jq_read "$_cr_board" ".crs[$cr_idx].approval_assumption_suppressed // false" -r 2>/dev/null)
+    ts=$(_kb_cr_timestamp)
+    # A hold suppressed the assumed approval (spec 9.3). Rescheduling lifts the
+    # suppression, but only to a moment that has not passed: a past time would
+    # stamp an approval backdated across the hold.
+    if [[ "$suppressed" == "true" && "$normalized" < "$ts" ]]; then
+        echo "kb-cr reschedule-approval: CR '$cr_id' was held (its assumed approval is suppressed); the new expected time must be in the future (now is $ts), otherwise the approval would be backdated across the hold. Approve explicitly with 'kb-cr approve --by <lead>' instead." >&2
+        return 1
+    fi
+    _kb_jq_update "$_cr_board" '
+        .crs[$cidx].timestamps.cr_approval_expected_at = $new |
+        del(.crs[$cidx].approval_assumption_suppressed, .crs[$cidx].approval_assumption_suppressed_at) |
+        .crs[$cidx].updatedAt = $ts |
+        .lastUpdated = $ts
+    ' --argjson cidx "$cr_idx" --arg new "$normalized" --arg ts "$ts" || return 1
+
+    local evt
+    evt=$(_kb_cr_activity_event "cr_approval_rescheduled" \
+        "field=cr_approval_expected_at" \
+        "old_value=${old:-<unset>}" "new_value=$normalized" \
+        "note=$reason") || true
+    [[ -n "$evt" ]] && _kb_cr_activity_append "$_cr_board" "$cr_id" "$evt" 2>/dev/null || true
+
+    echo "kb-cr reschedule-approval: [$cr_id] cr_approval_expected_at ${old:-<unset>} -> $normalized (reason: $reason)"
+}
+
+# kb-cr complete <CR-ID>   (XACA-1348) — deployed-prod -> cr-completed, or
+# emergency-deployed -> cr-completed once a retroactive approval is recorded.
+# v2 (marked) CRs only: the per-item `kb-cr complete <item-id>` path is
+# unchanged. Stamps cr_completed_at; the evidence gate (_kb_cr_missing_evidence)
+# is enforced here rather than assumed.
+_kb_cr_container_complete() {
+    local cr_id="${1:-}"
+    if [[ -z "$cr_id" ]]; then
+        echo "Usage: kb-cr complete <CR-ID>" >&2
+        return 1
+    fi
+
+    local _cr_team _cr_board _cr_enabled
+    _kb_cr_board_preamble || return 1
+    [[ "$_cr_enabled" != "true" ]] && { _kb_cr_disabled_exit "$_cr_team"; return 0; }
+
+    local cr_idx
+    cr_idx=$(_kb_cr_find_container "$_cr_board" "$cr_id")
+    if [[ "$cr_idx" == "-1" ]]; then
+        echo "kb-cr complete: CR '$cr_id' not found on board '$_cr_team'." >&2
+        return 1
+    fi
+
+    if ! _kb_cr_is_v2 "$_cr_board" "$cr_idx"; then
+        echo "kb-cr complete: CR '$cr_id' is a legacy CR (no v2 lifecycle marker); complete it by item-id (kb-cr complete <item-id>)." >&2
+        return 1
+    fi
+
+    local current_state
+    current_state=$(_kb_cr_container_get_state "$_cr_board" "$cr_idx")
+    case "$current_state" in
+        deployed-prod|emergency-deployed) ;;
+        cr-completed)
+            echo "kb-cr complete: CR '$cr_id' is already completed." >&2
+            return 1
+            ;;
+        *)
+            echo "kb-cr complete: CR '$cr_id' is in state '$current_state'; expected one of: deployed-prod, emergency-deployed" >&2
+            return 1
+            ;;
+    esac
+
+    local missing _me_rc
+    missing=$(_kb_cr_missing_evidence "$_cr_board" "$cr_idx" "cr-completed")
+    _me_rc=$?
+    if [[ $_me_rc -ne 0 ]]; then
+        echo "kb-cr complete: cannot evaluate the prerequisite evidence for cr-completed (state maps out of sync)." >&2
+        return 1
+    fi
+    if [[ -n "$missing" ]]; then
+        echo "kb-cr complete: CR '$cr_id' cannot be completed — missing evidence: $missing" >&2
+        if [[ "$current_state" == "emergency-deployed" && "$missing" == *cr_approved_at* ]]; then
+            echo "  An emergency-deployed CR needs its retroactive approval first: kb-cr approve $cr_id --by <approver>" >&2
+        fi
+        return 1
+    fi
+
+    local ts
+    ts=$(_kb_cr_timestamp)
+    _kb_cr_lifecycle_advance "$_cr_board" "$cr_idx" "$cr_id" "cr-completed" "cr_completed_at" "$ts" || return 1
+    echo "kb-cr complete: [$cr_id] $current_state -> cr-completed (cr_completed_at=$ts)"
+}
+
 # kb-cr reject <CR-ID> [--reason "<text>"]
 # Predecessor states: cr-submitted, cr-held
 _kb_cr_container_reject() {
@@ -1734,6 +2237,26 @@ _kb_cr_container_hold() {
 
     _kb_cr_lifecycle_advance "$_cr_board" "$cr_idx" "$cr_id" "cr-held" "cr_held_at" "$ts" || return 1
 
+    # XACA-1348: a v2 CR remembers the state it was held from so `kb-cr resume`
+    # returns to EXACTLY that state. cr_approved_at is never touched by hold.
+    #
+    # Spec 9.3: a hold on a CR that has no approval yet SUPPRESSES the assumed
+    # approval, durably. That includes a hold placed AFTER cr_approval_expected_at
+    # passed but before the sweep ran: the assumption was never stamped and the
+    # lead stopped it, so it is the same rule. Resume must not resurrect it and no
+    # approval may be backdated across the hold; only `reschedule-approval` (a new
+    # expected time) or an explicit `approve` moves the CR on. The flag is read by
+    # approval_providers.should_stamp (the single implementation of the rules).
+    if _kb_cr_is_v2 "$_cr_board" "$cr_idx"; then
+        _kb_jq_update "$_cr_board" '
+            .crs[$cidx].held_from = $hf |
+            (if $hf == "cr-submitted" and ((.crs[$cidx].timestamps.cr_approved_at // "") == "")
+             then .crs[$cidx].approval_assumption_suppressed = true
+                  | .crs[$cidx].approval_assumption_suppressed_at = $ts
+             else . end)
+        ' --argjson cidx "$cr_idx" --arg hf "$current_state" --arg ts "$ts" || return 1
+    fi
+
     # Append reason to pushback_notes and increment pushback_count if reason provided
     if [[ -n "$reason" ]]; then
         local -a hold_args=(--argjson cidx "$cr_idx" --arg reason "$reason" --arg ts "$ts")
@@ -1752,6 +2275,191 @@ _kb_cr_container_hold() {
     local reason_msg=""
     [[ -n "$reason" ]] && reason_msg=" reason=\"$reason\""
     echo "kb-cr hold: [$cr_id] $current_state -> cr-held (cr_held_at=$ts${reason_msg})"
+}
+
+# kb-cr resume <CR-ID> [--note "<text>"]   (XACA-1348-001)
+# cr-held -> EXACTLY the state recorded in held_from (v2 CRs only). A STATE-ONLY
+# write: it does not go through _kb_cr_lifecycle_advance, because that rewrites
+# the entry timestamp of the target state and resume must never touch
+# cr_submitted_at or cr_approved_at (a CR held from cr-approved comes back
+# cr-approved with its ORIGINAL approval time — hold/resume cannot launder it).
+# held_from is cleared on resume (and on close); its history lives in the
+# cr_state_changed events (hold: from_state=<held_from>, resume: to_state=<held_from>).
+_kb_cr_container_resume() {
+    local cr_id="${1:-}"
+    shift 2>/dev/null
+    if [[ -z "$cr_id" ]]; then
+        echo "Usage: kb-cr resume <CR-ID> [--note \"<text>\"]" >&2
+        return 1
+    fi
+    local note=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --note)   note="${2:-}"; shift 2 ;;
+            --note=*) note="${1#--note=}"; shift ;;
+            *) shift ;;
+        esac
+    done
+
+    local _cr_team _cr_board _cr_enabled
+    _kb_cr_board_preamble || return 1
+    [[ "$_cr_enabled" != "true" ]] && { _kb_cr_disabled_exit "$_cr_team"; return 0; }
+
+    local cr_idx
+    cr_idx=$(_kb_cr_find_container "$_cr_board" "$cr_id")
+    if [[ "$cr_idx" == "-1" ]]; then
+        echo "kb-cr resume: CR '$cr_id' not found on board '$_cr_team'." >&2
+        return 1
+    fi
+    if ! _kb_cr_is_v2 "$_cr_board" "$cr_idx"; then
+        echo "kb-cr resume: CR '$cr_id' is a legacy CR (no v2 lifecycle marker); it records no held_from to return to." >&2
+        return 1
+    fi
+
+    local current_state held_from
+    current_state=$(_kb_cr_container_get_state "$_cr_board" "$cr_idx")
+    if [[ "$current_state" != "cr-held" ]]; then
+        echo "kb-cr resume: CR '$cr_id' is in state '$current_state'; only a cr-held CR can be resumed." >&2
+        return 1
+    fi
+    held_from=$(_kb_jq_read "$_cr_board" ".crs[$cr_idx].held_from // \"\"" -r 2>/dev/null)
+    case "$held_from" in
+        cr-submitted|cr-approved) ;;
+        *)
+            echo "kb-cr resume: CR '$cr_id' records no usable held_from ('${held_from}'); refusing to guess a state (fail-closed). Close it or use 'kb-cr transition ... --force' deliberately." >&2
+            return 1 ;;
+    esac
+
+    local ts
+    ts=$(_kb_cr_timestamp)
+    _kb_jq_update "$_cr_board" '
+        .crs[$cidx].crState = $st |
+        del(.crs[$cidx].held_from) |
+        .crs[$cidx].updatedAt = $ts |
+        .lastUpdated = $ts
+    ' --argjson cidx "$cr_idx" --arg st "$held_from" --arg ts "$ts" || return 1
+
+    local evt
+    evt=$(_kb_cr_activity_event "cr_state_changed" \
+        "from_state=cr-held" "to_state=$held_from" \
+        "note=resume${note:+: $note}") || true
+    [[ -n "$evt" ]] && _kb_cr_activity_append "$_cr_board" "$cr_id" "$evt" 2>/dev/null || true
+    echo "kb-cr resume: [$cr_id] cr-held -> $held_from"
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+# ASSUMED-APPROVAL STAMPING (XACA-1348-005, spec 9)
+# ═════════════════════════════════════════════════════════════════════════════
+# ONE implementation of the rules: kanban-hooks/approval_providers.py
+# (stamp_assumed_approvals / set_expected_approval). The functions below only
+# (a) take the board lock via _kb_jq_atomic_write, (b) run the python core
+# under it, (c) append the activity events the core returns. No rule lives here.
+# Profile: board teamConfig.crSupport.approval (absent = manual = never assume).
+# Clock: _kb_cr_timestamp (KB_CR_TEST_NOW in tests).
+
+# Echo the absolute path of kanban-hooks/approval_providers.py, resolved like
+# release_stage_cli.py (sibling of the kanban-hooks dir located from
+# kanban-helpers.sh itself, so a worktree/consumer copy uses its own).
+_kb_cr_approval_py() {
+    local _bs _py
+    _bs=$(_kb_board_settings_script) || return 1
+    _py="$(dirname "$_bs")/approval_providers.py"
+    [[ -f "$_py" ]] || { echo "kb-cr: ERROR: missing $_py" >&2; return 1; }
+    printf '%s\n' "$_py"
+}
+
+# Same post-write hooks _kb_jq_update fires after a successful board write.
+_kb_cr_after_board_write() {
+    ( (type _kb_register_team &>/dev/null && _kb_register_team) & ) 2>/dev/null
+    ( (type _kb_push_board &>/dev/null && _kb_push_board) & ) 2>/dev/null
+}
+
+# _kb_cr_set_expected_approval <board_file> <cr_id>
+# Compute cr_approval_expected_at for a v2 CR from the team profile (locked write).
+_kb_cr_set_expected_approval() {
+    local board="$1" cr_id="$2" py
+    py=$(_kb_cr_approval_py) || return 1
+    _kb_jq_atomic_write "${board}.lock" "${board}.tmp" "$board" \
+        "could not compute the expected approval time for $cr_id" \
+        python3 "$py" set-expected --board "$board" --cr-id "$cr_id" || return 1
+    _kb_cr_after_board_write
+}
+
+# _kb_cr_stamp_assumed_approval <CR-ID> [<board_file>]
+# THE single stamping function (promote-time and sweep call sites both land here).
+# The core re-checks everything (v2 marker, cr-submitted, no cr_approved_at,
+# now >= expected) against the board as loaded UNDER the lock; a cheap lock-free
+# dry-run probe first avoids rewriting the board on every sweep.
+# Returns 0 = stamped, 3 = nothing to stamp (not due / not eligible), 1 = error
+# (malformed profile, unreadable board — nothing is written).
+_kb_cr_stamp_assumed_approval() {
+    local cr_id="${1:-}" board="${2:-}"
+    if [[ -z "$cr_id" ]]; then
+        echo "Usage: _kb_cr_stamp_assumed_approval <CR-ID> [<board_file>]" >&2
+        return 1
+    fi
+    if [[ -z "$board" ]]; then
+        local _cr_team _cr_board _cr_enabled
+        _kb_cr_board_preamble || return 1
+        [[ "$_cr_enabled" != "true" ]] && return 3
+        board="$_cr_board"
+    fi
+    local py now probe evfile n
+    py=$(_kb_cr_approval_py) || return 1
+    now=$(_kb_cr_timestamp)
+
+    probe=$(python3 "$py" stamp-board --board "$board" --now "$now" --cr-id "$cr_id" --dry-run) || {
+        echo "kb-cr: assumed-approval check FAILED for '$cr_id' — nothing was stamped." >&2
+        return 1
+    }
+    [[ "$probe" == "[]" ]] && return 3
+
+    evfile=$(mktemp "${TMPDIR:-/tmp}/kb-cr-stamp.XXXXXX") || return 1
+    if ! _kb_jq_atomic_write "${board}.lock" "${board}.tmp" "$board" \
+            "assumed-approval stamp failed for $cr_id (nothing written)" \
+            python3 "$py" stamp-board --board "$board" --now "$now" --cr-id "$cr_id" \
+            --actor "${KB_CR_ACTOR:-kb-cr}" --events-out "$evfile"; then
+        rm -f "$evfile"
+        return 1
+    fi
+    _kb_cr_after_board_write
+
+    n=$(jq 'length' "$evfile" 2>/dev/null || echo 0)
+    if [[ "$n" == "0" ]]; then          # lost a race: the CR changed between probe and lock
+        rm -f "$evfile"
+        return 3
+    fi
+    local ev
+    jq -c '.[] | .event' "$evfile" 2>/dev/null | while IFS= read -r ev; do
+        _kb_cr_activity_append "$board" "$cr_id" "$ev" 2>/dev/null || true
+    done
+    rm -f "$evfile"
+    local idx at
+    idx=$(_kb_cr_find_container "$board" "$cr_id")
+    at=$(_kb_jq_read "$board" ".crs[$idx].timestamps.cr_approved_at // \"\"" -r 2>/dev/null)
+    echo "kb-cr approve --assumed: [$cr_id] cr-submitted -> cr-approved (cr_approved_at=$at, approval_basis=assumed-schedule)"
+    return 0
+}
+
+# kb-cr sweep-assumed-approvals
+# Walk the team board's v2 cr-submitted CRs and call the stamping function for
+# each. Idempotent (an already-stamped CR is cr-approved and never a candidate).
+# Silent when the team has CRs disabled / nothing is due. Exit 1 if any CR errored.
+_kb_cr_container_sweep_assumed_approvals() {
+    local _cr_team _cr_board _cr_enabled
+    _kb_cr_board_preamble || return 1
+    [[ "$_cr_enabled" != "true" ]] && return 0
+    local ids id rc failed=0
+    ids=$(_kb_jq_read "$_cr_board" \
+        '[.crs[]? | select(.cr_lifecycle == "v2" and .crState == "cr-submitted") | .id] | .[]' -r 2>/dev/null)
+    [[ -z "$ids" ]] && return 0
+    while IFS= read -r id; do
+        [[ -z "$id" ]] && continue
+        _kb_cr_stamp_assumed_approval "$id" "$_cr_board"
+        rc=$?
+        [[ $rc -eq 1 ]] && failed=1
+    done <<< "$ids"
+    return $failed
 }
 
 # kb-cr close <CR-ID> [--reason "<text>"]
@@ -1795,10 +2503,21 @@ _kb_cr_container_close() {
         return 1
     fi
 
+    # XACA-1348: closing a rejected v2 CR records reason "rejected" unless the
+    # caller supplied one (e.g. "superseded by <new CR-ID>").
+    if [[ "$current_state" == "cr-rejected" && -z "$reason" ]] && _kb_cr_is_v2 "$_cr_board" "$cr_idx"; then
+        reason="rejected"
+    fi
+
     local ts
     ts=$(_kb_cr_timestamp)
 
     _kb_cr_lifecycle_advance "$_cr_board" "$cr_idx" "$cr_id" "cr-closed" "cr_closed_at" "$ts" || return 1
+    # XACA-1348: held_from is meaningful only while held; its history is the
+    # cr_state_changed event (from_state) in the activity log.
+    if [[ "$current_state" == "cr-held" ]]; then
+        _kb_jq_update "$_cr_board" 'del(.crs[$cidx].held_from)' --argjson cidx "$cr_idx" || return 1
+    fi
 
     # Write closed_reason if provided (not pushback_notes — not a pushback).
     # Unconditional assignment is safe because the idempotent guard above
@@ -1836,6 +2555,9 @@ _kb_cr_container_deploy_dev() {
         echo "kb-cr deploy-dev: CR '$cr_id' not found on board '$_cr_team'." >&2
         return 1
     fi
+
+    # XACA-1348: not part of the v2 lifecycle (legacy CRs only).
+    _kb_cr_v2_refuse_legacy_verb "$_cr_board" "$cr_idx" "$cr_id" "deploy-dev" || return 1
 
     local current_state
     current_state=$(_kb_cr_container_get_state "$_cr_board" "$cr_idx")
@@ -1881,6 +2603,9 @@ _kb_cr_container_deploy_prod() {
     local current_state
     current_state=$(_kb_cr_container_get_state "$_cr_board" "$cr_idx")
 
+    # XACA-1348: v2 CRs reach deployed-prod only from cr-approved.
+    _kb_cr_v2_guard "$_cr_board" "$cr_idx" "$cr_id" "deploy-prod" "$current_state" "deployed-prod" || return 1
+
     local warn_skip_dev=0
     case "$current_state" in
         deployed-dev) ;;
@@ -1897,7 +2622,8 @@ _kb_cr_container_deploy_prod() {
             ;;
     esac
 
-    if [[ $warn_skip_dev -eq 1 ]]; then
+    # v2 CRs have no dev stage to skip, so no skip warning.
+    if [[ $warn_skip_dev -eq 1 ]] && ! _kb_cr_is_v2 "$_cr_board" "$cr_idx"; then
         echo "kb-cr deploy-prod: WARNING: CR '$cr_id' is skipping deployed-dev (current state: $current_state). Proceeding." >&2
     fi
 
@@ -1928,6 +2654,9 @@ _kb_cr_container_start_dev() {
         echo "kb-cr start-dev: CR '$cr_id' not found on board '$_cr_team'." >&2
         return 1
     fi
+
+    # XACA-1348: not part of the v2 lifecycle (legacy CRs only).
+    _kb_cr_v2_refuse_legacy_verb "$_cr_board" "$cr_idx" "$cr_id" "start-dev" || return 1
 
     local current_state
     current_state=$(_kb_cr_container_get_state "$_cr_board" "$cr_idx")
@@ -1973,6 +2702,9 @@ _kb_cr_container_start_test() {
         echo "kb-cr start-test: CR '$cr_id' not found on board '$_cr_team'." >&2
         return 1
     fi
+
+    # XACA-1348: not part of the v2 lifecycle (legacy CRs only).
+    _kb_cr_v2_refuse_legacy_verb "$_cr_board" "$cr_idx" "$cr_id" "start-test" || return 1
 
     local current_state
     current_state=$(_kb_cr_container_get_state "$_cr_board" "$cr_idx")
@@ -2048,6 +2780,12 @@ _kb_cr_container_emergency_deploy() {
     current_state=$(_kb_cr_container_get_state "$_cr_board" "$cr_idx")
     local ts
     ts=$(_kb_cr_timestamp)
+
+    # XACA-1348-007: break-glass skips CAB review, not the lifecycle's end: a v2
+    # CR that was rejected or closed is never reused (spec 16 G8).
+    if [[ "$current_state" == "cr-rejected" || "$current_state" == "cr-closed" ]]; then
+        _kb_cr_v2_guard "$_cr_board" "$cr_idx" "$cr_id" "emergency-deploy" "$current_state" "emergency-deployed" || return 1
+    fi
 
     # Break-glass: advance state and timestamp (no predecessor validation)
     _kb_cr_lifecycle_advance "$_cr_board" "$cr_idx" "$cr_id" "emergency-deployed" "cr_emergency_deployed_at" "$ts" || return 1
@@ -2138,6 +2876,24 @@ _kb_cr_container_revert() {
         return 1
     fi
 
+    # XACA-1348: revert/undo would move a rejected v2 CR back into the flow.
+    if [[ "$current_state" == "cr-rejected" ]] && _kb_cr_is_v2 "$_cr_board" "$cr_idx"; then
+        echo "kb-cr $operation: CR '$cr_id' was rejected; a rejected v2 CR is never reused — close it (reason \"rejected\") and create a new CR." >&2
+        return 1
+    fi
+
+    # XACA-1348-007: a closed v2 CR is terminal (the unranked-state check below
+    # would refuse it too, but say why).
+    if [[ "$current_state" == "cr-closed" ]] && _kb_cr_is_v2 "$_cr_board" "$cr_idx"; then
+        echo "kb-cr $operation: CR '$cr_id' is closed; closed is terminal for a v2 CR. Create a new CR instead." >&2
+        return 1
+    fi
+
+    # XACA-1348: a held v2 CR leaves cr-held only through resume (or close).
+    if [[ "$current_state" == "cr-held" ]]; then
+        _kb_cr_v2_guard "$_cr_board" "$cr_idx" "$cr_id" "$operation" "cr-held" "${target_state:-cr-drafted}" || return 1
+    fi
+
     local current_rank
     current_rank=$(_kb_cr_state_rank "$current_state")
     if (( current_rank < 0 )); then
@@ -2164,7 +2920,7 @@ _kb_cr_container_revert() {
     if (( target_rank < 0 )); then
         echo "kb-cr $operation: target state '$target_state' is not a known crState." >&2
         echo "  Valid: cr-drafted, cr-published, cr-submitted, cr-rejected, cr-held," >&2
-        echo "         cr-approved, implementing, deployed-dev, deployed-prod, emergency-deployed" >&2
+        echo "         cr-approved, implementing, deployed-dev, deployed-prod, emergency-deployed, cr-completed" >&2
         return 1
     fi
 
@@ -2176,6 +2932,15 @@ _kb_cr_container_revert() {
     if (( target_rank >= current_rank )); then
         echo "kb-cr $operation: target state '$target_state' (rank $target_rank) is not strictly earlier than current '$current_state' (rank $current_rank)." >&2
         echo "  $operation only walks backwards. Use 'kb-cr transition' or a forward verb to advance." >&2
+        return 1
+    fi
+
+    # XACA-1348-007: rejection goes through the `reject` verb, which keeps
+    # cr_approved_at. A revert/undo TARGETING cr-rejected strips the approval of
+    # a CR that was approved before it was held/rejected, making it look
+    # never-approved (Requirement 4).
+    if [[ "$target_state" == "cr-rejected" ]] && _kb_cr_is_v2 "$_cr_board" "$cr_idx"; then
+        echo "kb-cr $operation: refusing to $operation CR '$cr_id' to 'cr-rejected' — rejection goes through 'kb-cr reject', which preserves any recorded approval." >&2
         return 1
     fi
 
@@ -2206,6 +2971,10 @@ _kb_cr_container_revert() {
             echo "  If approval was waived, not recorded, revert to cr-submitted or cr-held instead" >&2
             echo "  (or to implementing, if that state's own prerequisites — including the waiver — are met)." >&2
             return 1
+        fi
+        # XACA-1348-007: a v2 CR's cr_approved_at must carry an approver.
+        if _kb_cr_is_v2 "$_cr_board" "$cr_idx"; then
+            _kb_cr_v2_guard "$_cr_board" "$cr_idx" "$cr_id" "$operation" "$current_state" "cr-approved" || return 1
         fi
     fi
 
@@ -2756,7 +3525,37 @@ kb-cr() {
         emergency)   _kb_cr_emergency "$@" ;;
         # complete has no container variant — routes to v1 only; propagation is
         # a no-op until _kb_cr_container_complete is implemented (XACA-0327-003).
-        complete)    _kb_cr_complete "$@" ;;
+        # XACA-1348: CR-* ids route to the container variant (v2 lifecycle).
+        complete)
+            case "${1:-}" in
+                CR-*) _kb_cr_container_complete "$@" ;;
+                *)    _kb_cr_complete "$@" ;;
+            esac ;;
+        # approve-draft / reschedule-approval (XACA-1348) are CONTAINER-ONLY:
+        # they are v2-lifecycle facts on the .crs[] record.
+        approve-draft)
+            case "${1:-}" in
+                CR-*) _kb_cr_container_approve_draft "$@" ;;
+                *)
+                    echo "kb-cr approve-draft: requires a CR-ID (e.g. CR-TEAM-YYYYMMDD-0001), not an item-id." >&2
+                    return 1 ;;
+            esac ;;
+        resume)
+            case "${1:-}" in
+                CR-*) _kb_cr_container_resume "$@" ;;
+                *)
+                    echo "kb-cr resume: requires a CR-ID (e.g. CR-TEAM-YYYYMMDD-0001), not an item-id." >&2
+                    return 1
+                    ;;
+            esac ;;
+        sweep-assumed-approvals) _kb_cr_container_sweep_assumed_approvals "$@" ;;
+        reschedule-approval)
+            case "${1:-}" in
+                CR-*) _kb_cr_container_reschedule_approval "$@" ;;
+                *)
+                    echo "kb-cr reschedule-approval: requires a CR-ID (e.g. CR-TEAM-YYYYMMDD-0001), not an item-id." >&2
+                    return 1 ;;
+            esac ;;
         # ── Revert / Undo / Revert-History (XACA-0329) ────────────────────────
         # Container-only — no v1 fallback. CR-* prefix → direct container call;
         # item-id prefix → routed via crAssignment.crId.
@@ -3062,6 +3861,7 @@ _kb_cr_container_create() {
             "title":        $title,
             "type":         $crtype,
             "crState":      "cr-drafted",
+            "cr_lifecycle": "v2",
             "itemIds":      [],
             "pushback_count": 0,
             "createdAt":    $ts,
@@ -3117,6 +3917,7 @@ _kb_cr_container_create() {
 
     echo "Created CR [$cr_id]: $title"
     echo "  Type:  $cr_type"
+    echo "  Lifecycle: v2"
     echo "  State: cr-drafted"
     [[ -n "$platform" ]] && echo "  Platform: $platform"
     [[ -n "$summary" ]] && echo "  Summary: ${summary:0:80}"
@@ -3873,7 +4674,7 @@ _kb_cr_container_list() {
                 echo ""
                 echo "Valid states: cr-drafted, cr-published, cr-submitted, cr-approved,"
                 echo "              cr-rejected, cr-held, implementing, deployed-dev,"
-                echo "              deployed-prod, emergency-deployed"
+                echo "              deployed-prod, emergency-deployed, cr-completed, cr-closed"
                 return 0
                 ;;
             *) shift ;;
@@ -3950,19 +4751,19 @@ _kb_cr_container_transition() {
         echo "Usage: kb-cr transition <CR-ID> <new-state> [--force]" >&2
         echo "Valid states: cr-drafted, cr-published, cr-submitted, cr-approved," >&2
         echo "              cr-rejected, cr-held, implementing, deployed-dev," >&2
-        echo "              deployed-prod, emergency-deployed, cr-closed" >&2
+        echo "              deployed-prod, emergency-deployed, cr-completed, cr-closed" >&2
         return 1
     fi
 
     # Validate the new state against the schema's crStates list
     case "$new_state" in
         cr-drafted|cr-published|cr-submitted|cr-approved|cr-rejected|cr-held|\
-        implementing|deployed-dev|deployed-prod|emergency-deployed|cr-closed) ;;
+        implementing|deployed-dev|deployed-prod|emergency-deployed|cr-completed|cr-closed) ;;
         *)
             echo "kb-cr transition: invalid state '$new_state'." >&2
             echo "Valid states: cr-drafted, cr-published, cr-submitted, cr-approved," >&2
             echo "              cr-rejected, cr-held, implementing, deployed-dev," >&2
-            echo "              deployed-prod, emergency-deployed, cr-closed" >&2
+            echo "              deployed-prod, emergency-deployed, cr-completed, cr-closed" >&2
             return 1
             ;;
     esac
@@ -4520,6 +5321,11 @@ _kb_cr_set_confluence_url() {
         echo "kb-cr _set_confluence_url: CR container '$cr_id_assigned' not found." >&2
         return 1
     fi
+
+    # XACA-1348: marked CR + requireLeadDraftApproval => no publish before
+    # approve-draft. Checked BEFORE the URL is written so a refusal leaves the
+    # record untouched.
+    _kb_cr_v2_publish_guard "$_cr_board" "$cr_container_idx" "$cr_id_assigned" "publish" || return 1
 
     local ts
     ts=$(_kb_cr_timestamp)
@@ -6167,7 +6973,7 @@ _kb_cr_help() {
     echo "              Valid states: cr-drafted, cr-published, cr-submitted,"
     echo "              cr-approved, cr-rejected, cr-held, implementing,"
     echo "              deployed-dev, deployed-prod, emergency-deployed,"
-    echo "              cr-closed"
+    echo "              cr-completed, cr-closed"
     echo "              REFUSED (XACA-0924) when stamping that timestamp would"
     echo "              invent evidence: the prerequisite stamps for the target"
     echo "              state must already be on the record. e.g. implementing"
@@ -6180,6 +6986,21 @@ _kb_cr_help() {
     echo "              <date> accepts: YYYY-MM-DD | YYYY-MM-DDTHH:MM:SSZ | YYYY-MM-DDTHH:MMZ"
     echo "              Writes deploy_window_planned on the .crs[] record."
     echo "              Emits a cr_deploy_window_set activity-log event."
+    echo "  approve-draft <CR-ID> --by <lead>  [XACA-1348]"
+    echo "              Record the lead's approval of the DRAFT (v2 CRs, cr-drafted only)."
+    echo "              Stamps cr_draft_approved_at/_by. NOT a state change."
+    echo "  reschedule-approval <CR-ID> --at <ISO datetime> --reason \"<text>\"  [XACA-1348]"
+    echo "              Move the EXPECTED approval time while cr-submitted (v2 CRs)."
+    echo "              Replaces cr_approval_expected_at; logs old + new + reason."
+    echo "              Distinct from 'reschedule' (deploy_window_planned)."
+    echo "  complete <CR-ID>  [XACA-1348]"
+    echo "              v2 CRs: deployed-prod -> cr-completed (or emergency-deployed,"
+    echo "              after the retroactive 'kb-cr approve <CR-ID> --by <who>')."
+    echo "              (complete <item-id> is the unchanged legacy per-item stamp.)"
+    echo "  v2 lifecycle: new CRs carry cr_lifecycle=v2 (stamped by create). For them"
+    echo "              start-dev/start-test/deploy-dev are refused, deploy-prod needs"
+    echo "              cr-approved, and a rejected CR can only be closed. CRs without"
+    echo "              the marker behave exactly as before."
     echo "  assign-release <CR-ID> <REL-ID>  [XACA-0657]"
     echo "              Link a CR to a release. Writes all three sites atomically:"
     echo "              CR.releaseAssignment (snapshot of release name),"
@@ -6228,6 +7049,16 @@ _kb_cr_help() {
     echo "              cr-submitted|cr-approved → cr-held"
     echo "              Writes timestamps.cr_held_at; appends reason to pushback_notes;"
     echo "              increments pushback_count."
+    echo "  resume  <CR-ID> [--note \"<text>\"]  [XACA-1348]"
+    echo "              cr-held → the state the CR was held from (v2 CRs; hold records"
+    echo "              held_from). cr_approved_at is never touched. A v2 CR leaves cr-held"
+    echo "              only via resume or close."
+    echo "  approve <CR-ID> --assumed  [XACA-1348]"
+    echo "              Stamp the assumed (schedule) approval IF it is due: cr_approved_at ="
+    echo "              cr_approval_expected_at (never the wall clock), approval_assumed=true."
+    echo "  sweep-assumed-approvals  [XACA-1348]"
+    echo "              Stamp every due assumed approval on this team's board (idempotent;"
+    echo "              run by the com.devteam.cr-approval-sweep LaunchAgent template)."
     echo "  start-dev <CR-ID>"
     echo "              cr-approved → implementing"
     echo "              Writes timestamps.cr_started_dev_at."
@@ -6240,7 +7071,8 @@ _kb_cr_help() {
     echo "              Writes timestamps.cr_deployed_dev_at."
     echo "  deploy-prod <CR-ID>"
     echo "              deployed-dev → deployed-prod (warns if skipping deployed-dev)"
-    echo "              Writes timestamps.cr_deployed_prod_at."
+    echo "              Writes timestamps.cr_deployed_prod_at. v2 CRs: only from cr-approved and"
+    echo "              only once now >= max(cr_approved_at, deploy_window_planned)."
     echo "  emergency-deploy <CR-ID> --justification \"<reason>\""
     echo "              Any state → emergency-deployed  [BREAK-GLASS — no state check]"
     echo "              --justification is REQUIRED (mandatory audit trail)."
