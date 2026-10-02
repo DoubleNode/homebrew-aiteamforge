@@ -136,19 +136,25 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
 # coupling. Import-safe: it never imports server -- it only clears the cache
 # when some test already has (`sys.modules`). Identical copy in the sibling
 # conftest (tests/ <-> lcars-ui/tests/), independent like the checks above.
-import pytest as _pytest_xaca1382
+# XACA-1386: the import is guarded because plain python3 (no pytest)
+# also loads this file -- tests/test-git-env-hermetic-runners.sh imports
+# it to prove the git-env scrub runs, on runners without pytest installed.
+try:
+    import pytest as _pytest_xaca1382
+except ImportError:  # pragma: no cover
+    _pytest_xaca1382 = None
 
+if _pytest_xaca1382 is not None:
+    @_pytest_xaca1382.fixture(autouse=True)
+    def _xaca1382_clear_board_cache():
+        import sys
 
-@_pytest_xaca1382.fixture(autouse=True)
-def _xaca1382_clear_board_cache():
-    import sys
+        def _clear():
+            mod = sys.modules.get("server")
+            clear = getattr(mod, "_board_cache_clear", None)
+            if callable(clear):
+                clear()
 
-    def _clear():
-        mod = sys.modules.get("server")
-        clear = getattr(mod, "_board_cache_clear", None)
-        if callable(clear):
-            clear()
-
-    _clear()
-    yield
-    _clear()
+        _clear()
+        yield
+        _clear()

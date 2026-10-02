@@ -35,6 +35,7 @@ import contextlib
 import copy
 import hashlib
 import hmac
+import io
 import ipaddress
 import json
 import mimetypes
@@ -3461,6 +3462,21 @@ def _board_stat_sig(path):
     return (st.st_mtime_ns, st.st_size, st.st_ino)
 
 
+# XACA-1386 ("racy" entries, the git index rule): Linux stamps file times from
+# the COARSE kernel clock, so two in-place, same-size writes inside one clock
+# tick get the IDENTICAL st_mtime_ns. Measured on the M1Mini Ubuntu runner:
+# 269 of 299 honest same-size rewrites were served stale by a stat-only key.
+# An entry stored while its file's mtime is within this window of "now" is
+# racy: it also carries a content digest, and a later signature match is
+# trusted only if the bytes still hash the same (a byte read, never a parse).
+# Entries stored outside the window behave exactly as before.
+_BOARD_CACHE_RACY_NS = 2_000_000_000
+
+
+def _board_digest(raw):
+    return hashlib.blake2b(raw, digest_size=16).digest()
+
+
 def _cached_board(path):
     """Return the parsed board JSON at `path`, re-parsing only if it changed.
 
@@ -3502,19 +3518,34 @@ def _cached_board(path):
         raise
     with _BOARD_CACHE_LOCK:
         entry = _BOARD_CACHE.get(key)
-        if entry is not None and entry[0] == sig:
-            _BOARD_CACHE_STATS["hits"] += 1
+    if entry is not None and entry[0] == sig:
+        digest = entry[2] if len(entry) > 2 else None
+        if digest is None:
+            with _BOARD_CACHE_LOCK:
+                _BOARD_CACHE_STATS["hits"] += 1
             return entry[1]
+        # Racy entry (XACA-1386): the signature alone cannot prove the bytes
+        # are unchanged. Verify the content without re-parsing.
+        with open(path, 'rb') as f:
+            if _board_digest(f.read()) == digest:
+                with _BOARD_CACHE_LOCK:
+                    _BOARD_CACHE_STATS["hits"] += 1
+                return entry[1]
+    with _BOARD_CACHE_LOCK:
         _BOARD_CACHE_STATS["misses"] += 1
-    with open(path, 'r', encoding='utf-8') as f:
-        data = json.load(f)
+    with open(path, 'rb') as f:
+        raw = f.read()
+    data = json.load(io.StringIO(raw.decode('utf-8')))
     try:
         sig_after = _board_stat_sig(path)
     except OSError:
         sig_after = None
+    racy_digest = None
+    if time.time_ns() - sig[0] < _BOARD_CACHE_RACY_NS:
+        racy_digest = _board_digest(raw)
     if sig_after == sig:
         with _BOARD_CACHE_LOCK:
-            _BOARD_CACHE[key] = (sig, data)
+            _BOARD_CACHE[key] = (sig, data) + (racy_digest,)
     else:
         with _BOARD_CACHE_LOCK:
             _BOARD_CACHE.pop(key, None)
