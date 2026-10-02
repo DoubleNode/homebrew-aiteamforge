@@ -6,6 +6,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1349 (PR #1036 round 1): re-mirror `share/kanban-hooks/release_rollback.py`, `share/kanban-hooks/release_gate.py`, `share/lcars-ui/server.py` — rollback override consumed at GAMMA entry, `ROLLBACK_OVERRIDE_CONFLICT`, `--clear`; tap-safe kb-cr path lookup.
 - **XACA-1349** (Added): release engine CR stage mirror (PR #1036) — new `share/kanban-hooks/release_cr_facts.py`, `release_cr_stage.py`, `release_cr_record_publish.py`, `release_rollback.py`; updated `approval_providers.py`, `release_gate.py`, `share/scripts/kb-cr.sh`, and `share/lcars-ui/server.py` (three-way merged over the XACA-1404/XACA-1386 ahead hunks).
 - **XACA-1404** (Fixed): last 3 in-place board writers (`handle_resolve_calendar_conflict` in `share/lcars-ui/server.py`, `share/kanban-hooks/kanban_utils.py`, `share/kanban-hooks/kanban-reset.py`) now take the board lock and write atomically (tmp+fsync+rename). Mirrors the dev changes.
 - **XACA-1386** (Perf): `share/lcars-ui/server.py` a racy board-cache entry sheds its content digest on the first verified hit

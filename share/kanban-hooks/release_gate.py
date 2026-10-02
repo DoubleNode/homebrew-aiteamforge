@@ -69,10 +69,13 @@ MANDATORY_STAGES = ("CR", "GAMMA")
 # Raised by the SERVER (it owns the git read); a HARD refusal in BOTH gate modes. The lead's remedy is
 # `kb-release rollback-override` (release.rollbackShaOverride).
 CODE_ROLLBACK_SHA_UNKNOWN = "ROLLBACK_SHA_UNKNOWN"
+# PR #1036 round 1: a lead override that disagrees with the resolvable production tag. Also raised by the
+# SERVER and HARD in both gate modes; the remedy is `kb-release rollback-override <id> --clear --by <lead>`.
+CODE_ROLLBACK_OVERRIDE_CONFLICT = "ROLLBACK_OVERRIDE_CONFLICT"
 REASON_CODES = (CODE_OTHER, CODE_GAMMA_CONFIRM_REQUIRED, CODE_GAMMA_ACTOR_NOT_LEAD, CODE_WAIVER_NEEDED,
                 CODE_TEST_MISSING, CODE_WAIVER_VOID_SHA, CODE_WAIVER_VOID_INVALID, CODE_WAIVER_NOT_LEAD,
                 CODE_NOT_IN_LEADS, CODE_LEADS_NOT_CONFIGURED, CODE_CR_SUPPORT_DISABLED,
-                CODE_MANDATORY_STAGE_SKIPPED, CODE_ROLLBACK_SHA_UNKNOWN)
+                CODE_MANDATORY_STAGE_SKIPPED, CODE_ROLLBACK_SHA_UNKNOWN, CODE_ROLLBACK_OVERRIDE_CONFLICT)
 INFORMATIONAL_CODES = frozenset((CODE_CR_SUPPORT_DISABLED,))
 CR_SUPPORT_DISABLED_MSG = "CR support disabled"
 

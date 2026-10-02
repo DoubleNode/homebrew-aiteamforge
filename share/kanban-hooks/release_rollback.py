@@ -15,9 +15,20 @@ Config (all optional), read from the board's releaseConfig, platform overriding 
   releaseConfig.platforms.<p>.prodTag = {...}    per-platform override (same shape)
 A release spanning platforms whose effective config differs is refused as ambiguous.
 
-Lead override: release.rollbackShaOverride = {sha, reason, by, at}. Honoured ONLY when sha is
+Lead override: release.rollbackShaOverride = {sha, reason, by, at}. Valid only when sha is
 40-hex and reason and by are non-empty strings. A PRESENT-but-malformed override refuses; it never
 falls through to the tag.
+
+The override is a fallback for "the production tag cannot be determined" (PR #1036 round 1), so the
+tag is consulted FIRST:
+  tag resolves, override differs  -> REFUSED, code ROLLBACK_OVERRIDE_CONFLICT (a stale override must
+                                     never silently beat the tag); the lead clears it with
+                                     `kb-release rollback-override <id> --clear --by <lead>`
+  tag resolves, override equal    -> source tag, overrideUsed (the caller consumes the override)
+  tag does not resolve            -> source override, overrideUsed
+The result carries `overrideUsed: True` when an override was applied; the caller (a real GAMMA entry)
+then moves it into release.rollbackShaOverrideUsed in the same board write, so it cannot outlive the
+entry it was set for.
 
 Pure apart from the injectable `lookup(repo_root, branch, prefix, sort)`; `git_prod_tag_lookup` is
 the real one. Anything that cannot be determined is a REFUSAL (ok=False), never "no rollback
@@ -39,6 +50,13 @@ _SAFE_PREFIX = re.compile(r"[A-Za-z0-9._/][A-Za-z0-9._/-]{0,31}|")
 def override_howto(release_id):
     return ('set a lead override: kb-release rollback-override %s <40-hex-prod-sha> '
             '--reason "<why>" --by <lead>' % (release_id or "<REL-ID>"))
+
+
+CODE_ROLLBACK_OVERRIDE_CONFLICT = "ROLLBACK_OVERRIDE_CONFLICT"
+
+
+def clear_howto(release_id):
+    return "kb-release rollback-override %s --clear --by <lead>" % (release_id or "<REL-ID>")
 
 
 def validate_override(ov):
@@ -137,26 +155,50 @@ def git_prod_tag_lookup(repo_root, branch, prefix, sort):
 
 
 def resolve_rollback(release, release_config, *, lookup=git_prod_tag_lookup, repo_root=None):
-    """{"ok": True, "sha", "source"} or {"ok": False, "reason"}. Never raises."""
+    """{"ok": True, "sha", "source"[, "overrideUsed": True]} or {"ok": False, "reason"[, "code"]}.
+    Never raises."""
     rid = release.get("id") if isinstance(release, dict) else None
     howto = override_howto(rid)
     try:
-        if isinstance(release, dict) and release.get("rollbackShaOverride") is not None:
-            ok, problem = validate_override(release["rollbackShaOverride"])
+        ov = release.get("rollbackShaOverride") if isinstance(release, dict) else None
+        if ov is not None:
+            ok, problem = validate_override(ov)
             if not ok:
                 return {"ok": False, "reason": "%s (a malformed override is refused, not ignored); fix it: %s"
                                                % (problem, howto)}
-            return {"ok": True, "sha": release["rollbackShaOverride"]["sha"].lower(), "source": "override"}
         cfg, problem = effective_config(release_config, release or {})
+        found = None
+        why = None
         if cfg is None:
-            return {"ok": False, "reason": "%s; fix the config or %s" % (problem, howto)}
-        if repo_root is None:
-            return {"ok": False, "reason": "team git repository not found, cannot read the production tag; %s" % howto}
-        found = lookup(repo_root, cfg["branch"], cfg["prefix"], cfg["sort"])
-        if not isinstance(found, dict) or not isinstance(found.get("sha"), str) \
-                or not _SHA40.fullmatch(found["sha"]) or not isinstance(found.get("tag"), str) or not found["tag"]:
-            return {"ok": False, "reason": "no %s<version> tag found on production branch '%s'; %s"
-                                           % (cfg["prefix"], cfg["branch"], howto)}
-        return {"ok": True, "sha": found["sha"].lower(), "source": "tag:%s" % found["tag"]}
+            why = "%s; fix the config or %s" % (problem, howto)
+        elif repo_root is None:
+            why = "team git repository not found, cannot read the production tag; %s" % howto
+        else:
+            try:
+                found = lookup(repo_root, cfg["branch"], cfg["prefix"], cfg["sort"])
+            except Exception as e:  # noqa: BLE001 - an unreadable tag is "does not resolve"
+                if ov is None:
+                    raise
+                found = None
+                why = "production tag lookup failed (%s: %s)" % (type(e).__name__, e)
+            if not isinstance(found, dict) or not isinstance(found.get("sha"), str) \
+                    or not _SHA40.fullmatch(found["sha"]) or not isinstance(found.get("tag"), str) \
+                    or not found["tag"]:
+                found = None
+                why = why or "no %s<version> tag found on production branch '%s'; %s" % (
+                    cfg["prefix"], cfg["branch"], howto)
+        if found is not None:
+            tag_sha = found["sha"].lower()
+            if ov is None:
+                return {"ok": True, "sha": tag_sha, "source": "tag:%s" % found["tag"]}
+            if ov["sha"].lower() != tag_sha:
+                return {"ok": False, "code": CODE_ROLLBACK_OVERRIDE_CONFLICT,
+                        "reason": "the rollback override %s (set by %s) conflicts with production tag %s -> %s; "
+                                  "refusing to guess which is production. If the override is stale, clear it: %s"
+                                  % (ov["sha"].lower(), ov["by"], found["tag"], tag_sha, clear_howto(rid))}
+            return {"ok": True, "sha": tag_sha, "source": "tag:%s" % found["tag"], "overrideUsed": True}
+        if ov is not None:
+            return {"ok": True, "sha": ov["sha"].lower(), "source": "override", "overrideUsed": True}
+        return {"ok": False, "reason": why}
     except Exception as e:  # noqa: BLE001 - fail closed on ANY lookup failure
         return {"ok": False, "reason": "production SHA lookup failed (%s: %s); %s" % (type(e).__name__, e, howto)}

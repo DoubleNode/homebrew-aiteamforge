@@ -8560,9 +8560,11 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 # XACA-1346: mirror the release-level stage state (board is authoritative).
                 # tests[] is deliberately NOT mirrored (large, append-only, board-only).
                 for _k in ('stage', 'stages', 'stageSha', 'rollbackSha', 'rollbackShaSource',
-                           'rollbackShaOverride', 'branch', 'branchBaseSha'):
+                           'rollbackShaOverride', 'rollbackShaOverrideUsed', 'branch', 'branchBaseSha'):
                     if _k in release:
                         manifest[_k] = release[_k]
+                    elif _k == 'rollbackShaOverride':
+                        manifest.pop(_k, None)   # consumed or cleared: the mirror must not keep it
 
                 # Marker so readers know this file is a derived mirror.
                 manifest['_source'] = 'board.releases[] (authoritative); this manifest is a mirror — do not edit by hand'
@@ -8856,6 +8858,20 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         # stored value can only be stale or hand-planted (no linked CR = state None = refused).
         return dict(release, cr=feed)
 
+    @classmethod
+    def _kb_cr_script_paths(cls):
+        """(kanban-helpers.sh, scripts/kb-cr.sh) from the first install root holding BOTH, or (None, None).
+        PR #1036 round 1 (advisory): this was Path.home()/"dev-team" only, which does not exist on a tap
+        consumer, so the durable assumed-approval stamp was never written there. Same candidate-root chain
+        as XACA-1239-020 (dev checkout, $AITEAMFORGE_DIR, the server's own install dir)."""
+        for root in cls._cr_schema_validator_candidate_roots():
+            helpers = next((c for c in (root / 'kanban-helpers.sh', root / 'scripts' / 'kanban-helpers.sh')
+                            if cls._is_regular_file(c)), None)
+            kbcr = root / 'scripts' / 'kb-cr.sh'
+            if helpers is not None and cls._is_regular_file(kbcr):
+                return helpers, kbcr
+        return None, None
+
     def _persist_assumed_approvals_before_promote(self, release_id, team):
         """XACA-1349-014: before a NON-dryRun promote takes the board lock, let kb-cr durably stamp
         any due assumed approval on the release's open linked CRs. kb-cr stays the single writer of
@@ -8876,10 +8892,14 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             ids = _approval_providers.open_linked_cr_ids(board, release) if release else []
             if not ids:
                 return []
-            root = Path.home() / "dev-team"
+            helpers, kbcr = self._kb_cr_script_paths()
+            if helpers is None:
+                print(f"[LCARS] WARNING: assumed-approval stamping skipped for {release_id}: kanban-helpers.sh / "
+                      "scripts/kb-cr.sh not found under any install root (ignored)")
+                return []
             script = "\n".join([
-                "source %s || exit 97" % shlex.quote(str(root / 'kanban-helpers.sh')),
-                "source %s || exit 97" % shlex.quote(str(root / 'scripts' / 'kb-cr.sh')),
+                "source %s || exit 97" % shlex.quote(str(helpers)),
+                "source %s || exit 97" % shlex.quote(str(kbcr)),
                 "for id in %s; do" % ' '.join(shlex.quote(i) for i in ids),
                 '  _kb_cr_stamp_assumed_approval "$id" %s >/dev/null 2>&1' % shlex.quote(str(board_file)),
                 '  echo "$id $?"',
@@ -9169,8 +9189,12 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         and _release_schema.STAGES.index(eff_target) > _release_schema.STAGES.index(cur)):
                     rollback = self._resolve_rollback(release, rcfg, LCARS_TEAM)
                     if not rollback['ok']:
-                        reasons.append("%s: rollback target unknown: %s" % (eff_target, rollback['reason']),
-                                       _release_gate.CODE_ROLLBACK_SHA_UNKNOWN,
+                        _conflict = rollback.get('code') == _release_gate.CODE_ROLLBACK_OVERRIDE_CONFLICT
+                        reasons.append("%s: rollback target %s: %s" % (
+                                           eff_target, "override conflict" if _conflict else "unknown",
+                                           rollback['reason']),
+                                       _release_gate.CODE_ROLLBACK_OVERRIDE_CONFLICT if _conflict
+                                       else _release_gate.CODE_ROLLBACK_SHA_UNKNOWN,
                                        {"stage": eff_target, "releaseId": release_id})
                 # XACA-1349-007: a MALFORMED crSupport switch is not "CR off". Reading it as off would let a
                 # release leave CR (or skip it) with no approval, so every forward move is refused until fixed.
@@ -9195,6 +9219,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         or _release_schema.STAGES.index(eff_target) < _release_schema.STAGES.index(cur)
                         or _release_gate.CODE_MANDATORY_STAGE_SKIPPED in reasons.codes
                         or _release_gate.CODE_ROLLBACK_SHA_UNKNOWN in reasons.codes
+                        or _release_gate.CODE_ROLLBACK_OVERRIDE_CONFLICT in reasons.codes
                         or crsupport_malformed)
                 # XACA-1375: the informational CR_SUPPORT_DISABLED reason (release stranded at CR)
                 # never blocks: promote OUT of CR stays allowed in enforce mode too.
@@ -9221,6 +9246,11 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     if rollback is not None:  # spec 3.2: the previous production SHA, recorded at GAMMA entry
                         release['rollbackSha'] = rollback['sha']
                         release['rollbackShaSource'] = rollback['source']
+                        if rollback.get('overrideUsed') and isinstance(release.get('rollbackShaOverride'), dict):
+                            # PR #1036 round 1: consume on use, same locked write as rollbackSha. The audit
+                            # copy keeps the history; dryRun never reaches here, so it consumes nothing.
+                            release['rollbackShaOverrideUsed'] = dict(
+                                release.pop('rollbackShaOverride'), consumedAt=now)
                     if cut:  # same locked write as the stage change
                         release['branch'] = cut['branch']
                         release['branchBaseSha'] = cut['branchBaseSha']
@@ -9793,7 +9823,11 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         SHA for a release whose production tag cannot be determined. Body {"sha": <40hex>, "reason": str,
         "by": lead}. 400 bad body, 403 `by` not in releaseConfig.leads, 404 unknown release, 409 release is
         at GAMMA/PROD (the rollback target is recorded at GAMMA entry and no longer changes), 200
-        {"ok": true, "override": {...}}. Logged as release_rollback_override."""
+        {"ok": true, "override": {...}}. Logged as release_rollback_override.
+
+        CLEAR (PR #1036 round 1): body {"clear": true, "by": lead} removes a stale/mistaken override (no sha or
+        reason; same lead check and same 409 at GAMMA/PROD). 200 {"ok": true, "cleared": true|false} (clearing
+        nothing is a harmless no-op). Logged as release_rollback_override_cleared with the removed sha."""
         try:
             if self._gate_unavailable():
                 return
@@ -9801,13 +9835,22 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             if err:
                 return self._send_json_response({"error": err}, status=400)
             sha, reason, by = body.get('sha'), body.get('reason'), body.get('by')
-            if not isinstance(sha, str) or not re.fullmatch(r'[0-9a-fA-F]{40}', sha):
-                return self._send_json_response({"error": "'sha' must be a 40-character hex string"}, status=400)
-            if not isinstance(reason, str) or not reason.strip():
-                return self._send_json_response({"error": "a non-empty 'reason' is required"}, status=400)
+            clear = body.get('clear', False)
+            if not isinstance(clear, bool):
+                return self._send_json_response({"error": "'clear' must be true or false"}, status=400)
+            if clear:
+                if sha is not None:
+                    return self._send_json_response(
+                        {"error": "'clear' removes the override; do not send a 'sha' with it"}, status=400)
+            else:
+                if not isinstance(sha, str) or not re.fullmatch(r'[0-9a-fA-F]{40}', sha):
+                    return self._send_json_response({"error": "'sha' must be a 40-character hex string"}, status=400)
+                if not isinstance(reason, str) or not reason.strip():
+                    return self._send_json_response({"error": "a non-empty 'reason' is required"}, status=400)
             if not isinstance(by, str) or not by.strip():
                 return self._send_json_response({"error": "'by' (the lead) is required"}, status=400)
             override = None
+            removed = None
             with self._board_write_transaction():
                 data = self._load_releases_config(_lock_held=True)
                 release = self._find_release_by_id(data, release_id)
@@ -9823,14 +9866,27 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 if cur in ('GAMMA', 'PROD'):
                     raise _DeferredResponse.json(
                         {"error": "release is at %s: its rollback target was recorded at GAMMA entry and "
-                                  "cannot be overridden now" % cur}, 409)
-                override = {"sha": sha.lower(), "reason": reason.strip(), "by": by.strip(),
-                            "at": self._get_timestamp()}
-                release['rollbackShaOverride'] = override
-                if not self._save_releases_config(data, _lock_held=True):
-                    raise _DeferredResponse.json({"error": "board write failed"}, 500)
-                snapshot = copy.deepcopy(release)
+                                  "cannot be %s now" % (cur, "cleared" if clear else "overridden")}, 409)
+                if clear:
+                    removed = release.pop('rollbackShaOverride', None)
+                    if removed is None:
+                        raise _DeferredResponse.json({"ok": True, "cleared": False}, 200)
+                    if not self._save_releases_config(data, _lock_held=True):
+                        raise _DeferredResponse.json({"error": "board write failed"}, 500)
+                    snapshot = copy.deepcopy(release)
+                else:
+                    override = {"sha": sha.lower(), "reason": reason.strip(), "by": by.strip(),
+                                "at": self._get_timestamp()}
+                    release['rollbackShaOverride'] = override
+                    if not self._save_releases_config(data, _lock_held=True):
+                        raise _DeferredResponse.json({"error": "board write failed"}, 500)
+                    snapshot = copy.deepcopy(release)
             self._mirror_release_manifest(snapshot)
+            if clear:
+                self._log_release_activity(
+                    release_id, 'release_rollback_override_cleared', cur, cur, actor=by.strip(),
+                    sha=removed.get('sha') if isinstance(removed, dict) else None)
+                return self._send_json_response({"ok": True, "cleared": True})
             self._log_release_activity(release_id, 'release_rollback_override', cur, cur, actor=override['by'],
                                        reason=override['reason'], sha=override['sha'])
             return self._send_json_response({"ok": True, "override": override})
