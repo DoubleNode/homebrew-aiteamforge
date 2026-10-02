@@ -119,7 +119,7 @@ fi
 #
 #   Container lifecycle (v2.0 — state + timestamp, atomic — argument starts with CR-):
 #   kb-cr submit  <CR-ID>
-#   kb-cr approve <CR-ID> [--approver <login>] [--approver-name "<name>"]
+#   kb-cr approve <CR-ID> [--by <login>] [--name "<name>"] [--assumed]   (aliases: --approver / --approver-name)
 #   kb-cr waive-approval <CR-ID> --reason "<text>" [--actor <name>]  [XACA-1239 — evidence only, no crState change]
 #   kb-cr reject  <CR-ID> [--reason "<text>"]
 #   kb-cr hold    <CR-ID> [--reason "<text>"]
@@ -1548,14 +1548,14 @@ _kb_cr_container_submit() {
     }
 }
 
-# kb-cr approve <CR-ID> [--approver <login>] [--approver-name "<name>"]
+# kb-cr approve <CR-ID> [--by <login>] [--name "<name>"] [--assumed]   (aliases: --approver / --approver-name)
 # Predecessor states: cr-submitted
 _kb_cr_container_approve() {
     local cr_id="${1:-}"
     shift 2>/dev/null
 
     if [[ -z "$cr_id" ]]; then
-        echo "Usage: kb-cr approve <CR-ID> [--approver <login>] [--approver-name \"<name>\"]" >&2
+        echo "Usage: kb-cr approve <CR-ID> [--by <login>] [--name \"<name>\"] [--assumed]   (aliases: --approver / --approver-name)" >&2
         return 1
     fi
 
@@ -7054,7 +7054,8 @@ _kb_cr_help() {
     echo "              appended to the bottom of the CR request page (cr_proper_url set)."
     echo "              In automated workflow the Confluence poller (XACA-0328-003) triggers"
     echo "              this transition; this CLI path exists for manual/back-compat use."
-    echo "  approve <CR-ID> [--approver <login>] [--approver-name \"<name>\"]"
+    echo "  approve <CR-ID> [--by <login>] [--name \"<name>\"] [--assumed]"
+    echo "              (--approver / --approver-name are accepted aliases for --by / --name)"
     echo "              cr-submitted → cr-approved"
     echo "              Writes timestamps.cr_approved_at + approver{login,name}."
     echo "  waive-approval <CR-ID> --reason \"<text>\" [--actor <name>]  [XACA-1239]"
@@ -7144,8 +7145,8 @@ _kb_cr_help() {
     echo "    → Falls through to v1 per-item helper (true legacy single-item CR)"
     echo "    → No propagation; only the one item's state changes"
     echo ""
-    echo "  KNOWN LIMITATION: 'kb-cr complete <item-id>' does NOT propagate."
-    echo "    No container variant for complete exists yet (see XACA-0327 plan)."
+    echo "  KNOWN LIMITATION: 'kb-cr complete <item-id>' does NOT propagate (v1 per-item path)."
+    echo "    Complete the whole CR with the container variant: 'kb-cr complete <CR-ID>' (XACA-1348)."
     echo ""
     echo "── Per-item Lifecycle Commands (v1 / legacy — argument is an item-id) ─"
     echo "  draft   <id> --type <major|emergency|fyi>"
