@@ -152,24 +152,26 @@ _cc_tmux_fmt() {
 # separator; a canonical window literally named "projA.command" can still equal a
 # qualified key, which the equality-based dupe check in _cc_window_key catches.
 _cc_qualify_key() {
-    local sname="$1" raw="$2"
-    [[ -n "$raw" ]] || return 0
-    if [[ -z "$SESSION_CODE" || "$sname" == "$SESSION_CODE" ]]; then
-        printf '%s' "$raw" | tr -c 'A-Za-z0-9._-' '_'
-    else
-        printf '%s.%s' "$sname" "$raw" | tr -c 'A-Za-z0-9._-' '_'
-    fi
+    local REPLY
+    _cc_qualify_key_r "$1" "$2"
+    printf '%s' "$REPLY"
 }
 
-# Name of session id $2 within the "<session_id> <session_name>" listing $1.
-_cc_session_name_of() {
-    local line
-    while IFS= read -r line; do
-        [[ "${line%% *}" == "$2" ]] || continue
-        printf '%s' "${line#* }"
-        return 0
-    done <<< "$1"
-    return 1
+# XACA-1074-024: the same derivation, in-process. Sets REPLY (no subshell, no fork), so
+# a listing of N windows costs N parameter expansions instead of N subshells + N execs of
+# tr. Like `tr -c 'A-Za-z0-9._-' '_'` it follows the locale (bytewise in C, one "_" per
+# character in a UTF-8 locale); an empty raw key gives an empty REPLY. The one difference:
+# tr ERRORS on an invalid UTF-8 sequence (empty key), this maps each such byte to "_" --
+# tmux only ever hands out valid UTF-8 (it octal-escapes the rest).
+#   $1 = #{session_name}, $2 = raw window key/name.
+_cc_qualify_key_r() {
+    local _q="$2"
+    REPLY=""
+    [[ -n "$_q" ]] || return 0
+    if [[ -n "$SESSION_CODE" && "$1" != "$SESSION_CODE" ]]; then
+        _q="$1.$_q"
+    fi
+    REPLY="${_q//[^A-Za-z0-9._-]/_}"
 }
 
 # XACA-1074-021: how many OTHER windows carry the qualified key $4? $1 = this window id,
@@ -180,29 +182,34 @@ _cc_session_name_of() {
 # SESSION_CODE only our own session is compared. Names and keys come from two listings:
 # either may contain any character, so neither can share a line with the other (the
 # free-text field is always LAST). A session that cannot be resolved counts as a dupe.
+# XACA-1074-024: the session map is built once per call and every qualified key is
+# derived in-process (_cc_qualify_key_r), so the cost is the listings (one tmux exec
+# each), not one subshell + tr per window.
 _cc_key_dupes() {
-    local wid="$1" sid="$2" sessions="$3" mine="$4" mode="$5" listing line ssid rest lwid val osn n=0
-    if [[ "$mode" == names ]]; then
-        listing=$(tmux list-windows -a -F '#{session_id} #{window_id} #{window_name}' 2>/dev/null)
+    local wid="$1" sid="$2" sessions="$3" mine="$4" mode="$5" listing line ssid rest lwid val n=0 pass REPLY
+    local -A snames
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && snames[${line%% *}]="${line#* }"
+    done <<< "$sessions"
+    for pass in names keys; do
+        if [[ "$pass" == names ]]; then
+            [[ "$mode" == names ]] || continue
+            listing=$(tmux list-windows -a -F '#{session_id} #{window_id} #{window_name}' 2>/dev/null)
+        else
+            listing=$(tmux list-windows -a -F '#{session_id} #{window_id} #{@cc_window_key}' 2>/dev/null)
+        fi
         while IFS= read -r line; do
             ssid="${line%% *}"; rest="${line#* }"; lwid="${rest%% *}"
             [[ "$lwid" == "$wid" ]] && continue
             [[ -z "$SESSION_CODE" && "$ssid" != "$sid" ]] && continue
             val=""; [[ "$rest" == *" "* ]] && val="${rest#* }"
-            osn=$(_cc_session_name_of "$sessions" "$ssid") || { n=$((n + 1)); continue; }
-            [[ "$(_cc_qualify_key "$osn" "$val")" == "$mine" ]] && n=$((n + 1))
+            # An unset @cc_window_key (no trailing field) is no key at all, not a dupe.
+            [[ "$pass" == keys && -z "$val" ]] && continue
+            [[ -n "$ssid" ]] && (( ${+snames[$ssid]} )) || { n=$((n + 1)); continue; }
+            _cc_qualify_key_r "${snames[$ssid]}" "$val"
+            [[ "$REPLY" == "$mine" ]] && n=$((n + 1))
         done <<< "$listing"
-    fi
-    listing=$(tmux list-windows -a -F '#{session_id} #{window_id} #{@cc_window_key}' 2>/dev/null)
-    while IFS= read -r line; do
-        ssid="${line%% *}"; rest="${line#* }"; lwid="${rest%% *}"
-        [[ "$lwid" == "$wid" || "$rest" != *" "* ]] && continue
-        [[ -z "$SESSION_CODE" && "$ssid" != "$sid" ]] && continue
-        val="${rest#* }"
-        [[ -n "$val" ]] || continue
-        osn=$(_cc_session_name_of "$sessions" "$ssid") || { n=$((n + 1)); continue; }
-        [[ "$(_cc_qualify_key "$osn" "$val")" == "$mine" ]] && n=$((n + 1))
-    done <<< "$listing"
+    done
     printf '%s' "$n"
 }
 
@@ -225,7 +232,7 @@ _cc_key_dupes() {
 # The stamp always holds the RAW window name; qualification is applied on every
 # derivation (also to stamps written by earlier versions, which hold bare names).
 _cc_window_key() {
-    local wid="$1" key="" name="" auto="" allow="" sid="" sname="" sessions="" mine=""
+    local wid="$1" key="" name="" auto="" allow="" sid="" sname="" sessions="" mine="" REPLY
     sname=$(_cc_tmux_fmt '#{session_name}')
     [[ -z "$sname" ]] && return 0
     sid=$(_cc_tmux_fmt '#{session_id}')
@@ -236,7 +243,7 @@ _cc_window_key() {
         # every read. Two stamps that qualify EQUAL (sanitize-equivalent session names
         # such as "p q" and "p_q") cannot be told apart: both fail closed to "-w@N".
         [[ -n "$sessions" ]] || return 0
-        mine=$(_cc_qualify_key "$sname" "$key")
+        _cc_qualify_key_r "$sname" "$key"; mine="$REPLY"
         (( $(_cc_key_dupes "$wid" "$sid" "$sessions" "$mine" keys) == 0 )) || return 0
     else
         # XACA-1074-013: read the WINDOW-LOCAL automatic-rename, not the effective
@@ -268,7 +275,7 @@ _cc_window_key() {
             # names would all share one sidecar; and it must not equal another window's
             # already-stamped key (a window renamed INTO a name another window was
             # stamped under would adopt its session).
-            mine=$(_cc_qualify_key "$sname" "$name")
+            _cc_qualify_key_r "$sname" "$name"; mine="$REPLY"
             if (( $(_cc_key_dupes "$wid" "$sid" "$sessions" "$mine" names) == 0 )); then
                 tmux set-option -w -t "$wid" @cc_window_key "$name" 2>/dev/null && key="$name"
             fi
@@ -468,12 +475,14 @@ _cc_sidecar_stray_hint() {
     # sanitized form (XACA-1074-021), so qualify each stamp with ITS session before
     # comparing. A pre-021 bare "-k<name>" file from a non-canonical session matches
     # no live qualified key, so it stays listed here: fail closed, never adopted.
-    local sline sn k
+    local sline sn k REPLY
     while IFS= read -r sline; do
         [[ -n "$sline" ]] || continue
         sn="${sline#* }"
         while IFS= read -r k; do
-            [[ -n "$k" ]] && live_keys="${live_keys}$(_cc_qualify_key "$sn" "$k")"$'\n'
+            [[ -n "$k" ]] || continue
+            _cc_qualify_key_r "$sn" "$k"
+            live_keys="${live_keys}${REPLY}"$'\n'
         done < <(tmux list-windows -t "${sline%% *}" -F '#{@cc_window_key}' 2>/dev/null)
     done < <(tmux list-sessions -F '#{session_id} #{session_name}' 2>/dev/null)
     while IFS= read -r f; do
