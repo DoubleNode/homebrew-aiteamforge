@@ -79,9 +79,12 @@
         return String(Math.round(v)).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
     }
 
-    // Em dash for "not reported" (aria-label so it is not read as punctuation).
+    // Em dash for "not reported". The dash is aria-hidden and the meaning is
+    // carried by visually hidden text: aria-label on a role-less <span> is
+    // ignored by screen readers (XACA-1388-020).
     function dashHtml() {
-        return '<span class="cicd-null" aria-label="not reported">' + DASH + '</span>';
+        return '<span class="cicd-null"><span aria-hidden="true">' + DASH + '</span>' +
+            '<span class="cicd-sr-only">not reported</span></span>';
     }
 
     function numOrDash(v) {

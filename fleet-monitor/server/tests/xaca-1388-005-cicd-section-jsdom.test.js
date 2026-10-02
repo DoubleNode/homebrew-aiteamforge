@@ -718,3 +718,16 @@ test('dimmed rows: no group opacity anywhere on .cicd-runner (XACA-1388-017)', (
     cssRules(fs.readFileSync(DASH_CSS, 'utf8')).filter(r => r.sel.some(s => /^\.cicd-runner(\.dimmed)?$/.test(s)))
         .forEach(r => assert.equal(r.decls.opacity, undefined, 'opacity on ' + r.sel.join(',')));
 });
+
+test('not-reported dash: no aria-label on role-less elements; meaning carried by sr-only text (XACA-1388-020)', () => {
+    const env = renderFixture('empty');
+    const nulls = env.el.querySelectorAll('.cicd-null');
+    assert.ok(nulls.length > 0, 'empty fixture renders at least one not-reported dash');
+    nulls.forEach(n => {
+        assert.equal(n.hasAttribute('aria-label'), false, 'role-less .cicd-null must not carry aria-label');
+        assert.equal(n.querySelector('[aria-hidden="true"]').textContent, '—');
+        assert.equal(n.querySelector('.cicd-sr-only').textContent, 'not reported');
+    });
+    env.el.querySelectorAll('span[aria-label]:not([role])').forEach(s =>
+        assert.fail('role-less span with aria-label: ' + s.outerHTML));
+});
