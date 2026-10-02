@@ -11,6 +11,7 @@ import json
 import os
 import fcntl
 import subprocess
+import sys
 import tempfile
 import warnings
 from datetime import datetime, timezone
@@ -295,6 +296,16 @@ def read_board_safely(board_file):
         return None
 
 
+def _remove_tmp_quietly(tmp_file):
+    """Best-effort unlink of a writer's tmp file. Call ONLY while holding the
+    board's exclusive lock (XACA-1404-005)."""
+    try:
+        if os.path.exists(tmp_file):
+            os.remove(tmp_file)
+    except OSError:
+        pass
+
+
 def write_board_safely(board_file, board_data):
     """
     Write board data atomically with file locking.
@@ -330,26 +341,30 @@ def write_board_safely(board_file, board_data):
             # Exclusive lock for writing (blocks all other access)
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:
-                # Write to temporary file first
-                with open(tmp_file, 'w') as f:
-                    json.dump(board_data, f, indent=2)
-                    f.flush()
-                    os.fsync(f.fileno())  # Ensure data is on disk
+                try:
+                    # Write to temporary file first
+                    with open(tmp_file, 'w') as f:
+                        json.dump(board_data, f, indent=2)
+                        f.flush()
+                        os.fsync(f.fileno())  # Ensure data is on disk
 
-                # Atomic rename (this is the key to preventing corruption)
-                os.rename(tmp_file, board_file)
-                return True
+                    # Atomic rename (this is the key to preventing corruption)
+                    os.rename(tmp_file, board_file)
+                    return True
+                except Exception:
+                    # XACA-1404-005: remove our partial tmp WHILE STILL HOLDING
+                    # the lock. tmp_file is board+'.tmp', the same fixed name the
+                    # kb-* writers use; deleting it after the unlock could delete
+                    # the tmp another writer just created under the lock.
+                    _remove_tmp_quietly(tmp_file)
+                    raise
             finally:
                 # Always release the lock
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
     except Exception as e:
-        # Clean up temp file if it exists
-        try:
-            if os.path.exists(tmp_file):
-                os.remove(tmp_file)
-        except:
-            pass
+        # Failures before the lock was taken never created our tmp, and the
+        # shared tmp name may now belong to another writer: do not touch it.
         return False
 
 
@@ -385,36 +400,41 @@ def update_board_safely(board_file, update_func):
             # Exclusive lock for the entire read-modify-write operation
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:
-                # Read current data
-                with open(board_file, 'r') as f:
-                    board_data = json.load(f)
+                try:
+                    # Read current data
+                    with open(board_file, 'r') as f:
+                        board_data = json.load(f)
 
-                # Apply update
-                updated_data = update_func(board_data)
+                    # Apply update
+                    updated_data = update_func(board_data)
 
-                if updated_data is None:
-                    # Update function returned None, skip write
+                    if updated_data is None:
+                        # Update function returned None, skip write
+                        return True
+
+                    # Write to temporary file
+                    with open(tmp_file, 'w') as f:
+                        json.dump(updated_data, f, indent=2)
+                        f.flush()
+                        os.fsync(f.fileno())
+
+                    # Atomic rename
+                    os.rename(tmp_file, board_file)
                     return True
-
-                # Write to temporary file
-                with open(tmp_file, 'w') as f:
-                    json.dump(updated_data, f, indent=2)
-                    f.flush()
-                    os.fsync(f.fileno())
-
-                # Atomic rename
-                os.rename(tmp_file, board_file)
-                return True
+                except Exception:
+                    # XACA-1404-005: clean up our partial tmp WHILE STILL HOLDING
+                    # the lock (see write_board_safely): the name is shared with
+                    # the kb-* writers, so an after-unlock remove can delete the
+                    # tmp another writer just created.
+                    _remove_tmp_quietly(tmp_file)
+                    raise
             finally:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
     except Exception as e:
-        # Clean up temp file if it exists
-        try:
-            if os.path.exists(tmp_file):
-                os.remove(tmp_file)
-        except:
-            pass
+        # XACA-1404: still returns False (contract unchanged), but say why on
+        # stderr so callers/operators are not left guessing.
+        print(f"update_board_safely: {board_file}: {type(e).__name__}: {e}", file=sys.stderr)
         return False
 
 

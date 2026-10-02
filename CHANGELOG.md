@@ -6,6 +6,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1404** (Fixed): last 3 in-place board writers (`handle_resolve_calendar_conflict` in `share/lcars-ui/server.py`, `share/kanban-hooks/kanban_utils.py`, `share/kanban-hooks/kanban-reset.py`) now take the board lock and write atomically (tmp+fsync+rename). Mirrors the dev changes.
 - **XACA-1388** (Added): LCARS fleet dashboard CI/CD section — new `fleet-monitor/server/public/lcars/js/lcars-cicd.js`, sidebar
   button + `data-section="cicd"` in `lcars-dashboard.html`, `cicd-*` styles in `lcars-dashboards.css`, refresh wiring in
   `lcars-dashboard-app.js` / `lcars-fleet-core.js`, jsdom tests + fixtures. Renders `GET /api/ci-runners` (v1 contract,

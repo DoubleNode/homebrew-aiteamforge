@@ -19370,34 +19370,44 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 }, status=503)
                 return
 
-            # Load team board data
-            board_file = get_board_file(team)
-            if not board_file.exists():
-                self._send_json_response({
-                    "success": False,
-                    "error": f"Board file not found for team {team}"
-                }, status=404)
-                return
+            # XACA-1404-002: one exclusive lock across load -> resolve -> save
+            # (was an unlocked read + truncating open(board,'w') that lost
+            # concurrent writers' changes and let readers see a torn file).
+            # Raw re-read and the shared atomic save (tmp+fsync+rename) keep to
+            # _board_write_transaction's contract: no second flock, and NO
+            # response written while the lock is held. The rename gives the
+            # board a new inode/mtime, which is what the XACA-1382 parsed-board
+            # cache keys on, so no explicit invalidation is needed (same as
+            # every other converted writer).
+            board_file = self._get_board_file(team)
+            with self._board_write_transaction(team):
+                if not board_file.exists():
+                    raise _DeferredResponse.json({
+                        "success": False,
+                        "error": f"Board file not found for team {team}"
+                    }, 404)
 
-            with open(board_file, 'r') as f:
-                board_data = json.load(f)
+                board_data = self._read_board_raw_locked(team)
 
-            # Resolve conflict
-            result = _calendar_sync_service.resolve_conflict(
-                board_data,
-                item_id,
-                resolution,
-                merge_data
-            )
+                # Resolve conflict (pure in-memory mutation of board_data)
+                result = _calendar_sync_service.resolve_conflict(
+                    board_data,
+                    item_id,
+                    resolution,
+                    merge_data
+                )
 
-            if result.get('success'):
-                # Save updated board data
-                with open(board_file, 'w') as f:
-                    json.dump(board_data, f, indent=2)
+                if result.get('success'):
+                    self._atomic_write_json(board_file, board_data)
 
             self._send_json_response(result)
             print(f"[LCARS] Resolved conflict for {item_id}: {result.get('action')}")
 
+        except _DeferredResponse as deferred:
+            # XACA-0890-022: emitted after the board lock is released; must
+            # stay ABOVE the generic `except Exception` below.
+            deferred.emit(self)
+            return
         except Exception as e:
             print(f"[LCARS] ERROR resolving conflict: {e}")
             import traceback
