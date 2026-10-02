@@ -1514,12 +1514,14 @@
     overflow-wrap: anywhere;
 }
 
-/* Dimmed = last known state. Opacity floor 0.65 keeps text >= 4.5:1; the badge is
-   excluded so its status text stays at full contrast. "(last known)" text is the
-   non-visual cue. */
-.cicd-runner.dimmed { opacity: 0.65; }
-.cicd-runner.dimmed .status-badge,
-.cicd-runner.dimmed .cicd-pill { opacity: 1; }
+/* Dimmed = last known state (XACA-1388-017). NO opacity: a group opacity
+   composites the badge and every text run with the card behind it and cannot be
+   undone by a child (opacity:1 on a child is a no-op), which measured 3.74:1 on
+   the OFFLINE badge. Dim with colour tokens only, each >= 4.5:1 on --lcars-darker
+   (asserted by the table-driven contrast test). Badges and pills keep their own
+   undimmed colours; "(last known)" text + italic are the non-colour cues. */
+.cicd-runner.dimmed { color: var(--lcars-tan); }
+.cicd-runner.dimmed .cicd-val { color: var(--lcars-tan); }
 .cicd-runner.dimmed .cicd-runner-job { font-style: italic; }
 
 .cicd-jobs-wrap {
@@ -1590,6 +1592,24 @@
         display: flex;
         flex-wrap: wrap;
     }
-    .cicd-runner-head { display: none; }
+    /* Keep the header row in the a11y tree (columnheader cells), visually hidden
+       with the sr-only pattern -- never display:none. Cells get inline labels. */
+    .cicd-runner-head {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+    }
+    .cicd-runner [data-label]::before {
+        content: attr(data-label) ": ";
+        color: var(--lcars-tan);
+        font-size: 11px;
+        letter-spacing: 1px;
+    }
     .cicd-runner-job { flex-basis: 100%; }
 }

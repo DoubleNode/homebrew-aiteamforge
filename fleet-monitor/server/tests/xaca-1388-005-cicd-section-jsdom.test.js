@@ -410,3 +410,311 @@ test('refresh: schemaVersion 2 payload still renders (forward compatible)', asyn
     assert.equal(machineCard(env, 'm1mini').getAttribute('data-cicd-status'), 'ONLINE');
     assert.equal(env.el.querySelector('[data-cicd-update-failed]'), null);
 });
+
+// ---- 9. round-1 gate findings (XACA-1388-012..018) --------------------------
+const DASH_CSS = path.join(PUBLIC_ROOT, 'lcars', 'css', 'lcars-dashboards.css');
+const THEME_CSS = path.join(PUBLIC_ROOT, 'lcars', 'css', 'lcars-fleet-theme.css');
+const REPO_ROOT = path.join(__dirname, '..', '..', '..');
+
+function busyJob(over) {
+    return Object.assign({ id: 1, workflow: 'wf', job: 'jb', branch: 'b', startedAt: '2026-10-02T16:50:00Z',
+        runUrl: 'https://github.com/o/r/actions/runs/1', jobUrl: 'https://github.com/o/r/actions/runs/1/job/2' }, over || {});
+}
+
+// 012: the runbook the empty state points at must really exist.
+test('empty state: referenced runbook path exists in the repo (XACA-1388-012)', () => {
+    const env = renderFixture('empty');
+    const text = normText(env.el.querySelector('[data-cicd-empty]'));
+    const refs = text.match(/docs\/[A-Za-z0-9_.\-]+\.md/g) || [];
+    assert.ok(refs.length >= 1, 'empty state names a docs/*.md runbook: ' + text);
+    refs.forEach(function (ref) {
+        assert.ok(fs.existsSync(path.join(REPO_ROOT, ref)), 'referenced doc must exist: ' + ref);
+    });
+    assert.ok(!/CI_RUNNERS\.md/.test(text), 'stale pointer must be gone');
+});
+
+// 013: missing/unparseable generatedAt
+test('deriveMachineStatus: unparseable generatedAt or lastReportAt is UNKNOWN, never OFFLINE (XACA-1388-013)', () => {
+    const { api } = loadImpl();
+    const gen = '2026-10-02T17:00:00Z';
+    assert.equal(api.deriveMachineStatus(mkMachine(), undefined, 180, 600), 'UNKNOWN');
+    assert.equal(api.deriveMachineStatus(mkMachine(), 'garbage', 180, 600), 'UNKNOWN');
+    assert.equal(api.deriveMachineStatus(mkMachine({ lastReportAt: null }), gen, 180, 600), 'UNKNOWN');
+    assert.equal(api.deriveMachineStatus(mkMachine({ lastReportAt: 'nope' }), gen, 180, 600), 'UNKNOWN');
+});
+
+test('render: machine with unparseable lastReportAt shows neutral UNKNOWN, not red OFFLINE (XACA-1388-013)', () => {
+    const env = loadImpl();
+    const d = fixture('healthy');
+    d.machines[0].lastReportAt = 'not-a-date';
+    env.api.render(d, env.el);
+    const card = machineCard(env, 'm1mini');
+    assert.equal(card.getAttribute('data-cicd-status'), 'UNKNOWN');
+    assert.ok(/UNKNOWN/.test(normText(card)));
+    assert.equal(card.querySelectorAll('.status-badge.offline').length, 0, 'no red OFFLINE badge');
+    assert.equal(card.querySelectorAll('[data-cicd-last-known]').length, 0, 'rows are not dimmed as last-known');
+});
+
+test('refresh: payload with missing/unparseable generatedAt is a failed fetch (last good kept + badge) (XACA-1388-013)', async () => {
+    for (const bad of [undefined, null, '', 'garbage', 12345]) {
+        const env = loadImpl();
+        env.window.fetch = () => jsonResponse(200, fixture('healthy'));
+        await env.api.refresh();
+        const p = fixture('stale');
+        if (bad === undefined) delete p.generatedAt; else p.generatedAt = bad;
+        env.window.fetch = () => jsonResponse(200, p);
+        await env.api.refresh();
+        assert.equal(machineCard(env, 'm1mini').getAttribute('data-cicd-status'), 'ONLINE', 'last good kept for ' + String(bad));
+        assert.ok(env.el.querySelector('[data-cicd-update-failed]'), 'badge for generatedAt=' + String(bad));
+    }
+});
+
+test('refresh: missing generatedAt with NO prior render shows CI DATA UNAVAILABLE, no machines (XACA-1388-013)', async () => {
+    const env = loadImpl();
+    const p = fixture('healthy');
+    delete p.generatedAt;
+    env.window.fetch = () => jsonResponse(200, p);
+    await env.api.refresh();
+    assert.equal(env.el.querySelectorAll('[data-cicd-machine]').length, 0);
+    assert.ok(/CI DATA UNAVAILABLE/.test(env.el.textContent));
+});
+
+// 014: offline elapsed anchored to lastReportAt
+test('render offline: last-known BUSY elapsed is anchored to lastReportAt, not generatedAt (XACA-1388-014)', () => {
+    const env = loadImpl();
+    const d = fixture('offline');
+    // positive case: job started 100s before the machine's last report
+    d.machines[0].runners[0].currentJob.startedAt = offsetIso(d.machines[0].lastReportAt, 100);
+    env.api.render(d, env.el);
+    const row = env.el.querySelector('[data-cicd-runner="m1mini-linux-1"]');
+    assert.ok(/1m 40s/.test(normText(row)), 'elapsed = lastReportAt - startedAt: ' + normText(row));
+    // and it does not grow when generatedAt moves on
+    d.generatedAt = '2026-10-03T17:00:00Z';
+    env.api.render(d, env.el);
+    assert.ok(/1m 40s/.test(normText(env.el.querySelector('[data-cicd-runner="m1mini-linux-1"]'))), 'unchanged a day later');
+});
+
+test('render offline: startedAt after lastReportAt (shipped fixture) renders an em dash, never a negative/huge elapsed (XACA-1388-014)', () => {
+    const d = fixture('offline');
+    assert.ok(Date.parse(d.machines[0].runners[0].currentJob.startedAt) > Date.parse(d.machines[0].lastReportAt), 'fixture precondition');
+    const env = renderFixture('offline');
+    const job = env.el.querySelector('[data-cicd-runner="m1mini-linux-1"] .cicd-runner-job');
+    assert.ok(job.querySelector('.cicd-val .cicd-null'), 'elapsed is the em dash');
+    assert.ok(!/(^|\s)-\d/.test(normText(job)), 'no negative duration');
+});
+
+test('render healthy: BUSY elapsed on an ONLINE machine still uses generatedAt (XACA-1388-014)', () => {
+    const env = renderFixture('healthy');
+    const row = env.el.querySelector('[data-cicd-status="BUSY"]');
+    assert.ok(row && row.querySelector('.cicd-val') && !row.querySelector('.cicd-val .cicd-null'), 'healthy busy row has a real elapsed');
+});
+
+// 015: degraded wording
+test('degradedReasons wording: offline vs unknown runner (XACA-1388-015)', () => {
+    const noteOf = (svc) => {
+        const env = loadImpl();
+        const d = fixture('healthy');
+        d.machines[0].runners[1].service = svc;
+        env.api.render(d, env.el);
+        const card = machineCard(env, 'm1mini');
+        assert.equal(card.getAttribute('data-cicd-status'), 'DEGRADED');
+        return normText(card.querySelector('.cicd-stale-note'));
+    };
+    assert.equal(noteOf('offline'), 'runner offline');
+    assert.equal(noteOf('unknown'), 'runner status unknown');
+    assert.equal(noteOf(null), 'runner status unknown');
+    // both present -> both reasons, each once
+    const env = loadImpl();
+    const d = fixture('healthy');
+    d.machines[0].runners[0].service = 'offline';
+    d.machines[0].runners[1].service = 'unknown';
+    d.machines[0].runners[2].service = 'offline';
+    env.api.render(d, env.el);
+    assert.equal(normText(machineCard(env, 'm1mini').querySelector('.cicd-stale-note')), 'runner offline, runner status unknown');
+});
+
+// 016: focus keys
+test('focus keys: same runner name on two machines gets distinct keys and focus survives re-render (XACA-1388-016)', () => {
+    const env = loadImpl();
+    const mk = (machine) => mkMachine({ machine, runners: [{ name: 'runner-1', os: 'Linux', service: 'online', busy: true, currentJob: busyJob() }] });
+    const d = { schemaVersion: 1, generatedAt: '2026-10-02T17:00:00Z', machines: [mk('alpha'), mk('beta')] };
+    env.api.render(d, env.el);
+    const keys = Array.from(env.el.querySelectorAll('.cicd-runner-job [data-cicd-focus]')).map(n => n.getAttribute('data-cicd-focus'));
+    assert.equal(keys.length, 2);
+    assert.equal(new Set(keys).size, 2, 'keys are unique across machines: ' + keys.join(','));
+    assert.ok(keys.every(k => /alpha|beta/.test(k)), 'machine is part of the key');
+    const second = env.el.querySelectorAll('.cicd-runner-job a')[1];
+    second.focus();
+    assert.equal(env.document.activeElement, second);
+    env.api.render(d, env.el);
+    const active = env.document.activeElement;
+    assert.equal(active.getAttribute('data-cicd-focus'), keys[1]);
+    assert.equal(active.closest('[data-cicd-machine]').getAttribute('data-cicd-machine'), 'beta', 'focus stays on beta, not alpha');
+});
+
+test('focus keys: id-less jobs fall back to row index, never "job:undefined" (XACA-1388-016)', () => {
+    const env = loadImpl();
+    const mkJob = (t) => { const j = busyJob({ startedAt: t, runUrl: 'https://github.com/o/r/actions/runs/9' }); delete j.id; delete j.jobUrl; return j; };
+    const d = { schemaVersion: 1, generatedAt: '2026-10-02T17:00:00Z',
+        machines: [mkMachine({ recentJobs: [mkJob('2026-10-02T16:00:00Z'), mkJob('2026-10-02T16:10:00Z')] })] };
+    env.api.render(d, env.el);
+    const links = env.el.querySelectorAll('.cicd-jobs a[data-cicd-focus]');
+    assert.equal(links.length, 2);
+    const keys = Array.from(links).map(n => n.getAttribute('data-cicd-focus'));
+    assert.ok(keys.every(k => !/undefined/.test(k)), 'no undefined key: ' + keys.join(','));
+    assert.equal(new Set(keys).size, 2, 'keys unique');
+    links[1].focus();
+    env.api.render(d, env.el);
+    assert.equal(env.document.activeElement.getAttribute('data-cicd-focus'), keys[1], 'focus restored to the second id-less job');
+});
+
+// Minimal CSS reader: flat list of {sel:[...], decls:{}, media:string|null}; one @media level is walked.
+function cssRules(text) {
+    text = text.replace(/\/\*[\s\S]*?\*\//g, '');
+    const out = [];
+    (function walk(src, media) {
+        let i = 0;
+        while (i < src.length) {
+            const o = src.indexOf('{', i);
+            if (o < 0) break;
+            const head = src.slice(i, o).trim();
+            let depth = 1, j = o + 1;
+            while (j < src.length && depth) { if (src[j] === '{') depth++; else if (src[j] === '}') depth--; j++; }
+            const body = src.slice(o + 1, j - 1);
+            if (/^@media/.test(head)) walk(body, head);
+            else if (!/^@/.test(head)) {
+                const decls = {};
+                body.split(';').forEach(function (d) {
+                    const k = d.indexOf(':');
+                    if (k > 0) decls[d.slice(0, k).trim()] = d.slice(k + 1).trim();
+                });
+                out.push({ sel: head.split(',').map(s => s.trim().replace(/\s+/g, ' ')), decls, media });
+            }
+            i = j;
+        }
+    })(text, null);
+    return out;
+}
+
+// 018: narrow viewport labels + a11y header
+test('narrow viewport: cells carry data-label, header row stays in the a11y tree (XACA-1388-018)', () => {
+    const env = renderFixture('healthy');
+    const rows = env.el.querySelectorAll('[data-cicd-runner]');
+    assert.ok(rows.length > 0);
+    rows.forEach(function (row) {
+        const labels = Array.from(row.querySelectorAll('[role="cell"]')).map(c => c.getAttribute('data-label'));
+        assert.deepEqual(labels, ['RUNNER', 'OS', 'STATUS', 'UPTIME', 'CURRENT JOB / ELAPSED']);
+    });
+    assert.equal(env.el.querySelectorAll('[role="columnheader"]').length, 5);
+
+    const rules = cssRules(fs.readFileSync(DASH_CSS, 'utf8'));
+    const narrow = rules.filter(r => r.media && /max-width:\s*600px/.test(r.media));
+    const head = narrow.filter(r => r.sel.includes('.cicd-runner-head'));
+    assert.ok(head.length > 0, 'narrow rule for the header row exists');
+    head.forEach(r => assert.notEqual(r.decls.display, 'none', 'header row must not be display:none'));
+    assert.ok(head.some(r => r.decls.position === 'absolute' && r.decls.clip), 'visually hidden via the sr-only pattern');
+    const lbl = narrow.find(r => r.sel.some(s => /\.cicd-runner \[data-label\]::before/.test(s)));
+    assert.ok(lbl && /attr\(data-label\)/.test(lbl.decls.content), 'inline label via ::before attr(data-label)');
+    rules.filter(r => r.sel.some(s => /cicd-runner-head|columnheader/.test(s))).forEach(r => assert.notEqual(r.decls.display, 'none'));
+});
+
+// 017: table-driven WCAG contrast of the dimmed OFFLINE-machine runner row ---
+function hexToRgb(h) {
+    const m = /^#([0-9a-f]{6})$/i.exec(h);
+    if (!m) throw new Error('not a #rrggbb colour: ' + h);
+    return [0, 2, 4].map(i => parseInt(m[1].slice(i, i + 2), 16));
+}
+function relLum(rgb) {
+    const [r, g, b] = rgb.map(v => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); });
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+function contrast(a, b) {
+    const [hi, lo] = [relLum(a), relLum(b)].sort((x, y) => y - x);
+    return (hi + 0.05) / (lo + 0.05);
+}
+function mix(fg, bg, a) { return fg.map((v, i) => a * v + (1 - a) * bg[i]); }
+
+// Resolve `prop` for an ordered list of selectors (later entry = higher cascade
+// priority); within one selector the last matching declaration in the file wins.
+function resolveProp(rules, selectors, prop) {
+    let val = null;
+    selectors.forEach(function (sel) {
+        rules.filter(r => !r.media && r.sel.includes(sel) && r.decls[prop] !== undefined).forEach(r => { val = r.decls[prop]; });
+    });
+    if (val === null) throw new Error('no ' + prop + ' for ' + selectors.join(' | '));
+    return val;
+}
+function resolveColor(val, tokens) {
+    let m;
+    while ((m = /^var\((--[\w-]+)\)$/.exec(val))) {
+        if (!(m[1] in tokens)) throw new Error('unknown token ' + m[1]);
+        val = tokens[m[1]];
+    }
+    return hexToRgb(val);
+}
+
+// Variant table: [name, fg selectors (cascade order), bg selectors or null (= row bg), bg prop].
+const DIMMED_VARIANTS = [
+    ['OFFLINE badge',            ['.status-badge', '.status-badge.offline'], ['.status-badge.offline'], 'background'],
+    ['IDLE badge',               ['.status-badge', '.status-badge.idle'],    ['.status-badge.idle'], 'background'],
+    ['BUSY badge',               ['.status-badge', '.status-badge.online'],  ['.status-badge.online'], 'background'],
+    ['name/OS/uptime text',      ['.cicd-runner', '.cicd-runner.dimmed'],    null],
+    ['.cicd-sub (last known)',   ['.cicd-sub', '.cicd-runner.dimmed .cicd-sub'], null],
+    ['.cicd-null em dash',       ['.cicd-null', '.cicd-runner.dimmed .cicd-null'], null],
+    ['.cicd-val elapsed',        ['.cicd-val', '.cicd-runner.dimmed .cicd-val'], null],
+    ['LOG link',                 ['.cicd-link'], null],
+    ['narrow inline label',      ['.cicd-runner [data-label]::before'], null]
+];
+
+function dimmedRowContrast(dashCss, themeCss) {
+    const theme = cssRules(themeCss);
+    const tokens = {};
+    theme.filter(r => !r.media && r.sel.includes(':root')).forEach(r => Object.assign(tokens, r.decls));
+    // The ::before label rule lives inside the narrow @media; treat it as unconditional here.
+    const flat = cssRules(dashCss).map(r => Object.assign({}, r, { media: r.media && /max-width:\s*600px/.test(r.media) ? null : r.media }));
+    const all = theme.concat(flat);
+    const dimRule = flat.filter(r => r.sel.includes('.cicd-runner.dimmed') && r.decls.opacity !== undefined).pop();
+    const op = dimRule ? parseFloat(dimRule.decls.opacity) : 1;
+    const card = resolveColor(resolveProp(all, ['.cicd-machine'], 'background'), tokens);
+    const rowBg = resolveColor(resolveProp(all, ['.cicd-runner'], 'background'), tokens);
+    return DIMMED_VARIANTS.map(function (v) {
+        const fg = resolveColor(resolveProp(all, v[1], 'color'), tokens);
+        const bg = v[2] ? resolveColor(resolveProp(all, v[2], v[3]), tokens) : rowBg;
+        // Group opacity composites glyph pixels AND background pixels with what is behind the row.
+        const ratio = contrast(mix(fg, card, op), mix(bg, card, op));
+        return { name: v[0], ratio, pass: ratio >= 4.5 };
+    });
+}
+
+test('contrast math sanity: black/white 21:1, identical 1:1', () => {
+    assert.ok(Math.abs(contrast([0, 0, 0], [255, 255, 255]) - 21) < 1e-9);
+    assert.ok(Math.abs(contrast([10, 20, 30], [10, 20, 30]) - 1) < 1e-9);
+});
+
+test('dimmed OFFLINE-machine runner row: every text variant is >= 4.5:1 (WCAG 1.4.3) (XACA-1388-017)', () => {
+    const results = dimmedRowContrast(fs.readFileSync(DASH_CSS, 'utf8'), fs.readFileSync(THEME_CSS, 'utf8'));
+    assert.equal(results.length, DIMMED_VARIANTS.length);
+    results.forEach(r => assert.ok(r.pass, r.name + ' = ' + r.ratio.toFixed(2) + ':1 (< 4.5)'));
+    console.log('CONTRAST ' + results.map(r => r.name + '=' + r.ratio.toFixed(2)).join(' | '));
+});
+
+test('dimmed row contrast checker NEGATIVE CONTROL: reintroducing opacity:0.65 fails the OFFLINE and IDLE badges (XACA-1388-017)', () => {
+    const css = fs.readFileSync(DASH_CSS, 'utf8') + '\n.cicd-runner.dimmed { opacity: 0.65; }\n';
+    const results = dimmedRowContrast(css, fs.readFileSync(THEME_CSS, 'utf8'));
+    const by = Object.fromEntries(results.map(r => [r.name, r]));
+    assert.equal(by['OFFLINE badge'].pass, false, 'OFFLINE badge must fail under opacity: ' + by['OFFLINE badge'].ratio.toFixed(2));
+    assert.ok(Math.abs(by['OFFLINE badge'].ratio - 3.74) < 0.1, 'matches the measured 3.74:1: ' + by['OFFLINE badge'].ratio.toFixed(2));
+    assert.equal(by['IDLE badge'].pass, false);
+    assert.ok(results.some(r => !r.pass));
+});
+
+test('dimmed row contrast checker NEGATIVE CONTROL: a known low-contrast colour token fails (XACA-1388-017)', () => {
+    const css = fs.readFileSync(DASH_CSS, 'utf8') + '\n.cicd-runner.dimmed { color: var(--lcars-dark); }\n';
+    const results = dimmedRowContrast(css, fs.readFileSync(THEME_CSS, 'utf8'));
+    assert.equal(results.find(r => r.name === 'name/OS/uptime text').pass, false);
+});
+
+test('dimmed rows: no group opacity anywhere on .cicd-runner (XACA-1388-017)', () => {
+    cssRules(fs.readFileSync(DASH_CSS, 'utf8')).filter(r => r.sel.some(s => /^\.cicd-runner(\.dimmed)?$/.test(s)))
+        .forEach(r => assert.equal(r.decls.opacity, undefined, 'opacity on ' + r.sel.join(',')));
+});

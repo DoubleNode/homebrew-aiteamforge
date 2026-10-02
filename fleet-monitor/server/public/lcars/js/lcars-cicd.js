@@ -174,8 +174,9 @@
         var offline = isNum(offlineAfterSeconds) ? offlineAfterSeconds : DEFAULT_OFFLINE_AFTER;
         var m = machine || {};
         var age = secondsBetween(generatedAt, m.lastReportAt);
-        // No (or unparseable) report time: we have no evidence of life.
-        if (isNaN(age)) return 'OFFLINE';
+        // A timestamp we cannot parse is missing evidence, not evidence of death:
+        // UNKNOWN (neutral), never OFFLINE (red).
+        if (isNaN(age)) return 'UNKNOWN';
         if (age > offline) return 'OFFLINE';
         if (age > stale) return 'STALE';
         if (degradedReasons(m).length) return 'DEGRADED';
@@ -185,12 +186,15 @@
     function degradedReasons(m) {
         var reasons = [];
         var runners = Array.isArray(m.runners) ? m.runners : [];
+        var sawOffline = false;
+        var sawUnknown = false;
         for (var i = 0; i < runners.length; i++) {
-            if (!runners[i] || runners[i].service !== 'online') {
-                reasons.push('runner offline');
-                break;
-            }
+            var svc = runners[i] ? runners[i].service : undefined;
+            if (svc === 'online') continue;
+            if (svc === 'offline') sawOffline = true; else sawUnknown = true;
         }
+        if (sawOffline) reasons.push('runner offline');
+        if (sawUnknown) reasons.push('runner status unknown');
         if (m.vm && m.vm.status !== 'Running') reasons.push('VM stopped');
         return reasons;
     }
@@ -296,17 +300,22 @@
         return '<span class="status-badge ' + cls + '">' + status + '</span>';
     }
 
-    function runnerRowHtml(r, data, lastKnown) {
+    function runnerRowHtml(r, data, lastKnown, machine) {
         var name = r && r.name != null ? r.name : '';
+        var machineName = machine && machine.machine != null ? machine.machine : '';
         var status = deriveRunnerStatus(r);
         var cj = r && r.currentJob;
+        var anchor = lastKnown && machine ? machine.lastReportAt : data.generatedAt;
+
         var jobCell;
         if (status === 'BUSY' && cj) {
-            var elapsed = secondsBetween(data.generatedAt, cj.startedAt);
+            // OFFLINE machine: the clock stopped at its last report; anchoring to
+            // generatedAt would grow the "elapsed" forever. Negative -> dash.
+            var elapsed = secondsBetween(anchor, cj.startedAt);
             var jobLabel = cj.job != null ? cj.job : cj.workflow;
             jobCell = esc(jobLabel) + ' <span class="cicd-sub">' + esc(cj.branch != null ? cj.branch : '') + '</span> ' +
                 '<span class="cicd-val">' + durHtml(elapsed) + '</span> ' +
-                logLinkHtml(cj, jobLabel, 'LOG', 'runner:' + name);
+                logLinkHtml(cj, jobLabel, 'LOG', 'runner:' + machineName + ':' + name);
         } else {
             jobCell = dashHtml();
         }
@@ -314,11 +323,11 @@
         return '<div class="cicd-runner' + (lastKnown ? ' dimmed' : '') + '" role="row"' +
             ' data-cicd-runner="' + esc(name) + '" data-cicd-status="' + status + '"' +
             (lastKnown ? ' data-cicd-last-known="true"' : '') + '>' +
-            '<div role="cell" class="cicd-runner-name">' + esc(name) + '</div>' +
-            '<div role="cell">' + esc(r && r.os != null ? r.os : '') + '</div>' +
-            '<div role="cell">' + runnerStatusHtml(status) + '</div>' +
-            '<div role="cell">' + durHtml(r ? r.uptimeSeconds : null) + '</div>' +
-            '<div role="cell" class="cicd-runner-job">' + jobCell + '</div>' +
+            '<div role="cell" class="cicd-runner-name" data-label="RUNNER">' + esc(name) + '</div>' +
+            '<div role="cell" data-label="OS">' + esc(r && r.os != null ? r.os : '') + '</div>' +
+            '<div role="cell" data-label="STATUS">' + runnerStatusHtml(status) + '</div>' +
+            '<div role="cell" data-label="UPTIME">' + durHtml(r ? r.uptimeSeconds : null) + '</div>' +
+            '<div role="cell" class="cicd-runner-job" data-label="CURRENT JOB / ELAPSED">' + jobCell + '</div>' +
             '</div>';
     }
 
@@ -326,11 +335,15 @@
         m = m || {};
         var status = deriveMachineStatus(m, data.generatedAt, data.staleAfterSeconds, data.offlineAfterSeconds);
         var badgeCls = { ONLINE: 'online', DEGRADED: 'warning', STALE: 'warning cicd-stale', OFFLINE: 'offline' }[status];
+        var badgeHtml = status === 'UNKNOWN'
+            ? '<span class="cicd-pill unknown">UNKNOWN</span>'
+            : '<span class="status-badge ' + badgeCls + '">' + status + '</span>';
         var name = m.machine != null ? m.machine : '';
         var age = secondsBetween(data.generatedAt, m.lastReportAt);
 
         var note = '';
         if (status === 'DEGRADED') note = degradedReasons(m).join(', ');
+        else if (status === 'UNKNOWN') note = 'Report time unavailable - state cannot be determined';
         else if (status === 'STALE' || status === 'OFFLINE') {
             var ageText = fmtDuration(age);
             note = ageText === null ? 'no report received' : 'Last known state - no report for ' + ageText;
@@ -349,7 +362,7 @@
         var runners = Array.isArray(m.runners) ? m.runners : [];
         var lastKnown = status === 'OFFLINE';
         var rows = '';
-        for (var i = 0; i < runners.length; i++) rows += runnerRowHtml(runners[i], data, lastKnown);
+        for (var i = 0; i < runners.length; i++) rows += runnerRowHtml(runners[i], data, lastKnown, m);
         var runnersHtml = runners.length
             ? '<div class="cicd-runners" role="table" aria-label="Runners on ' + esc(name) + '">' +
               '<div class="cicd-runner cicd-runner-head" role="row">' +
@@ -362,7 +375,7 @@
             '" data-cicd-status="' + status + '">' +
             '<div class="cicd-machine-head"><span><strong>' + esc(name) + '</strong> <span class="cicd-host">' +
             esc(m.hostname) + '</span></span>' +
-            '<span class="status-badge ' + badgeCls + '">' + status + '</span></div>' +
+            badgeHtml + '</div>' +
             '<div class="cicd-machine-meta">' + meta + '</div>' +
             (note ? '<div class="cicd-stale-note">' + esc(note) + '</div>' : '') +
             runnersHtml + '</div>';
@@ -393,7 +406,7 @@
         return jobs.slice(0, MAX_JOBS_RENDERED);
     }
 
-    function jobRowHtml(j) {
+    function jobRowHtml(j, idx) {
         var label = j.job != null ? j.job : j.workflow;
         var stamp = utcStamp(j.startedAt);
         return '<tr data-cicd-job="' + esc(j.id) + '">' +
@@ -404,7 +417,7 @@
             '<td class="cicd-num">' + durHtml(j.durationSeconds) + '</td>' +
             '<td class="cicd-num">' + numOrDash(j.minutes) + '</td>' +
             '<td>' + resultHtml(j.result) + '</td>' +
-            '<td>' + logLinkHtml(j, label, 'LOG', 'job:' + j.id) + '</td></tr>';
+            '<td>' + logLinkHtml(j, label, 'LOG', 'job:' + (j.id != null ? j.id : 'idx' + idx)) + '</td></tr>';
     }
 
     function jobsHtml(jobs) {
@@ -435,7 +448,7 @@
         html += '<h3 class="cicd-subhead">MACHINES</h3>';
         if (!machines.length) {
             html += emptyStateHtml('NO CI RUNNERS REPORTING',
-                'No machine has pushed runner telemetry yet. See docs/CI_RUNNERS.md (runbook) to enroll a runner.',
+                'No machine has pushed runner telemetry yet. See docs/ci-runner-runbook.md (runbook) to enroll a runner.',
                 'data-cicd-empty');
         } else {
             html += machines.map(function(m) { return machineHtml(m, data); }).join('');
@@ -552,7 +565,8 @@
     // =========================================================================
 
     function validPayload(data) {
-        return data && typeof data === 'object' && isNum(data.schemaVersion) && data.schemaVersion >= 1;
+        return !!data && typeof data === 'object' && isNum(data.schemaVersion) && data.schemaVersion >= 1 &&
+            !isNaN(ts(data.generatedAt));
     }
 
     function doRefresh() {
