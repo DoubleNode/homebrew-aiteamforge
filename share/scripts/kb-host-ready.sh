@@ -21,7 +21,8 @@
 #                                           session-age guard).
 #   kb-host-ready.sh resume [--dry-run]    Claude auto-resume half only (XACA-1380-005).
 #                                           Needs auto_resume_claude: true. Scope =
-#                                           configured teams that are up now.
+#                                           configured teams that are up now; server
+#                                           identity = the last login's snapshot.
 #   kb-host-ready.sh status                 Read-only report. No side effects.
 #   kb-host-ready.sh check                  Validation only, zero side
 #                                           effects. The gate a human runs.
@@ -201,7 +202,7 @@ notify() {
 }
 
 usage() {
-    sed -n '2,55p' "${BASH_SOURCE[0]:-$0}" | sed 's/^# \{0,1\}//'
+    sed -n '2,56p' "${BASH_SOURCE[0]:-$0}" | sed 's/^# \{0,1\}//'
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -382,13 +383,13 @@ _hr_json_str() {
 
 _hr_write_state() {
     # $1=login_stamp_epoch $2=restore_json_summary $3=lock_status $4=lock_reason $5=exit_code
-    local stamp="$1" restore_summary="$2" lock_status="$3" lock_reason="$4" exit_code="$5" resume_summary="${6:-}"
+    local stamp="$1" restore_summary="$2" lock_status="$3" lock_reason="$4" exit_code="$5" resume_summary="${6:-}" server_snapshot="${7:-}"
     local dir tmp
     dir="$(_hr_state_dir)"
     mkdir -p "$dir" 2>/dev/null || { warn "could not create state dir $dir"; return 1; }
     tmp="$(mktemp "${dir}/.host-ready.state.XXXXXX" 2>/dev/null)" || { warn "mktemp failed for state file"; return 1; }
     STAMP="$stamp" RESTORE="$restore_summary" LOCKSTATUS="$lock_status" LOCKREASON="$lock_reason" \
-        EXITCODE="$exit_code" RESUME="$resume_summary" RESTORESRC="${_HR_LAST_RESTORE_SOURCE:-}" NOW="$(date '+%Y-%m-%dT%H:%M:%S%z')" python3 - > "$tmp" <<'PY'
+        EXITCODE="$exit_code" RESUME="$resume_summary" SRVSNAP="$server_snapshot" RESTORESRC="${_HR_LAST_RESTORE_SOURCE:-}" NOW="$(date '+%Y-%m-%dT%H:%M:%S%z')" python3 - > "$tmp" <<'PY'
 import json, os
 
 def _restore_or_raw():
@@ -409,6 +410,19 @@ def _resume_or_none():
     except ValueError as e:
         return {"parse_error": str(e)}
 
+def _snapshot_or_none():
+    # XACA-1380-025: the pre-restore tmux server identity per socket. A standalone
+    # `resume` reads it back; anything that is not a JSON object is dropped (None),
+    # which makes that resume refuse everything -- never a guessed identity.
+    raw = os.getenv("SRVSNAP")
+    if not raw:
+        return None
+    try:
+        v = json.loads(raw)
+    except ValueError:
+        return None
+    return v if isinstance(v, dict) else None
+
 doc = {
     "login_session_stamp": os.environ.get("STAMP") or None,
     "last_run_at": os.environ["NOW"],
@@ -418,6 +432,7 @@ doc = {
     "restore": _restore_or_raw(),
     "restore_source": os.environ.get("RESTORESRC") or None,
     "resume": _resume_or_none(),
+    "server_snapshot": _snapshot_or_none(),
     "lock": os.environ.get("LOCKSTATUS") or "NOT_ATTEMPTED",
     "lock_reason": os.environ.get("LOCKREASON") or None,
     "exit_code": int(os.environ.get("EXITCODE", "0")),
@@ -1668,9 +1683,24 @@ cmd_lock() {
 # the place a quoting slip types into the wrong conversation).
 #
 # Examined markers are moved to claude-live/archive/<stamp>/ so a second reboot
-# cannot resume them again. EXCEPTION: a marker whose recorded tmux server is
+# cannot resume them again. EXCEPTIONS: a marker whose recorded tmux server is
 # still the LIVE server on that socket is left in place, untouched -- that
-# window was never interrupted and its marker is the crash evidence for NEXT time.
+# window was never interrupted and its marker is the crash evidence for NEXT time;
+# and a standalone `resume` never consumes a marker of a team that is merely
+# down (team_not_restored) -- only the login path archives those (XACA-1380-029).
+#
+# XACA-1380-025 server-lifetime binding: a marker qualifies only when its
+# server_start|server_pid equals the PRE-OUTAGE server of its socket, i.e. the
+# last server the team's startup recorded in its run-marker (kb-run-marker.sh
+# tmux_server_start/pid). login snapshots those identities BEFORE restore runs
+# any startup script (which rewrites the run-markers) and persists the snapshot
+# in the state file; a standalone `resume` uses the snapshot of the last login.
+# A marker from any older lifetime (kill-window/kill-server then a restart,
+# markers left while auto-resume was off) is refused stale_server_lifetime; a
+# socket with no recorded identity is refused no_prior_server_identity.
+#
+# XACA-1380-026: the typed command is `ccc --resume-exact <uuid>`, which resumes
+# exactly that uuid or refuses -- it never falls back to --continue/--fork.
 # ─────────────────────────────────────────────────────────────────────────────
 KB_CLAUDE_LIVE_DIR="${KB_CLAUDE_LIVE_DIR:-$HOME/.aiteamforge/run/claude-live}"
 KB_HOST_READY_RESUME_BUDGET="${KB_HOST_READY_RESUME_BUDGET:-300}"
@@ -1678,14 +1708,79 @@ KB_HOST_READY_RESUME_SHELL_WAIT="${KB_HOST_READY_RESUME_SHELL_WAIT:-20}"
 _HR_STARTED_PREFIXES=""      # "<socket>\t<prefix>\n" per team THIS run started
 _HR_LAST_RESUME_SUMMARY=""   # JSON array for the state file
 
-# $1 = dry-run (0|1), $2 = stagger seconds, $3 = login_session_stamp (archive dir name)
+# XACA-1380-025: echo the per-socket identity of the last tmux server each team's
+# startup recorded, as one JSON object {"<socket>": {"start": N, "pid": N} | null}.
+# MUST run before restore starts any team (a startup rewrites its run-marker).
+# Per socket the newest recorded server (max tmux_server_start) wins: one socket
+# hosts one server at a time, so an older recorded server was gone before it.
+# null = the socket has run-markers but no complete identity, or two markers
+# disagree about the newest server -> its liveness markers are refused.
+_hr_server_snapshot() {
+    python3 - <<'PY' 2>/dev/null || printf '{}'
+import json, os, re
+SAFE = re.compile(r"^[A-Za-z0-9._-]+$")
+d = os.environ.get("KB_RUN_MARKER_DIR") or os.path.join(
+    os.path.expanduser("~"), ".aiteamforge", "run", "teams-running")
+ids = {}
+try:
+    names = sorted(os.listdir(d))
+except OSError:
+    names = []
+for n in names:
+    if not n.endswith(".json") or n.startswith(".") or ".tmp." in n:
+        continue
+    try:
+        with open(os.path.join(d, n), encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except Exception:
+        continue
+    if not isinstance(doc, dict):
+        continue
+    sock = doc.get("socket") or doc.get("team")
+    if not isinstance(sock, str) or not SAFE.match(sock) or sock.startswith("."):
+        continue
+    st, pid = doc.get("tmux_server_start"), doc.get("tmux_server_pid")
+    lst = ids.setdefault(sock, [])
+    if type(st) is int and type(pid) is int and st > 0 and pid > 0:
+        lst.append((st, pid))
+out = {}
+for sock, lst in ids.items():
+    if not lst:
+        out[sock] = None
+        continue
+    top = max(x[0] for x in lst)
+    pids = set(x[1] for x in lst if x[0] == top)
+    out[sock] = {"start": top, "pid": pids.pop()} if len(pids) == 1 else None
+print(json.dumps(out, sort_keys=True))
+PY
+}
+
+# Echo the server_snapshot persisted by the most recent login, or return 1.
+_hr_saved_server_snapshot() {
+    [ -f "$KB_HOST_READY_STATE_FILE" ] || return 1
+    STATEFILE="$KB_HOST_READY_STATE_FILE" python3 - <<'PY' 2>/dev/null
+import json, os, sys
+try:
+    with open(os.environ["STATEFILE"], encoding="utf-8") as fh:
+        v = json.load(fh).get("server_snapshot")
+except Exception:
+    sys.exit(1)
+if not isinstance(v, dict):
+    sys.exit(1)
+print(json.dumps(v, sort_keys=True))
+PY
+}
+
+# $1 = dry-run (0|1), $2 = stagger seconds, $3 = login_session_stamp (archive dir name),
+# $4 = server snapshot JSON (_hr_server_snapshot), $5 = login|standalone
 _hr_auto_resume() {
-    local dry="${1:-0}" stagger="${2:-8}" stamp="${3:-}"
+    local dry="${1:-0}" stagger="${2:-8}" stamp="${3:-}" snapshot="${4:-}" mode="${5:-login}"
     local tmux_bin
     tmux_bin="$(_hr_resolve_tmux)" || { warn "resume: tmux not found on this host — nothing resumed"; return 0; }
     local out_json
     out_json="$(mktemp "${TMPDIR:-/tmp}/kbhostready-resume.XXXXXX" 2>/dev/null)" || { warn "resume: mktemp failed — nothing resumed"; return 0; }
     DRY="$dry" STAGGER="$stagger" STAMP="$stamp" TMUX_BIN="$tmux_bin" OUT_JSON="$out_json" \
+        SNAPSHOT="$snapshot" MODE="$mode" \
         LIVE_DIR="$KB_CLAUDE_LIVE_DIR" CLAUDE_HOME="$HOME/.claude" \
         BUDGET="$KB_HOST_READY_RESUME_BUDGET" SHELL_WAIT="$KB_HOST_READY_RESUME_SHELL_WAIT" \
         PROBE_TIMEOUT="$KB_HOST_READY_PROBE_TIMEOUT" STARTED="$_HR_STARTED_PREFIXES" python3 - <<'PY'
@@ -1708,6 +1803,13 @@ STAGGER = _int("STAGGER", 8)
 BUDGET = _int("BUDGET", 300)
 SHELL_WAIT = _int("SHELL_WAIT", 20)
 PROBE = _int("PROBE_TIMEOUT", 3) or 3
+STANDALONE = E.get("MODE") == "standalone"
+try:
+    SNAP = json.loads(E.get("SNAPSHOT") or "{}")
+    if not isinstance(SNAP, dict):
+        SNAP = {}
+except ValueError:
+    SNAP = {}
 
 def now():
     return time.strftime("%Y-%m-%d %H:%M:%S")
@@ -1720,6 +1822,9 @@ def warn(m):
 TEXT = {
     "marker_malformed": "liveness marker is malformed or carries unsafe fields",
     "team_not_restored": "its team was not restored by this login",
+    "no_prior_server_identity": "no pre-outage tmux server identity is recorded for its socket (no run-marker with a server identity), so the marker cannot be tied to the outage",
+    "stale_server_lifetime": "the marker comes from an older tmux server lifetime, not the server that was running before the outage",
+    "window_name_unstable": "the window name is not pinned (automatic-rename / allow-rename on, or a shell name), so ccc could key it differently",
     "no_pinned_uuid": "low-confidence session (no pinned uuid)",
     "window_id_key": "window-id key cannot be proven after a restart",
     "key_mismatch": "marker key does not match the window name",
@@ -1736,6 +1841,7 @@ TEXT = {
     "send_failed": "tmux send-keys failed",
 }
 TAIL = "Window restored without Claude; resume by hand with `ccc` after checking the sidecar."
+SHELL_NAMES = ("zsh", "bash", "sh", "dash", "ksh", "fish", "tmux")   # _cc_window_key never keys these
 
 SAFE = re.compile(r"^[A-Za-z0-9._-]+$")
 UUID = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -1824,7 +1930,7 @@ def preflight(name):
             and (not uuid or UUID.match(uuid)) and pwd.startswith("/")):
         return "marker_malformed", ctx          # label stays the filename: never echo unsafe fields
     ctx["label"] = "%s:%s" % (session, wname)
-    ctx.update(sock=sock, session=session)
+    ctx.update(sock=sock, session=session, uuid=uuid)
     # (1) the marker must come from a DEAD server. Checked FIRST so a marker
     # belonging to a window that was never interrupted is never consumed,
     # whatever its team's restore outcome was.
@@ -1835,6 +1941,12 @@ def preflight(name):
             return "LIVE", ctx
     if not team_started(sock, session):
         return "team_not_restored", ctx
+    # XACA-1380-025: bind the marker to the PRE-OUTAGE server of its socket.
+    ident = SNAP.get(sock)
+    if not isinstance(ident, dict) or "start" not in ident or "pid" not in ident:
+        return "no_prior_server_identity", ctx
+    if [sstart, spid] != [str(ident["start"]), str(ident["pid"])]:
+        return "stale_server_lifetime", ctx
     if not uuid:
         return "no_pinned_uuid", ctx
     if re.search(r"-w@[0-9]+$", name):
@@ -1869,13 +1981,14 @@ def preflight(name):
     if not os.path.isdir(pwd):
         return "pwd_missing", ctx
     rc, out = tm(sock, "list-windows", "-a", "-F",
-                 "#{session_name}\t#{window_id}\t#{pane_id}\t#{@cc_window_key}\t#{window_name}")
+                 "#{session_name}\t#{window_id}\t#{pane_id}\t#{allow-rename}\t#{@cc_window_key}\t#{window_name}")
     hits = []
     if rc == 0:
         for ln in out.splitlines():
-            p = ln.split("\t", 4)
-            if len(p) != 5:
+            p = ln.split("\t", 5)
+            if len(p) != 6:
                 continue
+            p = [p[0], p[1], p[2], p[4], p[5], p[3]]   # -> session, wid, pane, stamp, name, allow-rename
             eff = p[3] if p[3] else p[4]
             # Same-named windows in OTHER sessions are legitimate since the key is
             # session-qualified (XACA-1074-021); only this marker's session competes.
@@ -1886,6 +1999,15 @@ def preflight(name):
     if len(hits) == 0 or hits[0][0] != session:
         return "window_not_found", ctx
     ctx["pane"] = hits[0][2]
+    # XACA-1380-026 defence in depth (the typed `ccc --resume-exact` already fails closed):
+    # with no @cc_window_key stamp, in-pane ccc derives the key from the window NAME only when
+    # it is explicit (window-local automatic-rename off), allow-rename is 0, and it is not a
+    # shell name -- exactly _cc_window_key's rule. Refuse a window where that would not hold.
+    if not hits[0][3]:
+        rc, auto = tm(sock, "show-options", "-w", "-v", "-q", "-t", hits[0][1], "automatic-rename")
+        if (rc != 0 or auto.strip() != "off" or hits[0][5].strip() != "0"
+                or hits[0][4] in SHELL_NAMES):
+            return "window_name_unstable", ctx
     # (9) pane at a shell prompt, polled up to SHELL_WAIT (once in dry-run).
     end = time.time() + (0 if DRY else SHELL_WAIT)
     while True:
@@ -1907,25 +2029,40 @@ for name in names:
         results.append({"window": ctx["label"], "marker": name, "outcome": "skipped_live", "reason": "server_still_live"})
         continue
     if reason is not None:
+        if STANDALONE and reason == "team_not_restored":
+            # XACA-1380-029: a team that is merely down keeps its marker (crash evidence
+            # for the login that restores it); only the login path consumes those.
+            warn("resume: REFUSED %s (%s) — its team is not up now; marker left in place for the login that restores it. %s" % (ctx["label"], name, TAIL))
+            results.append({"window": ctx["label"], "marker": name, "outcome": "refused", "reason": reason})
+            continue
         warn("resume: REFUSED %s (%s) — %s. %s" % (ctx["label"], name, TEXT[reason], TAIL))
         results.append({"window": ctx["label"], "marker": name, "outcome": "refused", "reason": reason})
         archive.append(name)
         continue
+    cmd = "ccc --resume-exact " + ctx["uuid"]
     if DRY:
-        log("resume --dry-run: would send 'ccc' to %s (pane %s, marker %s)" % (ctx["label"], ctx["pane"], name))
+        log("resume --dry-run: would send '%s' to %s (pane %s, marker %s)" % (cmd, ctx["label"], ctx["pane"], name))
         results.append({"window": ctx["label"], "marker": name, "outcome": "would_send"})
         continue
     if last_send is not None:
         wait = STAGGER - (time.time() - last_send)
         if wait > 0:
             time.sleep(wait)
-    rc, _ = tm(ctx["sock"], "send-keys", "-t", ctx["pane"], "ccc", "Enter")
+    # XACA-1380-027: the pane was checked before the stagger sleep; re-check it right
+    # before typing so a pane that left its shell meanwhile is never typed into.
+    rc, out = tm(ctx["sock"], "display-message", "-p", "-t", ctx["pane"], "#{pane_current_command}")
+    if rc != 0 or out.strip() not in SHELLS:
+        warn("resume: REFUSED %s (%s) — %s (re-checked right before sending). %s" % (ctx["label"], name, TEXT["pane_not_at_shell"], TAIL))
+        results.append({"window": ctx["label"], "marker": name, "outcome": "refused", "reason": "pane_not_at_shell"})
+        archive.append(name)
+        continue
+    rc, _ = tm(ctx["sock"], "send-keys", "-t", ctx["pane"], cmd, "Enter")
     last_send = time.time()
     if rc != 0:
         warn("resume: REFUSED %s (%s) — %s. %s" % (ctx["label"], name, TEXT["send_failed"], TAIL))
         results.append({"window": ctx["label"], "marker": name, "outcome": "refused", "reason": "send_failed"})
     else:
-        log("resume: sent 'ccc' to %s (pane %s)" % (ctx["label"], ctx["pane"]))
+        log("resume: sent '%s' to %s (pane %s)" % (cmd, ctx["label"], ctx["pane"]))
         results.append({"window": ctx["label"], "marker": name, "outcome": "sent"})
     archive.append(name)
 
@@ -1963,6 +2100,9 @@ _hr_resume_cfg_from() {
 # this process, so "started" is unknowable; scope is every resolved, gate-passing
 # configured team that is CURRENTLY UP. Safety is unchanged (dead-server marker,
 # shell-prompt pane, every other check); it is an explicit operator action.
+# XACA-1380-025(d): the pre-outage server identity is the snapshot the most recent
+# login persisted; with none, NOTHING is resumed. XACA-1380-029: markers of a team
+# that is down are left in place (only login consumes them).
 cmd_resume() {
     local dry=0
     while [ $# -gt 0 ]; do
@@ -1983,6 +2123,11 @@ cmd_resume() {
         log "resume: auto_resume_claude is not true in ${KB_HOST_READY_CONFIG} — nothing to do"
         return 0
     fi
+    local snapshot
+    if ! snapshot="$(_hr_saved_server_snapshot)" || [ -z "$snapshot" ]; then
+        err "resume: no tmux server snapshot from a previous login in ${KB_HOST_READY_STATE_FILE} — refusing to resume ANY window (a marker cannot be tied to the outage without it). Run 'kb-host-ready.sh login --force' once, or resume by hand with ccc."
+        return 1
+    fi
     _HR_STARTED_PREFIXES=""
     local rectype f1 f2 f3 f4 f5 f6 f7 f8
     while IFS=$'\x1f' read -r rectype f1 f2 f3 f4 f5 f6 f7 f8; do
@@ -1992,7 +2137,7 @@ cmd_resume() {
             fi
         fi
     done <<< "$resolved"
-    _hr_auto_resume "$dry" "${cfg#* }" "manual-$(date +%Y%m%d%H%M%S)"
+    _hr_auto_resume "$dry" "${cfg#* }" "manual-$(date +%Y%m%d%H%M%S)" "$snapshot" standalone
     return 0
 }
 
@@ -2041,6 +2186,14 @@ cmd_login() {
         return 0
     fi
 
+    # XACA-1380-025: snapshot every team's last recorded tmux server identity BEFORE
+    # restore runs any startup script (each rewrites its run-marker with the NEW
+    # server). Taken whether or not auto-resume is on, and persisted, so a later
+    # standalone `resume` binds markers to this same pre-outage server.
+    local server_snapshot
+    server_snapshot="$(_hr_server_snapshot)"
+    [ -n "$server_snapshot" ] || server_snapshot='{}'
+
     log "login: restoring configured teams (restore before lock — locking first would race the startup scripts, §4.4)"
     _HR_LAST_RESTORE_SUMMARY=""
     cmd_restore
@@ -2068,7 +2221,7 @@ cmd_login() {
     resume_cfg="$(_hr_resume_cfg_from "$_HR_PRERESOLVED")"
     if [ "${resume_cfg%% *}" = "true" ]; then
         log "login: lock step finished — proceeding to Claude auto-resume (opt-in)"
-        _hr_auto_resume 0 "${resume_cfg#* }" "${current_epoch:-}"
+        _hr_auto_resume 0 "${resume_cfg#* }" "${current_epoch:-}" "$server_snapshot" login
     fi
     local overall_rc=0
     if [ "$restore_rc" -ne 0 ] || [ "$lock_rc" -ne 0 ]; then
@@ -2097,7 +2250,7 @@ cmd_login() {
         fi
     fi
 
-    _hr_write_state "${current_epoch:-}" "${_HR_LAST_RESTORE_SUMMARY:-}" "$lock_status" "$lock_reason" "$overall_rc" "${_HR_LAST_RESUME_SUMMARY:-}"
+    _hr_write_state "${current_epoch:-}" "${_HR_LAST_RESTORE_SUMMARY:-}" "$lock_status" "$lock_reason" "$overall_rc" "${_HR_LAST_RESUME_SUMMARY:-}" "$server_snapshot"
 
     if [ "$overall_rc" -ne 0 ]; then
         notify "kb-host-ready login finished with problems (restore_rc=$restore_rc, lock=$lock_status). See the LaunchAgent's StandardOutPath log, or run: kb-host-ready.sh status"

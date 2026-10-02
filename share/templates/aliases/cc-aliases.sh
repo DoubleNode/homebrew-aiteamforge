@@ -1125,17 +1125,69 @@ cc() {
 
 # Resume the most recent Claude session for THIS terminal
 # Uses stored session ID instead of --continue (which picks most recent globally)
+# XACA-1380-026: locate the ONE sidecar holding session uuid $1 for `ccc --resume-exact`.
+# Echoes its path; returns non-zero (with a one-line reason on stderr) unless exactly one
+# sidecar holds the uuid, its saved project dir exists, and the transcript
+# <projects>/<encoded saved dir>/<uuid>.jsonl exists. Located by uuid, NOT by this window's
+# derived key: after a restore the in-pane key can differ (automatic-rename, allow-rename,
+# SESSION_CODE, a shell-named window), and that difference must never turn into a guess.
+_cc_exact_sidecar() {
+    setopt local_options null_glob
+    local id="$1" f sid sdir hit="" hdir="" n=0 base enc_a enc_b
+    if [[ ! "$id" =~ ^[A-Za-z0-9_-]+$ ]]; then
+        print -u2 "ccc: --resume-exact: '$id' is not a session uuid — refusing"
+        return 1
+    fi
+    for f in "$HOME/.claude/terminal-sessions"/*; do
+        [[ -f "$f" ]] || continue
+        sid="" sdir=""
+        IFS='|' read -r sid _ sdir _ _ _ < "$f" 2>/dev/null
+        [[ "$sid" == "$id" ]] || continue
+        n=$((n + 1)); hit="$f"; hdir="$sdir"
+    done
+    if (( n == 0 )); then
+        print -u2 "ccc: --resume-exact ${id}: no saved session holds this uuid — refusing (no --continue fallback)"
+        return 1
+    fi
+    if (( n > 1 )); then
+        print -u2 "ccc: --resume-exact ${id}: ${n} saved sessions hold this uuid (collision) — refusing"
+        return 1
+    fi
+    if [[ -z "$hdir" || ! -d "$hdir" ]]; then
+        print -u2 "ccc: --resume-exact ${id}: its saved project dir '${hdir}' is gone — refusing"
+        return 1
+    fi
+    enc_a="${hdir//[\/ ]/-}"
+    enc_b="${hdir//[^A-Za-z0-9]/-}"
+    for base in "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" "$HOME/.claude"; do
+        if [[ -f "$base/projects/$enc_a/${id}.jsonl" || -f "$base/projects/$enc_b/${id}.jsonl" ]]; then
+            print -r -- "$hit"
+            return 0
+        fi
+    done
+    print -u2 "ccc: --resume-exact ${id}: transcript ~/.claude/projects/${enc_a}/${id}.jsonl is missing — refusing (no --continue fallback)"
+    return 1
+}
+
 ccc() {
     # XACA-1312 (design §5): argument parsing + routing + cross-account
     # guard parity with dev ccc(). A typo like `ccc --forse` must be a usage
     # error, not silent consent-absent.
-    local _ccc_force=0
+    local _ccc_force=0 _ccc_exact=""
     while (( $# )); do
         case "$1" in
             --force) _ccc_force=1; shift ;;
+            # XACA-1380-026: resume EXACTLY this uuid or refuse (never --continue/--fork).
+            --resume-exact)
+                if (( $# < 2 )) || [[ ! "$2" =~ ^[A-Za-z0-9_-]+$ ]]; then
+                    print -u2 "ccc: --resume-exact needs a session uuid"
+                    print -u2 "usage: ccc [--force] [--resume-exact <uuid>]"
+                    return 2
+                fi
+                _ccc_exact="$2"; shift 2 ;;
             *)
                 print -u2 "ccc: unknown argument '$1'"
-                print -u2 "usage: ccc [--force]"
+                print -u2 "usage: ccc [--force] [--resume-exact <uuid>]"
                 return 2
                 ;;
         esac
@@ -1182,13 +1234,26 @@ ccc() {
     window_suffix=$(_cc_window_suffix) || window_suffix=""
     local session_file="$HOME/.claude/terminal-sessions/${SESSION_CODE}${window_suffix}"
 
+    # XACA-1380-026: --resume-exact <uuid> (typed by kb-host-ready auto-resume) resumes
+    # EXACTLY that uuid or refuses. Its sidecar is found by uuid, not by this window's
+    # derived key, and nothing below may fall back to --continue for it.
+    local _ccc_restamp=1
+    if [[ -n "$_ccc_exact" ]]; then
+        local _ccc_exact_file
+        _ccc_exact_file=$(_cc_exact_sidecar "$_ccc_exact") || return 1
+        # Re-stamp only when this window's own key names that same sidecar: writing the
+        # uuid under a second key would make it a collision every later resume refuses.
+        [[ "$_ccc_exact_file" == "$session_file" ]] || _ccc_restamp=0
+        session_file="$_ccc_exact_file"
+    fi
+
     # XACA-1075: _cc_sidecar_usable fails closed (one-line notice, file left
     # alone) when the transcript is gone or a "-w@N" file cannot be proven to
     # belong to this tmux server lifetime -- falls through to --continue below.
     # (It also replaces the XACA-1074-018 phantom-sidecar self-heal that used to
     # sit here: the same transcript test now lives in the gate itself.)
-    if [[ -n "$SESSION_CODE" && -n "$window_suffix" && -f "$session_file" ]] \
-        && _cc_sidecar_usable "$session_file" "$window_suffix"; then
+    if [[ -n "$_ccc_exact" ]] || { [[ -n "$SESSION_CODE" && -n "$window_suffix" && -f "$session_file" ]] \
+        && _cc_sidecar_usable "$session_file" "$window_suffix"; }; then
         # Sidecar is "<uuid>|<name>|<project_dir>|<server_start>|<server_pid>|
         # <window_id>" -- legacy 1/2/3-field files parse with empty trailing
         # vars and still work with --resume. All 6 fields are read so the
@@ -1213,8 +1278,13 @@ ccc() {
                     echo "ccc: warning — saved project dir '$saved_dir' is gone, resuming from $PWD" >&2
                 fi
             fi
+            # XACA-1380-026: an exact resume never runs from a different cwd.
+            if [[ -n "$_ccc_exact" && "$PWD" != "$saved_dir" ]]; then
+                print -u2 "ccc: --resume-exact ${_ccc_exact}: could not cd to its saved project dir '$saved_dir' — refusing"
+                return 1
+            fi
 
-            _cc_save_session "$session_id"
+            (( _ccc_restamp )) && _cc_save_session "$session_id"
             _cc_record_session_account "$session_id" "$resolved_account_id" "$resolved_account_nickname"
 
             # XACA-1303: never-blocking resume cost warning. Optional — guarded
@@ -1234,7 +1304,9 @@ ccc() {
             # XACA-1074-018: only if claude actually left a transcript for this
             # id; re-stamping a phantom (or one that vanished) is what wedged
             # the window. Absent -> no write, any existing sidecar stays.
-            if _cc_transcript_exists "$session_id"; then
+            if (( ! _ccc_restamp )); then
+                print -u2 "ccc: --resume-exact: this window keys its sidecar as ${SESSION_CODE}${window_suffix}, not ${session_file:t}; not re-stamping"
+            elif _cc_transcript_exists "$session_id"; then
                 _cc_save_session "$session_id"
             else
                 print -u2 "ccc: XACA-1074-018: no transcript for ${session_id}; not saving it for ${SESSION_CODE}${window_suffix}"
@@ -1251,6 +1323,11 @@ ccc() {
     # XACA-1303: no resume cost warning here — no session id to locate a
     # transcript by until claude has already picked one.
     # XACA-1075: list (never adopt) unclaimed same-cwd sidecars for an explicit resume.
+    # XACA-1380-026: --resume-exact NEVER falls back to --continue / --fork-session.
+    if [[ -n "$_ccc_exact" ]]; then
+        print -u2 "ccc: --resume-exact ${_ccc_exact}: could not resume exactly that session — refusing (no --continue fallback)"
+        return 1
+    fi
     _cc_sidecar_stray_hint
     print -u2 $'\e[2m'"ccc: no saved session for this window — using --continue; billed to ${resolved_account_nickname:-default OAuth}"$'\e[0m'
     # XACA-1074-003: pin a fresh session id so the post-exit save needn't guess
