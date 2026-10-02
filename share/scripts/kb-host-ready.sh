@@ -1708,6 +1708,9 @@ cmd_lock() {
 # exactly that uuid or refuses -- it never falls back to --continue/--fork.
 # ─────────────────────────────────────────────────────────────────────────────
 KB_CLAUDE_LIVE_DIR="${KB_CLAUDE_LIVE_DIR:-$HOME/.aiteamforge/run/claude-live}"
+# claude-live/archive/<stamp>/ directories older than this many days are pruned by every
+# non-dry-run resume (login or standalone). 0 = never prune.
+KB_CLAUDE_LIVE_ARCHIVE_DAYS="${KB_CLAUDE_LIVE_ARCHIVE_DAYS:-30}"
 KB_HOST_READY_RESUME_BUDGET="${KB_HOST_READY_RESUME_BUDGET:-300}"
 KB_HOST_READY_RESUME_SHELL_WAIT="${KB_HOST_READY_RESUME_SHELL_WAIT:-20}"
 _HR_STARTED_PREFIXES=""      # "<socket>\t<prefix>\n" per team THIS run started
@@ -1786,10 +1789,10 @@ _hr_auto_resume() {
     out_json="$(mktemp "${TMPDIR:-/tmp}/kbhostready-resume.XXXXXX" 2>/dev/null)" || { warn "resume: mktemp failed — nothing resumed"; return 0; }
     DRY="$dry" STAGGER="$stagger" STAMP="$stamp" TMUX_BIN="$tmux_bin" OUT_JSON="$out_json" \
         SNAPSHOT="$snapshot" MODE="$mode" \
-        LIVE_DIR="$KB_CLAUDE_LIVE_DIR" CLAUDE_HOME="$HOME/.claude" \
+        LIVE_DIR="$KB_CLAUDE_LIVE_DIR" CLAUDE_HOME="$HOME/.claude" ARCHIVE_DAYS="$KB_CLAUDE_LIVE_ARCHIVE_DAYS" \
         BUDGET="$KB_HOST_READY_RESUME_BUDGET" SHELL_WAIT="$KB_HOST_READY_RESUME_SHELL_WAIT" \
         PROBE_TIMEOUT="$KB_HOST_READY_PROBE_TIMEOUT" STARTED="$_HR_STARTED_PREFIXES" python3 - <<'PY'
-import json, os, re, subprocess, sys, time
+import json, os, re, shutil, subprocess, sys, time
 
 E = os.environ
 DRY = E["DRY"] == "1"
@@ -1887,6 +1890,23 @@ def team_started(sock, session):
         if s == sock and (session == p or session.startswith(p + "-")):
             return True
     return False
+
+# Prune archived markers older than ARCHIVE_DAYS (never in dry-run). Only real directories
+# directly under archive/ are removed; a symlink is never followed.
+if not DRY and _int("ARCHIVE_DAYS", 30) > 0:
+    adir0 = os.path.join(LIVE, "archive")
+    cutoff = time.time() - _int("ARCHIVE_DAYS", 30) * 86400
+    pruned = 0
+    try:
+        for d in os.listdir(adir0):
+            p = os.path.join(adir0, d)
+            if os.path.isdir(p) and not os.path.islink(p) and os.path.getmtime(p) < cutoff:
+                shutil.rmtree(p, ignore_errors=True)
+                pruned += 0 if os.path.exists(p) else 1
+    except Exception:
+        pass
+    if pruned:
+        log("resume: pruned %d archived marker dir(s) older than %d days" % (pruned, _int("ARCHIVE_DAYS", 30)))
 
 results = []
 def finish():

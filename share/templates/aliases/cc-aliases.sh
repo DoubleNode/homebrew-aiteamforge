@@ -862,6 +862,8 @@ _cc_saved_session_label() {
 #     removed one silently loses the resume.
 # Removal is compare-and-delete (pane_id + shell_pid + nonce must still match),
 # so an old guardian never deletes a newer launch's marker for the same window.
+# Compare-and-delete briefly renames the marker aside, so a guardian that finds
+# its marker missing looks once more 1s later before it concludes "cleared".
 # It keys on pane id + shell pid, never on the window name, so a rename cannot
 # strand a marker. v1 markers (no guardian) are refused by the reader.
 # The guardian is exec'd (zsh closes its internal fds, incl. the tty) with
@@ -876,7 +878,12 @@ _cc_live_marker_path() {
     print -r -- "${KB_CLAUDE_LIVE_DIR:-$HOME/.aiteamforge/run/claude-live}/${SESSION_CODE}${sfx}"
 }
 
-# POSIX sh, argv: marker tmux_bin socket_path pane_id shell_pid pane_pid server_pid nonce poll_s.
+# POSIX sh, argv: marker tmux_bin socket_path pane_id shell_pid pane_pid server_pid nonce poll_s [grace_s].
+# With a 10th arg it runs in GRACE mode instead (XACA-1380-032, started by _cc_live_marker_clear on
+# claude rc 143): every poll_s for grace_s it checks that the marker is still ours AND the same server
+# answers with the pane intact and the shell alive; the first time any of that fails it exits and
+# KEEPS (shutdown under way, or a newer launch / the guardian owns it now). Still all true at the end
+# of the grace, and again 1s later -> compare-and-delete. A signal keeps.
 # No single quotes in here (the whole body is one zsh single-quoted string). It never calls
 # _cc_tmux_fmt and never makes an untargeted tmux call: one `-S <socket> list-panes -a` with the
 # socket captured at launch, looked up by the recorded pane id. Empty answer / rc != 0 / another
@@ -906,14 +913,28 @@ dec() { [ $d = 1 ] && return 0; d=1
   [ "$(st)" = gone ] || return 0
   sleep 1
   [ "$(st)" = gone ] || return 0
-  x="$m.tmp.reap.$$"
+  rp; }
+rp() { x="$m.tmp.reap.$$"
   mv -f "$m" "$x" 2>/dev/null || return 0
   if ours "$x"; then unlink "$x"; else ln "$x" "$m" 2>/dev/null; unlink "$x"; fi 2>/dev/null; }
+if [ -n "${10:-}" ]; then
+  trap keep TERM HUP INT
+  e=$(($(date +%s) + ${10}))
+  while :; do
+    ours "$m" && [ "$(st)" = alive ] || exit 0
+    [ "$(date +%s)" -lt "$e" ] || break
+    sleep "$iv" & w=$!
+    wait "$w"; w=""
+  done
+  sleep 1
+  ours "$m" && [ "$(st)" = alive ] && rp
+  exit 0
+fi
 trap keep TERM
 trap "dec; exit 0" HUP INT
 trap dec EXIT
 while kill -0 "$sp" 2>/dev/null; do
-  ours "$m" || { d=1; exit 0; }
+  ours "$m" || { sleep 1; ours "$m"; } || { d=1; exit 0; }
   sleep "$iv" & w=$!
   wait "$w"; w=""
 done
@@ -928,8 +949,8 @@ _cc_live_tmux_bin() {
 }
 
 _cc_live_marker_set() {
-    local uuid="$1" mpath dir tmp sockp sock sname wname pane ppane tbin nonce iv
-    _CC_LIVE_MARKER_PATH="" _CC_LIVE_NONCE="" _CC_LIVE_GUARD_PID=""
+    local uuid="$1" mpath dir tmp sockp sock sname wname pane ppane tbin nonce iv b4
+    _CC_LIVE_MARKER_PATH="" _CC_LIVE_NONCE="" _CC_LIVE_GUARD_PID="" _CC_LIVE_GUARD_ARGV=()
     # Every tmux read below must be about THIS pane: no TMUX_PANE -> no key -> no marker
     # (an untargeted display-message answers for the most recently active pane).
     [[ "$TMUX_PANE" =~ ^%[0-9]+$ ]] || return 0
@@ -953,10 +974,17 @@ _cc_live_marker_set() {
     if printf '2|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$uuid" "${PWD//|/ }" "${sock//|/ }" "$sname" "$wname" \
         "$_CC_LIVE_START" "$_CC_LIVE_PID" "$(date +%s)" "$pane" "$$" "$nonce" > "$tmp" 2>/dev/null \
         && mv -f "$tmp" "$mpath" 2>/dev/null; then
-        _CC_LIVE_MARKER_PATH="$mpath" _CC_LIVE_NONCE="$nonce"
-        /bin/sh -c "$_CC_LIVE_GUARD_SH" cc-live-guard "$mpath" "$tbin" "$sockp" "$pane" "$$" "$ppane" \
-            "$_CC_LIVE_PID" "$nonce" "$iv" </dev/null >/dev/null 2>&1 &!
-        _CC_LIVE_GUARD_PID=$!
+        _CC_LIVE_GUARD_ARGV=("$mpath" "$tbin" "$sockp" "$pane" "$$" "$ppane" "$_CC_LIVE_PID" "$nonce" "$iv")
+        b4="$!"
+        /bin/sh -c "$_CC_LIVE_GUARD_SH" cc-live-guard "${_CC_LIVE_GUARD_ARGV[@]}" </dev/null >/dev/null 2>&1 &!
+        if [[ "$!" =~ ^[0-9]+$ && "$!" != "$b4" && "$!" != 0 ]]; then
+            _CC_LIVE_GUARD_PID=$! _CC_LIVE_MARKER_PATH="$mpath" _CC_LIVE_NONCE="$nonce"
+        else
+            # No guardian -> no marker (an unwatched marker outlives a kill-pane). Ours: nothing else has it yet.
+            _CC_LIVE_GUARD_ARGV=()
+            unlink "$mpath" 2>/dev/null
+            print -u2 -r -- "cc: liveness guardian failed to start; this launch will not be auto-resumed after an outage"
+        fi
     else
         unlink "$tmp" 2>/dev/null
     fi
@@ -966,16 +994,32 @@ _cc_live_marker_set() {
 # Clean return: drop THIS launch's marker (the path recorded at set time, so a
 # rename while claude ran cannot strand it), only if it still carries our nonce.
 # The guardian sees the marker gone at its next poll and exits by itself.
-# $1 = claude's rc. 143 (claude SIGTERMed) KEEPS the marker: a clean OS shutdown or
-# planned restart TERMs claude while the interactive shell (which ignores TERM) runs
-# on to this line, and that conversation must resume like a power loss (measured:
-# claude 2.1.287 exits 143 on TERM, 129 on HUP, 0 on INT). The guardian stays on
-# watch, so if the shell later dies while the server lives the marker still goes.
+# $1 = claude's rc. 143 (claude SIGTERMed) keeps the marker PROVISIONALLY (XACA-1380-032):
+# a clean OS shutdown or planned restart TERMs claude while the interactive shell (which
+# ignores TERM) runs on to this line, and that conversation must resume like a power loss
+# (measured: claude 2.1.287 exits 143 on TERM, 129 on HUP, 0 on INT). But `kill <pid>`,
+# Activity Monitor Quit, pkill or a supervisor also give 143 with the shell living on, and
+# then nothing would ever remove the marker. So 143 starts a one-shot GRACE checker (the
+# guardian script in grace mode, its own process, never signalling the guardian: a pid can
+# be reused): after ${KB_CLAUDE_LIVE_GRACE_S:-20}s, if the same tmux server still answers
+# with this pane and shell intact, the machine is not going down -> compare-and-delete. A
+# real shutdown takes the server and shell down (or TERMs the checker) well within the
+# grace, so the marker stays. A new launch in this pane rewrites the nonce -> untouched.
+# The guardian stays on watch either way for shell death.
 _cc_live_marker_clear() {
-    local mpath="$_CC_LIVE_MARKER_PATH" nonce="$_CC_LIVE_NONCE" l=""
-    [[ "${1:-}" == 143 ]] && return 0
-    _CC_LIVE_MARKER_PATH="" _CC_LIVE_NONCE=""
+    local mpath="$_CC_LIVE_MARKER_PATH" nonce="$_CC_LIVE_NONCE" l="" g
+    local -a ga
+    ga=("${_CC_LIVE_GUARD_ARGV[@]}")
+    _CC_LIVE_MARKER_PATH="" _CC_LIVE_NONCE="" _CC_LIVE_GUARD_ARGV=() _CC_LIVE_GRACE_PID=""
     [[ -n "$mpath" && -n "$nonce" ]] || return 0
+    if [[ "${1:-}" == 143 ]]; then
+        (( ${#ga[@]} == 9 )) || return 0
+        g="${KB_CLAUDE_LIVE_GRACE_S:-20}"
+        [[ "$g" =~ ^[1-9][0-9]{0,2}$ ]] || g=20
+        /bin/sh -c "$_CC_LIVE_GUARD_SH" cc-live-guard "${ga[@]}" "$g" </dev/null >/dev/null 2>&1 &!
+        _CC_LIVE_GRACE_PID=$!
+        return 0
+    fi
     IFS= read -r l < "$mpath" 2>/dev/null
     [[ "${l##*|}" == "$nonce" ]] && unlink "$mpath" 2>/dev/null
     return 0
