@@ -3433,6 +3433,103 @@ def get_board_file(team: str) -> Path:
     return kanban_dir / f"{team}-board.json"
 
 
+# ---------------------------------------------------------------------------
+# XACA-1382: process-level parsed-board cache for READ-ONLY LCARS paths.
+#
+# A team board is ~10 MB (academy: 9.96 MB, ~0.14 s per json.load) and nearly
+# every GET re-parsed it. _cached_board() returns the parsed board without
+# re-parsing while the file is unchanged on disk.
+# ---------------------------------------------------------------------------
+_BOARD_CACHE: dict = {}          # str(path) -> (stat signature, parsed board)
+_BOARD_CACHE_LOCK = threading.Lock()   # guards the dict ONLY, never held across a parse
+_BOARD_CACHE_STATS = {"hits": 0, "misses": 0, "uncached": 0}
+# Per-thread write-transaction depth, set by LCARSHandler._board_write_transaction.
+_BOARD_TXN_STATE = threading.local()
+
+
+class BoardCacheInWriteTransactionError(RuntimeError):
+    """_cached_board() was called while this thread holds a board write
+    transaction (XACA-0890 / XACA-1382-004). A read-modify-write must re-read
+    the file raw under the exclusive lock; a cached read could be stale."""
+
+
+def _board_stat_sig(path):
+    """Cache key half: (st_mtime_ns, st_size, st_ino). LCARS writers use
+    tmp + rename (new inode); size/mtime catch in-place writers; the inode
+    catches a replace that happens to keep both."""
+    st = os.stat(path)
+    return (st.st_mtime_ns, st.st_size, st.st_ino)
+
+
+def _cached_board(path):
+    """Return the parsed board JSON at `path`, re-parsing only if it changed.
+
+    !! The returned object is SHARED between every request thread and is
+    !! READ-ONLY. Never mutate it (copy the sub-structure you need to change:
+    !! shallow-copy the top dict, deepcopy only the small list you edit; never
+    !! deepcopy the whole board, which costs about as much as the parse this
+    !! avoids). It must NEVER be used inside _board_write_transaction or for a
+    !! `_lock_held=True` load: those must re-read raw from disk under the
+    !! exclusive lock (XACA-0890). Calling it inside a transaction raises
+    !! BoardCacheInWriteTransactionError, and a structural test pins the call
+    !! sites (tests/test_xaca1382_board_read_cache.py).
+
+    Error behavior is exactly that of `open(path)` + `json.load`: a missing
+    file raises FileNotFoundError (and drops any stale entry), a corrupt file
+    raises json.JSONDecodeError and is never cached. Callers keep their
+    existing try/except and exists() handling.
+
+    Keyed on str(path) with a (mtime_ns, size, inode) stat signature taken
+    BEFORE the parse and again AFTER it. The result is stored only if the two
+    signatures are equal, so a torn read of an in-place writer
+    (handle_resolve_calendar_conflict truncates + rewrites) is returned to the
+    caller uncached instead of poisoning the cache. The global lock is never
+    held during the parse, so a slow parse of one team's board never blocks
+    readers of another's; two threads may parse concurrently on a cold miss,
+    which is correct (each stores only a verified-current result).
+    One entry per path, replaced on change: memory is bounded by team count.
+    """
+    if getattr(_BOARD_TXN_STATE, "depth", 0) > 0:
+        raise BoardCacheInWriteTransactionError(
+            "_cached_board() called inside _board_write_transaction; "
+            "read-modify-write paths must re-read the board raw (XACA-0890)")
+    key = str(path)
+    try:
+        sig = _board_stat_sig(path)
+    except OSError:
+        with _BOARD_CACHE_LOCK:
+            _BOARD_CACHE.pop(key, None)
+        raise
+    with _BOARD_CACHE_LOCK:
+        entry = _BOARD_CACHE.get(key)
+        if entry is not None and entry[0] == sig:
+            _BOARD_CACHE_STATS["hits"] += 1
+            return entry[1]
+        _BOARD_CACHE_STATS["misses"] += 1
+    with open(path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    try:
+        sig_after = _board_stat_sig(path)
+    except OSError:
+        sig_after = None
+    if sig_after == sig:
+        with _BOARD_CACHE_LOCK:
+            _BOARD_CACHE[key] = (sig, data)
+    else:
+        with _BOARD_CACHE_LOCK:
+            _BOARD_CACHE.pop(key, None)
+            _BOARD_CACHE_STATS["uncached"] += 1
+    return data
+
+
+def _board_cache_clear():
+    """Drop every cached board and zero the counters (tests / diagnostics)."""
+    with _BOARD_CACHE_LOCK:
+        _BOARD_CACHE.clear()
+        for k in _BOARD_CACHE_STATS:
+            _BOARD_CACHE_STATS[k] = 0
+
+
 def get_reconciled_inprogress(team: str, board_file: Path) -> list:
     """XACA-0778-005: Crash-recovery reconciliation for the Workflow tab.
 
@@ -4557,8 +4654,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         """The current team's `terminals` map, or {} when unreadable."""
         try:
             board_file = get_board_file(LCARS_TEAM)
-            with open(board_file, 'r', encoding='utf-8') as handle:
-                board = json.load(handle)
+            board = _cached_board(board_file)  # XACA-1382-003: read-only
         except (OSError, ValueError, TypeError):
             return {}
         if not isinstance(board, dict):
@@ -6485,8 +6581,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 if not board_file.exists():
                     continue
                 try:
-                    with open(board_file, 'r') as f:
-                        board_data = json.load(f)
+                    board_data = _cached_board(board_file)  # XACA-1382-003: read-only
 
                     for item in board_data.get('backlog', []):
                         ticket_links = item.get('ticketLinks', [])
@@ -6799,23 +6894,30 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         # case keeps the old unlocked-yield behavior, documented rather than
         # hidden; it is unreachable for any provisioned team.
         import fcntl
-        if not lock_file.parent.is_dir():
-            yield
-            return
-
-        with open(lock_file, 'w') as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            try:
-                # XACA-0890-022: a _DeferredResponse raised in here unwinds
-                # through this finally (lock released, fd closed) and is
-                # emitted by the caller's `except _DeferredResponse` clause —
-                # i.e. no HTTP response is ever written while this exclusive
-                # lock is held. See _DeferredResponse's docstring.
+        # XACA-1382-004: runtime guard. While this thread is inside a write
+        # transaction, _cached_board() raises (see its docstring). Depth
+        # counter, not a bool: the lock-less branch below also counts.
+        _BOARD_TXN_STATE.depth = getattr(_BOARD_TXN_STATE, "depth", 0) + 1
+        try:
+            if not lock_file.parent.is_dir():
                 yield
-            finally:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+                return
 
-    def _load_releases_config(self, team=None, _lock_held=False):
+            with open(lock_file, 'w') as lock:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+                try:
+                    # XACA-0890-022: a _DeferredResponse raised in here unwinds
+                    # through this finally (lock released, fd closed) and is
+                    # emitted by the caller's `except _DeferredResponse` clause —
+                    # i.e. no HTTP response is ever written while this exclusive
+                    # lock is held. See _DeferredResponse's docstring.
+                    yield
+                finally:
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        finally:
+            _BOARD_TXN_STATE.depth -= 1
+
+    def _load_releases_config(self, team=None, _lock_held=False, _read_only=False):
         """Load releases from kanban board file.
 
         _lock_held=True (XACA-0890 review-gate fix): the caller already holds
@@ -6824,8 +6926,21 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         actually inside that transaction is a caller bug (the read races
         unprotected). See _board_write_transaction's docstring for the full
         contract and why this split exists.
+
+        _read_only=True (XACA-1382-003): explicit per-call-site opt-in for GET
+        handlers that only DISPLAY the result. Parses through the stat-keyed
+        _cached_board() cache instead of re-reading the ~10 MB board, takes no
+        LOCK_SH (writers replace atomically, and the cache's before/after stat
+        check rejects a torn in-place write), and returns a deep copy of the
+        derived structure (releases + config only, a few KB, NEVER the whole
+        board) so callers may mutate it freely (serve_releases_list assigns
+        progress/team onto release dicts) without polluting the shared cache.
+        Mutually exclusive with _lock_held, and never valid for a caller that
+        goes on to save (XACA-0890: RMW re-reads raw under the exclusive lock).
         """
         import fcntl
+        if _read_only and _lock_held:
+            raise ValueError("_load_releases_config: _read_only and _lock_held are mutually exclusive")
         board_file = self._get_board_file(team)
 
         if not board_file.exists():
@@ -6838,8 +6953,11 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             }
 
         def _read():
-            with open(board_file, 'r') as f:
-                data = json.load(f)
+            if _read_only:
+                data = _cached_board(board_file)
+            else:
+                with open(board_file, 'r') as f:
+                    data = json.load(f)
 
             # Build releases data structure from board
             release_config = data.get('releaseConfig', self.DEFAULT_RELEASE_CONFIG)
@@ -6884,7 +7002,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 # defaultEnvironments key. Mirrors the XACA-0163 flowConfig deepcopy rationale.
                 default_environments = list(raw_envs)
 
-            return {
+            result = {
                 "version": "1.0",
                 "team": data.get('team', LCARS_TEAM),
                 "releases": data.get('releases', []),
@@ -6899,8 +7017,12 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 # teamConfig.crSupport.enabled is the sole CR source of truth (spec 3.1).
                 "crSupportEnabled": self._crsupport_enabled(data)
             }
+            if _read_only:
+                # Detach from the shared cached board (see docstring).
+                return copy.deepcopy(result)
+            return result
 
-        if _lock_held:
+        if _lock_held or _read_only:
             return _read()
 
         lock_file = board_file.with_suffix('.json.lock')
@@ -7454,8 +7576,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             board_file = get_board_file(team)
             if not board_file.exists():
                 return None
-            with open(board_file, 'r') as f:
-                board_data = json.load(f)
+            # XACA-1382-003: shared READ-ONLY board (callers only read item dicts).
+            board_data = _cached_board(board_file)
         except Exception as e:
             print(f"[LCARS] Warning: Could not load board '{team}': {e}")
             return None
@@ -7671,7 +7793,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         """
         from urllib.parse import parse_qs
         try:
-            data = self._load_releases_config()
+            data = self._load_releases_config(_read_only=True)  # XACA-1382
             releases = data.get('releases', [])
             config_team = data.get('team', LCARS_TEAM)
 
@@ -7735,7 +7857,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     def serve_release_detail(self, release_id):
         """GET /api/releases/<id> - Get release details"""
         try:
-            data = self._load_releases_config()
+            data = self._load_releases_config(_read_only=True)  # XACA-1382
             release = self._find_release_by_id(data, release_id)
 
             # XACA-0056: If not found in active releases, check archived releases
@@ -7878,8 +8000,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             # Only scan current team's board - NO cross-team operations
             board_file = get_board_file(LCARS_TEAM)
             if board_file.exists():
-                with open(board_file, 'r') as f:
-                    board_data = json.load(f)
+                board_data = _cached_board(board_file)  # XACA-1382-003: read-only
 
                 for item in board_data.get('backlog', []):
                     if not item.get('releaseAssignment'):
@@ -7938,7 +8059,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             from urllib.parse import parse_qs
             params = parse_qs(query_string)
             team = params.get('team', [None])[0]
-            data = self._load_releases_config(team)
+            data = self._load_releases_config(team, _read_only=True)  # XACA-1382
             # Ensure flowConfig exists with defaults
             if 'flowConfig' not in data:
                 data['flowConfig'] = {
@@ -10898,29 +11019,42 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         team = team or LCARS_TEAM
         return get_board_file(team)
 
-    def _load_board_epics(self, team=None, _lock_held=False):
+    def _load_board_epics(self, team=None, _lock_held=False, _read_only=False):
         """Load epics from the kanban board file.
 
         _lock_held=True (XACA-0890 review-gate fix): see
         _load_releases_config's docstring — identical contract, board_file
         just holds a different top-level key (`epics`) here.
+
+        _read_only=True (XACA-1382-003): same explicit opt-in, cache and
+        deep-copy-of-the-small-structure semantics as _load_releases_config
+        (here: the epics list, ~5 ms for 55 epics). Mutually exclusive with
+        _lock_held.
         """
         import fcntl
+        if _read_only and _lock_held:
+            raise ValueError("_load_board_epics: _read_only and _lock_held are mutually exclusive")
         board_file = self._get_board_file(team)
 
         if not board_file.exists():
             return {"epics": [], "nextEpicId": 1}
 
         def _read():
-            with open(board_file, 'r') as f:
-                data = json.load(f)
-            return {
+            if _read_only:
+                data = _cached_board(board_file)
+            else:
+                with open(board_file, 'r') as f:
+                    data = json.load(f)
+            result = {
                 "epics": data.get('epics', []),
                 "nextEpicId": data.get('nextEpicId', 1),
                 "team": data.get('team', team or LCARS_TEAM)
             }
+            if _read_only:
+                return copy.deepcopy(result)
+            return result
 
-        if _lock_held:
+        if _lock_held or _read_only:
             return _read()
 
         lock_file = board_file.with_suffix('.json.lock')
@@ -11164,8 +11298,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             if not board_file.exists():
                 return items
             try:
-                with open(board_file, 'r') as f:
-                    board_data = json.load(f)
+                board_data = _cached_board(board_file)  # XACA-1382-003: read-only
             except Exception as e:
                 print(f"[LCARS] Error reading {board_file}: {e}")
                 return items
@@ -11186,7 +11319,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 "status": item.get('status', 'todo'),
                 "priority": item.get('priority', 'medium'),
                 "team": LCARS_TEAM,
-                "tags": item.get('tags', []),
+                "tags": list(item.get('tags', [])),  # XACA-1382-005: detach
                 "subRepo": item.get('subRepo', '')
             })
 
@@ -11227,7 +11360,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     return
                 filter_states = set(tokens)
 
-            data = self._load_board_epics(filter_team)
+            data = self._load_board_epics(filter_team, _read_only=True)  # XACA-1382
             epics = data.get('epics', [])
 
             # XACA-0474-011: Read the team board once for the whole request and
@@ -11236,8 +11369,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             board_file = get_board_file(LCARS_TEAM)
             if board_file.exists():
                 try:
-                    with open(board_file, 'r') as f:
-                        board_data_cache = json.load(f)
+                    board_data_cache = _cached_board(board_file)  # XACA-1382-003: read-only
                 except Exception as e:
                     print(f"[LCARS] Error reading {board_file}: {e}")
 
@@ -11304,17 +11436,13 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             raw_releases = []
 
             if board_file.exists():
-                lock_file = board_file.with_suffix('.json.lock')
-                with open(lock_file, 'w') as _lock:
-                    fcntl.flock(_lock.fileno(), fcntl.LOCK_SH)
-                    try:
-                        with open(board_file, 'r') as _f:
-                            _board = json.load(_f)
-                        raw_epics = _board.get('epics', [])
-                        raw_backlog = _board.get('backlog', [])
-                        raw_releases = _board.get('releases', [])
-                    finally:
-                        fcntl.flock(_lock.fileno(), fcntl.LOCK_UN)
+                # XACA-1382-003: stat-keyed shared read replaces the LOCK_SH
+                # read (writers replace atomically; torn in-place writes are
+                # rejected by _cached_board's before/after stat check).
+                _board = _cached_board(board_file)
+                raw_epics = _board.get('epics', [])
+                raw_backlog = _board.get('backlog', [])
+                raw_releases = _board.get('releases', [])
 
             # Build an O(1) lookup: item id → raw item dict
             backlog_index = {item['id']: item for item in raw_backlog if 'id' in item}
@@ -11761,7 +11889,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         (8-key rollup dict) per STATE_CONTRACT.md §5.3.
         """
         try:
-            data = self._load_board_epics()
+            data = self._load_board_epics(_read_only=True)  # XACA-1382
             epic = self._find_epic_by_id(data, epic_id)
 
             if not epic:
@@ -11832,8 +11960,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 self._send_json_response({"success": False, "error": f"Board not found: {team}"}, 404)
                 return
 
-            with open(board_file, 'r') as f:
-                data = json.load(f)
+            data = _cached_board(board_file)  # XACA-1382-003: read-only
 
             todos = data.get('todos', [])
 
@@ -12585,8 +12712,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             board_file = get_board_file(team)
             if not board_file.exists():
                 return items
-            with open(board_file, 'r') as f:
-                data = json.load(f)
+            data = _cached_board(board_file)  # XACA-1382-003: read-only
             for t in data.get('todos', []):
                 if t.get('status') == 'completed':
                     continue
@@ -12629,8 +12755,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             board_file = get_board_file(team)
             if not board_file.exists():
                 return items
-            with open(board_file, 'r') as f:
-                data = json.load(f)
+            data = _cached_board(board_file)  # XACA-1382-003: read-only
             for item in data.get('backlog', []):
                 if item.get('status') in ('completed', 'done', 'cancelled'):
                     continue
@@ -12690,8 +12815,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             board_file = get_board_file(team)
             if not board_file.exists():
                 return items
-            with open(board_file, 'r') as f:
-                data = json.load(f)
+            data = _cached_board(board_file)  # XACA-1382-003: read-only
 
             from datetime import timezone
             today_str = now_dt.strftime('%Y-%m-%d')
@@ -12922,8 +13046,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             board_file = get_board_file(team)
             if not board_file.exists():
                 return items
-            with open(board_file, 'r') as f:
-                data = json.load(f)
+            data = _cached_board(board_file)  # XACA-1382-003: read-only
             for item in data.get('backlog', []):
                 due_date = item.get('dueDate')
                 if not due_date or due_date > today_str:
@@ -13045,8 +13168,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             board_file = get_board_file(team)
             if not board_file.exists():
                 return items
-            with open(board_file, 'r') as f:
-                data = json.load(f)
+            data = _cached_board(board_file)  # XACA-1382-003: read-only
             for release in data.get('releases', []):
                 status = release.get('status', '')
                 if status in ('archived', 'completed'):
@@ -13078,7 +13200,9 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         'status':        status,
                         'target_date':   target_date,
                         'severity':      severity,
-                        'environments':  release.get('environments', {}),
+                        # XACA-1382-005: detach from the shared cached board
+                        # (small per-release dict; never the whole board).
+                        'environments':  copy.deepcopy(release.get('environments', {})),
                     },
                 })
         except Exception as e:
@@ -13315,8 +13439,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         if not board_file.exists():
             return None  # caller converts to 404
 
-        with open(board_file, 'r') as f:
-            board_data = json.load(f)
+        board_data = _cached_board(board_file)  # XACA-1382-003: read-only
 
         backlog = board_data.get('backlog', [])
 
@@ -13634,8 +13757,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 }, indent=2).encode())
                 return
 
-            with open(board_file, 'r') as f:
-                board_data = json.load(f)
+            board_data = _cached_board(board_file)  # XACA-1382-003: read-only
 
             team = board_data.get('team', team_filter)
 
@@ -13669,7 +13791,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     "epicId": item_epic_id,
                     "type": "item",
                     "team": team,
-                    "tags": item.get('tags', []),
+                    "tags": list(item.get('tags', [])),  # XACA-1382-005: detach from cached board
                     "subitemCount": subitem_count
                 }
 
@@ -14254,14 +14376,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 if team:
                     board_file = get_board_file(team)
                     if board_file.exists():
-                        lock_file = board_file.with_suffix('.json.lock')
-                        with open(lock_file, 'w') as lock:
-                            fcntl.flock(lock.fileno(), fcntl.LOCK_SH)
-                            try:
-                                with open(board_file, 'r', encoding='utf-8') as f:
-                                    board_data = json.load(f)
-                            finally:
-                                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+                        # XACA-1382-003: cached read replaces the LOCK_SH read.
+                        board_data = _cached_board(board_file)
                         team_config = board_data.get('teamConfig', {})
                         if bool(team_config.get('crSupport', {}).get('enabled', False)):
                             for backlog_item in board_data.get('backlog', []):
@@ -14444,14 +14560,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 self._send_json_response({"exists": False, "itemId": item_id})
                 return
 
-            lock_file = board_file.with_suffix('.json.lock')
-            with open(lock_file, 'w') as lock:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_SH)
-                try:
-                    with open(board_file, 'r', encoding='utf-8') as f:
-                        board_data = json.load(f)
-                finally:
-                    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            # XACA-1382-003: cached read replaces the LOCK_SH read.
+            board_data = _cached_board(board_file)
 
             # crSupport.enabled guard — disabled teams always return exists=false
             # (no info leak about whether any CR file is present).
@@ -14604,14 +14714,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 }, status=404)
                 return
 
-            lock_file = board_file.with_suffix('.json.lock')
-            with open(lock_file, 'w') as lock:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_SH)
-                try:
-                    with open(board_file, 'r', encoding='utf-8') as f:
-                        board_data = json.load(f)
-                finally:
-                    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            # XACA-1382-003: cached read replaces the LOCK_SH read.
+            board_data = _cached_board(board_file)
 
             # crSupport.enabled guard — disabled teams always return 404
             # (same response shape as a missing CR, no info leak).
@@ -15768,8 +15872,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             board_file = get_board_file(team)
             if board_file.exists():
-                with open(board_file, 'r') as f:
-                    board_data = json.load(f)
+                board_data = _cached_board(board_file)  # XACA-1382-003: SHARED, read-only
             else:
                 board_data = {}
 
@@ -15777,7 +15880,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             # board JSON — dict.get() only uses the default when the key is ABSENT, not
             # when it's None. Cannot occur via server-written boards, but a hand-edited
             # JSON could leave teamConfig: null, which would crash setdefault().
-            team_config = board_data.get('teamConfig') or {}
+            # XACA-1382-005: this handler setdefault()s and assigns on team_config
+            # below, so detach the (tiny) teamConfig sub-dict from the shared cached
+            # board first. deepcopy of teamConfig only, never the whole board.
+            team_config = copy.deepcopy(board_data.get('teamConfig') or {})
             # Ensure crSupport key always present with default
             team_config.setdefault('crSupport', {}).setdefault('enabled', False)
             # XACA-0619: Ensure timepadSupport key always present with default (disabled)
@@ -19187,8 +19293,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 }, status=404)
                 return
 
-            with open(board_file, 'r') as f:
-                board_data = json.load(f)
+            # XACA-1382-005: get_conflicts() was audited read-only (lcars-ui/calendar/
+            # sync_service.py: iterates items/epics, builds new dicts); safe on the
+            # shared cached board.
+            board_data = _cached_board(board_file)
 
             # Get conflicts
             conflicts = _calendar_sync_service.get_conflicts(board_data)
@@ -20330,8 +20438,12 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
         if board_file.exists():
             try:
-                with open(board_file, 'r') as f:
-                    data = json.load(f)
+                # XACA-1382-005: this handler assigns branding keys and
+                # reconciledInProgress on the TOP-LEVEL dict only, so a shallow
+                # copy (O(top-level keys), not O(10 MB)) detaches those writes
+                # from the shared cached board. Nested structures stay shared
+                # and are only serialized.
+                data = dict(_cached_board(board_file))
 
                 # XACA-0460-002: hydrate missing branding from registry.json.
                 missing_branding = any(not data.get(field) for field in self._BRANDING_FIELDS)
@@ -23835,8 +23947,7 @@ end tell
         if not board_file.exists():
             return None
         try:
-            with open(board_file, 'r') as f:
-                board = json.load(f)
+            board = _cached_board(board_file)  # XACA-1382-003: read-only
             terminals = board.get('terminals', {})
             agents = set()
             for _term_name, term_info in terminals.items():
@@ -23929,8 +24040,7 @@ end tell
                 continue
 
             try:
-                with open(board_file, 'r', encoding='utf-8') as fh:
-                    board = json.load(fh)
+                board = _cached_board(board_file)  # XACA-1382-003: read-only
             except Exception:
                 continue
 

@@ -780,7 +780,9 @@ class TestServeKanbanData(unittest.TestCase):
             mock_path = MagicMock(spec=Path)
             mock_path.exists.return_value = True
             mock_gbf.return_value = mock_path
-            with patch("builtins.open", mock_open(read_data=json.dumps(board_data))):
+            # XACA-1382: serve_kanban_data reads through server._cached_board (stat-keyed),
+            # so the mock path no longer reaches builtins.open.
+            with patch("server._cached_board", return_value=board_data):
                 handler.serve_kanban_data("academy")
 
         data = _response_json(buf)
@@ -810,7 +812,9 @@ class TestServeKanbanData(unittest.TestCase):
                 mock_path = MagicMock(spec=Path)
                 mock_path.exists.return_value = True
                 mock_gbf.return_value = mock_path
-                with patch("builtins.open", mock_open(read_data=json.dumps(board_data))):
+                # XACA-1382: serve_kanban_data reads through server._cached_board (stat-keyed),
+            # so the mock path no longer reaches builtins.open.
+            with patch("server._cached_board", return_value=board_data):
                     handler.serve_kanban_data("ios")
 
         self.assertEqual(handler._response_code, 200)
@@ -821,7 +825,7 @@ class TestServeKanbanData(unittest.TestCase):
             mock_path = MagicMock(spec=Path)
             mock_path.exists.return_value = True
             mock_gbf.return_value = mock_path
-            with patch("builtins.open", mock_open(read_data="not valid json {{")):
+            with patch("server._cached_board", side_effect=json.JSONDecodeError("bad", "not valid json {{", 0)):  # XACA-1382
                 handler.serve_kanban_data("academy")
         handler.send_error.assert_called_once()
         self.assertEqual(handler.send_error.call_args.args[0], 500)
@@ -833,7 +837,9 @@ class TestServeKanbanData(unittest.TestCase):
             mock_path = MagicMock(spec=Path)
             mock_path.exists.return_value = True
             mock_gbf.return_value = mock_path
-            with patch("builtins.open", mock_open(read_data=json.dumps(board_data))):
+            # XACA-1382: serve_kanban_data reads through server._cached_board (stat-keyed),
+            # so the mock path no longer reaches builtins.open.
+            with patch("server._cached_board", return_value=board_data):
                 handler.serve_kanban_data("academy")
 
         header_map = dict(handler._headers_buffer)
