@@ -46,6 +46,7 @@ CLI (JSON on stdout, message on stderr + nonzero exit on error):
     approval_providers.py set-expected  --board FILE --cr-id ID           (board JSON on stdout)
 """
 import argparse
+import copy
 import json
 import re
 import sys
@@ -404,6 +405,163 @@ def stamp_assumed_approvals(board, now, actor="kb-cr", cr_ids=None, events=None,
                 actor, now_iso,
                 "approve --assumed (assumed-schedule; cr_approved_at=%s)" % payload["cr_approved_at"])))
     return stamped
+
+
+# -- release.cr gate feed (XACA-1349-014) ------------------------------------------------------
+
+# Canonical crState ranks (kb-cr.sh _kb_cr_state_rank). cr-closed is deliberately absent, as there.
+_CR_RANK = {"cr-drafted": 0, "cr-published": 5, "cr-submitted": 10, "cr-rejected": 11,
+            "cr-held": 12, "cr-approved": 20, "implementing": 30, "deployed-dev": 40,
+            "deployed-prod": 50, "emergency-deployed": 60, "cr-completed": 70}
+_CR_RETIRED = ("cr-closed", "cr-rejected")   # spec 8.3 step 1 / G8: one CR = one approval decision
+
+
+# Keys a CR record may carry for the SHA its approval was written for. cr-stage stamps the first one
+# (XACA-1349 QA F1); the others are tolerated spellings. The first non-empty value wins.
+_STAGE_SHA_KEYS = ("cr_stage_sha", "stage_sha", "stageSha")
+
+
+def cr_stamped_sha(cr):
+    """The SHA stamped on a CR record (see _STAGE_SHA_KEYS), or None when absent/blank/not a string."""
+    for k in _STAGE_SHA_KEYS:
+        v = cr.get(k) if isinstance(cr, dict) else None
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return None
+
+
+def _fail_closed_feed(reason, ids=(), stale=None):
+    # state None: release_gate reports "CR state is 'None', must be cr-approved" and refuses.
+    # `stale` (XACA-1349 F1) carries the distinct stale-approval reason release_gate also prints.
+    return {"state": None, "approvedAt": None, "deployWindowPlanned": None, "crIds": list(ids),
+            "crStatus": None, "cr_approved_at": None, "cr_approval_expected_at": None,
+            "stageSha": None, "approvalAssumed": False, "stamped": [], "refusals": [],
+            "staleApproval": stale, "error": reason}
+
+
+def _linked_crs(board, release):
+    """(crs, missing_ids): the board CRs linked to `release`. A CR's own releaseAssignment wins
+    (it links to AT MOST ONE release); release.linkedCRs[].crId is the mirror and counts only for a
+    CR that carries no assignment. A linkedCRs id with no CR on the board is reported as missing."""
+    rid = release.get("id")
+    by_id = {c.get("id"): c for c in (board.get("crs") or []) if isinstance(c, dict)}
+    out, seen, missing = [], set(), []
+    for cr in by_id.values():
+        ra = cr.get("releaseAssignment")
+        if isinstance(ra, dict) and ra.get("releaseId") == rid:
+            out.append(cr)
+            seen.add(cr.get("id"))
+    for ent in release.get("linkedCRs") or []:
+        cid = ent.get("crId") if isinstance(ent, dict) else ent
+        if cid in seen:
+            continue
+        cr = by_id.get(cid)
+        if cr is None:
+            missing.append(cid)
+        elif not (isinstance(cr.get("releaseAssignment"), dict)
+                  and cr["releaseAssignment"].get("releaseId")):
+            out.append(cr)
+            seen.add(cid)
+    return out, missing
+
+
+def open_linked_cr_ids(board, release):
+    """Ids of the open (not closed/rejected) CRs linked to `release`; [] on any malformation."""
+    try:
+        return [c.get("id") for c in _linked_crs(board, release)[0]
+                if c.get("crState") not in _CR_RETIRED and isinstance(c.get("id"), str)]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def release_cr_feed(board, release, now, actor="lcars-release-gate"):
+    """The `release.cr` dict release_gate reads, built from the board's CRs (XACA-1349-014).
+
+    Pure: `board` is NOT mutated (assumed approvals are stamped on a deep copy of the CRs, with the
+    SAME stamp_assumed_approvals the kb-cr sweep uses, so the gate sees what the sweep will write).
+    The caller holds the board lock and passes the board it read under it. No I/O, no shell-out.
+
+    Shape (keys release_gate reads first, then the ones the GAMMA gate will read):
+      state                 lowest-ranked crState across the linked CRs (the gate wants cr-approved,
+                            emergency-deployed, or on GAMMA exit cr-completed)
+      approvedAt            LATEST cr_approved_at; None if any CR lacks one
+      deployWindowPlanned   LATEST deploy_window_planned; None if any CR lacks one
+      crIds, crStatus (== state), cr_approved_at (== approvedAt), cr_approval_expected_at (latest
+      present), stageSha (release.stageSha.CR, else stages.CR.sha, else None), staleApproval (None, or the
+      refusal text when an approved CR's cr_stage_sha is absent/!= stageSha.CR; state is then None),
+      approvalAssumed, stamped, refusals
+
+    Fail closed: no linked CR, a linkedCRs id missing from the board, a non-dict CR, an unknown
+    crState, or ANY exception (malformed approval profile included) yields state None with an
+    `error`. It can never produce an approved state it did not read from a CR.
+    """
+    try:
+        if not isinstance(board, dict) or not isinstance(release, dict):
+            return _fail_closed_feed("board or release is not an object")
+        crs, missing = _linked_crs(board, release)
+        ids = [c.get("id") for c in crs]
+        if missing:
+            return _fail_closed_feed("linked CR(s) not found on the board: %s" % ", ".join(map(str, missing)), ids)
+        if not crs:
+            return _fail_closed_feed("no CR is linked to this release")
+        # G8: a rejected CR is closed and a re-CR links a NEW one to the same release, so retired CRs
+        # must not drag the minimum state down (or be read stale). None open = not approved.
+        crs = [c for c in crs if c.get("crState") not in _CR_RETIRED]
+        ids = [c.get("id") for c in crs]
+        if not crs:
+            return _fail_closed_feed("every CR linked to this release is closed or rejected", ids)
+        work = {"teamConfig": board.get("teamConfig"), "crs": copy.deepcopy(crs)}
+        events, refusals = [], []
+        stamped = stamp_assumed_approvals(work, now, actor=actor, cr_ids=ids, events=events,
+                                          refusals=refusals)
+        states = [c.get("crState") for c in work["crs"]]
+        ranks = [_CR_RANK.get(st, -1) if isinstance(st, str) else -1 for st in states]
+        low = min(range(len(ranks)), key=lambda i: ranks[i])
+        state = states[low] if ranks[low] >= 0 else None
+        if state is None:
+            return _fail_closed_feed("a linked CR has an unknown or missing crState", ids)
+
+        def _ts(key):
+            return [cr_ts(c, key) for c in work["crs"]]
+
+        def _latest(vals, require_all):
+            if require_all and not all(vals):
+                return None
+            parsed = [(parse_iso(v, "timestamp"), v) for v in vals if v]
+            return max(parsed, key=lambda t: t[0])[1] if parsed else None
+
+        approved = _latest(_ts("cr_approved_at"), True)
+        window = _latest([c.get("deploy_window_planned") for c in work["crs"]], True)
+        # The authoritative SHA is release.stageSha.CR (what the gate reads).
+        sha = (release.get("stageSha") or {}).get("CR") or \
+            ((release.get("stages") or {}).get("CR") or {}).get("sha")
+        # XACA-1349 QA F1: an approval is bound to the code it approved. cr-stage stamps the SHA on the
+        # CR record (cr_stage_sha); an open CR that carries an approval (rank >= cr-approved) but whose
+        # stamp is ABSENT or != release.stageSha.CR is NOT approved for the CR exit (fail closed).
+        # An ABSENT stamp failing closed is deliberate and safe: the engine is new on this branch, so
+        # there are no in-flight engine CRs without a stamp. emergency-deployed is exempt: the 13.5 path
+        # approves retroactively and never goes through cr-stage. Only while the release is at CR: the
+        # GAMMA exit asks for cr-completed, not for an approval.
+        if sha and (release.get("stage") or release.get("currentStage")) == "CR":
+            for c in work["crs"]:
+                st = c.get("crState")
+                if st == "emergency-deployed" or _CR_RANK.get(st, -1) < _CR_RANK["cr-approved"]:
+                    continue
+                stamp = cr_stamped_sha(c)
+                if stamp is None or stamp.lower() != str(sha).lower():
+                    why = ("CR %s approved SHA %s != stageSha.CR %s: close it superseded "
+                           "(kb-cr close %s --reason \"superseded by new SHA %s\") and re-run cr-stage"
+                           % (c.get("id"), (stamp[:12] if stamp else "<none stamped>"), str(sha)[:12], c.get("id"),
+                              str(sha)[:12]))
+                    return _fail_closed_feed(why, ids, stale=why)
+        return {"state": state, "approvedAt": approved, "deployWindowPlanned": window,
+                "crIds": ids, "crStatus": state, "cr_approved_at": approved,
+                "cr_approval_expected_at": _latest(_ts("cr_approval_expected_at"), False),
+                "stageSha": sha or None, "staleApproval": None,
+                "approvalAssumed": any(c.get("approval_assumed") is True for c in work["crs"]),
+                "stamped": stamped, "refusals": [list(r) for r in refusals], "error": None}
+    except Exception as e:  # noqa: BLE001 - the gate must see "not approved", whatever went wrong
+        return _fail_closed_feed("%s: %s" % (type(e).__name__, e))
 
 
 # -- CLI ----------------------------------------------------------------------

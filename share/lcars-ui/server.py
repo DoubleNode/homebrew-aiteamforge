@@ -164,11 +164,21 @@ try:
     import release_gate as _release_gate
     import release_schema as _release_schema
     import release_supersede as _release_supersede
+    import release_rollback as _release_rollback
 except ImportError as e:  # pragma: no cover
+    _release_rollback = None
     _release_gate = None
     _release_schema = None
     _release_supersede = None
     print(f"[LCARS] Warning: release_gate unavailable, release promote/regress/waiver fail closed: {e}")
+
+# CR approval providers (XACA-1349-014): feeds release.cr to the gate. Missing module = no feed =
+# the gate sees no CR state and refuses (fail closed).
+try:
+    import approval_providers as _approval_providers
+except ImportError as e:  # pragma: no cover
+    _approval_providers = None
+    print(f"[LCARS] Warning: approval_providers unavailable, release.cr feed fails closed: {e}")
 
 # Import integration providers
 try:
@@ -5206,6 +5216,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             # POST /api/releases/<id>/stages/<STAGE>/tests — the ONE writer of expected[] + tests[] (XACA-1347-004)
             release_id, _sep, tail = path[len('/api/releases/'):].partition('/stages/')
             self.handle_release_stage_tests(release_id, tail[:-len('/tests')])
+        elif path.startswith('/api/releases/') and path.endswith('/rollback-override'):
+            # POST /api/releases/<id>/rollback-override — lead-set rollback SHA (XACA-1349-004, spec 13.3)
+            release_id = path[len('/api/releases/'):-len('/rollback-override')]
+            self.handle_release_rollback_override(release_id)
         elif path.startswith('/api/releases/') and path.endswith('/new-sha'):
             # POST /api/releases/<id>/new-sha — supersede on a new commit (XACA-1347-006, spec 6.5)
             release_id = path[len('/api/releases/'):-len('/new-sha')]
@@ -8545,7 +8559,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
                 # XACA-1346: mirror the release-level stage state (board is authoritative).
                 # tests[] is deliberately NOT mirrored (large, append-only, board-only).
-                for _k in ('stage', 'stages', 'stageSha', 'rollbackSha', 'branch', 'branchBaseSha'):
+                for _k in ('stage', 'stages', 'stageSha', 'rollbackSha', 'rollbackShaSource',
+                           'rollbackShaOverride', 'branch', 'branchBaseSha'):
                     if _k in release:
                         manifest[_k] = release[_k]
 
@@ -8693,6 +8708,18 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         cs = tc.get('crSupport') if isinstance(tc, dict) else None
         return isinstance(cs, dict) and cs.get('enabled') is True
 
+    @staticmethod
+    def _crsupport_malformed(board_raw):
+        """XACA-1349-007: True when teamConfig.crSupport is PRESENT but not a usable switch (crSupport
+        not an object, or `enabled` present and not a real bool: "true", 1, null...). Absent is a
+        legitimate "CR off"; a malformed value is a config error and must not be read as "CR off",
+        because CR off lets a release skip (or leave) the CR approval gate."""
+        tc = board_raw.get('teamConfig') if isinstance(board_raw, dict) else None
+        if not isinstance(tc, dict) or 'crSupport' not in tc:
+            return False
+        cs = tc['crSupport']
+        return not isinstance(cs, dict) or ('enabled' in cs and not isinstance(cs['enabled'], bool))
+
     @classmethod
     def _cr_config_warning(cls, board_raw, flow_config):
         """XACA-1375-004 (WARN ONLY): CR support is off but flowConfig.stages.CR is still enabled.
@@ -8723,17 +8750,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     def _actor_is_lead(actor, release_config):
         """(is_lead, reason). FAILS CLOSED: releaseConfig.leads missing/empty/malformed means
         nobody is a lead. The actor is self-asserted (localhost trust model) but always recorded."""
-        leads = release_config.get('leads')
-        names = {x.strip() for x in leads if isinstance(x, str) and x.strip()} \
-            if isinstance(leads, list) else set()
-        if not names:
-            return False, ("releaseConfig.leads is missing or empty; nobody can be authorized as lead "
-                           "(fails closed)")
-        if not isinstance(actor, str) or not actor.strip():
-            return False, "an actor name is required and must be listed in releaseConfig.leads"
-        if actor.strip() not in names:
-            return False, "actor '%s' is not in releaseConfig.leads" % actor.strip()
-        return True, None
+        return _release_gate.actor_is_lead(actor, release_config)   # single shared implementation
 
     @staticmethod
     def _leads_configured(release_config):
@@ -8781,6 +8798,15 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         sha = (r.stdout or '').strip()
         return sha if r.returncode == 0 and re.fullmatch(r'[0-9a-fA-F]{7,64}', sha) else None
 
+    def _prod_tag_lookup(self, repo_root, branch, prefix, sort):
+        """XACA-1349-004: the injectable production-tag lookup (tests replace it)."""
+        return _release_rollback.git_prod_tag_lookup(repo_root, branch, prefix, sort)
+
+    def _resolve_rollback(self, release, rcfg, team):
+        """XACA-1349-004 (spec 13.3): {ok, sha, source} | {ok: False, reason}. Read-only, never raises."""
+        return _release_rollback.resolve_rollback(
+            release, rcfg, lookup=self._prod_tag_lookup, repo_root=self._release_repo_root(team))
+
     def _build_gate_context(self, release, release_id, board_raw, data, team, deploy_confirmed):
         """Read-only evaluate() context. Nothing here is invented: an item that records no
         prMerged passes prMerged=None and the gate refuses it (fails closed by design)."""
@@ -8803,7 +8829,79 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         pend = release.get('pendingSha')
         if isinstance(pend, dict) and isinstance(pend.get('sha'), str) and pend['sha']:
             ctx["branch_head"] = pend['sha']
+        # XACA-1349-014: the release.cr feed. release_gate reads release.cr (CR exit: cr-approved +
+        # approval time + deploy window; GAMMA exit: cr-completed) but nothing persists it, so it is
+        # built here from the board's CRs, with due assumed approvals stamped first by the SAME core
+        # the kb-cr sweep uses (board dict in/out, no shell-out; the caller holds the board lock).
+        # Stamped on a copy: this builder also serves dry-run previews, which must not write.
+        # Only when CR support is on (the CR checks do not exist otherwise). Fails closed in
+        # release_cr_feed, and here too if the module itself is missing.
+        if self._crsupport_enabled(board_raw):
+            try:
+                feed = _approval_providers.release_cr_feed(board_raw, release, ctx["now"])
+            except Exception as e:  # noqa: BLE001
+                feed = {"state": None, "error": "%s: %s" % (type(e).__name__, e)}
+            ctx["release_cr"] = feed
         return ctx
+
+    @staticmethod
+    def _gate_release_view(release, ctx):
+        """The release dict to hand release_gate.evaluate: `release` with `cr` replaced by the
+        built feed (shallow copy; the stored release is never touched, so nothing is persisted).
+        With no feed (CR support off) the release is returned as is."""
+        feed = ctx.pop("release_cr", None)
+        if feed is None:
+            return release          # CR support off: the CR checks do not exist
+        # Always override, even with no linked CR: nothing writes release.cr but this feed, so a
+        # stored value can only be stale or hand-planted (no linked CR = state None = refused).
+        return dict(release, cr=feed)
+
+    def _persist_assumed_approvals_before_promote(self, release_id, team):
+        """XACA-1349-014: before a NON-dryRun promote takes the board lock, let kb-cr durably stamp
+        any due assumed approval on the release's open linked CRs. kb-cr stays the single writer of
+        the board stamp AND its activity event (no Python copy of either). Returns the stamped CR ids.
+        rc 0 = stamped, rc 3 = nothing due (both fine); anything else, a timeout or a missing kb-cr
+        is logged and IGNORED: the promote never fails on it (the feed under the lock re-derives the
+        same deterministic stamp on a copy, so a skipped persist is not fail-open)."""
+        try:
+            if _approval_providers is None:
+                return []
+            board_file = self._get_board_file(team)
+            with open(board_file, 'r') as f:
+                board = json.load(f)
+            if not self._crsupport_enabled(board):
+                return []
+            release = next((r for r in board.get('releases') or []
+                            if isinstance(r, dict) and r.get('id') == release_id), None)
+            ids = _approval_providers.open_linked_cr_ids(board, release) if release else []
+            if not ids:
+                return []
+            root = Path.home() / "dev-team"
+            script = "\n".join([
+                "source %s || exit 97" % shlex.quote(str(root / 'kanban-helpers.sh')),
+                "source %s || exit 97" % shlex.quote(str(root / 'scripts' / 'kb-cr.sh')),
+                "for id in %s; do" % ' '.join(shlex.quote(i) for i in ids),
+                '  _kb_cr_stamp_assumed_approval "$id" %s >/dev/null 2>&1' % shlex.quote(str(board_file)),
+                '  echo "$id $?"',
+                "done",
+            ])
+            run_env = dict(os.environ, KB_TEAM=team, KB_TERMINAL="agent", KB_CR_ACTOR="lcars-release-gate")
+            r = subprocess.run(["zsh", "-c", script], capture_output=True, text=True, timeout=30, env=run_env)
+            stamped = []
+            for line in (r.stdout or '').splitlines():
+                cid, _, rc = line.partition(' ')
+                if rc == '0':
+                    stamped.append(cid)
+                elif rc != '3':
+                    print(f"[LCARS] WARNING: assumed-approval stamp for {cid} returned rc={rc} (ignored)")
+            if r.returncode != 0:
+                print(f"[LCARS] WARNING: assumed-approval stamping exited rc={r.returncode} (ignored)")
+            return stamped
+        except subprocess.TimeoutExpired:
+            print(f"[LCARS] WARNING: assumed-approval stamping timed out for {release_id} (ignored)")
+        except Exception as e:  # noqa: BLE001 - never fail a promote on the persist step
+            print(f"[LCARS] WARNING: assumed-approval stamping skipped for {release_id}: {e}")
+        return []
 
     def _apply_pending_sha(self, release, data, to, flow, cr_on, now, on_new_sha):
         """XACA-1347-006 (PR #1010 round 1): what a regress does with a recorded pendingSha (caller
@@ -9007,6 +9105,11 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             written = False
             noop_log = None
+            # XACA-1349-014: BEFORE the board lock (kb-cr takes it itself) let kb-cr durably stamp due
+            # assumed approvals. dryRun: no shell-out, no writes. Failures are logged and ignored.
+            persisted_stamped = [] if dry_run else self._persist_assumed_approvals_before_promote(
+                release_id, LCARS_TEAM)
+            feed_stamped = []
             with self._board_write_transaction():
                 data = self._load_releases_config(_lock_held=True)
                 release = self._find_release_by_id(data, release_id)
@@ -9043,14 +9146,15 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 is_lead, lead_reason = self._actor_is_lead(actor, rcfg)
                 ctx = self._build_gate_context(release, release_id, board_raw, data, LCARS_TEAM,
                                                confirm and is_lead)
+                feed_stamped = list((ctx.get("release_cr") or {}).get("stamped") or [])
                 cur = _release_gate.current_stage(release)
                 stranded_before = _release_gate.stranded_in_cr(release, cr_on)  # XACA-1375-018
                 order = _release_gate.enabled_stages(flow, cr_support_enabled=cr_on)
                 later = [s for s in order if _release_schema.STAGES.index(s) > _release_schema.STAGES.index(cur)]
                 nxt = later[0] if later else None
                 eff_target = target or nxt
-                verdict = _release_gate.evaluate(release, eff_target or cur, flow, cr_support_enabled=cr_on,
-                                                 actor=actor, context=ctx)
+                verdict = _release_gate.evaluate(self._gate_release_view(release, ctx), eff_target or cur, flow,
+                                                 cr_support_enabled=cr_on, actor=actor, context=ctx)
                 reasons = _release_gate.Reasons(verdict['reasons'], verdict['reasonCodes'], verdict['reasonData'])
                 # XACA-1375-013: the confirm stage is GAMMA when the team has it, else PROD.
                 _confirm_stage = _release_gate.deploy_confirm_stage(order)
@@ -9058,6 +9162,22 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     reasons.append("%s: deploy confirmation refused: %s" % (_confirm_stage, lead_reason),
                                    _release_gate.CODE_GAMMA_ACTOR_NOT_LEAD if self._leads_configured(rcfg)
                                    else _release_gate.CODE_LEADS_NOT_CONFIGURED, {"stage": _confirm_stage})
+                # XACA-1349-004 (spec 13.3): entering the production-deploy stage needs a rollback target.
+                # Resolved on dryRun too (read-only); an unresolvable SHA is a HARD refusal below.
+                rollback = None
+                if (eff_target == _confirm_stage and cur != 'PROD'
+                        and _release_schema.STAGES.index(eff_target) > _release_schema.STAGES.index(cur)):
+                    rollback = self._resolve_rollback(release, rcfg, LCARS_TEAM)
+                    if not rollback['ok']:
+                        reasons.append("%s: rollback target unknown: %s" % (eff_target, rollback['reason']),
+                                       _release_gate.CODE_ROLLBACK_SHA_UNKNOWN,
+                                       {"stage": eff_target, "releaseId": release_id})
+                # XACA-1349-007: a MALFORMED crSupport switch is not "CR off". Reading it as off would let a
+                # release leave CR (or skip it) with no approval, so every forward move is refused until fixed.
+                crsupport_malformed = self._crsupport_malformed(board_raw)
+                if crsupport_malformed:
+                    reasons.append("CR: teamConfig.crSupport is malformed (enabled must be true or false); refusing "
+                                   "to read it as 'CR support off'. Fix the team config.")
                 # A lead command can never succeed while releaseConfig.leads is missing/empty: say so as
                 # its own reason so a UI suggests configuring it instead of a command that is refused.
                 _lead_fixable = {_release_gate.CODE_GAMMA_CONFIRM_REQUIRED, _release_gate.CODE_WAIVER_NEEDED,
@@ -9073,7 +9193,9 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 hard = (eff_target is None or cur == 'PROD' or eff_target == cur
                         or eff_target not in order
                         or _release_schema.STAGES.index(eff_target) < _release_schema.STAGES.index(cur)
-                        or _release_gate.CODE_MANDATORY_STAGE_SKIPPED in reasons.codes)
+                        or _release_gate.CODE_MANDATORY_STAGE_SKIPPED in reasons.codes
+                        or _release_gate.CODE_ROLLBACK_SHA_UNKNOWN in reasons.codes
+                        or crsupport_malformed)
                 # XACA-1375: the informational CR_SUPPORT_DISABLED reason (release stranded at CR)
                 # never blocks: promote OUT of CR stays allowed in enforce mode too.
                 blocking = reasons.blocking()
@@ -9093,7 +9215,12 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         proceed = False
                 if proceed and not dry_run:
                     now = self._get_timestamp()
+                    if rollback is not None and not rollback['ok']:  # defence in depth: `hard` already refused
+                        raise _DeferredResponse.json({"error": "rollback target unknown; refusing"}, 409)
                     self._apply_stage_move(release, data, cur, eff_target, now, 'promote', cr_on)
+                    if rollback is not None:  # spec 3.2: the previous production SHA, recorded at GAMMA entry
+                        release['rollbackSha'] = rollback['sha']
+                        release['rollbackShaSource'] = rollback['source']
                     if cut:  # same locked write as the stage change
                         release['branch'] = cut['branch']
                         release['branchBaseSha'] = cut['branchBaseSha']
@@ -9113,7 +9240,13 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     "strandedInCR": stranded,
                     # XACA-1375-016: the stage whose ENTRY needs the lead's deploy confirmation (the UI
                     # keys its up-front warning off this, not a hardcoded GAMMA)
-                    "confirmStage": _confirm_stage}
+                    "confirmStage": _confirm_stage,
+                    # XACA-1349-004: the resolved rollback target (None unless entering the deploy stage)
+                    "rollbackSha": rollback['sha'] if rollback and rollback['ok'] else None,
+                    "rollbackShaSource": rollback['source'] if rollback and rollback['ok'] else None,
+                    # XACA-1349-014: CRs whose assumed approval is stamped (kb-cr persisted it before
+                    # the lock, or the gate derived it on a copy because the persist was skipped)
+                    "stamped": sorted(set(persisted_stamped) | set(feed_stamped))}
             if cfg_warning:
                 base["configWarning"] = cfg_warning
             if dry_run:
@@ -9125,7 +9258,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                          error=None if proceed and not blocking else self._reasons_error(reasons)),
                     status=200)
             logctx = dict(actor=actor, mode=mode, reasons=list(reasons), confirmDeploy=confirm,
-                          cut=cut, configWarning=cfg_warning)
+                          cut=cut, configWarning=cfg_warning,
+                          rollbackSha=base["rollbackSha"], rollbackShaSource=base["rollbackShaSource"])
             if not written:
                 self._log_release_activity(release_id, 'release_promote_refused', cur, eff_target, **logctx)
                 return self._send_json_response(
@@ -9652,6 +9786,59 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             return
         except Exception as e:
             self.send_error(500, f"Error applying new SHA: {e}")
+
+    def handle_release_rollback_override(self, release_id):
+        """POST /api/releases/<id>/rollback-override (XACA-1349-004, spec 13.3) - the sanctioned writer of
+        release.rollbackShaOverride = {sha, reason, by, at}: the lead's assertion of the current production
+        SHA for a release whose production tag cannot be determined. Body {"sha": <40hex>, "reason": str,
+        "by": lead}. 400 bad body, 403 `by` not in releaseConfig.leads, 404 unknown release, 409 release is
+        at GAMMA/PROD (the rollback target is recorded at GAMMA entry and no longer changes), 200
+        {"ok": true, "override": {...}}. Logged as release_rollback_override."""
+        try:
+            if self._gate_unavailable():
+                return
+            body, err = self._read_release_json_body()
+            if err:
+                return self._send_json_response({"error": err}, status=400)
+            sha, reason, by = body.get('sha'), body.get('reason'), body.get('by')
+            if not isinstance(sha, str) or not re.fullmatch(r'[0-9a-fA-F]{40}', sha):
+                return self._send_json_response({"error": "'sha' must be a 40-character hex string"}, status=400)
+            if not isinstance(reason, str) or not reason.strip():
+                return self._send_json_response({"error": "a non-empty 'reason' is required"}, status=400)
+            if not isinstance(by, str) or not by.strip():
+                return self._send_json_response({"error": "'by' (the lead) is required"}, status=400)
+            override = None
+            with self._board_write_transaction():
+                data = self._load_releases_config(_lock_held=True)
+                release = self._find_release_by_id(data, release_id)
+                if not release:
+                    raise _DeferredResponse.json({"error": "Release not found: %s" % release_id}, 404)
+                rcfg = self._release_cfg(self._read_board_raw_locked())
+                is_lead, lead_reason = self._actor_is_lead(by, rcfg)
+                if not is_lead:
+                    raise _DeferredResponse.json(
+                        {"error": "rollback override refused: %s" % lead_reason,
+                         "reasonCode": self._lead_reason_code(rcfg)}, 403)
+                cur = _release_gate.current_stage(release)
+                if cur in ('GAMMA', 'PROD'):
+                    raise _DeferredResponse.json(
+                        {"error": "release is at %s: its rollback target was recorded at GAMMA entry and "
+                                  "cannot be overridden now" % cur}, 409)
+                override = {"sha": sha.lower(), "reason": reason.strip(), "by": by.strip(),
+                            "at": self._get_timestamp()}
+                release['rollbackShaOverride'] = override
+                if not self._save_releases_config(data, _lock_held=True):
+                    raise _DeferredResponse.json({"error": "board write failed"}, 500)
+                snapshot = copy.deepcopy(release)
+            self._mirror_release_manifest(snapshot)
+            self._log_release_activity(release_id, 'release_rollback_override', cur, cur, actor=override['by'],
+                                       reason=override['reason'], sha=override['sha'])
+            return self._send_json_response({"ok": True, "override": override})
+        except _DeferredResponse as deferred:
+            deferred.emit(self)
+            return
+        except Exception as e:
+            self.send_error(500, f"Error setting rollback override: {e}")
 
     def handle_plan_release(self, release_id):
         """POST /api/releases/<id>/plan — send a release BACK to the PLANNED holding state.

@@ -65,10 +65,14 @@ CODE_CR_SUPPORT_DISABLED = "CR_SUPPORT_DISABLED"
 # BOTH gate modes (report mode included); other forward skips stay "refused in enforce, logged in report".
 CODE_MANDATORY_STAGE_SKIPPED = "MANDATORY_STAGE_SKIPPED"
 MANDATORY_STAGES = ("CR", "GAMMA")
+# XACA-1349-004 (spec 13.3): entering the production-deploy stage with no determinable rollback target.
+# Raised by the SERVER (it owns the git read); a HARD refusal in BOTH gate modes. The lead's remedy is
+# `kb-release rollback-override` (release.rollbackShaOverride).
+CODE_ROLLBACK_SHA_UNKNOWN = "ROLLBACK_SHA_UNKNOWN"
 REASON_CODES = (CODE_OTHER, CODE_GAMMA_CONFIRM_REQUIRED, CODE_GAMMA_ACTOR_NOT_LEAD, CODE_WAIVER_NEEDED,
                 CODE_TEST_MISSING, CODE_WAIVER_VOID_SHA, CODE_WAIVER_VOID_INVALID, CODE_WAIVER_NOT_LEAD,
                 CODE_NOT_IN_LEADS, CODE_LEADS_NOT_CONFIGURED, CODE_CR_SUPPORT_DISABLED,
-                CODE_MANDATORY_STAGE_SKIPPED)
+                CODE_MANDATORY_STAGE_SKIPPED, CODE_ROLLBACK_SHA_UNKNOWN)
 INFORMATIONAL_CODES = frozenset((CODE_CR_SUPPORT_DISABLED,))
 CR_SUPPORT_DISABLED_MSG = "CR support disabled"
 
@@ -324,6 +328,23 @@ def derive_stage_status(stage_record, tests, expected, stage=None):
     return WAIVED if WAIVED in outs else PASSED
 
 
+def actor_is_lead(actor, release_config):
+    """(is_lead, reason). THE lead check (XACA-1349): the LCARS endpoints (server._actor_is_lead
+    delegates here) and `kb-release cr-stage --skip-notify --by` share it. FAILS CLOSED:
+    releaseConfig.leads missing/empty/malformed means nobody is a lead. The actor is self-asserted
+    (localhost trust model) but always recorded."""
+    leads = release_config.get("leads") if isinstance(release_config, dict) else None
+    names = {x.strip() for x in leads if isinstance(x, str) and x.strip()} if isinstance(leads, list) else set()
+    if not names:
+        return False, ("releaseConfig.leads is missing or empty; nobody can be authorized as lead "
+                       "(fails closed)")
+    if not isinstance(actor, str) or not actor.strip():
+        return False, "an actor name is required and must be listed in releaseConfig.leads"
+    if actor.strip() not in names:
+        return False, "actor '%s' is not in releaseConfig.leads" % actor.strip()
+    return True, None
+
+
 def validate_waiver(waiver, stage_record, actor_is_lead):
     """Reasons a waiver is not acceptable ([] = valid). Lead check is the caller's fact."""
     r = Reasons()
@@ -421,6 +442,8 @@ def _exit_conditions(release, cur, cr_on, ctx):
         else:
             if state != "cr-approved":
                 r.append("CR: CR state is '%s', must be cr-approved (or emergency-deployed, spec 13.5)" % state)
+            if isinstance(cr.get("staleApproval"), str) and cr["staleApproval"]:   # XACA-1349 F1
+                r.append("CR: " + cr["staleApproval"])
             now, ap, win = _parse_ts(ctx.get("now")), _parse_ts(cr.get("approvedAt")), _parse_ts(cr.get("deployWindowPlanned"))
             if not (now and ap and win):
                 r.append("CR: cannot verify approval time / deploy window (need context.now, cr.approvedAt, cr.deployWindowPlanned)")

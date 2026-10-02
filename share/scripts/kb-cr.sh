@@ -1520,6 +1520,25 @@ _kb_cr_container_submit() {
             ;;
     esac
 
+    # XACA-1349 (F2, spec 8.1): a v2 CR is submitted only from cr-published, and only after the
+    # cr-approver notice receipt (or a recorded lead override). Legacy CRs are unchanged.
+    # Held/rejected were already refused by _kb_cr_v2_guard above (resume / never reused).
+    if _kb_cr_is_v2 "$_cr_board" "$cr_idx"; then
+        if [[ "$current_state" != "cr-published" ]]; then
+            echo "kb-cr submit: CR '$cr_id' is in state '$current_state'; a v2 CR is submitted only from cr-published (spec 8.1). Publish first: kb-release cr-stage <REL-ID>" >&2
+            return 1
+        fi
+        # Mirrors CrStage._has_receipt + the noticeOverride check in kanban-hooks/release_cr_stage.py
+        # (alias cr-approver, template cr-submitted, ok === true; override must carry reason AND by).
+        # Keep in sync with that file.
+        local _notice_ok
+        _notice_ok=$(_kb_jq_read "$_cr_board" '.crs[$i] | if (((.notices // []) | map(select(type == "object" and .alias == "cr-approver" and .template == "cr-submitted" and .ok == true)) | length) > 0) or ((.noticeOverride | type == "object") and ((.noticeOverride.reason // "") | tostring | length) > 0 and ((.noticeOverride.by // "") | tostring | length) > 0) then "yes" else "no" end' -r --argjson i "$cr_idx" 2>/dev/null)
+        if [[ "$_notice_ok" != "yes" ]]; then
+            echo "kb-cr submit: CR '$cr_id' has no successful cr-approver notice receipt (and no lead override); the approver must be notified before submit. Run: kb-release cr-stage <REL-ID> (or --skip-notify \"<reason>\" --by <lead>)" >&2
+            return 1
+        fi
+    fi
+
     local ts
     ts=$(_kb_cr_timestamp)
     _kb_cr_lifecycle_advance "$_cr_board" "$cr_idx" "$cr_id" "cr-submitted" "cr_submitted_at" "$ts" || return 1
@@ -2056,6 +2075,127 @@ _kb_cr_container_reschedule_approval() {
     echo "kb-cr reschedule-approval: [$cr_id] cr_approval_expected_at ${old:-<unset>} -> $normalized (reason: $reason)"
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# cr-record wiki page (XACA-1349-006, spec 12.2 / 3.2 GAMMA)
+#
+#   complete <CR>        publishes the cr-record page   (kb-wiki publish --doc cr-record)
+#   close <CR>           RE-publishes the SAME page     (--page-id/--stored-version; never a 2nd page)
+#   publish-record <CR>  re-run path: create-or-update from the stored handle
+#
+# Rendering + the kb-wiki call live in kanban-hooks/release_cr_record_publish.py (it never writes
+# the board). This shell owns only the locked handle write: .crs[].wikiPages["cr-record"] =
+# {pageId,url,version}. (release_cr_stage.py is adding the same accessors in parallel; consolidate.)
+#
+# FAILURE SEMANTICS (spec 8.3: a failure leaves the CR in its last good state): the state change
+# has ALREADY committed when this runs. A publish failure never undoes it; it prints a loud
+# warning with the re-run command and returns KB_CR_RECORD_FAIL_RC (6). A skip (wiki not
+# configured / cr-record not mapped / no linked release / close with no page ever published) is
+# a notice, rc 0.
+# ─────────────────────────────────────────────────────────────────────────────
+KB_CR_RECORD_FAIL_RC=6
+
+_kb_cr_record_py() {
+    local _bs _py
+    _bs=$(_kb_board_settings_script) || return 1
+    _py="$(dirname "$_bs")/release_cr_record_publish.py"
+    [[ -f "$_py" ]] || { echo "kb-cr: ERROR: missing $_py" >&2; return 1; }
+    printf '%s\n' "$_py"
+}
+
+# _kb_cr_publish_record <verb> <board> <team> <cr_id> <create-or-update|update-only>
+_kb_cr_publish_record() {
+    local verb="$1" board="$2" team="$3" cr_id="$4" mode="$5"
+    local rerun="kb-cr publish-record $cr_id"
+
+    # close: no stored page means complete never published one -> nothing to re-publish (quiet).
+    if [[ "$mode" == "update-only" ]]; then
+        local have
+        have=$(_kb_jq_read "$board" \
+            '(.crs[]? | select(.id == $id) | .wikiPages["cr-record"].pageId // "") ' \
+            --arg id "$cr_id" -r 2>/dev/null)
+        if [[ -z "$have" ]]; then
+            # XACA-1349-007: a CR that COMPLETED but whose cr-record publish failed (rc 6) has no page yet;
+            # close must write it now rather than silently drop the record. A CR that never completed
+            # (withdrawn / rejected) still has nothing to re-publish.
+            local done_at
+            done_at=$(_kb_jq_read "$board" \
+                '(.crs[]? | select(.id == $id) | (.timestamps.cr_completed_at // .cr_completed_at // ""))' \
+                --arg id "$cr_id" -r 2>/dev/null)
+            [[ -z "$done_at" ]] && return 0
+            mode="create-or-update"
+        fi
+    fi
+
+    local py verdict prc
+    py=$(_kb_cr_record_py) || {
+        echo "kb-cr $verb: WARNING: cr-record page NOT published (publisher script missing). Re-run: $rerun" >&2
+        return $KB_CR_RECORD_FAIL_RC
+    }
+    verdict=$(python3 "$py" --board "$board" --cr-id "$cr_id" --team "$team" --mode "$mode" \
+        --activity-file "$(_kb_cr_activity_path "$board" "$cr_id")")
+    prc=$?
+
+    local pr_status pr_reason
+    pr_status=$(printf '%s' "$verdict" | jq -r '.status // ""' 2>/dev/null)
+    pr_reason=$(printf '%s' "$verdict" | jq -r '.reason // ""' 2>/dev/null)
+
+    case "$pr_status" in
+        published)
+            local ts h_json
+            ts=$(_kb_cr_timestamp)
+            h_json=$(printf '%s' "$verdict" | jq -c '.handle')
+            if ! _kb_jq_update "$board" '
+                    .crs[$cidx].wikiPages = ((.crs[$cidx].wikiPages // {}) + {"cr-record": $h}) |
+                    .crs[$cidx].updatedAt = $ts | .lastUpdated = $ts
+                ' --argjson cidx "$(_kb_cr_find_container "$board" "$cr_id")" --argjson h "$h_json" --arg ts "$ts"; then
+                echo "kb-cr $verb: WARNING: cr-record page WAS published but its handle could not be stored on the CR: $h_json" >&2
+                echo "  Do NOT re-run publish-record (a second create is refused). Store it by hand, then re-run." >&2
+                return $KB_CR_RECORD_FAIL_RC
+            fi
+            echo "kb-cr $verb: cr-record page $(printf '%s' "$verdict" | jq -r '.mode') ok ($(printf '%s' "$h_json" | jq -r '.url') v$(printf '%s' "$h_json" | jq -r '.version'))"
+            return 0
+            ;;
+        skipped)
+            echo "kb-cr $verb: cr-record page skipped: $pr_reason" >&2
+            return 0
+            ;;
+        *)
+            echo "kb-cr $verb: WARNING: cr-record page NOT published: ${pr_reason:-publisher exit $prc, no verdict}" >&2
+            echo "  The CR state change was NOT undone. Re-run:  $rerun   (exit code $KB_CR_RECORD_FAIL_RC = publish failed)" >&2
+            return $KB_CR_RECORD_FAIL_RC
+            ;;
+    esac
+}
+
+# kb-cr publish-record <CR-ID> -- (re)publish the cr-record page from the stored handle.
+# Only for a CR that has reached cr-completed or cr-closed (the record is the finished history).
+_kb_cr_container_publish_record() {
+    local cr_id="${1:-}"
+    if [[ -z "$cr_id" ]]; then
+        echo "Usage: kb-cr publish-record <CR-ID>" >&2
+        return 1
+    fi
+    local _cr_team _cr_board _cr_enabled
+    _kb_cr_board_preamble || return 1
+    [[ "$_cr_enabled" != "true" ]] && { _kb_cr_disabled_exit "$_cr_team"; return 0; }
+    local cr_idx
+    cr_idx=$(_kb_cr_find_container "$_cr_board" "$cr_id")
+    if [[ "$cr_idx" == "-1" ]]; then
+        echo "kb-cr publish-record: CR '$cr_id' not found on board '$_cr_team'." >&2
+        return 1
+    fi
+    local st
+    st=$(_kb_cr_container_get_state "$_cr_board" "$cr_idx")
+    case "$st" in
+        cr-completed|cr-closed) ;;
+        *)
+            echo "kb-cr publish-record: CR '$cr_id' is in state '$st'; the cr-record page is published at cr-completed / cr-closed." >&2
+            return 1
+            ;;
+    esac
+    _kb_cr_publish_record "publish-record" "$_cr_board" "$_cr_team" "$cr_id" "create-or-update"
+}
+
 # kb-cr complete <CR-ID>   (XACA-1348) — deployed-prod -> cr-completed, or
 # emergency-deployed -> cr-completed once a retroactive approval is recorded.
 # v2 (marked) CRs only: the per-item `kb-cr complete <item-id>` path is
@@ -2117,6 +2257,9 @@ _kb_cr_container_complete() {
     ts=$(_kb_cr_timestamp)
     _kb_cr_lifecycle_advance "$_cr_board" "$cr_idx" "$cr_id" "cr-completed" "cr_completed_at" "$ts" || return 1
     echo "kb-cr complete: [$cr_id] $current_state -> cr-completed (cr_completed_at=$ts)"
+    # XACA-1349-006: publish the cr-record page. The state change above is final; a publish
+    # failure returns rc 6 but never undoes it.
+    _kb_cr_publish_record "complete" "$_cr_board" "$_cr_team" "$cr_id" "create-or-update"
 }
 
 # kb-cr reject <CR-ID> [--reason "<text>"]
@@ -2541,6 +2684,8 @@ _kb_cr_container_close() {
     local reason_msg=""
     [[ -n "$reason" ]] && reason_msg=" reason=\"$reason\""
     echo "kb-cr close: [$cr_id] $current_state -> cr-closed (cr_closed_at=$ts${reason_msg})"
+    # XACA-1349-006: re-publish the SAME cr-record page (only if complete published one).
+    _kb_cr_publish_record "close" "$_cr_board" "$_cr_team" "$cr_id" "update-only"
 }
 
 # kb-cr deploy-dev <CR-ID>
@@ -3529,7 +3674,11 @@ kb-cr() {
         emergency-deploy) _kb_cr_container_emergency_deploy "$@" ;;
         # ── Per-item only lifecycle (v1) ──────────────────────────────────────
         draft)       _kb_cr_draft "$@" ;;
-        publish)     _kb_cr_publish "$@" ;;
+        publish)
+            case "${1:-}" in
+                CR-*) _kb_cr_container_publish_url "$@" ;;
+                *)    _kb_cr_publish "$@" ;;
+            esac ;;
         _set_confluence_url) _kb_cr_set_confluence_url "$@" ;;
         _set_publish_stamps) _kb_cr_set_publish_stamps "$@" ;;
         _get_publish_stamps) _kb_cr_get_publish_stamps "$@" ;;
@@ -3577,6 +3726,13 @@ kb-cr() {
                     ;;
             esac ;;
         sweep-assumed-approvals) _kb_cr_container_sweep_assumed_approvals "$@" ;;
+        publish-record)
+            case "${1:-}" in
+                CR-*) _kb_cr_container_publish_record "$@" ;;
+                *)
+                    echo "kb-cr publish-record: requires a CR-ID (e.g. CR-TEAM-YYYYMMDD-0001), not an item-id." >&2
+                    return 1 ;;
+            esac ;;
         reschedule-approval)
             case "${1:-}" in
                 CR-*) _kb_cr_container_reschedule_approval "$@" ;;
@@ -5305,6 +5461,126 @@ PROMPT
     return 0
 }
 
+# _kb_cr_write_confluence_url <board_file> <cr_idx> <cr_id> <url>
+# Shared core of _kb_cr_set_confluence_url (item-id entry) and the container
+# publish verb (CR-ID entry, XACA-1349-003): v2 publish guard, write
+# cr_confluence_url, rank-guarded cr-drafted -> cr-published advance.
+_kb_cr_write_confluence_url() {
+    local board_file="$1" cr_idx="$2" cr_id="$3" url="$4"
+
+    # XACA-1348: marked CR + requireLeadDraftApproval => no publish before
+    # approve-draft. Checked BEFORE the URL is written so a refusal leaves the
+    # record untouched.
+    _kb_cr_v2_publish_guard "$board_file" "$cr_idx" "$cr_id" "publish" || return 1
+
+    local ts
+    ts=$(_kb_cr_timestamp)
+
+    # Write cr_confluence_url on the container record (.crs[]).
+    _kb_jq_update "$board_file" '
+        .crs[$cidx].cr_confluence_url = $url |
+        .crs[$cidx].updatedAt = $ts |
+        .lastUpdated = $ts
+    ' \
+    --argjson cidx "$cr_idx" \
+    --arg url "$url" \
+    --arg ts "$ts" \
+    || return 1
+
+    # Record the publish event in the activity log.
+    local event
+    event=$(_kb_cr_activity_event "confluence_published" \
+        "field=cr_confluence_url" \
+        "new_value=${url}" \
+        "note=Published to Confluence; URL written to CR container record") || true
+    if [[ -n "$event" ]]; then
+        _kb_cr_activity_append "$board_file" "$cr_id" "$event" 2>/dev/null || true
+    fi
+
+    # ── Advance cr-drafted → cr-published on a successful URL write (XACA-0895) ─
+    # This is the ONLY place cr_confluence_url is actually written to the board
+    # (both the `publish` skill path and the direct `kb-cr _set_confluence_url`
+    # plumbing call in here), so it is the correct place to gate the state
+    # advance rather than in _kb_cr_publish itself.
+    #
+    # Guard on RANK, not on a literal "cr-drafted" match: a CR already at
+    # cr-published (idempotent re-publish / URL update) or anywhere at or past
+    # cr-submitted must never be dragged backward or have cr_published_at
+    # re-stamped. Only a container strictly below cr-published's rank (i.e.
+    # cr-drafted, rank 0) advances. Unknown/empty state (_kb_cr_state_rank
+    # returns -1) is deliberately left alone rather than guessed forward.
+    local _cur_state _cur_rank _pub_rank
+    _cur_state=$(_kb_cr_container_get_state "$board_file" "$cr_idx" 2>/dev/null || echo "")
+    _cur_rank=$(_kb_cr_state_rank "$_cur_state")
+    _pub_rank=$(_kb_cr_state_rank "cr-published")
+    if [[ "$_cur_rank" -ge 0 ]] && [[ "$_cur_rank" -lt "$_pub_rank" ]]; then
+        _kb_cr_lifecycle_advance "$board_file" "$cr_idx" "$cr_id" "cr-published" "cr_published_at" "$ts" || return 1
+        echo "kb-cr publish: [$cr_id] $_cur_state -> cr-published (cr_published_at=$ts)"
+    fi
+
+    echo "cr_confluence_url set on CR [$cr_id]: $url"
+    return 0
+}
+
+# kb-cr publish <CR-ID> --url <url> [--version <v> --title <t>]   (XACA-1349-003, spec 8.3 step 6)
+# The ENGINE's publish verb: the page was already created by `kb-wiki publish --doc cr`, so this
+# only RECORDS it -- it never invokes the Main Event CR skill (that is the per-item
+# `kb-cr publish <item-id>` path, unchanged). Refuses without draft approval when the team requires
+# it (v2 publish guard), writes cr_confluence_url, advances cr-drafted -> cr-published (rank-guarded,
+# so a re-run on an already-published CR only refreshes the URL), and stamps
+# cr_published_version/cr_published_title when --version and --title are both given.
+_kb_cr_container_publish_url() {
+    local cr_id="${1:-}"
+    shift 2>/dev/null
+    local url="" version="" title=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --url)       url="${2:-}"; shift 2 ;;
+            --url=*)     url="${1#--url=}"; shift ;;
+            --version)   version="${2:-}"; shift 2 ;;
+            --version=*) version="${1#--version=}"; shift ;;
+            --title)     title="${2:-}"; shift 2 ;;
+            --title=*)   title="${1#--title=}"; shift ;;
+            *) echo "kb-cr publish: unexpected argument '$1'" >&2; return 1 ;;
+        esac
+    done
+    if [[ -z "$url" ]]; then
+        echo "Usage: kb-cr publish <CR-ID> --url <url> [--version <v> --title <t>]" >&2
+        echo "  (a CR-ID publishes by RECORDING the already-created wiki page; an item-id runs the publish skill)" >&2
+        return 1
+    fi
+    if [[ -n "$version" && -z "$title" ]] || [[ -z "$version" && -n "$title" ]]; then
+        echo "kb-cr publish: --version and --title go together (they stamp cr_published_version/title)." >&2
+        return 1
+    fi
+
+    local _cr_team _cr_board _cr_enabled
+    _kb_cr_board_preamble || return 1
+    [[ "$_cr_enabled" != "true" ]] && { _kb_cr_disabled_exit "$_cr_team"; return 0; }
+
+    local cr_idx
+    cr_idx=$(_kb_cr_find_container "$_cr_board" "$cr_id")
+    if [[ "$cr_idx" == "-1" ]]; then
+        echo "kb-cr publish: CR '$cr_id' not found on board '$_cr_team'." >&2
+        return 1
+    fi
+
+    _kb_cr_write_confluence_url "$_cr_board" "$cr_idx" "$cr_id" "$url" || return 1
+
+    if [[ -n "$version" ]]; then
+        local ts
+        ts=$(_kb_cr_timestamp)
+        _kb_jq_update "$_cr_board" '
+            .crs[$cidx].cr_published_version = $version |
+            .crs[$cidx].cr_published_title   = $title   |
+            .crs[$cidx].updatedAt            = $ts      |
+            .lastUpdated                     = $ts
+        ' --argjson cidx "$cr_idx" --arg version "$version" --arg title "$title" --arg ts "$ts" || return 1
+        echo "publish stamps set on CR [$cr_id]: version=$version title=\"$title\""
+    fi
+    return 0
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Internal plumbing: _kb_cr_set_confluence_url <item-id> <url>
 # Phase 3 (XACA-0308-002)
@@ -5350,58 +5626,7 @@ _kb_cr_set_confluence_url() {
         return 1
     fi
 
-    # XACA-1348: marked CR + requireLeadDraftApproval => no publish before
-    # approve-draft. Checked BEFORE the URL is written so a refusal leaves the
-    # record untouched.
-    _kb_cr_v2_publish_guard "$_cr_board" "$cr_container_idx" "$cr_id_assigned" "publish" || return 1
-
-    local ts
-    ts=$(_kb_cr_timestamp)
-
-    # Write cr_confluence_url on the container record (.crs[]).
-    _kb_jq_update "$_cr_board" '
-        .crs[$cidx].cr_confluence_url = $url |
-        .crs[$cidx].updatedAt = $ts |
-        .lastUpdated = $ts
-    ' \
-    --argjson cidx "$cr_container_idx" \
-    --arg url "$conf_url" \
-    --arg ts "$ts" \
-    || return 1
-
-    # Record the publish event in the activity log.
-    local event
-    event=$(_kb_cr_activity_event "confluence_published" \
-        "field=cr_confluence_url" \
-        "new_value=${conf_url}" \
-        "note=Published to Confluence; URL written to CR container record") || true
-    if [[ -n "$event" ]]; then
-        _kb_cr_activity_append "$_cr_board" "$cr_id_assigned" "$event" 2>/dev/null || true
-    fi
-
-    # ── Advance cr-drafted → cr-published on a successful URL write (XACA-0895) ─
-    # This is the ONLY place cr_confluence_url is actually written to the board
-    # (both the `publish` skill path and the direct `kb-cr _set_confluence_url`
-    # plumbing call in here), so it is the correct place to gate the state
-    # advance rather than in _kb_cr_publish itself.
-    #
-    # Guard on RANK, not on a literal "cr-drafted" match: a CR already at
-    # cr-published (idempotent re-publish / URL update) or anywhere at or past
-    # cr-submitted must never be dragged backward or have cr_published_at
-    # re-stamped. Only a container strictly below cr-published's rank (i.e.
-    # cr-drafted, rank 0) advances. Unknown/empty state (_kb_cr_state_rank
-    # returns -1) is deliberately left alone rather than guessed forward.
-    local _cur_state _cur_rank _pub_rank
-    _cur_state=$(_kb_cr_container_get_state "$_cr_board" "$cr_container_idx" 2>/dev/null || echo "")
-    _cur_rank=$(_kb_cr_state_rank "$_cur_state")
-    _pub_rank=$(_kb_cr_state_rank "cr-published")
-    if [[ "$_cur_rank" -ge 0 ]] && [[ "$_cur_rank" -lt "$_pub_rank" ]]; then
-        _kb_cr_lifecycle_advance "$_cr_board" "$cr_container_idx" "$cr_id_assigned" "cr-published" "cr_published_at" "$ts" || return 1
-        echo "kb-cr publish: [$cr_id_assigned] $_cur_state -> cr-published (cr_published_at=$ts)"
-    fi
-
-    echo "cr_confluence_url set on CR [$cr_id_assigned]: $conf_url"
-    return 0
+    _kb_cr_write_confluence_url "$_cr_board" "$cr_container_idx" "$cr_id_assigned" "$conf_url"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -7025,6 +7250,15 @@ _kb_cr_help() {
     echo "              v2 CRs: deployed-prod -> cr-completed (or emergency-deployed,"
     echo "              after the retroactive 'kb-cr approve <CR-ID> --by <who>')."
     echo "              (complete <item-id> is the unchanged legacy per-item stamp.)"
+    echo "              [XACA-1349-006] Then publishes the cr-record wiki page (kb-wiki publish"
+    echo "              --doc cr-record) and stores wikiPages[\"cr-record\"]. close <CR-ID>"
+    echo "              re-publishes that SAME page (never a second one). A publish failure"
+    echo "              does NOT undo the state change: it warns loudly and exits 6."
+    echo "              Wiki not configured / no linked release = skip notice, exit 0."
+    echo "  publish-record <CR-ID>  [XACA-1349-006]"
+    echo "              Re-run path for the cr-record page (cr-completed / cr-closed CRs):"
+    echo "              creates it if no page is stored, else updates the stored page."
+    echo "              Exit 0 = published or skipped; exit 6 = publish failed (retry later)."
     echo "  v2 lifecycle: new CRs carry cr_lifecycle=v2 (stamped by create). For them"
     echo "              start-dev/start-test/deploy-dev are refused, deploy-prod needs"
     echo "              cr-approved, and a rejected CR can only be closed. CRs without"
@@ -7157,6 +7391,10 @@ _kb_cr_help() {
     echo "              Idempotent: re-run leaves existing doc untouched."
     echo "              Does NOT write cr_doc_link. Confluence URL is stored separately"
     echo "              in cr_confluence_url on the .crs[] record after kb-cr publish."
+    echo "  publish <CR-ID> --url <url> [--version <v> --title <t>]  [XACA-1349-003]"
+    echo "              Engine form: RECORDS a wiki page already created by kb-wiki (no skill run)."
+    echo "              Needs draft approval when the team requires it; advances cr-drafted ->"
+    echo "              cr-published; stamps cr_published_version/title when both are given."
     echo "  publish <id>"
     echo "              Phase 3 (XACA-0308-002): reads <team-kanban>/cr-docs/<ITEM-ID>-CR.md,"
     echo "              invokes Main Event CR skill (On-Demand Mode) to create/update"
