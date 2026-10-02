@@ -3473,8 +3473,8 @@ def _board_stat_sig(path):
 _BOARD_CACHE_RACY_NS = 2_000_000_000
 
 
-def _board_digest(raw):
-    return hashlib.blake2b(raw, digest_size=16).digest()
+def _board_digest(text):
+    return hashlib.blake2b(text.encode('utf-8'), digest_size=16).digest()
 
 
 def _cached_board(path):
@@ -3526,23 +3526,23 @@ def _cached_board(path):
             return entry[1]
         # Racy entry (XACA-1386): the signature alone cannot prove the bytes
         # are unchanged. Verify the content without re-parsing.
-        with open(path, 'rb') as f:
+        with open(path, 'r', encoding='utf-8') as f:
             if _board_digest(f.read()) == digest:
                 with _BOARD_CACHE_LOCK:
                     _BOARD_CACHE_STATS["hits"] += 1
                 return entry[1]
     with _BOARD_CACHE_LOCK:
         _BOARD_CACHE_STATS["misses"] += 1
-    with open(path, 'rb') as f:
-        raw = f.read()
-    data = json.load(io.StringIO(raw.decode('utf-8')))
+    with open(path, 'r', encoding='utf-8') as f:
+        text = f.read()
+    data = json.load(io.StringIO(text))
     try:
         sig_after = _board_stat_sig(path)
     except OSError:
         sig_after = None
     racy_digest = None
     if time.time_ns() - sig[0] < _BOARD_CACHE_RACY_NS:
-        racy_digest = _board_digest(raw)
+        racy_digest = _board_digest(text)
     if sig_after == sig:
         with _BOARD_CACHE_LOCK:
             _BOARD_CACHE[key] = (sig, data) + (racy_digest,)
