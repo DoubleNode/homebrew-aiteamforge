@@ -3528,8 +3528,15 @@ def _cached_board(path):
         # are unchanged. Verify the content without re-parsing.
         with open(path, 'r', encoding='utf-8') as f:
             if _board_digest(f.read()) == digest:
+                # The bytes were verified after the mtime left the racy
+                # window, so any later write lands on a newer clock tick and
+                # changes the signature: shed the digest (git's racy rule),
+                # so later hits go back to stat-only instead of re-hashing.
+                aged = time.time_ns() - sig[0] >= _BOARD_CACHE_RACY_NS
                 with _BOARD_CACHE_LOCK:
                     _BOARD_CACHE_STATS["hits"] += 1
+                    if aged and _BOARD_CACHE.get(key) is entry:
+                        _BOARD_CACHE[key] = (sig, entry[1], None)
                 return entry[1]
     with _BOARD_CACHE_LOCK:
         _BOARD_CACHE_STATS["misses"] += 1
