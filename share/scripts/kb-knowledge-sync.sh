@@ -285,7 +285,7 @@ if ! _acquire_lock; then
     # Holder is gone (or pidfile unreadable) — check for staleness by mtime
     # before reclaiming, so we don't race a holder that is between `mkdir`
     # and writing its pidfile.
-    _lock_epoch="$(stat -f %m "$LOCK_DIR" 2>/dev/null || stat -c %Y "$LOCK_DIR" 2>/dev/null || echo 0)"
+    _lock_epoch="$(stat -c %Y "$LOCK_DIR" 2>/dev/null || stat -f %m "$LOCK_DIR" 2>/dev/null || echo 0)"
     _now_epoch="$(date +%s)"
     _lock_age=$(( _now_epoch - _lock_epoch ))
 
@@ -653,7 +653,7 @@ _ac_sha1() {
 }
 
 _ac_mtime() {
-    stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || true
+    stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || true
 }
 
 _ac_iso_to_epoch() {
