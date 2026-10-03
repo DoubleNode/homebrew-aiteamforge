@@ -499,6 +499,16 @@ class TestServeForeverOrchestration(unittest.TestCase):
     address at all.
     """
 
+    def setUp(self):
+        # XACA-1397-004: _lcars_serve_forever_on now starts/stops the reconcile
+        # refresher. Stub it so these orchestration tests neither spawn the
+        # real thread (which would skew the threading.Thread call counts) nor
+        # leave one running.
+        for name in ("start_reconcile_refresher", "stop_reconcile_refresher"):
+            p = patch.object(server, name)
+            p.start()
+            self.addCleanup(p.stop)
+
     def _make_fake_server_class(self, fail_hosts=frozenset()):
         created = []
 

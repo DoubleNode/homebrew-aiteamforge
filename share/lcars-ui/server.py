@@ -3582,60 +3582,303 @@ def _board_cache_clear():
             _BOARD_CACHE_STATS[k] = 0
 
 
+def _run_reconcile_helper(team: str, board_file: Path, timeout: float = 20) -> list:
+    """Run `_kb_reconcile_inprogress` and return its parsed list.
+
+    RAISES on any failure (helpers script missing, non-zero exit, timeout,
+    malformed output) so the background refresher (XACA-1397-001) can tell a
+    failed refresh from a genuinely empty result and keep its last-good value.
+    Never call this from a request thread: it spawns zsh and takes seconds.
+    """
+    dev_team_root = Path.home() / "dev-team"
+    helpers_path = dev_team_root / "kanban-helpers.sh"
+    if not helpers_path.exists():
+        raise FileNotFoundError(f"kanban-helpers.sh not found at {helpers_path}")
+
+    shell_script = "\n".join([
+        f"source {shlex.quote(str(helpers_path))}",
+        f"_kb_reconcile_inprogress {shlex.quote(team)} {shlex.quote(str(board_file))}",
+    ])
+
+    result = subprocess.run(
+        ["zsh", "-c", shell_script],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"reconcile-inprogress non-zero exit ({result.returncode}): "
+            f"{result.stderr.strip()}")
+    raw = result.stdout.strip()
+    if not raw:
+        return []
+    parsed = json.loads(raw)
+    if not isinstance(parsed, list):
+        raise ValueError("reconcile-inprogress output is not a JSON list")
+    return parsed
+
+
 def get_reconciled_inprogress(team: str, board_file: Path) -> list:
     """XACA-0778-005: Crash-recovery reconciliation for the Workflow tab.
 
     Shells out to `_kb_reconcile_inprogress` (kanban-helpers.sh) to classify
     every in_progress backlog item/subitem as BOUND (a live tmux window still
-    backs it) or ORPHANED (it does not — e.g. after a Mac/tmux crash). This is
+    backs it) or ORPHANED (it does not -- e.g. after a Mac/tmux crash). This is
     the persistent-truth view (backlog[].status == "in_progress") that
     survives a dead tmux server, unlike the ephemeral activeWindows[] pointers
     the Workflow tab has historically rendered from.
 
-    Read-only and best-effort: on ANY failure (helpers script missing, jq
-    error, timeout, malformed output) this returns [] rather than raising —
-    reconciliation is an additive enhancement to board serving, and a broken
-    classifier must never take down the primary board response the whole UI
-    depends on. Errors are logged server-side for diagnosis.
+    Read-only and best-effort: on ANY failure this returns [] rather than
+    raising. SLOW (seconds): XACA-1397 -- it must NOT be called from a request
+    thread. Board serving reads _get_cached_reconciled_inprogress() instead;
+    only the background refresher computes (via _run_reconcile_helper).
 
     See kanban-helpers.sh `_kb_reconcile_inprogress` for the full output
-    contract (XACA-0778-001) — do not reimplement classification here.
+    contract (XACA-0778-001) -- do not reimplement classification here.
     """
     try:
-        dev_team_root = Path.home() / "dev-team"
-        helpers_path = dev_team_root / "kanban-helpers.sh"
-        if not helpers_path.exists():
-            return []
-
-        shell_script = "\n".join([
-            f"source {shlex.quote(str(helpers_path))}",
-            f"_kb_reconcile_inprogress {shlex.quote(team)} {shlex.quote(str(board_file))}",
-        ])
-
-        result = subprocess.run(
-            ["zsh", "-c", shell_script],
-            capture_output=True,
-            text=True,
-            timeout=20,
-        )
-
-        if result.returncode != 0:
-            stderr = result.stderr.strip()
-            print(f"[LCARS] WARNING: reconcile-inprogress non-zero exit for '{team}': {stderr}")
-            return []
-
-        raw = result.stdout.strip()
-        if not raw:
-            return []
-
-        parsed = json.loads(raw)
-        return parsed if isinstance(parsed, list) else []
+        return _run_reconcile_helper(team, board_file)
     except subprocess.TimeoutExpired:
         print(f"[LCARS] WARNING: reconcile-inprogress timed out for team '{team}'")
         return []
     except Exception as e:
         print(f"[LCARS] WARNING: reconcile-inprogress failed for team '{team}': {e}")
         return []
+
+
+# ---------------------------------------------------------------------------
+# XACA-1397-001: per-team reconcile cache + background refresher.
+#
+# The reconcile helper costs 3-20 s (zsh + helper source + tmux probe). It used
+# to run synchronously inside every GET /data/<team>-board.json. Now the
+# request thread only READS _RECONCILE_CACHE (never blocks); a single daemon
+# thread recomputes it. Mirrors the XACA-1382 board cache's discipline: one
+# lock guarding the dicts only, never held across the subprocess; the board's
+# stat signature (_board_stat_sig) is the invalidation signal.
+#
+# Lifecycle: start_reconcile_refresher() / stop_reconcile_refresher(). Server
+# startup/shutdown wiring is XACA-1397-004; until then the first board GET
+# lazily starts the thread (_ensure_reconcile_refresher).
+# ---------------------------------------------------------------------------
+RECONCILE_TTL_S = 30.0            # recompute at least this often
+RECONCILE_STALE_AFTER_S = 90.0    # value older than this is flagged stale
+RECONCILE_MIN_INTERVAL_S = 5.0    # debounce for board-change-triggered refresh
+RECONCILE_TIMEOUT_S = 20          # per-subprocess timeout
+RECONCILE_POLL_S = 2.0            # refresher loop tick
+
+# team -> {"value": list|None, "computed_at": monotonic|None, "board_sig": tuple|None,
+#          "error": str|None, "last_attempt": monotonic|None}
+_RECONCILE_CACHE: dict = {}
+_RECONCILE_WANTED: dict = {}      # team -> board_file Path (teams a client has asked for)
+_RECONCILE_INFLIGHT: set = set()  # teams with a refresh running (coalescing guard)
+_RECONCILE_LOCK = threading.Lock()   # guards the three dicts/set ONLY
+# XACA-1397 QA: each refresher thread owns its OWN stop Event (_RECONCILE_STOP
+# is just the CURRENT thread's). A shared flag let a start-after-timed-out-stop
+# clear it and revive the old, still-stuck thread -> two refreshers.
+_RECONCILE_STOP = threading.Event()
+_RECONCILE_WAKE = threading.Event()
+_RECONCILE_THREAD = None
+_RECONCILE_THREAD_LOCK = threading.Lock()
+_RECONCILE_STOPPED = [False]      # set by stop_*, cleared by start_*: no lazy restart mid-shutdown
+
+
+def _reconcile_refresh_team(team: str, board_file: Path) -> bool:
+    """Recompute one team's reconcile result. Returns True if a refresh ran.
+
+    At most one refresh per team is in flight: a second caller returns False
+    immediately. On failure the previous value is KEPT and the error recorded.
+    The lock is never held across the subprocess.
+    """
+    with _RECONCILE_LOCK:
+        if team in _RECONCILE_INFLIGHT:
+            return False
+        _RECONCILE_INFLIGHT.add(team)
+    # XACA-1397 QA: exactly ONE release of the slot, by this claimant only. The
+    # publish block below releases it; the finally releases it only if that
+    # block never ran. An unconditional second discard could free a slot that
+    # another caller claimed in between and start a duplicate refresh.
+    released = False
+    try:
+        try:
+            sig = _board_stat_sig(board_file)
+        except OSError:
+            sig = None
+        started = time.monotonic()
+        try:
+            # Looked up at call time so tests can stub the (slow) compute.
+            value = _run_reconcile_helper(team, board_file, RECONCILE_TIMEOUT_S)
+            err = None
+        except Exception as e:  # incl. subprocess.TimeoutExpired
+            value = None
+            err = f"{type(e).__name__}: {e}"
+            # Coarse, client-safe category only (no paths/usernames/stderr).
+            err_kind = "timeout" if isinstance(e, subprocess.TimeoutExpired) else "helper-failed"
+            print(f"[LCARS] WARNING: reconcile-inprogress refresh failed for '{team}': {err}")
+        with _RECONCILE_LOCK:
+            entry = _RECONCILE_CACHE.get(team) or {
+                "value": None, "computed_at": None, "board_sig": None,
+                "error": None, "last_attempt": None}
+            entry["last_attempt"] = started
+            if err is None:
+                entry.update(value=value, computed_at=time.monotonic(),
+                             board_sig=sig, error=None, error_kind=None, failures=0)
+            else:
+                entry["error"] = err      # keep last-good value + its timestamp
+                entry["error_kind"] = err_kind
+                entry["failures"] = int(entry.get("failures") or 0) + 1
+            _RECONCILE_CACHE[team] = entry
+            # Release the coalescing slot in the SAME critical section as the
+            # cache publish, so a reader that sees the new value never also
+            # sees a phantom in-flight refresh.
+            _RECONCILE_INFLIGHT.discard(team)
+            released = True
+        return True
+    finally:
+        if not released:
+            with _RECONCILE_LOCK:
+                _RECONCILE_INFLIGHT.discard(team)
+
+
+def _reconcile_refresh_due(team: str, board_file: Path, now: float) -> bool:
+    """Caller holds no lock. True if this team's cache needs recomputing."""
+    with _RECONCILE_LOCK:
+        entry = _RECONCILE_CACHE.get(team)
+        inflight = team in _RECONCILE_INFLIGHT
+    if inflight:
+        return False
+    if entry is None or entry["last_attempt"] is None:
+        return True
+    since = now - entry["last_attempt"]
+    if since >= RECONCILE_TTL_S:
+        return True
+    if since >= RECONCILE_MIN_INTERVAL_S:
+        try:
+            if _board_stat_sig(board_file) != entry["board_sig"]:
+                return True
+        except OSError:
+            pass
+    return False
+
+
+def _reconcile_refresher_loop(stop: threading.Event):
+    while not stop.is_set():
+        # Clear BEFORE working: a wake raised while we refresh must survive to
+        # the next wait instead of being erased after it.
+        _RECONCILE_WAKE.clear()
+        with _RECONCILE_LOCK:
+            wanted = list(_RECONCILE_WANTED.items())
+        for team, board_file in wanted:
+            if stop.is_set():
+                break
+            try:
+                if _reconcile_refresh_due(team, board_file, time.monotonic()):
+                    _reconcile_refresh_team(team, board_file)
+            except Exception as e:  # the refresher must never die
+                print(f"[LCARS] WARNING: reconcile refresher error for '{team}': {e}")
+        _RECONCILE_WAKE.wait(RECONCILE_POLL_S)
+
+
+def start_reconcile_refresher() -> bool:
+    """Start the background reconcile refresher (idempotent). True if started.
+
+    Policy when a previous refresher was stopped but is still alive (stop timed
+    out while its helper subprocess was stuck): SUPERSEDE. The old thread keeps
+    its own, already-set stop Event, so it exits as soon as its helper returns
+    and never starts another refresh; the new thread gets a fresh Event. The
+    per-team in-flight slot keeps the two from refreshing the same team at once.
+    """
+    global _RECONCILE_THREAD, _RECONCILE_STOP
+    with _RECONCILE_THREAD_LOCK:
+        if _RECONCILE_THREAD is not None and _RECONCILE_THREAD.is_alive():
+            return False
+        _RECONCILE_STOPPED[0] = False
+        _RECONCILE_STOP = threading.Event()   # never clear the old thread's event
+        _RECONCILE_WAKE.clear()
+        _RECONCILE_THREAD = threading.Thread(
+            target=_reconcile_refresher_loop, args=(_RECONCILE_STOP,),
+            name="lcars-reconcile-refresher", daemon=True)
+        _RECONCILE_THREAD.start()
+        return True
+
+
+def stop_reconcile_refresher(timeout: float = 5.0) -> None:
+    """Signal the refresher to exit and join it (bounded; the thread is a
+    daemon so a refresh stuck in the subprocess cannot hold up shutdown)."""
+    global _RECONCILE_THREAD
+    with _RECONCILE_THREAD_LOCK:
+        t = _RECONCILE_THREAD
+        _RECONCILE_STOPPED[0] = True
+        _RECONCILE_STOP.set()
+        _RECONCILE_WAKE.set()
+        _RECONCILE_THREAD = None
+    if t is not None and t.is_alive():
+        t.join(timeout)
+
+
+def _ensure_reconcile_refresher():
+    """Lazy start so board serving works before startup wiring (XACA-1397-004)
+    exists. No-op once running, or after an explicit stop during shutdown."""
+    t = _RECONCILE_THREAD
+    if t is not None and t.is_alive():
+        return
+    if _RECONCILE_STOPPED[0]:
+        return
+    # XACA-1397 QA: process-level kill switch for the LAZY path (read per call,
+    # so it works for any module object loaded from this file, under any name).
+    # Tests set it; the explicit startup start_reconcile_refresher() ignores it.
+    if os.environ.get("LCARS_RECONCILE_REFRESHER_DISABLED", "").strip().lower() in (
+            "1", "true", "yes", "on"):
+        return
+    start_reconcile_refresher()
+
+
+def _reconcile_cache_clear():
+    """Drop all cached reconcile state (tests / diagnostics)."""
+    with _RECONCILE_LOCK:
+        _RECONCILE_CACHE.clear()
+        _RECONCILE_WANTED.clear()
+        _RECONCILE_INFLIGHT.clear()
+
+
+def _get_reconcile_failure_info(team: str):
+    """(error_kind|None, consecutive_failures) for a team. Coarse category only
+    ("timeout" / "helper-failed"): never raw stderr, paths or usernames."""
+    with _RECONCILE_LOCK:
+        entry = _RECONCILE_CACHE.get(team)
+        if not entry:
+            return None, 0
+        return entry.get("error_kind"), int(entry.get("failures") or 0)
+
+
+def _get_cached_reconciled_inprogress(team: str, board_file: Path):
+    """Request-path read of the reconcile cache. NEVER blocks on the helper.
+
+    Returns (value, age_ms, stale). Cold cache -> ([], None, True) and the
+    refresher is woken. stale is True when: cold, the last refresh failed,
+    the value is older than RECONCILE_STALE_AFTER_S, or the board changed on
+    disk since the value was computed (the refresh for it is already queued).
+    """
+    with _RECONCILE_LOCK:
+        _RECONCILE_WANTED[team] = board_file
+        entry = _RECONCILE_CACHE.get(team)
+        snap = dict(entry) if entry else None
+    _ensure_reconcile_refresher()
+    if snap is None or snap["computed_at"] is None:
+        _RECONCILE_WAKE.set()
+        return [], None, True
+    now = time.monotonic()
+    age_s = now - snap["computed_at"]
+    stale = bool(snap["error"]) or age_s > RECONCILE_STALE_AFTER_S
+    try:
+        if _board_stat_sig(board_file) != snap["board_sig"]:
+            stale = True
+            _RECONCILE_WAKE.set()
+    except OSError:
+        pass
+    if age_s >= RECONCILE_TTL_S:
+        _RECONCILE_WAKE.set()
+    return list(snap["value"]), int(age_s * 1000), stale
 
 
 BACKUP_STATUS_FILE = BACKUP_DIR / "backup-status.json"
@@ -20903,7 +21146,18 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 # consumers are unaffected. Best-effort: reconcile_inprogress
                 # never raises, so a classifier failure degrades to an empty list
                 # rather than breaking board serving.
-                data['reconciledInProgress'] = get_reconciled_inprogress(team, board_file)
+                #
+                # XACA-1397-001: read the background-refreshed cache; this
+                # request thread NEVER runs the (3-20 s) helper subprocess.
+                # Cold cache -> [] + stale=True, refresh kicked off.
+                _rip, _rip_age_ms, _rip_stale = _get_cached_reconciled_inprogress(
+                    team, board_file)
+                data['reconciledInProgress'] = _rip
+                data['reconciledInProgressAgeMs'] = _rip_age_ms
+                data['reconciledInProgressStale'] = _rip_stale
+                _rip_err, _rip_fails = _get_reconcile_failure_info(team)
+                data['reconciledInProgressError'] = _rip_err
+                data['reconciledInProgressFailures'] = _rip_fails
 
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json')
@@ -25633,11 +25887,24 @@ def _lcars_serve_forever_on(bind_hosts, port):
                 daemon=True,
             ).start()
 
+        # XACA-1397-004: sockets are bound, so the server is up. Start the
+        # reconcile refresher now so the first board GET finds a warm cache
+        # (the lazy start in _ensure_reconcile_refresher stays as a fallback).
+        # Never let it block or abort startup.
+        try:
+            start_reconcile_refresher()
+        except Exception as exc:
+            print(f"[LCARS] WARNING: reconcile refresher not started at startup: {exc}")
+
         try:
             servers[0].serve_forever()
         except KeyboardInterrupt:
             print("\n[LCARS] Server shutting down...")
         finally:
+            # XACA-1397-004: stop the refresher first (bounded join; daemon
+            # thread, so a stuck helper subprocess cannot hold up shutdown).
+            with contextlib.suppress(Exception):
+                stop_reconcile_refresher()
             for srv in servers:
                 with contextlib.suppress(Exception):
                     srv.shutdown()

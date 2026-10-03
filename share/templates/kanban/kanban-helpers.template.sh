@@ -4855,70 +4855,161 @@ _kb_reconcile_inprogress() {
         echo "kb-recover: tmux state could not be confirmed for team '$team' (socket ladder unreachable/truncated) -- ORPHANED results below may be incomplete" >&2
     fi
 
+    # XACA-1397-002 / -013 / -018: ONE jq pass turns the candidates array into
+    # one row per candidate and ONE closing jq assembles every result object,
+    # replacing the old five `jq -r` forks + one `jq -nc` fork PER candidate.
+    #
+    # THE RULE THAT KEEPS THIS BYTE-IDENTICAL TO THE PER-CANDIDATE VERSION:
+    # no value that is COMPARED or EMITTED may round-trip through the shell
+    # or through `@tsv`. `@tsv` escapes backslash/TAB/CR/LF, and the shell
+    # compared those escaped forms against the raw tmux window ids, which
+    # flipped BOUND to ORPHANED for such window names (review round 1, B1).
+    # So the BOUND test happens INSIDE the closing jq, against the live set
+    # passed in raw via --arg. Only the plan-doc lookup needs the shell
+    # (it forks kb-plan-doc-path), and only for the plan target id.
+    #
+    # `jq_defs` reproduces what the old `jq -r '.f // empty'` + `$(...)` did:
+    #   * null / false      -> "" (jq's `// empty`)
+    #   * string            -> verbatim
+    #   * anything else     -> what `jq -r` prints (numbers/true as-is;
+    #                          arrays/objects PRETTY-printed, 2-space indent)
+    #   * then trailing newlines stripped, exactly as `$(...)` did.
+    local jq_defs='
+        def pp($i): if type == "array" then
+                (if length == 0 then "[]" else
+                    "[\n" + ([.[] | ("  " * ($i + 1)) + pp($i + 1)] | join(",\n")) + "\n" + ("  " * $i) + "]" end)
+            elif type == "object" then
+                (if length == 0 then "{}" else
+                    "{\n" + ([to_entries[] | ("  " * ($i + 1)) + (.key | tojson) + ": " + (.value | pp($i + 1))] | join(",\n")) + "\n" + ("  " * $i) + "}" end)
+            else tojson end;
+        def raw: if . == null or . == false then "" elif type == "string" then . else pp(0) end;
+        def cap: raw | sub("\\n+\\z"; "");
+        def nn: if . == "" then null else . end;
+        def target: ((.parentId | cap) as $p | (.id | cap) as $i | if $p != "" then $p else $i end);
+    '
+
+    # Row per candidate that has a non-empty id (the old loop skipped the
+    # rest): "x<idx> TAB <flag> TAB x<plan_target>". Flag "w" = the target
+    # holds a character TSV would escape (or the memo's own SOH/STX/ETX
+    # delimiters): the shell then re-fetches the RAW target by index and
+    # skips the memo. Every field is "x"-prefixed because tab is
+    # IFS-whitespace and an empty field would collapse.
+    local cand_rows
+    cand_rows=$(printf '%s' "$candidates" | jq -r "$jq_defs"'
+        to_entries[]
+        | .key as $ix | .value as $v
+        | select(($v.id | cap) != "")
+        | ($v | target) as $t
+        | ($t | test("[\\\\\\t\\r\\n\\u0001-\\u0003]")) as $weird
+        | [ "x" + ($ix | tostring), (if $weird then "w" else "c" end), (if $weird then "x" else "x" + $t end) ]
+        | @tsv
+    ' 2>/dev/null)
+
     # Loop-body locals declared ONCE before the loop (zsh: re-declaring
     # `local` inside a loop body can leak the assignment expression to
     # stdout on some zsh versions -- see kanban-helpers.sh house style).
-    local cand_json cand_id cand_title cand_worktree cand_branch cand_parent cand_lkw
-    local plan_target plan_doc_path classification result_line
-    local -a result_lines=()
+    local cand_row cand_idx cand_flag
+    local plan_target plan_doc_path esc_path
+    local tab=$'\t' nl=$'\n' soh=$'\001' stx=$'\002' etx=$'\003'
+    # Per-run plan-doc memo (bash 3.2 / zsh safe: no associative arrays).
+    # Entries are "<SOH>parent<STX>path<ETX>"; many subitems share a parent
+    # and each kb-plan-doc-path lookup costs ~0.1-0.7s. Empty results are
+    # memoized too.
+    local plan_memo="" memo_tag memo_rest base_memo="" base_tag base_rest
+    local meta_rows=""
 
-    while IFS= read -r cand_json; do
-        [[ -n "$cand_json" ]] || continue
-
-        cand_id=$(printf '%s' "$cand_json" | jq -r '.id // empty' 2>/dev/null)
-        [[ -n "$cand_id" ]] || continue
-        cand_title=$(printf '%s' "$cand_json" | jq -r '.title // empty' 2>/dev/null)
-        cand_worktree=$(printf '%s' "$cand_json" | jq -r '.worktree // empty' 2>/dev/null)
-        cand_branch=$(printf '%s' "$cand_json" | jq -r '.branch // empty' 2>/dev/null)
-        cand_parent=$(printf '%s' "$cand_json" | jq -r '.parentId // empty' 2>/dev/null)
-        cand_lkw=$(printf '%s' "$cand_json" | jq -r '.lastKnownWindow // empty' 2>/dev/null)
+    while IFS= read -r cand_row; do
+        [[ -n "$cand_row" ]] || continue
+        # Split on tab by hand; every field is "x"-prefixed so none is empty.
+        cand_idx="${cand_row%%${tab}*}"; cand_row="${cand_row#*${tab}}"
+        cand_flag="${cand_row%%${tab}*}"; plan_target="${cand_row#*${tab}}"
+        cand_idx="${cand_idx#x}"; plan_target="${plan_target#x}"
 
         # planDocPath resolves at the PARENT granularity (kb-plan-doc-path
-        # rejects subitem-shaped ids); use the id itself when this candidate
-        # IS a top-level item (parentId is null/empty).
-        plan_target="${cand_parent:-$cand_id}"
-        plan_doc_path=$(_kb_reconcile_plan_doc_path "$plan_target")
-
-        # BOUND requires a lastKnownWindow pointer AND that exact
-        # "terminal:window_name" key present in the live set right now.
-        # No pointer, or a live set that doesn't contain it (including an
-        # entirely empty live set post-crash) => ORPHANED.
-        classification="ORPHANED"
-        if [[ -n "$cand_lkw" && -n "$live_windows" ]] && printf '%s\n' "$live_windows" | grep -qxF -- "$cand_lkw"; then
-            classification="BOUND"
+        # rejects subitem-shaped ids); the target is the parentId, or the id
+        # itself when this candidate IS a top-level item.
+        if [[ "$cand_flag" == "w" ]]; then
+            # Rare: the target has characters TSV escapes. Fetch it raw and
+            # bypass the memo (its delimiters could collide).
+            plan_target=$(printf '%s' "$candidates" | jq -j --argjson i "$cand_idx" "$jq_defs"'.[$i] | target' 2>/dev/null)
+            plan_doc_path=$(_kb_reconcile_plan_doc_path "$plan_target")
+        else
+            memo_tag="${soh}${plan_target}${stx}"
+            memo_rest="${plan_memo#*${memo_tag}}"
+            if [[ "$memo_rest" != "$plan_memo" ]]; then
+                plan_doc_path="${memo_rest%%${etx}*}"
+            else
+                # Second memo layer, by team-code prefix: kb-plan-doc-path's
+                # cost is ~all in _kb_get_kanban_dir (~0.55s, once per call)
+                # and every id sharing a prefix resolves to the same kanban
+                # base dir. Once one lookup has succeeded, learn the base from
+                # its result ("<base>plans/<ID>/") and build + -d-test later
+                # paths directly -- exactly what _kb_reconcile_plan_doc_path
+                # would return. A prefix with no success yet keeps calling
+                # the helper.
+                base_tag="${soh}${plan_target%%-*}${stx}"
+                base_rest="${base_memo#*${base_tag}}"
+                if [[ "$base_rest" != "$base_memo" ]]; then
+                    plan_doc_path="${base_rest%%${etx}*}${plan_target}/"
+                    [[ -d "$plan_doc_path" ]] || plan_doc_path=""
+                else
+                    plan_doc_path=$(_kb_reconcile_plan_doc_path "$plan_target")
+                    if [[ -n "$plan_doc_path" && "$plan_doc_path" == *"plans/${plan_target}/" ]]; then
+                        base_memo="${base_memo}${base_tag}${plan_doc_path%${plan_target}/}${etx}"
+                    fi
+                fi
+                plan_memo="${plan_memo}${memo_tag}${plan_doc_path}${etx}"
+            fi
         fi
 
-        result_line=$(jq -nc \
-            --arg id "$cand_id" \
-            --arg title "$cand_title" \
-            --arg team "$team" \
-            --arg parentId "$cand_parent" \
-            --arg worktree "$cand_worktree" \
-            --arg branch "$cand_branch" \
-            --arg planDocPath "$plan_doc_path" \
-            --arg lastKnownWindow "$cand_lkw" \
-            --arg classification "$classification" \
-            '{
-                id: $id,
-                title: $title,
-                team: $team,
-                parentId: (if $parentId == "" then null else $parentId end),
-                worktree: (if $worktree == "" then null else $worktree end),
-                branch: (if $branch == "" then null else $branch end),
-                planDocPath: (if $planDocPath == "" then null else $planDocPath end),
-                lastKnownWindow: (if $lastKnownWindow == "" then null else $lastKnownWindow end),
-                classification: $classification
-            }' 2>/dev/null)
+        # The path rides back to jq escaped (\ -> \\, LF -> \n) so a newline
+        # or backslash in it cannot break the row framing; jq decodes below.
+        esc_path="${plan_doc_path//\\/\\\\}"
+        esc_path="${esc_path//${nl}/\\n}"
+        meta_rows="${meta_rows}${cand_idx}${tab}${esc_path}${nl}"
+    done <<< "$cand_rows"
 
-        [[ -n "$result_line" ]] && result_lines+=("$result_line")
-    done < <(printf '%s' "$candidates" | jq -c '.[]' 2>/dev/null)
-
-    if [[ ${#result_lines[@]} -eq 0 ]]; then
+    if [[ -z "$meta_rows" ]]; then
         echo "[]"
         return 0
     fi
 
-    printf '%s\n' "${result_lines[@]}" | jq -sc '.' 2>/dev/null || echo "[]"
+    # Single closing jq: cands[idx] supplies every field verbatim and does
+    # the BOUND test. BOUND requires a lastKnownWindow pointer AND that exact
+    # "terminal:window_name" key present in the live set right now. No
+    # pointer, or an empty live set (post-crash) => ORPHANED.
+    # QUIRK PRESERVED ON PURPOSE: the original was `grep -qxF -- "$lkw"`, and
+    # grep -F treats a pattern containing a newline as SEVERAL patterns. So a
+    # window name with an interior newline matches if ANY of its lines equals
+    # a live line (an empty line matches an empty live line). That is arguably
+    # a false match, but it is the shipped behaviour, so `split("\n")` on both
+    # sides reproduces it exactly instead of silently changing it.
+    printf '%s' "$meta_rows" | jq -R -sc \
+        --argjson cands "$candidates" \
+        --arg team "$team" \
+        --arg live "$live_windows" "$jq_defs"'
+        def unesc: gsub("\\\\(?<c>[\\\\n])"; if .c == "n" then "\n" else "\\" end);
+        ($live | split("\n")) as $live_lines
+        | $cands as $c
+        | split("\n") | map(select(length > 0) | split("\t")) as $rows
+        | [ $rows[] | . as [$mi]
+            | ($c[($mi | tonumber)]) as $k
+            | ($k.lastKnownWindow | cap) as $lkw
+            | {
+                id: ($k.id | cap),
+                title: ($k.title | cap),
+                team: $team,
+                parentId: ($k.parentId | cap | nn),
+                worktree: ($k.worktree | cap | nn),
+                branch: ($k.branch | cap | nn),
+                planDocPath: ((.[1:] | join("\t") | unesc) | nn),
+                lastKnownWindow: ($lkw | nn),
+                classification: (
+                    if $lkw != "" and $live != ""
+                       and ($lkw | split("\n") | any(. as $p | $live_lines | index([$p]) != null))
+                    then "BOUND" else "ORPHANED" end)
+              } ]
+    ' 2>/dev/null || echo "[]"
 }
 
 # Thin manual/debug CLI over _kb_reconcile_inprogress -- NOT the user-facing

@@ -683,6 +683,7 @@ function showAssetBanner() {
     }
     bar.hidden = false;
     refreshAssetBannerMode();
+    if (typeof positionBoardStaleBanner === 'function') positionBoardStaleBanner();
 }
 
 /** Re-pick the wording (stronger when a modal is open). Safe to call anytime. */
@@ -696,6 +697,8 @@ function refreshAssetBannerMode() {
     if (msg) msg.textContent = text;
     announceAssetBanner(text);
     syncAssetBannerModalOffset(warn ? bar : null);
+    // The wording change can re-wrap the bar; re-stack the stale-board bar under it.
+    if (typeof positionBoardStaleBanner === 'function') positionBoardStaleBanner();
 }
 
 /**
@@ -769,6 +772,7 @@ function hideAssetBanner() {
     if (bar) bar.hidden = true;
     announceAssetBanner('');
     syncAssetBannerModalOffset(null);
+    if (typeof positionBoardStaleBanner === 'function') positionBoardStaleBanner();
 }
 
 if (typeof window !== 'undefined') {
@@ -779,7 +783,105 @@ if (typeof window !== 'undefined') {
 // DATA LOADING
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// XACA-1397-003: a refresh that fails must never replace a board that already
+// loaded. The embedded empty fallback is only for a page that has never had one.
+var boardEverLoaded = false;
+var boardLoadInFlight = false;
+// XACA-1397: loads can overlap (auto-refresh, window.refreshData, CR-tab reloads).
+// A counter keeps boardLoadInFlight true until the LAST one settles; a bare
+// boolean was cleared by whichever finished first.
+var boardLoadsInFlight = 0;
+var boardLastLoadedAt = '';  // locale time of the last SUCCESSFUL load
+const BOARD_STALE_BANNER_ID = 'lcars-board-stale-banner';
+// XACA-1397 QA: abort a hung board fetch so boardLoadInFlight cannot pin the
+// auto-refresh off for minutes. AbortController + setTimeout (not
+// AbortSignal.timeout) for older Safari. `var` so tests/diagnostics can lower it.
+var BOARD_FETCH_TIMEOUT_MS = 25000;
+
+/**
+ * XACA-1397-012: stack the stale-board bar directly UNDER the stale-asset bar
+ * (XACA-1376) using the asset bar's measured height, instead of a fixed offset
+ * that overlapped when the asset bar wrapped (<=600px) and left a gap when it
+ * was absent. Publishes two root vars read by lcars.css:
+ *   --lcars-board-stale-top  top offset of the stale-board bar (8px when no asset bar)
+ *   --lcars-board-stale-h    height the stale-board bar adds to the modal top
+ *                            reserve (0px when hidden)
+ * Safe to call anytime; layout bookkeeping only.
+ */
+function positionBoardStaleBanner() {
+    try {
+        const root = document.documentElement;
+        if (!root || !root.style || !root.style.setProperty) return;
+        const bar = document.getElementById(BOARD_STALE_BANNER_ID);
+        const assetBar = document.getElementById(ASSET_BANNER_ID);
+        let top = 8;
+        if (assetBar && !assetBar.hidden) {
+            top = 8 + (assetBar.offsetHeight || 48) + 8;
+        }
+        root.style.setProperty('--lcars-board-stale-top', top + 'px');
+        const staleH = (bar && !bar.hidden) ? (bar.offsetHeight || 40) + 8 : 0;
+        root.style.setProperty('--lcars-board-stale-h', staleH + 'px');
+    } catch (e) { /* cosmetic only */ }
+}
+// The asset bar wraps (and so changes height) as the viewport changes.
+if (typeof window !== 'undefined' && window.addEventListener) {
+    window.addEventListener('resize', positionBoardStaleBanner);
+}
+
+/**
+ * Show/refresh (never stack) the non-blocking board-load bar.
+ * asOf set  -> "Unable to refresh board - showing last loaded data (as of X)".
+ * asOf ''   -> "Unable to load board - retrying..." (XACA-1397-019, first load).
+ */
+function showBoardStaleBanner(asOf) {
+    try {
+        if (!document.body) return;
+        let bar = document.getElementById(BOARD_STALE_BANNER_ID);
+        if (!bar) {
+            bar = document.createElement('div');
+            bar.id = BOARD_STALE_BANNER_ID;
+            // Reuses the XACA-1376 asset-banner look; the modifier moves it below that bar.
+            bar.className = 'lcars-asset-banner lcars-board-stale-banner';
+            bar.setAttribute('role', 'status');
+            bar.setAttribute('aria-live', 'polite');
+            bar.setAttribute('aria-atomic', 'true');
+            const msg = document.createElement('span');
+            msg.className = 'lcars-asset-banner-text';
+            bar.appendChild(msg);
+            document.body.appendChild(bar);
+        }
+        const msg = bar.querySelector('.lcars-asset-banner-text');
+        if (msg) {
+            // XACA-1397-019: no asOf = no board has EVER loaded -> first-load wording.
+        msg.textContent = asOf
+            ? 'Unable to refresh board \u2014 showing last loaded data (as of ' + asOf + ')'
+            : 'Unable to load board \u2014 retrying\u2026';
+        }
+        bar.hidden = false;
+        positionBoardStaleBanner();
+    } catch (e) {
+        // cosmetic only - never let the banner break the load path
+    }
+}
+
+function hideBoardStaleBanner() {
+    try {
+        const bar = document.getElementById(BOARD_STALE_BANNER_ID);
+        if (bar) bar.hidden = true;
+        positionBoardStaleBanner();
+    } catch (e) { /* cosmetic only */ }
+}
+
 async function loadBoardData() {
+    boardLoadsInFlight++;
+    boardLoadInFlight = true;
+    let fetchTimer = null;
+    let fetchSignal;
+    if (typeof AbortController !== 'undefined') {
+        const ctl = new AbortController();
+        fetchSignal = ctl.signal;
+        fetchTimer = setTimeout(() => ctl.abort(), BOARD_FETCH_TIMEOUT_MS);
+    }
     try {
         // Clear plan doc cache on refresh (XACA-0045-006)
         clearPlanDocExistsCache();
@@ -794,12 +896,19 @@ async function loadBoardData() {
             });
         }
 
-        const response = await fetch(CONFIG.dataPath);
+        // The abort covers the body read too (response.json()), not just headers.
+        const response = await fetch(CONFIG.dataPath, fetchSignal ? { signal: fetchSignal } : undefined);
         if (!response.ok) {
             throw new Error(`HTTP error! status: ${response.status}`);
         }
         checkAssetVersion(response);  // XACA-1376: stale-asset banner (no extra request)
-        boardData = await response.json();
+        const freshBoard = await response.json();
+        if (!freshBoard || typeof freshBoard !== 'object' || Array.isArray(freshBoard)) {
+            throw new Error('Board response was not a JSON object');
+        }
+        boardData = freshBoard;
+        boardEverLoaded = true;
+        boardLastLoadedAt = new Date().toLocaleTimeString();
 
         // XACA-0056: Also fetch archived releases for release name lookups
         // Items assigned to archived releases need to display the correct shortTitle
@@ -823,22 +932,42 @@ async function loadBoardData() {
             });
         }
 
+        hideBoardStaleBanner();
         renderBoard();
         updateTimestamp();
         return true;
     } catch (error) {
-        console.error('Error loading board data:', error);
-        loadEmbeddedData();
+        console.error('Error loading board data (team: ' +
+            ((typeof CONFIG !== 'undefined' && CONFIG.team) || (boardData && boardData.team) || 'unknown') +
+            '):', error);
+        if (boardEverLoaded) {
+            // Keep the last good board; do not re-render it empty.
+            showBoardStaleBanner(boardLastLoadedAt);
+        } else {
+            // XACA-1397-019: never a silent fallback. The (clearly labelled)
+            // placeholder board keeps boardData non-null for the rest of the UI;
+            // the banner says why. Auto-refresh keeps retrying; success hides it.
+            loadEmbeddedData();
+            showBoardStaleBanner('');
+        }
         return false;
+    } finally {
+        if (fetchTimer !== null) clearTimeout(fetchTimer);
+        boardLoadsInFlight = Math.max(0, boardLoadsInFlight - 1);
+        boardLoadInFlight = boardLoadsInFlight > 0;
     }
 }
 
+// XACA-1397-019: only called when the FIRST board load fails (no other caller;
+// there is no offline/file:// mode). This is a PLACEHOLDER, not data: it must
+// not read as a real team, so the ship name says so and lastUpdated is omitted
+// ("Awaiting Data" instead of a fake "now"). boardUnavailable marks it.
 function loadEmbeddedData() {
     boardData = {
         team: "freelance",
-        ship: "Enterprise NX-01",
+        ship: "BOARD UNAVAILABLE",
         series: "ENT",
-        lastUpdated: new Date().toISOString(),
+        boardUnavailable: true,
         terminals: {
             command: { developer: "Captain Jonathan Archer", role: "Lead Feature Developer", color: "command" },
             engineering: { developer: "Commander Trip Tucker", role: "Release Engineer", color: "operations" },
@@ -2283,11 +2412,21 @@ const KANBAN_COLUMNS = ['needs_reconnect', 'paused', 'ready', 'planning', 'codin
 // Toggle state - show all columns or intelligent hiding
 let showAllKanbanColumns = localStorage.getItem('showAllKanbanColumns') === 'true';
 
+function clearKanbanColumnKeepingNote(container) {
+    const kids = Array.from(container.childNodes || []);
+    kids.forEach(ch => {
+        const keep = ch.classList && ch.classList.contains('reconcile-status-note');
+        if (!keep && ch.parentNode) ch.parentNode.removeChild(ch);
+    });
+}
+
 function renderKanbanColumns() {
     // Clear all columns
+    // XACA-1397-020: the reconcile status note is a live region and must
+    // survive re-renders (updateReconcileStatusNote owns its lifecycle).
     KANBAN_COLUMNS.forEach(col => {
         const container = document.getElementById(`col-${col}`);
-        if (container) container.innerHTML = '';
+        if (container) clearKanbanColumnKeepingNote(container);
     });
 
     // Get active windows from new format
@@ -2321,25 +2460,120 @@ function renderKanbanColumns() {
     // and goes silent the instant tmux dies -- exactly when an operator most
     // needs to see what was mid-flight. Additive: never touches activeWindows.
     const reconnectCol = document.getElementById('col-needs_reconnect');
+    let reconcileState = 'absent';
     if (reconnectCol) {
-        const reconciled = boardData.reconciledInProgress || [];
+        // XACA-1397-004: the server now serves a cached reconcile. Absent
+        // fields = older server (unchanged behavior). stale + empty = the
+        // cache is cold, NOT "nothing orphaned": show a "reconciling" note
+        // instead of silently rendering an empty lane. stale + data: use it.
+        const reconciled = Array.isArray(boardData.reconciledInProgress)
+            ? boardData.reconciledInProgress : [];
         const orphaned = reconciled.filter(r => r.classification === 'ORPHANED');
         orphaned.forEach(item => {
             const card = createReconnectCard(item);
-            reconnectCol.appendChild(card);
+            // Cards go BEFORE the persistent note so the note is never moved.
+            reconnectCol.insertBefore(card, reconnectCol.querySelector('.reconcile-status-note'));
             columnCardCounts.needs_reconnect = (columnCardCounts.needs_reconnect || 0) + 1;
         });
+        reconcileState = updateReconcileStatusNote(reconnectCol, boardData);
     }
 
-    // Apply responsive swimlane logic
-    updateKanbanColumnVisibility(columnCardCounts);
+    // Apply responsive swimlane logic. XACA-1397-011: a cold/unavailable
+    // reconcile note adds no card, so without this the lane (hidden when
+    // empty) would hide the very note explaining why it is empty.
+    updateKanbanColumnVisibility(columnCardCounts, reconcileLaneForcedVisible(reconcileState));
+}
+
+/**
+ * XACA-1397-004: subtle status line in the NEEDS RECONNECT lane describing the
+ * freshness of the server's reconciled in-progress view. Returns the state:
+ * 'absent' (older server), 'fresh', 'cold', 'unavailable' or 'stale'. Never adds a card, so
+ * it never changes column counts / visibility.
+ */
+function updateReconcileStatusNote(col, data) {
+    let state = 'absent';
+    try {
+        const prev = col.querySelector ? col.querySelector('.reconcile-status-note') : null;
+        if (data && typeof data.reconciledInProgressStale === 'boolean') {
+            const list = Array.isArray(data.reconciledInProgress) ? data.reconciledInProgress : [];
+            const age = data.reconciledInProgressAgeMs;
+            // XACA-1397 QA: a cold cache whose refresh keeps failing will never
+            // warm up. Server fields (absent on an older server = old behavior):
+            // reconciledInProgressFailures (consecutive count) / ...Error (category).
+            const fails = Number(data.reconciledInProgressFailures) || 0;
+            const hasErr = !!data.reconciledInProgressError;
+            const noFailCount = data.reconciledInProgressFailures === undefined ||
+                data.reconciledInProgressFailures === null;
+            if (!data.reconciledInProgressStale) {
+                state = 'fresh';
+            } else if (list.length === 0 && (age === null || age === undefined)) {
+                state = (fails >= 3 || (noFailCount && hasErr)) ? 'unavailable' : 'cold';
+            } else {
+                state = 'stale';
+            }
+            if (state !== 'fresh') {
+                // XACA-1397-020: ONE persistent note per lane. The live text
+                // (.reconcile-status-text) changes only when the semantic state
+                // changes; the ticking "(Ns old)" lives in a sibling aria-hidden
+                // span, so an auto-refresh tick never re-announces. (Age stays
+                // visible for sighted operators; coarse buckets were rejected
+                // because each bucket change would still re-announce.)
+                let note = prev;
+                if (!note) {
+                    note = document.createElement('div');
+                    note.className = 'reconcile-status-note';
+                    note.setAttribute('role', 'status');
+                    note.setAttribute('aria-live', 'polite');
+                    const t = document.createElement('span');
+                    t.className = 'reconcile-status-text';
+                    const a = document.createElement('span');
+                    a.className = 'reconcile-status-age';
+                    a.setAttribute('aria-hidden', 'true');
+                    note.appendChild(t);
+                    note.appendChild(a);
+                    col.appendChild(note);
+                }
+                const label = state === 'unavailable'
+                    ? 'Reconcile unavailable \u2014 in-progress status may be incomplete'
+                    : state === 'cold'
+                    ? 'Reconciling in-progress work\u2026'
+                    : 'Reconcile data may be out of date';
+                const textEl = note.querySelector('.reconcile-status-text');
+                if (textEl && textEl.textContent !== label) textEl.textContent = label;
+                const ageEl = note.querySelector('.reconcile-status-age');
+                if (ageEl) {
+                    const ageText = (state === 'stale' && typeof age === 'number')
+                        ? ' (' + Math.round(age / 1000) + 's old)' : '';
+                    if (ageEl.textContent !== ageText) ageEl.textContent = ageText;
+                }
+                return state;
+            }
+        }
+        // fresh / absent: no note.
+        if (prev && prev.parentNode) prev.parentNode.removeChild(prev);
+    } catch (e) { /* cosmetic only */ }
+    return state;
+}
+
+/**
+ * XACA-1397-011: columns that must stay visible although they hold no cards,
+ * because they carry a status note the operator needs to see. Only the
+ * 'cold' / 'unavailable' reconcile states qualify: "we do not know yet / could
+ * not check" is information; fresh-and-empty (and stale-with-data, which shows
+ * cards or a passing age note) keeps the default hide-when-empty behaviour.
+ */
+function reconcileLaneForcedVisible(state) {
+    return (state === 'cold' || state === 'unavailable') ? ['needs_reconnect'] : [];
 }
 
 /**
  * Update column visibility based on card counts and priority
  * Critical columns always show, optional columns hide when empty
+ * `forceVisible` (optional): column names that hold a status note and so are
+ * treated as non-empty (no `empty` class, so the narrow-viewport CSS that
+ * hides `.kanban-column.empty` does not hide them either).
  */
-function updateKanbanColumnVisibility(columnCardCounts) {
+function updateKanbanColumnVisibility(columnCardCounts, forceVisible) {
     const kanbanBoard = document.querySelector('.kanban-board');
     if (!kanbanBoard) return;
 
@@ -2352,7 +2586,8 @@ function updateKanbanColumnVisibility(columnCardCounts) {
 
         const cardCount = columnCardCounts[colName] || 0;
         const priority = COLUMN_PRIORITY[colName] || 'optional';
-        const isEmpty = cardCount === 0;
+        const isEmpty = cardCount === 0 &&
+            !(Array.isArray(forceVisible) && forceVisible.indexOf(colName) !== -1);
 
         // Determine visibility
         let shouldShow = true;
@@ -10710,7 +10945,9 @@ function startAutoRefresh() {
     if (CONFIG.autoRefresh) {
         refreshTimer = setInterval(() => {
             // Skip refresh if paused (modal is open)
-            if (!refreshPaused) {
+            // XACA-1397-003: skip the tick while a load is still running so a slow
+            // board request cannot stack overlapping polls.
+            if (!refreshPaused && !boardLoadInFlight) {
                 loadBoardData();
             }
         }, CONFIG.refreshInterval);
