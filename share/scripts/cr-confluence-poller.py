@@ -375,26 +375,50 @@ def _board_file_for_team(team: str) -> str | None:
     return None
 
 
-def _is_release_linked(cr: dict) -> bool:
-    """True for an engine-managed CR (XACA-1349): releaseAssignment.releaseId is set.
+def _load_approval_providers():
+    """Import kanban-hooks/approval_providers.py (repo layout: ../kanban-hooks, tap share layout:
+    ../kanban-hooks, flat: next to this file). None when it cannot be imported (callers fail closed)."""
+    here = Path(__file__).resolve().parent
+    for cand in (here.parent / "kanban-hooks", here / "kanban-hooks", here):
+        if (cand / "approval_providers.py").is_file():
+            if str(cand) not in sys.path:
+                sys.path.insert(0, str(cand))
+            try:
+                import approval_providers  # noqa: PLC0415
+                return approval_providers
+            except Exception:  # noqa: BLE001
+                return None
+    return None
 
-    `kb-release cr-stage` owns publish AND submit for these. Pass 1 must not touch
-    them: kb-cr submit refuses a release-linked v2 CR without the cr-approver notice
-    receipt, so a poller transition would write cr_proper_url and then fail every
-    cycle. Same predicate as kb-cr.sh _kb_cr_is_release_linked.
+
+def _is_engine_managed(board: dict, cr: dict) -> bool:
+    """True for an engine-managed CR (XACA-1349): it carries the cr_stage_sha stamp that only
+    `kb-release cr-stage` writes (approval_providers.is_engine_managed; v2 or legacy).
+
+    INVARIANT: skip = engine-managed (cr_stage_sha), NOT release linkage. The gate refuses unstamped CRs,
+    so linkage alone can never open CR exit; hand-linked CRs (kb-cr assign-release, XACA-0657/0897 Guard 5)
+    keep the pre-PR poller path exactly.
+
+    `kb-release cr-stage` owns publish AND submit for engine-managed CRs. Pass 1 must not touch them:
+    kb-cr submit refuses one without the cr-approver notice receipt, so a poller transition would write
+    cr_proper_url and then fail every cycle. FAILS CLOSED: if the helper cannot be imported, every CR
+    counts as engine-managed (skipped).
     """
-    ra = cr.get("releaseAssignment")
-    return isinstance(ra, dict) and bool(str(ra.get("releaseId") or "").strip())
+    ap_mod = _load_approval_providers()
+    if ap_mod is None:
+        log("approval_providers unavailable; treating CR as engine-managed (fail closed, skipped).")
+        return True
+    return bool(ap_mod.is_engine_managed(cr))
 
 
-def _skip_release_linked(team: str, crs: list[dict], state: str) -> list[dict]:
+def _skip_engine_managed(team: str, crs: list[dict], state: str, board: dict) -> list[dict]:
     """Drop engine-managed CRs from a Pass 1 candidate list (verbose-logged, never written)."""
     kept = []
     for cr in crs:
-        if _is_release_linked(cr):
+        if _is_engine_managed(board, cr):
             cr_id = cr.get("crId") or cr.get("id", "<unknown>")
             vlog(
-                f"[{team}][{cr_id}] {state} CR is release-linked (engine-managed): "
+                f"[{team}][{cr_id}] {state} CR is engine-managed (cr_stage_sha stamped): "
                 f"skipped, `kb-release cr-stage` owns its publish/submit."
             )
             continue
@@ -428,7 +452,7 @@ def find_cr_drafted_crs(team: str) -> list[dict]:
             cr["_board_file"] = board_path
             drafted.append(cr)
 
-    drafted = _skip_release_linked(team, drafted, "cr-drafted")
+    drafted = _skip_engine_managed(team, drafted, "cr-drafted", board_data)
     vlog(f"[{team}] Found {len(drafted)} cr-drafted CR(s) out of {len(crs)} total.")
     return drafted
 
@@ -464,7 +488,7 @@ def find_cr_published_crs(team: str) -> list[dict]:
             cr["_board_file"] = board_path
             published.append(cr)
 
-    published = _skip_release_linked(team, published, "cr-published")
+    published = _skip_engine_managed(team, published, "cr-published", board_data)
     vlog(f"[{team}] Found {len(published)} cr-published CR(s) out of {len(crs)} total.")
     return published
 

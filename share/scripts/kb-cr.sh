@@ -1470,12 +1470,25 @@ _kb_cr_activity_resolve_board() {
 # Each one: validates predecessor state → calls _kb_cr_lifecycle_advance.
 # ─────────────────────────────────────────────────────────────────────────────
 
-# _kb_cr_is_release_linked <board> <cr_idx>  -- 0 when the CR carries releaseAssignment.releaseId
-# (an engine-managed CR, XACA-1349). Same predicate as release_cr_stage.py / the poller skip.
-_kb_cr_is_release_linked() {
-    local _rl
-    _rl=$(_kb_jq_read "$1" '.crs[$i].releaseAssignment | if type == "object" and ((.releaseId // "") | tostring | length) > 0 then "yes" else "no" end' -r --argjson i "$2" 2>/dev/null)
-    [[ "$_rl" == "yes" ]]
+# _kb_cr_is_engine_managed <board> <cr_idx>  -- 0 when the CR is ENGINE-MANAGED (XACA-1349): it carries a
+# cr_stage_sha stamp (any key the gate reads; only `kb-release cr-stage` writes it), v2 or legacy.
+# NO rule lives here: it asks the ONE implementation, approval_providers.is_engine_managed. Keyed on the
+# stamp, NOT on release linkage: kb-cr assign-release / kb-release link-cr also write releaseAssignment
+# (XACA-0657/0897) and those hand-linked CRs keep the pre-PR submit path. Safe because the gate refuses
+# an unstamped CR at cr-approved or later, so linkage alone can never open CR exit.
+# FAILS CLOSED: if the python call cannot answer, the CR is treated as engine-managed (the receipt
+# guard applies) and a warning is printed.
+_kb_cr_is_engine_managed() {
+    local _py _ans
+    _py=$(_kb_cr_approval_py 2>/dev/null) || {
+        echo "kb-cr: WARNING: cannot resolve approval_providers.py; treating CR as engine-managed (fail closed)" >&2
+        return 0
+    }
+    _ans=$(python3 "$_py" is-engine-managed --board "$1" --cr-index "$2" 2>/dev/null) || {
+        echo "kb-cr: WARNING: engine-managed check failed; treating CR as engine-managed (fail closed)" >&2
+        return 0
+    }
+    [[ "$_ans" != "no" ]]
 }
 
 # kb-cr submit <CR-ID>
@@ -1528,18 +1541,19 @@ _kb_cr_container_submit() {
             ;;
     esac
 
-    # XACA-1349 (F2, spec 8.1): an ENGINE-MANAGED CR (linked to a release:
-    # releaseAssignment.releaseId set) is submitted only from cr-published, and only after the
-    # cr-approver notice receipt (or a recorded lead override). That is the same rule
-    # `kb-release cr-stage` enforces (CrStage._has_receipt in kanban-hooks/release_cr_stage.py), so the
-    # CLI cannot be used to skip it. Round 2 narrowed this from "every v2 CR": a standalone v2 CR
-    # (no release link; the Confluence poller path, `kb-cr create`) is NOT engine-managed and keeps
-    # the pre-PR behaviour exactly. Legacy CRs are unchanged too.
+    # XACA-1349 (F2, spec 8.1): an ENGINE-MANAGED CR (carries the cr_stage_sha stamp that only
+    # `kb-release cr-stage` writes, approval_providers.is_engine_managed; v2 or legacy) is submitted only
+    # from cr-published, and only after the cr-approver notice receipt (or a recorded lead override).
+    # That is the same rule `kb-release cr-stage` enforces (CrStage._has_receipt in
+    # kanban-hooks/release_cr_stage.py), so the CLI cannot be used to skip it.
+    # INVARIANT: guard/skip = engine-managed (cr_stage_sha); the gate refuses unstamped CRs, so linkage
+    # alone can never open CR exit. Hand-linked CRs (kb-cr assign-release, XACA-0657/0897), standalone
+    # CRs and unstamped legacy CRs are NOT engine-managed and keep the pre-PR behaviour exactly.
     # Held/rejected were already refused by _kb_cr_v2_guard above (resume / never reused).
-    # Counterpart: the cr-confluence-poller skips release-linked CRs (the engine owns their submit).
-    if _kb_cr_is_v2 "$_cr_board" "$cr_idx" && _kb_cr_is_release_linked "$_cr_board" "$cr_idx"; then
+    # Counterpart: the cr-confluence-poller skips engine-managed CRs (the engine owns their submit).
+    if _kb_cr_is_engine_managed "$_cr_board" "$cr_idx"; then
         if [[ "$current_state" != "cr-published" ]]; then
-            echo "kb-cr submit: CR '$cr_id' is in state '$current_state'; a release-linked v2 CR is submitted only from cr-published (spec 8.1). Publish first: kb-release cr-stage <REL-ID>" >&2
+            echo "kb-cr submit: CR '$cr_id' is in state '$current_state'; an engine-managed CR is submitted only from cr-published (spec 8.1). Publish first: kb-release cr-stage <REL-ID>" >&2
             return 1
         fi
         # Mirrors CrStage._has_receipt + the noticeOverride check in kanban-hooks/release_cr_stage.py

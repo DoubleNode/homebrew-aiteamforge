@@ -430,6 +430,31 @@ def cr_stamped_sha(cr):
     return None
 
 
+def is_engine_managed(cr):
+    """True when `cr` carries an engine stamp: ANY of _STAGE_SHA_KEYS present (the same key set the gate
+    reads via cr_stamped_sha), whatever the CR's lifecycle. Only `kb-release cr-stage` step 1 writes
+    cr_stage_sha. A present-but-malformed stamp (not a string, e.g. a number or object) counts as
+    managed (fail closed); None and blank strings count as absent. Anything unreadable answers True.
+
+    INVARIANT (XACA-1349 PR #1036 round 3): the `kb-cr submit` receipt guard and the Confluence poller
+    skip key on THIS predicate, never on release linkage (kb-cr assign-release / kb-release link-cr also
+    write releaseAssignment, XACA-0657/0897). That is safe because release_cr_feed refuses any CR at
+    cr-approved or later whose stamp is absent or != stageSha.CR: linkage alone can never open CR exit.
+    So: gate allows CR exit  =>  CR is engine-managed AND guarded."""
+    try:
+        if not isinstance(cr, dict):
+            return True
+        for k in _STAGE_SHA_KEYS:
+            v = cr.get(k)
+            if v is None:
+                continue
+            if not isinstance(v, str) or v.strip():
+                return True
+        return False
+    except Exception:  # noqa: BLE001
+        return True
+
+
 def _fail_closed_feed(reason, ids=(), stale=None):
     # state None: release_gate reports "CR state is 'None', must be cr-approved" and refuses.
     # `stale` (XACA-1349 F1) carries the distinct stale-approval reason release_gate also prints.
@@ -439,30 +464,86 @@ def _fail_closed_feed(reason, ids=(), stale=None):
             "staleApproval": stale, "error": reason}
 
 
+# -- CR <-> release linkage: ONE rule, ONE implementation (XACA-1349 PR #1036 round 3) -----------
+# LINKAGE (the gate feed and cr-stage) goes through _linked_crs / is_release_linked: a half-unlink
+# (the LCARS unlink endpoint is two separate writes) leaves a CR in release.linkedCRs[] with no
+# releaseAssignment, and the gate still drives it.
+# GUARD / SKIP (the `kb-cr submit` receipt guard, the Confluence poller skip, CLI mode
+# `is-engine-managed`) key on is_engine_managed (the cr_stage_sha stamp), NOT on linkage: the gate
+# refuses unstamped CRs, so linkage alone can never open CR exit, while hand-linked CRs
+# (kb-cr assign-release, XACA-0657/0897) keep their pre-PR submit path.
+
+def _assignment_rid(cr):
+    """The release id a CR's own releaseAssignment names ('' when absent/blank/not a dict)."""
+    ra = cr.get("releaseAssignment") if isinstance(cr, dict) else None
+    return str(ra.get("releaseId") or "").strip() if isinstance(ra, dict) else ""
+
+
+def _listed_cr_ids(release):
+    """Ids named by release.linkedCRs[] (entries are {crId: ..} objects or bare id strings).
+    Raises TypeError on a non-list linkedCRs so callers can fail closed."""
+    lst = release.get("linkedCRs")
+    if lst is None:
+        return []
+    if not isinstance(lst, list):
+        raise TypeError("linkedCRs is not a list")
+    return [ent.get("crId") if isinstance(ent, dict) else ent for ent in lst]
+
+
+def _cr_linked_to(cr_id, assigned_rid, release_id, listed_ids):
+    """THE predicate. A CR's own releaseAssignment wins (it links to AT MOST ONE release); the
+    release's linkedCRs[] mirror counts only for a CR that carries no assignment."""
+    if assigned_rid:
+        return assigned_rid == release_id
+    return cr_id in listed_ids
+
+
 def _linked_crs(board, release):
-    """(crs, missing_ids): the board CRs linked to `release`. A CR's own releaseAssignment wins
-    (it links to AT MOST ONE release); release.linkedCRs[].crId is the mirror and counts only for a
-    CR that carries no assignment. A linkedCRs id with no CR on the board is reported as missing."""
+    """(crs, missing_ids): the board CRs linked to `release`. A linkedCRs id with no CR on the
+    board is reported as missing. Linkage rule: _cr_linked_to."""
     rid = release.get("id")
+    listed = _listed_cr_ids(release)
     by_id = {c.get("id"): c for c in (board.get("crs") or []) if isinstance(c, dict)}
     out, seen, missing = [], set(), []
     for cr in by_id.values():
-        ra = cr.get("releaseAssignment")
-        if isinstance(ra, dict) and ra.get("releaseId") == rid:
+        if _assignment_rid(cr) and _cr_linked_to(cr.get("id"), _assignment_rid(cr), rid, listed):
             out.append(cr)
             seen.add(cr.get("id"))
-    for ent in release.get("linkedCRs") or []:
-        cid = ent.get("crId") if isinstance(ent, dict) else ent
+    for cid in listed:
         if cid in seen:
             continue
         cr = by_id.get(cid)
         if cr is None:
             missing.append(cid)
-        elif not (isinstance(cr.get("releaseAssignment"), dict)
-                  and cr["releaseAssignment"].get("releaseId")):
+        elif _cr_linked_to(cid, _assignment_rid(cr), rid, listed):
             out.append(cr)
             seen.add(cid)
     return out, missing
+
+
+def is_release_linked(board, cr):
+    """True when `cr` (a CR record from `board`) is linked to ANY release under the _linked_crs
+    rule: releaseAssignment.releaseId set (even if that release is missing), or its id listed in
+    any release's linkedCRs[]. FAILS CLOSED: any malformation (releases / linkedCRs not lists,
+    non-dict release, unreadable record) answers True so the receipt guard applies."""
+    try:
+        if _assignment_rid(cr):
+            return True
+        ids = {i for i in (cr.get("id"), cr.get("crId")) if i}
+        releases = board.get("releases")
+        if releases is None:
+            return False
+        if not isinstance(releases, list):
+            return True
+        for rel in releases:
+            if not isinstance(rel, dict):
+                return True
+            listed = _listed_cr_ids(rel)
+            if any(_cr_linked_to(i, "", rel.get("id"), listed) for i in ids):
+                return True
+        return False
+    except Exception:  # noqa: BLE001
+        return True
 
 
 def open_linked_cr_ids(board, release):
@@ -472,6 +553,19 @@ def open_linked_cr_ids(board, release):
                 if c.get("crState") not in _CR_RETIRED and isinstance(c.get("id"), str)]
     except Exception:  # noqa: BLE001
         return []
+
+
+def _release_at_cr(release):
+    """True when the release is at CR by the GATE's own derivation (release_gate.current_stage: explicit
+    stage, else furthest stages{}.enteredAt, else legacy platform environments). FAILS CLOSED: if the
+    stage cannot be determined (module missing, malformed record) answer True so the stamp check runs.
+    (A feed that tested only the explicit `stage` let an unstamped approved CR open the CR exit on a
+    release whose stage was only derived.)"""
+    try:
+        import release_gate  # noqa: PLC0415 - lazy: keeps this module importable standalone
+        return release_gate.current_stage(release) == "CR"
+    except Exception:  # noqa: BLE001
+        return True
 
 
 def release_cr_feed(board, release, now, actor="lcars-release-gate"):
@@ -542,7 +636,7 @@ def release_cr_feed(board, release, now, actor="lcars-release-gate"):
         # there are no in-flight engine CRs without a stamp. emergency-deployed is exempt: the 13.5 path
         # approves retroactively and never goes through cr-stage. Only while the release is at CR: the
         # GAMMA exit asks for cr-completed, not for an approval.
-        if sha and (release.get("stage") or release.get("currentStage")) == "CR":
+        if sha and _release_at_cr(release):
             for c in work["crs"]:
                 st = c.get("crState")
                 if st == "emergency-deployed" or _CR_RANK.get(st, -1) < _CR_RANK["cr-approved"]:
@@ -598,6 +692,27 @@ def _board_cli(args):
     return 0
 
 
+def _managed_cli(args):
+    """Print `yes`/`no` (exit 0); any error exits 2 and the caller must treat it as engine-managed."""
+    try:
+        with open(args.board, encoding="utf-8") as fh:
+            board = json.loads(fh.read())
+        crs = board.get("crs")
+        if not isinstance(crs, list):
+            raise ValueError("board has no crs list")
+        if args.cr_index is not None:
+            cr = crs[args.cr_index] if 0 <= args.cr_index < len(crs) else None
+        else:
+            cr = next((c for c in crs if isinstance(c, dict) and args.cr_id in (c.get("id"), c.get("crId"))), None)
+        if not isinstance(cr, dict):
+            raise ValueError("CR not found on the board")
+    except (OSError, ValueError, AttributeError) as e:
+        sys.stderr.write("approval_providers: is-engine-managed: %s\n" % e)
+        return 2
+    sys.stdout.write("yes\n" if is_engine_managed(cr) else "no\n")
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="approval_providers.py")
     sub = ap.add_subparsers(dest="mode", required=True)
@@ -622,8 +737,15 @@ def main(argv=None):
     e = sub.add_parser("set-expected")
     e.add_argument("--board", required=True)
     e.add_argument("--cr-id", required=True)
+    r = sub.add_parser("is-engine-managed")
+    r.add_argument("--board", required=True)
+    g = r.add_mutually_exclusive_group(required=True)
+    g.add_argument("--cr-id")
+    g.add_argument("--cr-index", type=int)
     args = ap.parse_args(argv)
     try:
+        if args.mode == "is-engine-managed":
+            return _managed_cli(args)
         if args.mode in ("stamp-board", "set-expected"):
             return _board_cli(args)
         if args.mode == "compute":
