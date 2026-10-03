@@ -604,11 +604,12 @@ const ADMIN_ROUTES = [
     { method: 'DELETE', path: '/api/vault/secrets/:engineSlug/:accountSlug',     file: 'lib/vault-routes.js' },
 ];
 
-// The 9 fleet-tier routes. 6 use requireApiKey middleware; the 3 msg-relay
+// The 10 fleet-tier routes. 7 use requireApiKey middleware; the 3 msg-relay
 // routes use the checkApiKey guard form inside the handler.
 const FLEET_MIDDLEWARE_ROUTES = [
     'POST /api/status', 'POST /api/team-register', 'POST /api/kanban-push', 'POST /api/knowledge-push',
     'POST /api/token-reports', 'GET /api/token-reports',
+    'POST /api/ci-runners-push',
 ];
 const FLEET_GUARD_ROUTES = ['POST /api/msg', 'GET /api/msg', 'POST /api/msg/ack'];
 
@@ -658,7 +659,7 @@ describe('route inventory — every admin route is on the admin gate (static)', 
         });
     }
 
-    test('the requireApiKey (fleet middleware) set is exactly the 6 fleet middleware routes', () => {
+    test('the requireApiKey (fleet middleware) set is exactly the 7 fleet middleware routes', () => {
         const derived = regs.filter((r) => r.gate === 'requireApiKey').map(key).sort();
         assert.deepEqual(derived, [...FLEET_MIDDLEWARE_ROUTES].sort());
     });
@@ -671,11 +672,11 @@ describe('route inventory — every admin route is on the admin gate (static)', 
         assert.ok(!/checkAdminKey/.test(src));
     });
 
-    test('tier totals: 19 admin + 9 fleet = 28 guarded', () => {
+    test('tier totals: 19 admin + 10 fleet = 29 guarded', () => {
         const admin = regs.filter((r) => r.gate === 'requireAdminKey').length;
         const fleet = regs.filter((r) => r.gate === 'requireApiKey').length + FLEET_GUARD_ROUTES.length;
         assert.equal(admin, 19);
-        assert.equal(fleet, 9);
+        assert.equal(fleet, 10);
     });
 
     test('every mutating /api route in the server is gated by a tier or explicitly allowlisted', () => {

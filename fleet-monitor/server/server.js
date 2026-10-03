@@ -39,6 +39,8 @@ const { ensureReady: vaultEnsureReady } = require('./lib/vault-crypto');
 const { registerVaultRoutes } = require('./lib/vault-routes');
 const { registerMsgRelayRoutes } = require('./lib/msg-relay-routes');
 const { registerTokenReportsRoutes } = require('./lib/token-reports-routes');
+// XACA-1387-003: CI runner telemetry (POST /api/ci-runners-push, GET /api/ci-runners).
+const { registerCiRunnersRoutes } = require('./lib/ci-runners-routes');
 
 // XACA-0395-005: shared API-key auth gate (kanban/plans/XACA-0395/
 // XACA-0395_auth_contract.md). requireApiKey is mounted as the second
@@ -3219,6 +3221,10 @@ registerTokenReportsRoutes(app, {
         .map(m => ({ machine_id: m.machine_id, hostname: m.hostname })),
 });
 
+// XACA-1387-003: self-hosted CI runner telemetry. Store flushed by the
+// periodic save + shutdown hooks below (same pattern as pushed boards).
+const ciRunnersStore = registerCiRunnersRoutes(app);
+
 // ============================================================================
 // ADMIN-TIER OPERATOR SESSION (XACA-0398-003)
 // ============================================================================
@@ -3946,6 +3952,13 @@ setInterval(() => {
     savePushedKnowledge();
 }, SAVE_INTERVAL_MS);
 
+// Periodically save CI runner telemetry (XACA-1387-003). save() writes BOTH
+// data/ci-runners.json and data/ci-runner-rollups.json (XACA-1387-020); the
+// SIGTERM/SIGINT handlers below make the same single call.
+setInterval(() => {
+    ciRunnersStore.save();
+}, SAVE_INTERVAL_MS);
+
 // XACA-1031-003: resolve the latest published tap VERSION now (fire-and-
 // forget -- a slow/failed first fetch must never delay server startup) and
 // keep it refreshed on the same cadence in the background. getLatestTapVersion()
@@ -4069,6 +4082,7 @@ process.on('SIGTERM', () => {
     console.log('Received SIGTERM, shutting down gracefully...');
     saveMachineData();
     savePushedKnowledge();
+    ciRunnersStore.save();
     process.exit(0);
 });
 
@@ -4076,5 +4090,6 @@ process.on('SIGINT', () => {
     console.log('Received SIGINT, shutting down gracefully...');
     saveMachineData();
     savePushedKnowledge();
+    ciRunnersStore.save();
     process.exit(0);
 });

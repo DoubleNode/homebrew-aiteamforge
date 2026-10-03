@@ -300,6 +300,16 @@ var KNOWN_UNPROJECTED_TIMESTAMP_FIELDS = {
         'gap predating XACA-0895 — out of scope for the cr-published defect class this ' +
         'file targets.'
     ),
+    cr_draft_approved_at: (
+        'XACA-1348 (v2 CR lifecycle) field mirrored into cr-schema.json ahead of any LCARS ' +
+        'consumer. Stamped by kb-cr approve-draft; not surfaced by the CR tab yet. ' +
+        'Recorded here by XACA-1386 so the SSOT guard stays red for NEW unprojected fields.'
+    ),
+    cr_approval_expected_at: (
+        'XACA-1348 (v2 CR lifecycle) field mirrored into cr-schema.json ahead of any LCARS ' +
+        'consumer. Read by approval_providers.should_stamp; not surfaced by the CR tab yet. ' +
+        'Recorded here by XACA-1386 so the SSOT guard stays red for NEW unprojected fields.'
+    ),
 };
 
 test('XACA-0895-009 SSOT: every cr-schema.json crTimestamps.* field is projected by _normalizeCR or explicitly allow-listed', () => {
