@@ -13315,7 +13315,9 @@ _kb_gate_resolve_pr() {
                 | def names_id: ascii_downcase | test("(^|[^0-9a-z])" + $i + "($|[^0-9])");
                   [ .[]? | select(((.headRefName // "") | names_id) or ((.title // "") | names_id))
                          | .number | tostring ] | join(" ")' 2>/dev/null) || hits=""
-            nhits=${#${(z)hits}}
+            # Count WORDS: ${#${(z)hits}} is a character count when there is one hit
+            # (zsh collapses a one-word result to a scalar: "1038" -> 4). PR #1038 gates.
+            local -a hitv; hitv=(${(z)hits}); nhits=${#hitv}
             if (( nhits > 1 )); then
                 echo "cannot verify: $nhits open PRs name $item_id (#${hits// /, #}) -- refusing to guess which one is this gate's" >&2
                 return 2
