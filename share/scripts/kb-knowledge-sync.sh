@@ -347,7 +347,7 @@ _now_iso() {
 _json_field() {
     local file="$1" key="$2"
     [ -r "$file" ] || { printf ''; return 0; }
-    sed -n 's/.*"'"$key"'"[[:space:]]*:[[:space:]]*"\{0,1\}\([^",}]*\)"\{0,1\}.*/\1/p' "$file" 2>/dev/null | head -1
+    sed -n 's/.*"'"$key"'"[[:space:]]*:[[:space:]]*"\{0,1\}\([^",}]*\)"\{0,1\}.*/\1/p' "$file" 2>/dev/null | awk 'NR==1'
 }
 
 # Backslash- and quote-escape a value for embedding in the JSON this script
@@ -1056,8 +1056,8 @@ _ac_all_own_ahead() {
         cn="$(_ac_git log -1 --format=%cn "$c" 2>/dev/null </dev/null || true)"
         [ "$cn" = "$AC_COMMITTER_NAME" ] || return 1
         body="$(_ac_git log -1 --format=%B "$c" 2>/dev/null </dev/null || true)"
-        printf '%s\n' "$body" | grep -qxF "$AC_TRAILER_MARK" || return 1
-        printf '%s\n' "$body" | grep -qxF "Knowledge-Sync-Host: ${AC_HOST}" || return 1
+        grep -qxF "$AC_TRAILER_MARK" <<<"$body" || return 1
+        grep -qxF "Knowledge-Sync-Host: ${AC_HOST}" <<<"$body" || return 1
     done <<EOF_OWN
 $list
 EOF_OWN
@@ -1223,7 +1223,7 @@ _ac_commit_attempt() {
         # Attribution: a COMMIT_SET path named on a [FAIL]/[BLOCK] line (the
         # installed and tracked hook formats respectively).
         while IFS="$_AC_TAB" read -r p sha <&4; do
-            line="$(printf '%s\n' "$AC_COMMIT_OUT" | grep -F -e '[FAIL]' -e '[BLOCK]' | grep -F -- "$p" | head -1)"
+            line="$(grep -F -e '[FAIL]' -e '[BLOCK]' <<<"$AC_COMMIT_OUT" | grep -F -- "$p" | awk 'NR==1')"
             if [ -n "$line" ]; then
                 printf '%s\t%s\t%s\t%s\n' "$sha" "$p" "$(_now_iso)" "$(printf '%s' "$line" | tr '\t\n' '  ')" >> "$TICK_TMP/attributed"
             fi
@@ -1518,7 +1518,7 @@ _ac_report_nonallowlisted() {
     [ "$_RES_OTHER" -gt 0 ] || return 0
     [ "$_RES_OTHER_FP" = "$AC_NONALLOW_FP_PREV" ] && return 0
     log "outbound-nonallowlisted-info: ${_RES_OTHER} dirty path(s) in ${REPO_DIR} are outside the auto-commit allowlist and are NOT counted as withheld. The daemon never commits outside agents/, subjects/ and teams/ entries + INDEX.md, so a human commits these by hand (logged once per content change):"
-    log_block "non-allowlisted dirty paths" "$(cut -f1,2 "$TICK_TMP/residual.other" | LC_ALL=C sort | head -50)"
+    log_block "non-allowlisted dirty paths" "$(cut -f1,2 "$TICK_TMP/residual.other" | LC_ALL=C sort | awk 'NR<=50')"
     return 0
 }
 

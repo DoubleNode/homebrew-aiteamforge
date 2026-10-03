@@ -556,7 +556,7 @@ get_tab_order() {
 is_lcars_session() {
     local session_name="$1"
     # Case-insensitive check for "lcars" in session name
-    echo "$session_name" | grep -qi "lcars" && return 0 || return 1
+    grep -qi "lcars" <<<"$session_name" && return 0 || return 1
 }
 
 # Get backup status JSON (if available)
@@ -764,7 +764,7 @@ get_tmux_sessions() {
             # XACA-0782: `|| echo 0` keeps windows numeric AND guards the set -e/
             # pipefail abort class (grep -o exits 1 if the line has no "N windows").
             windows=$(echo "$line" | grep -o '[0-9]* windows' | awk '{print $1}' || echo 0)
-            attached=$(echo "$line" | grep -q 'attached' && echo "true" || echo "false")
+            attached=$(grep -q 'attached' <<<"$line" && echo "true" || echo "false")
 
             # Extract creation date
             created_str=$(echo "$line" | sed -n 's/.*created \(.*\)) .*/\1/p')
@@ -807,7 +807,7 @@ get_tmux_sessions() {
 
             # Check for LCARS port (for LCARS terminals)
             lcars_port_json=""
-            if echo "$session_name" | grep -qi "lcars"; then
+            if grep -qi "lcars" <<<"$session_name"; then
                 lcars_port=$(get_lcars_port "$session_name")
                 if [ -n "$lcars_port" ]; then
                     lcars_port_json=",\"lcars_port\":$lcars_port"
@@ -1503,7 +1503,8 @@ _system_static_get() {
     [ -n "$key" ] || return 0
     _system_build_static_map
     [ -n "$_SYSTEM_STATIC_MAP" ] || return 0
-    printf '%s' "$_SYSTEM_STATIC_MAP" | awk -F'=' -v want="$key" '$1 == want { print $2; exit }'
+    # First match only, without awk `exit` (an early exit SIGPIPEs printf under pipefail+set -e).
+    printf '%s' "$_SYSTEM_STATIC_MAP" | awk -F'=' -v want="$key" '!d && $1 == want { print $2; d = 1 }'
     return 0
 }
 
@@ -1768,7 +1769,7 @@ _system_volatile_get() {
     local key="$1"
     [ -n "$key" ] || return 0
     [ -n "$_SYSTEM_VOLATILE_MAP" ] || return 0
-    printf '%s' "$_SYSTEM_VOLATILE_MAP" | awk -F'=' -v want="$key" '$1 == want { print $2; exit }'
+    printf '%s' "$_SYSTEM_VOLATILE_MAP" | awk -F'=' -v want="$key" '!d && $1 == want { print $2; d = 1 }'
     return 0
 }
 
@@ -2073,7 +2074,7 @@ _msg_default_machine_slug() {
         | sed -E 's/[^a-z0-9]+/-/g' \
         | sed -E 's/^-+//' \
         | sed -E 's/-+$//')
-    if [ -z "$slug" ] || ! printf '%s' "$slug" | grep -qE '^[a-z]'; then
+    if [ -z "$slug" ] || ! grep -qE '^[a-z]' <<<"$slug"; then
         slug=$(printf '%s' "m-${slug}" | sed -E 's/-+$//')
     fi
     printf '%s' "${slug:0:64}"
@@ -2461,7 +2462,9 @@ send_token_reports() {
             http_code=$(printf '%s' "$response" | tail -1)
             case "$http_code" in
                 200|201) lines="${lines}${week}: sent to $url (HTTP $http_code)"$'\n' ;;
-                409)     lines="${lines}${week}: server kept its record at $url (HTTP 409 $(printf '%s' "$response" | sed '$d' | head -c 200))"$'\n' ;;
+                409)     # capture, then slice (no early-exit consumer downstream of sed)
+                         body409="$(printf '%s' "$response" | sed '$d')"
+                         lines="${lines}${week}: server kept its record at $url (HTTP 409 ${body409:0:200})"$'\n' ;;
                 *)       result="fail"; lines="${lines}${week}: FAILED to send to $url (HTTP ${http_code:-none})"$'\n' ;;
             esac
         done
