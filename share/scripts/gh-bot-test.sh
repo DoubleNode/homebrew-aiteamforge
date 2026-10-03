@@ -320,7 +320,9 @@ CANDIDATES
     fi
 
     if [ "$count" -eq 1 ]; then
-        accept_key_file "$(printf '%s' "$found" | head -1)"
+        # First line WITHOUT a pipe: `printf | head -1` under pipefail lets head's
+        # early exit SIGPIPE printf and fail the whole command (XACA-1404).
+        accept_key_file "${found%%$'\n'*}"
         return 0
     fi
 
@@ -458,7 +460,10 @@ for inst in data:
 sys.stdout.write("\n".join(out) + "\n")
 ')" || die "could not read the installation list from GitHub."
 
-        n="$(printf '%s\n' "$parsed" | head -1)"
+        # First line WITHOUT a pipe: on a big page, `printf | head -1` under
+        # pipefail let head's early exit SIGPIPE printf and abort the walk
+        # (XACA-1404; seen as "printf: write error: Broken pipe" on Linux CI).
+        n="${parsed%%$'\n'*}"
         printf '%s\n' "$parsed" | tail -n +2
         total=$((total + n))
 
