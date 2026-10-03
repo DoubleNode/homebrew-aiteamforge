@@ -1470,6 +1470,14 @@ _kb_cr_activity_resolve_board() {
 # Each one: validates predecessor state → calls _kb_cr_lifecycle_advance.
 # ─────────────────────────────────────────────────────────────────────────────
 
+# _kb_cr_is_release_linked <board> <cr_idx>  -- 0 when the CR carries releaseAssignment.releaseId
+# (an engine-managed CR, XACA-1349). Same predicate as release_cr_stage.py / the poller skip.
+_kb_cr_is_release_linked() {
+    local _rl
+    _rl=$(_kb_jq_read "$1" '.crs[$i].releaseAssignment | if type == "object" and ((.releaseId // "") | tostring | length) > 0 then "yes" else "no" end' -r --argjson i "$2" 2>/dev/null)
+    [[ "$_rl" == "yes" ]]
+}
+
 # kb-cr submit <CR-ID>
 # Predecessor states: cr-drafted (one-stage legacy path, XACA-0465), cr-published (two-stage path,
 # XACA-0895), cr-held (re-submit after hold), cr-rejected (re-submit after rework)
@@ -1520,12 +1528,18 @@ _kb_cr_container_submit() {
             ;;
     esac
 
-    # XACA-1349 (F2, spec 8.1): a v2 CR is submitted only from cr-published, and only after the
-    # cr-approver notice receipt (or a recorded lead override). Legacy CRs are unchanged.
+    # XACA-1349 (F2, spec 8.1): an ENGINE-MANAGED CR (linked to a release:
+    # releaseAssignment.releaseId set) is submitted only from cr-published, and only after the
+    # cr-approver notice receipt (or a recorded lead override). That is the same rule
+    # `kb-release cr-stage` enforces (CrStage._has_receipt in kanban-hooks/release_cr_stage.py), so the
+    # CLI cannot be used to skip it. Round 2 narrowed this from "every v2 CR": a standalone v2 CR
+    # (no release link; the Confluence poller path, `kb-cr create`) is NOT engine-managed and keeps
+    # the pre-PR behaviour exactly. Legacy CRs are unchanged too.
     # Held/rejected were already refused by _kb_cr_v2_guard above (resume / never reused).
-    if _kb_cr_is_v2 "$_cr_board" "$cr_idx"; then
+    # Counterpart: the cr-confluence-poller skips release-linked CRs (the engine owns their submit).
+    if _kb_cr_is_v2 "$_cr_board" "$cr_idx" && _kb_cr_is_release_linked "$_cr_board" "$cr_idx"; then
         if [[ "$current_state" != "cr-published" ]]; then
-            echo "kb-cr submit: CR '$cr_id' is in state '$current_state'; a v2 CR is submitted only from cr-published (spec 8.1). Publish first: kb-release cr-stage <REL-ID>" >&2
+            echo "kb-cr submit: CR '$cr_id' is in state '$current_state'; a release-linked v2 CR is submitted only from cr-published (spec 8.1). Publish first: kb-release cr-stage <REL-ID>" >&2
             return 1
         fi
         # Mirrors CrStage._has_receipt + the noticeOverride check in kanban-hooks/release_cr_stage.py

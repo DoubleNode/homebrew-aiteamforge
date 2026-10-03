@@ -9255,6 +9255,21 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                             # copy keeps the history; dryRun never reaches here, so it consumes nothing.
                             release['rollbackShaOverrideUsed'] = dict(
                                 release.pop('rollbackShaOverride'), consumedAt=now)
+                    if eff_target == 'GAMMA' and cur != 'PROD':
+                        # PR #1036 round 2 (spec 3.2: GAMMA "deploys from releases/<ver> at stageSha.CR; records
+                        # stageSha.GAMMA"). Nothing else writes it, so GAMMA tests (/stages/GAMMA/tests accepts
+                        # only sha == stageSha.GAMMA) and gamma-fail could never run. Same locked write as the
+                        # stage change; dryRun never reaches here. Source = the SHA the gate just verified
+                        # against the branch HEAD: stageSha.CR (the stage being exited; with CR support off
+                        # that is the previous stage's graded SHA). Entering GAMMA is always a FRESH attempt
+                        # (cur != GAMMA), so a value left by an earlier attempt (regress does not clear
+                        # stageSha) is replaced; test records stay SHA-bound, so none of the old ones count.
+                        # Same shape release_supersede.apply_new_sha writes (and keeps in step pre-CR).
+                        _src = _release_gate.graded_sha(release, cur) if cur in _release_schema.STAGES else None
+                        if isinstance(_src, str) and _src:
+                            if not isinstance(release.get('stageSha'), dict):
+                                release['stageSha'] = {}
+                            release['stageSha']['GAMMA'] = _src
                     if cut:  # same locked write as the stage change
                         release['branch'] = cut['branch']
                         release['branchBaseSha'] = cut['branchBaseSha']

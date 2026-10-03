@@ -6,6 +6,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1349 (PR #1036 round 2): re-mirror `share/scripts/kb-cr.sh` (v2 submit guard scoped to release-linked CRs), `share/scripts/cr-confluence-poller.py` (skips release-linked CRs), `share/lcars-ui/server.py` (records `stageSha.GAMMA` at GAMMA entry).
 - XACA-1349 (PR #1036 round 1): re-mirror `share/kanban-hooks/release_rollback.py`, `share/kanban-hooks/release_gate.py`, `share/lcars-ui/server.py` — rollback override consumed at GAMMA entry, `ROLLBACK_OVERRIDE_CONFLICT`, `--clear`; tap-safe kb-cr path lookup.
 - **XACA-1349** (Added): release engine CR stage mirror (PR #1036) — new `share/kanban-hooks/release_cr_facts.py`, `release_cr_stage.py`, `release_cr_record_publish.py`, `release_rollback.py`; updated `approval_providers.py`, `release_gate.py`, `share/scripts/kb-cr.sh`, and `share/lcars-ui/server.py` (three-way merged over the XACA-1404/XACA-1386 ahead hunks).
 - **XACA-1404** (Fixed): `share/scripts/gh-bot-review.sh` / `gh-bot-test.sh` take the first line with a parameter expansion instead of `printf | head -1` under `set -euo pipefail` (head's early exit SIGPIPE'd printf and aborted `--list-installations` on Linux runners). Mirrors the dev changes.

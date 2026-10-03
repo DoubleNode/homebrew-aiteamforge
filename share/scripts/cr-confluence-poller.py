@@ -375,6 +375,33 @@ def _board_file_for_team(team: str) -> str | None:
     return None
 
 
+def _is_release_linked(cr: dict) -> bool:
+    """True for an engine-managed CR (XACA-1349): releaseAssignment.releaseId is set.
+
+    `kb-release cr-stage` owns publish AND submit for these. Pass 1 must not touch
+    them: kb-cr submit refuses a release-linked v2 CR without the cr-approver notice
+    receipt, so a poller transition would write cr_proper_url and then fail every
+    cycle. Same predicate as kb-cr.sh _kb_cr_is_release_linked.
+    """
+    ra = cr.get("releaseAssignment")
+    return isinstance(ra, dict) and bool(str(ra.get("releaseId") or "").strip())
+
+
+def _skip_release_linked(team: str, crs: list[dict], state: str) -> list[dict]:
+    """Drop engine-managed CRs from a Pass 1 candidate list (verbose-logged, never written)."""
+    kept = []
+    for cr in crs:
+        if _is_release_linked(cr):
+            cr_id = cr.get("crId") or cr.get("id", "<unknown>")
+            vlog(
+                f"[{team}][{cr_id}] {state} CR is release-linked (engine-managed): "
+                f"skipped, `kb-release cr-stage` owns its publish/submit."
+            )
+            continue
+        kept.append(cr)
+    return kept
+
+
 def find_cr_drafted_crs(team: str) -> list[dict]:
     """
     Read the team board and return all CR container records whose crState
@@ -401,6 +428,7 @@ def find_cr_drafted_crs(team: str) -> list[dict]:
             cr["_board_file"] = board_path
             drafted.append(cr)
 
+    drafted = _skip_release_linked(team, drafted, "cr-drafted")
     vlog(f"[{team}] Found {len(drafted)} cr-drafted CR(s) out of {len(crs)} total.")
     return drafted
 
@@ -436,6 +464,7 @@ def find_cr_published_crs(team: str) -> list[dict]:
             cr["_board_file"] = board_path
             published.append(cr)
 
+    published = _skip_release_linked(team, published, "cr-published")
     vlog(f"[{team}] Found {len(published)} cr-published CR(s) out of {len(crs)} total.")
     return published
 
