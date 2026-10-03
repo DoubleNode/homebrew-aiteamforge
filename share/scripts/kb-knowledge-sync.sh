@@ -1427,7 +1427,7 @@ _ac_autocommit() {
             1)
                 AC_RESULT="refused"
                 log "autocommit-refused: the pre-commit hook refused attempt ${attempt}; quarantining the named entr(y|ies) by content hash (an edit releases them)"
-                log_block "hook output" "$(printf '%s\n' "$AC_COMMIT_OUT" | head -20)"
+                log_block "hook output" "$(printf '%s\n' "$AC_COMMIT_OUT" | awk 'NR<=20')"
                 if ! _ac_quarantine_refresh "$TICK_TMP/attributed"; then
                     :   # held this tick; re-attempted once next tick (still bounded)
                 fi
@@ -1459,7 +1459,7 @@ _ac_autocommit() {
                 AC_RESULT="deferred-git-busy"
                 AC_NO_PUSH=1
                 log "autocommit-lost-race: HEAD moved while the auto-commit was being built (a concurrent commit) — nothing landed, the real index is untouched, NOT pushing this tick; retrying next tick on top of the new HEAD"
-                log_block "git output" "$(printf '%s\n' "$AC_COMMIT_OUT" | head -20)"
+                log_block "git output" "$(printf '%s\n' "$AC_COMMIT_OUT" | awk 'NR<=20')"
                 break
                 ;;
             *)
@@ -1467,7 +1467,7 @@ _ac_autocommit() {
                 AC_HOOK_ERR_KEY="$(_ac_hook_key)"
                 AC_HOOK_ERR_AT="$(_now_iso)"
                 log "autocommit-hook-error: the commit was refused but no entry was named (a broken hook, a signing failure, or another environment fault). No entry is quarantined. Backing off: one retry per 24h or when the hook changes. The daemon never bypasses the hook — fix it (install the tracked .githooks/pre-commit)."
-                log_block "git commit output" "$(printf '%s\n' "$AC_COMMIT_OUT" | head -20)"
+                log_block "git commit output" "$(printf '%s\n' "$AC_COMMIT_OUT" | awk 'NR<=20')"
                 break
                 ;;
         esac

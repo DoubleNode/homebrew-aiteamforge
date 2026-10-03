@@ -1227,7 +1227,7 @@ if [ -z "$EP" ]; then
 else
   # XACA-1297-019: CORPUS| is now the first line; TOTAL and the entrypoint
   # value/count rows shift down by one from the old layout.
-  _D2_CORPUS=$(printf '%s\n' "$EP" | head -1)
+  _D2_CORPUS="${EP%%$'\n'*}"  # no pipe: printf | head SIGPIPEs under pipefail (XACA-1404)
   _parse_corpus_line "$_D2_CORPUS"
   if [ -z "$_D2_CORPUS" ]; then
     unver "D2 transcript scan did not report corpus stats — treating as unreadable."
@@ -1242,7 +1242,7 @@ else
   else
     note "corpus: $FILES_OK file(s) opened, $FILES_FAILED failed to open, $RECORDS_TOTAL JSON record(s) parsed"
     _D2_REST=$(printf '%s\n' "$EP" | tail -n +2)
-    TOTAL=$(printf '%s\n' "$_D2_REST" | head -1)
+    TOTAL="${_D2_REST%%$'\n'*}"  # no pipe: printf | head SIGPIPEs under pipefail (XACA-1404)
     # XACA-1297-019b (PR #955 review, advisory): a missing/malformed count line
     # used to be coerced to 0, which fed the N/A branch -- a parse failure
     # reported as "nothing to see here". Check C fails closed on the symmetric

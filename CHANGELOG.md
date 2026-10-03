@@ -6,6 +6,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1404** (Fixed): `share/scripts/kb-compaction-premise-check.sh` and `share/scripts/kb-knowledge-sync.sh` no longer pipe `printf` into `head` under `set -o pipefail` (head's early exit could SIGPIPE printf and abort the script). Mirrors the dev changes.
 - XACA-1349 (PR #1036 round 4): `share/templates/kanban/kanban-helpers.template.sh` gains `kb-release cr-stage` (`kb-release-cr-stage`, drives `kanban-hooks/release_cr_stage.py`) and `kb-release rollback-override` (`kb-release-rollback-override`), plus the two `kb-release` dispatch cases and help lines. Ported verbatim from canonical; module paths resolve via the template's existing `_kb_release_stage_ctx` (`kanban-hooks/` beside the installed helpers). The template still lacks `kb-release doctor` (pre-existing divergence, not part of this change).
 - XACA-1349 (PR #1036 round 3): re-mirror `share/kanban-hooks/approval_providers.py` (`is_engine_managed`, shared linkage rule, feed stage via `current_stage`), `share/scripts/kb-cr.sh` and `share/scripts/cr-confluence-poller.py` (guard / skip keyed on the engine stamp).
 - **XACA-1390** (Feature, PR #1032): mirrors the CR-consumer `cr-completed` / v2 lifecycle work into `share/lcars-ui/` (server.py EDIT STATE v2 filtering
