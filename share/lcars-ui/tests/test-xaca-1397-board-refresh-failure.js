@@ -101,6 +101,23 @@ async function test(name, fn) { await fn(); n++; console.log('ok - ' + name); }
         assert.strictEqual(t.doc.body.children.filter(c => c.id === 'lcars-board-stale-banner').length, 1);
         assert.strictEqual(t.calls.embedded, 0);
     });
+    await test('XACA-1397-021: repeat identical failures do not rewrite the live-region text', async () => {
+        const t = setup();
+        t.state.responses.push(ok({ backlog: [1] }), archived, new Error('a'), new Error('b'), new Error('c'));
+        await t.api.loadBoardData();
+        await t.api.loadBoardData();
+        const msg = bar(t).children[0];
+        const first = msg.textContent;
+        assert(/\(as of .+\)/.test(first));
+        let writes = 0, value = first;
+        Object.defineProperty(msg, 'textContent', {
+            get() { return value; }, set(v) { writes++; value = v; }, configurable: true,
+        });
+        await t.api.loadBoardData();
+        await t.api.loadBoardData();
+        assert.strictEqual(writes, 0, 'same text must not be re-written into the aria-live region');
+        assert.strictEqual(msg.textContent, first);
+    });
     await test('next success clears the banner', async () => {
         const t = setup();
         t.state.responses.push(ok({ backlog: [1] }), archived, new Error('x'),

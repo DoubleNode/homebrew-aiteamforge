@@ -6,6 +6,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1397** (Fixed, PR #1040 round 3): re-mirror `share/lcars-ui/js/lcars.js` (stale-board banner writes its aria-live text only on change; dated
+  "as of" stamp) and `tests/test-xaca-1397-board-refresh-failure.js`; `share/lcars-ui/index.html` takes only the `lcars.js?v=4.03` bump on top of the
+  existing XACA-1390 merge (1390's `lcars-filter-bar.js?v=1.2` kept).
 - **XACA-1404** (Fixed): `share/scripts/fleet-reporter.sh` and `share/scripts/kb-knowledge-sync.sh` no longer feed pipelines into early-exit consumers (`grep -q`, `head`, `awk ... exit`) under `set -o pipefail`; here-strings and full-read `awk` instead. Mirrors the dev changes.
 - **XACA-1397** (Fixed, PR #1040): LCARS board load no longer blocks on the in-progress reconcile or silently empties on a failed refresh. Mirrors
   `share/lcars-ui/{server.py,index.html,js/lcars.js,css/lcars.css,tests/conftest.py,tests/test_xaca0161_bind_control.py}` plus the two new

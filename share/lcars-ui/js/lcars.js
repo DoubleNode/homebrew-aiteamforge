@@ -853,9 +853,13 @@ function showBoardStaleBanner(asOf) {
         const msg = bar.querySelector('.lcars-asset-banner-text');
         if (msg) {
             // XACA-1397-019: no asOf = no board has EVER loaded -> first-load wording.
-        msg.textContent = asOf
-            ? 'Unable to refresh board \u2014 showing last loaded data (as of ' + asOf + ')'
-            : 'Unable to load board \u2014 retrying\u2026';
+            const text = asOf
+                ? 'Unable to refresh board \u2014 showing last loaded data (as of ' + asOf + ')'
+                : 'Unable to load board \u2014 retrying\u2026';
+            // XACA-1397-021: this is an aria-live region and every failed auto-refresh
+            // tick lands here; only write on change so screen readers are not
+            // re-notified of identical text each tick (same rule as announceAssetBanner).
+            if (msg.textContent !== text) msg.textContent = text;
         }
         bar.hidden = false;
         positionBoardStaleBanner();
@@ -908,7 +912,10 @@ async function loadBoardData() {
         }
         boardData = freshBoard;
         boardEverLoaded = true;
-        boardLastLoadedAt = new Date().toLocaleTimeString();
+        // Date included so a kiosk left stale overnight says WHICH day (XACA-1397 UX r3).
+        boardLastLoadedAt = new Date().toLocaleString([], {
+            month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', second: '2-digit'
+        });
 
         // XACA-0056: Also fetch archived releases for release name lookups
         // Items assigned to archived releases need to display the correct shortTitle
