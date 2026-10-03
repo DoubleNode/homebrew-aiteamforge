@@ -24701,6 +24701,103 @@ kb-release-edit() {
     fi
 }
 
+# Lead override of the rollback (previous production) SHA when the prod tag cannot be determined.
+# Usage: kb-release rollback-override <REL-ID> <sha> --reason <text> --by <lead>
+#        kb-release rollback-override <REL-ID> --clear --by <lead>
+# XACA-1349-004 (spec 13.3): GAMMA entry is refused (ROLLBACK_SHA_UNKNOWN) when the production SHA is unknown.
+# PR #1036 round 1: an override that disagrees with a resolvable production tag refuses GAMMA entry
+# (ROLLBACK_OVERRIDE_CONFLICT); --clear removes a stale/mistaken override. A used override is consumed.
+kb-release-rollback-override() {
+    local release_id="" sha="" opt_reason="" opt_by="" opt_clear=0
+    local usage="Usage: kb-release rollback-override <release-id> <40-hex-sha> --reason <text> --by <lead>
+       kb-release rollback-override <release-id> --clear --by <lead>"
+
+    while [[ $# -gt 0 ]]; do
+        case "${1-}" in
+            --reason|-r)
+                if [[ $# -lt 2 ]]; then echo "Error: --reason needs a value" >&2; echo "$usage" >&2; return 2; fi
+                opt_reason="${2-}"; shift 2 ;;
+            --by|--actor)
+                if [[ $# -lt 2 ]]; then echo "Error: --by needs a value" >&2; echo "$usage" >&2; return 2; fi
+                opt_by="${2-}"; shift 2 ;;
+            --clear)
+                opt_clear=1; shift ;;
+            --help|-h)
+                echo "$usage"
+                echo ""
+                echo "Record the production SHA to roll back to, for a release whose production tag"
+                echo "(newest v<version> tag on the production branch) cannot be found. --by must be listed"
+                echo "in releaseConfig.leads. Refused once the release is at GAMMA or PROD."
+                echo "The override is consumed by the GAMMA entry that uses it. If it disagrees with a"
+                echo "resolvable production tag, GAMMA entry is refused (ROLLBACK_OVERRIDE_CONFLICT):"
+                echo "--clear removes the override so the tag is used."
+                echo ""
+                echo "Exit codes: 0 ok, 1 server/transport, 2 usage/rejected, 3 refused (409),"
+                echo "            4 release not found"
+                return 0 ;;
+            -*)
+                echo "Error: Unknown option: ${1-}" >&2; echo "$usage" >&2; return 2 ;;
+            *)
+                if [[ -z "$release_id" ]]; then
+                    release_id="${1-}"
+                elif [[ -z "$sha" ]]; then
+                    sha="${1-}"
+                else
+                    echo "Error: Unexpected argument: ${1-}" >&2; echo "$usage" >&2; return 2
+                fi
+                shift ;;
+        esac
+    done
+
+    if [[ -z "$release_id" ]]; then
+        echo "Error: Release ID is required" >&2; echo "$usage" >&2; return 2
+    fi
+    if ! _kb_release_valid_token "$release_id"; then
+        echo "Error: invalid release id: $release_id" >&2; return 2
+    fi
+    if (( opt_clear )); then
+        if [[ -n "$sha" || -n "$opt_reason" ]]; then
+            echo "Error: --clear takes no <sha> and no --reason" >&2; echo "$usage" >&2; return 2
+        fi
+    else
+        if [[ ! "$sha" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "Error: <sha> must be a full 40-character hex commit id" >&2; echo "$usage" >&2; return 2
+        fi
+        if [[ -z "${opt_reason//[[:space:]]/}" ]]; then
+            echo "Error: --reason is required" >&2; echo "$usage" >&2; return 2
+        fi
+    fi
+    [[ -z "$opt_by" ]] && opt_by=$(_kb_release_default_actor)
+    if [[ -z "${opt_by//[[:space:]]/}" ]]; then
+        echo "Error: --by <lead> is required" >&2; echo "$usage" >&2; return 2
+    fi
+
+    local payload
+    if (( opt_clear )); then
+        payload=$(jq -n --arg by "$opt_by" '{clear: true, by: $by}') || return 1
+    else
+        payload=$(jq -n --arg sha "$sha" --arg reason "$opt_reason" --arg by "$opt_by" \
+            '{sha: $sha, reason: $reason, by: $by}') || return 1
+    fi
+
+    _kb_release_api_post "${release_id}/rollback-override" "$payload" || return 1
+
+    if [[ "$_KB_REL_CODE" == "200" ]]; then
+        if (( opt_clear )); then
+            if [[ "$(printf '%s' "$_KB_REL_BODY" | jq -r '.cleared // false' 2>/dev/null)" == "true" ]]; then
+                echo "✓ rollback-override $release_id: cleared (by $opt_by)"
+            else
+                echo "✓ rollback-override $release_id: no override was set (nothing to clear)"
+            fi
+        else
+            echo "✓ rollback-override $release_id: ${sha:0:12} (by $opt_by)"
+        fi
+        return 0
+    fi
+    _kb_release_fail "rollback-override $release_id"
+    return $?
+}
+
 # Date-only shorthand for rescheduling a release
 # Usage: kb-release reschedule <release-id> <YYYY-MM-DD>
 kb-release-reschedule() {
@@ -25863,6 +25960,81 @@ kb-release-sync-board() {
     fi
 }
 
+# XACA-1349-002/003: the resumable CR-stage flow (spec 8.3).  Thin shell around
+# kanban-hooks/release_cr_stage.py, which owns every rule.  It reuses/creates the release's CR, drafts it from
+# the team `cr` profile, STOPS for the lead's `kb-cr approve-draft`, publishes the Testing Log and the CR page
+# (kb-wiki), notifies cr-approver (kb-notify; a failed send stops BEFORE submit), then `kb-cr submit`s.
+# Re-running resumes: every step detects that it already happened.
+# Usage: kb-release cr-stage <REL-ID> [--content-file F] [--step S] [--status] [--repo-dir P]
+#                                      [--skip-notify REASON --by LEAD] [--json]
+# Exit: 0 submitted | 1 tool failed (re-run) | 2 usage/config | 3 refused | 5 waiting for draft approval | 6 draft invalid
+kb-release-cr-stage() {
+    local release_id=""
+    local usage="Usage: kb-release cr-stage <release-id> [--content-file <json>] [--step <step>] [--status] [--repo-dir <path>] [--skip-notify <reason> --by <lead>] [--json]"
+    local -a pass=()
+    local opt_repo="$PWD"
+
+    while [[ $# -gt 0 ]]; do
+        case "${1-}" in
+            --content-file|--step|--skip-notify|--by)
+                if [[ $# -lt 2 ]]; then echo "Error: ${1-} needs a value" >&2; echo "$usage" >&2; return 2; fi
+                pass+=("${1-}" "${2-}"); shift 2 ;;
+            --repo-dir)
+                if [[ $# -lt 2 ]]; then echo "Error: --repo-dir needs a value" >&2; echo "$usage" >&2; return 2; fi
+                opt_repo="${2-}"; shift 2 ;;
+            --status|--json) pass+=("${1-}"); shift ;;
+            --help|-h)
+                echo "$usage"
+                echo ""
+                echo "Steps (in order): cr, draft, approval, testing-log, publish, notify, submit."
+                echo "  cr           reuse the open linked CR, else kb-cr create + assign-release; records release.stageSha.CR"
+                echo "  draft        facts -> team cr profile template -> mechanical validation"
+                echo "  approval     STOPS (exit 5) until the lead runs: kb-cr approve-draft <CR> --by <lead>"
+                echo "  testing-log  kb-wiki publish --doc testing-log (handle stored on the release)"
+                echo "  publish      kb-wiki publish --doc cr, then kb-cr publish <CR> --url ..."
+                echo "  notify       kb-notify send --to cr-approver (a failure stops BEFORE submit)"
+                echo "  submit       kb-cr submit; prints cr_approval_expected_at (or 'manual approval, no expected time')"
+                echo ""
+                echo "  --content-file F   JSON object of the drafted prose slots (content.*); stored on the CR, so later"
+                echo "                     runs need not repeat it.  Re-supply it to redraft BEFORE draft approval."
+                echo "  --step S           run only through step S"
+                echo "  --status           show which steps are already done; change nothing"
+                echo "  --skip-notify R    lead override of the approver notice (needs --by <lead>)"
+                echo "  --repo-dir P       git repo holding releases/<ver> (default: current directory)"
+                echo ""
+                echo "Exit codes: 0 submitted, 1 tool failed (re-run resumes), 2 usage/config, 3 refused,"
+                echo "            5 waiting for the lead's draft approval, 6 draft failed validation"
+                return 0 ;;
+            -*)
+                echo "Error: Unknown option: ${1-}" >&2; echo "$usage" >&2; return 2 ;;
+            *)
+                if [[ -z "$release_id" ]]; then
+                    release_id="${1-}"
+                else
+                    echo "Error: Unexpected argument: ${1-}" >&2; echo "$usage" >&2; return 2
+                fi
+                shift ;;
+        esac
+    done
+
+    if [[ -z "$release_id" ]]; then
+        echo "Error: Release ID is required" >&2; echo "$usage" >&2; return 2
+    fi
+    if ! _kb_release_valid_token "$release_id"; then
+        echo "Error: invalid release id: $release_id" >&2; return 2
+    fi
+
+    _kb_release_stage_ctx || return 1
+    local context team cli helpers
+    context=$(_kb_detect_context 2>/dev/null)
+    team="${context%%:*}"
+    cli="$(dirname "$_KB_RS_CLI")/release_cr_stage.py"
+    helpers="$(dirname "$(dirname "$_KB_RS_CLI")")/kanban-helpers.sh"
+    [[ -f "$cli" ]] || { echo "Error: missing $cli" >&2; return 1; }
+    python3 "$cli" "$release_id" --team "$team" --kanban-dir "$_KB_RS_KDIR" --repo-dir "$opt_repo" \
+        --helpers "$helpers" "${pass[@]}"
+}
+
 # Unified release command
 # Usage: kb-release <subcommand> [args...]
 kb-release() {
@@ -25914,6 +26086,14 @@ kb-release() {
             # XACA-1347-007: supersede results on a new release-branch commit
             kb-release-new-sha "$@"
             ;;
+        rollback-override)
+            # XACA-1349-004: lead-set rollback SHA when the production tag is unknown (spec 13.3)
+            kb-release-rollback-override "$@"
+            ;;
+        cr-stage)
+            # XACA-1349-002/003: resumable CR stage flow (spec 8.3)
+            kb-release-cr-stage "$@"
+            ;;
         reschedule)
             kb-release-reschedule "$@"
             ;;
@@ -25948,6 +26128,10 @@ kb-release() {
             echo "                                              Interactive manual-provider walkthrough (XACA-1347)"
             echo "  kb-release new-sha <id> <sha> [--reason \"...\"]"
             echo "                                              New commit on the release branch: supersede stale results"
+            echo "  kb-release rollback-override <id> <sha> --reason \"...\" --by LEAD   (or --clear --by LEAD)"
+            echo "                                              Set the rollback SHA when the prod tag is unknown (XACA-1349)"
+            echo "  kb-release cr-stage <id> [--content-file F] [--step S] [--status] [--skip-notify R --by LEAD]"
+            echo "                                              Resumable CR stage: draft, lead approval, publish, notify, submit (XACA-1349)"
             echo "  kb-release plan <id> --reason \"...\"       Demote back to PLANNED (XACA-0729; reason required)"
             echo "  kb-release reschedule <id> <date>          Change target date"
             echo "  kb-release link-cr <rel> <cr>              Link a CR to this release (XACA-0657)"
