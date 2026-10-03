@@ -48,3 +48,11 @@
 | Deploy time | {{prod.deployedAt}} |
 | T+2h soak | {{prod.soak2h}} |
 | T+24h soak | {{prod.soak24h}} |
+{{#if rollback.sha}}
+
+## Exceptions
+
+- GAMMA failure: {{rollback.summary}}
+- Production was rolled back to {{rollback.sha}}.
+- This Change Request was put on hold. The fix ships under a new Change Request, and this one is closed as superseded by it.
+{{/if}}

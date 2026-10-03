@@ -2225,8 +2225,18 @@ _kb_cr_container_publish_record() {
     st=$(_kb_cr_container_get_state "$_cr_board" "$cr_idx")
     case "$st" in
         cr-completed|cr-closed) ;;
+        cr-held)
+            # XACA-1349-005: a CR held by a GAMMA failure (`kb-release gamma-fail` stamps .gammaFailure on it)
+            # gets its record now, so the failure is visible before the superseding close. Any other hold waits.
+            local gf
+            gf=$(_kb_jq_read "$_cr_board" ".crs[$cr_idx].gammaFailure.at // \"\"" -r 2>/dev/null)
+            if [[ -z "$gf" ]]; then
+                echo "kb-cr publish-record: CR '$cr_id' is held, but not by a GAMMA failure; the cr-record page is published at cr-completed / cr-closed." >&2
+                return 1
+            fi
+            ;;
         *)
-            echo "kb-cr publish-record: CR '$cr_id' is in state '$st'; the cr-record page is published at cr-completed / cr-closed." >&2
+            echo "kb-cr publish-record: CR '$cr_id' is in state '$st'; the cr-record page is published at cr-completed / cr-closed (or cr-held by a GAMMA failure)." >&2
             return 1
             ;;
     esac
@@ -2374,7 +2384,9 @@ _kb_cr_container_reject() {
 }
 
 # kb-cr hold <CR-ID> [--reason "<text>"]
-# Predecessor states: cr-submitted, cr-approved
+# Predecessor states: cr-submitted, cr-approved, deployed-prod and emergency-deployed (v2 only; XACA-1349-005, spec 13.3/13.5 GAMMA failure)
+# A CR held from deployed-prod is not resumable (resume refuses a held_from it cannot safely re-enter);
+# the GAMMA-failure path closes it as superseded when the release's new CR is created.
 _kb_cr_container_hold() {
     local cr_id="${1:-}"
     shift 2>/dev/null
@@ -2409,12 +2421,23 @@ _kb_cr_container_hold() {
 
     case "$current_state" in
         cr-submitted|cr-approved) ;;
+        deployed-prod|emergency-deployed)
+            # XACA-1349-005 (spec 13.3): a GAMMA failure holds the CR that is already live in production.
+            # emergency-deployed (spec 13.5 step 4: "Rollback per 13.3 applies") is the same case on the break-glass
+            # path. Without a hold an emergency CR stays reusable and would keep satisfying the CR exit gate
+            # ("emergency-deployed in place of cr-approved") for the next attempt, so it MUST be heldable.
+            # v2 lifecycle only: a legacy CR has no held_from, so nothing could ever resume or audit it.
+            if ! _kb_cr_is_v2 "$_cr_board" "$cr_idx"; then
+                echo "kb-cr hold: CR '$cr_id' is a legacy CR (no v2 lifecycle marker); hold from $current_state is v2 only." >&2
+                return 1
+            fi
+            ;;
         cr-held)
             echo "kb-cr hold: CR '$cr_id' is already on hold." >&2
             return 1
             ;;
         *)
-            echo "kb-cr hold: CR '$cr_id' is in state '$current_state'; expected one of: cr-submitted, cr-approved" >&2
+            echo "kb-cr hold: CR '$cr_id' is in state '$current_state'; expected one of: cr-submitted, cr-approved, deployed-prod (v2), emergency-deployed (v2)" >&2
             return 1
             ;;
     esac
@@ -7338,7 +7361,8 @@ _kb_cr_help() {
     echo "              does NOT undo the state change: it warns loudly and exits 6."
     echo "              Wiki not configured / no linked release = skip notice, exit 0."
     echo "  publish-record <CR-ID>  [XACA-1349-006]"
-    echo "              Re-run path for the cr-record page (cr-completed / cr-closed CRs):"
+    echo "              Re-run path for the cr-record page (cr-completed / cr-closed CRs, or a"
+    echo "              cr-held CR carrying a GAMMA-failure marker, XACA-1349-005):"
     echo "              creates it if no page is stored, else updates the stored page."
     echo "              Exit 0 = published or skipped; exit 6 = publish failed (retry later)."
     echo "  v2 lifecycle: new CRs carry cr_lifecycle=v2 (stamped by create). For them"
@@ -7391,7 +7415,8 @@ _kb_cr_help() {
     echo "              Writes timestamps.cr_rejected_at; increments pushback_count;"
     echo "              appends reason to pushback_notes."
     echo "  hold    <CR-ID> [--reason \"<text>\"]"
-    echo "              cr-submitted|cr-approved → cr-held"
+    echo "              cr-submitted|cr-approved → cr-held; deployed-prod|emergency-deployed → cr-held"
+    echo "              (v2 CRs only, the GAMMA-failure path, XACA-1349-005)"
     echo "              Writes timestamps.cr_held_at; appends reason to pushback_notes;"
     echo "              increments pushback_count."
     echo "  resume  <CR-ID> [--note \"<text>\"]  [XACA-1348]"

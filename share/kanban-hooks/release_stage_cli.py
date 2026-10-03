@@ -113,6 +113,23 @@ def _plan_lines(providers, include_scheduled):
     return lines
 
 
+def _gamma_failed_refusal(release, stage, sha, verb, rel_id):
+    """XACA-1349-005 (spec 13.3 step 1): after `kb-release gamma-fail` the session halts further GAMMA tests of
+    EVERY kind (automated `test` and manual `walkthrough`) for the build that failed. Scoped to that SHA and to the
+    failure still being in force: once the release was regressed out of GAMMA for it (marker.regressedAt) a re-entry
+    of GAMMA, on a new SHA or the same one, is free to test again. Returns the refusal text, or None."""
+    gf = release.get("gammaFailure")
+    if stage != "GAMMA" or gf is None:
+        return None
+    if not isinstance(gf, dict):
+        return "kb-release %s: refused: release.gammaFailure is malformed; fix it before testing GAMMA" % verb
+    if not sha or str(gf.get("gammaSha", "")).lower() != str(sha).lower() or gf.get("regressedAt"):
+        return None
+    return ("kb-release %s: refused: GAMMA failed at %s (gamma-fail at %s: %s); no further GAMMA tests run for this "
+            "build. Finish the protocol (kb-release gamma-fail %s --status); the fix re-enters GAMMA on a new SHA."
+            % (verb, str(sha)[:12], gf.get("at", "?"), gf.get("summary", "?"), rel_id))
+
+
 def cmd_test(a, *, run=None, post=None, out=None):
     import subprocess
     run = run or subprocess.run
@@ -128,6 +145,10 @@ def cmd_test(a, *, run=None, post=None, out=None):
     except (RunnerError, ProvidersError) as e:
         print("kb-release test: %s" % (e,), file=sys.stderr)
         return RC_USAGE
+    refusal = _gamma_failed_refusal(release, stage, sha, "test", a.release)
+    if refusal:
+        print(refusal, file=sys.stderr)
+        return RC_REFUSED
     if a.dry_run:
         return _dry_run(a, release, stage, sha, providers, run, say)
     try:
@@ -190,6 +211,11 @@ def cmd_walkthrough(a):
             raise RunnerError("release %s is at stage %s, which has no test set" % (a.release, stage))
         doc = load_providers(os.path.join(a.kanban_dir, "config", "test-providers.json"))
         manual = [p["name"] for p in providers_for_stage(doc, stage) if p.get("kind") == "manual"]
+        refusal = _gamma_failed_refusal(release, stage, (release.get("stageSha") or {}).get(stage), "walkthrough",
+                                        a.release)
+        if refusal:
+            print(refusal, file=sys.stderr)
+            return RC_REFUSED
         name = a.provider
         if not name:
             if len(manual) != 1:

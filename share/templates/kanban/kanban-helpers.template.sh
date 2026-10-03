@@ -26035,6 +26035,76 @@ kb-release-cr-stage() {
         --helpers "$helpers" "${pass[@]}"
 }
 
+# XACA-1349-005: the resumable GAMMA failure / rollback protocol (spec 13.3).  Thin shell around
+# kanban-hooks/release_gamma_failure.py, which owns every rule.  Marks GAMMA failed, then (each step skips if it
+# already happened, so a re-run resumes): records the lead-reported rollback deploy + production smoke against
+# release.rollbackSha, holds the CR, regresses the release to DEV, notifies release-channel, re-publishes the
+# Testing Log and the cr-record.  The engine never redeploys production: the lead does, and reports the result.
+# Usage: kb-release gamma-fail <REL-ID> --by <lead> [--summary "..."] [--rollback-result PASS|FAIL [--rollback-notes ..]]
+#                                      [--smoke-result PASS|FAIL [--smoke-notes ..]] [--step S] [--status] [--json]
+# Exit: 0 complete | 1 a tool failed or the rollback FAILED (re-run) | 2 usage/config | 3 refused | 5 waiting for the lead
+kb-release-gamma-fail() {
+    local release_id=""
+    local usage="Usage: kb-release gamma-fail <release-id> --by <lead> [--summary <text>] [--rollback-result PASS|FAIL] [--rollback-notes <text>] [--smoke-result PASS|FAIL] [--smoke-notes <text>] [--step <step>] [--status] [--json]"
+    local -a pass=()
+
+    while [[ $# -gt 0 ]]; do
+        case "${1-}" in
+            --by|--summary|--rollback-result|--rollback-notes|--smoke-result|--smoke-notes|--step)
+                if [[ $# -lt 2 ]]; then echo "Error: ${1-} needs a value" >&2; echo "$usage" >&2; return 2; fi
+                pass+=("${1-}" "${2-}"); shift 2 ;;
+            --status|--json) pass+=("${1-}"); shift ;;
+            --help|-h)
+                echo "$usage"
+                echo ""
+                echo "Steps (in order): stop, rollback-deploy, rollback-smoke, hold, regress, notify, record."
+                echo "  stop             refuses unless the release is at GAMMA; marks GAMMA failed and stops GAMMA test runs"
+                echo "  rollback-deploy  STOPS (exit 5) until the lead has redeployed production from release.rollbackSha and"
+                echo "                   re-runs with --rollback-result PASS|FAIL; records the Automated test 'rollback-deploy'"
+                echo "  rollback-smoke   same for the production smoke re-run (--smoke-result); records 'rollback-smoke'"
+                echo "  hold             kb-cr hold <CR> --reason \"GAMMA failure: <summary>; rolled back to <rollbackSha>\""
+                echo "  regress          kb-release regress --to DEV with that reason"
+                echo "  notify           kb-notify send --to release-channel --template gamma-rollback"
+                echo "  record           re-publish the Testing Log and the CR's cr-record from their stored pages"
+                echo ""
+                echo "  --by LEAD          must be in releaseConfig.leads (fails closed when none are configured)"
+                echo "  --summary TEXT     what failed; required on the first run, stored for re-runs"
+                echo "  --status           show which steps are done; change nothing"
+                echo "The held CR is closed as 'superseded by <new CR-ID>' by the next 'kb-release cr-stage'."
+                echo ""
+                echo "Exit codes: 0 complete, 1 tool failed / rollback FAILED (re-run resumes), 2 usage/config, 3 refused,"
+                echo "            5 waiting for the lead's redeploy or smoke result"
+                return 0 ;;
+            -*)
+                echo "Error: Unknown option: ${1-}" >&2; echo "$usage" >&2; return 2 ;;
+            *)
+                if [[ -z "$release_id" ]]; then
+                    release_id="${1-}"
+                else
+                    echo "Error: Unexpected argument: ${1-}" >&2; echo "$usage" >&2; return 2
+                fi
+                shift ;;
+        esac
+    done
+
+    if [[ -z "$release_id" ]]; then
+        echo "Error: Release ID is required" >&2; echo "$usage" >&2; return 2
+    fi
+    if ! _kb_release_valid_token "$release_id"; then
+        echo "Error: invalid release id: $release_id" >&2; return 2
+    fi
+
+    _kb_release_stage_ctx || return 1
+    local context team cli helpers
+    context=$(_kb_detect_context 2>/dev/null)
+    team="${context%%:*}"
+    cli="$(dirname "$_KB_RS_CLI")/release_gamma_failure.py"
+    helpers="$(dirname "$(dirname "$_KB_RS_CLI")")/kanban-helpers.sh"
+    [[ -f "$cli" ]] || { echo "Error: missing $cli" >&2; return 1; }
+    python3 "$cli" "$release_id" --team "$team" --kanban-dir "$_KB_RS_KDIR" --port "$_KB_RS_PORT" \
+        --helpers "$helpers" "${pass[@]}"
+}
+
 # Unified release command
 # Usage: kb-release <subcommand> [args...]
 kb-release() {
@@ -26094,6 +26164,10 @@ kb-release() {
             # XACA-1349-002/003: resumable CR stage flow (spec 8.3)
             kb-release-cr-stage "$@"
             ;;
+        gamma-fail)
+            # XACA-1349-005: resumable GAMMA failure / rollback protocol (spec 13.3)
+            kb-release-gamma-fail "$@"
+            ;;
         reschedule)
             kb-release-reschedule "$@"
             ;;
@@ -26132,6 +26206,8 @@ kb-release() {
             echo "                                              Set the rollback SHA when the prod tag is unknown (XACA-1349)"
             echo "  kb-release cr-stage <id> [--content-file F] [--step S] [--status] [--skip-notify R --by LEAD]"
             echo "                                              Resumable CR stage: draft, lead approval, publish, notify, submit (XACA-1349)"
+            echo "  kb-release gamma-fail <id> --by LEAD --summary \"...\" [--rollback-result PASS|FAIL] [--smoke-result PASS|FAIL] [--status]"
+            echo "                                              GAMMA failure: record rollback, hold CR, regress to DEV, notify, re-publish (XACA-1349)"
             echo "  kb-release plan <id> --reason \"...\"       Demote back to PLANNED (XACA-0729; reason required)"
             echo "  kb-release reschedule <id> <date>          Change target date"
             echo "  kb-release link-cr <rel> <cr>              Link a CR to this release (XACA-0657)"

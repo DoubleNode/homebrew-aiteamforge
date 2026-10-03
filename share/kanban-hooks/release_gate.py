@@ -458,6 +458,18 @@ def _exit_conditions(release, cur, cr_on, ctx):
     if cur == "GAMMA" and cr_on:
         if (release.get("cr") or {}).get("state") != "cr-completed":
             r.append("GAMMA: CR must be cr-completed")
+    if cur == "GAMMA" and release.get("gammaFailure") is not None:
+        # XACA-1349-005 QA (spec 13.3): a build that failed in GAMMA and was rolled back is never promoted to PROD, even
+        # when every expected test reads PASS (the lead may have declared the failure with no FAIL record, or waived
+        # the failing test afterwards) and even for a team with no CR to hold. Scoped like `kb-release test`: this
+        # build, and only until the protocol regressed the release out of GAMMA (marker.regressedAt).
+        gfm = release.get("gammaFailure")
+        if not isinstance(gfm, dict):
+            r.append("GAMMA: release.gammaFailure is malformed; refusing (fails closed)")
+        elif not gfm.get("regressedAt") and str(gfm.get("gammaSha", "")).lower() == str(sha or "").lower():
+            r.append("GAMMA: a GAMMA failure is recorded for this build (%s); production was rolled back. A failed build "
+                     "is not promoted: finish `kb-release gamma-fail` (regress to DEV) and ship the fix under a new CR"
+                     % (gfm.get("summary") or "no summary"))
     if cur in TEST_STAGES:
         rec = (release.get("stages") or {}).get(cur) or {}
         expected = rec.get("expected")

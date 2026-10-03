@@ -67,12 +67,12 @@ class FactSetError(ValueError):
 CANONICAL_FACTS: Dict[str, Dict[str, Any]] = {
     # ---- release.* -------------------------------------------------------
     "release.id": {"type": "string", "source": "release record `id`", "example": "REL-0042",
-                   "kinds": ["cr", "testing-log", "cr-record"]},
+                   "kinds": ["cr", "testing-log", "cr-record", "notice"]},
     "release.version": {"type": "string", "source": "release record `version`", "example": "1.2.0",
-                        "kinds": ["cr", "testing-log", "cr-record"]},
+                        "kinds": ["cr", "testing-log", "cr-record", "notice"]},
     "release.platform": {"type": "string",
                          "source": "release record `platform`; falls back to wiki.json `platformName`",
-                         "example": "iOS", "kinds": ["cr", "testing-log", "cr-record"]},
+                         "example": "iOS", "kinds": ["cr", "testing-log", "cr-record", "notice"]},
     "release.branch": {"type": "string", "source": "release record `branch`", "example": "releases/1.2.0",
                        "kinds": ["testing-log"]},
     "release.stageSha": {"type": "string",
@@ -108,7 +108,7 @@ CANONICAL_FACTS: Dict[str, Dict[str, Any]] = {
                               "example": "06:00 AM CDT", "kinds": ["cr"]},
     # ---- cr.* ------------------------------------------------------------
     "cr.id": {"type": "string", "source": "CR record `id`", "example": "CR-0107",
-              "kinds": ["cr-record"]},
+              "kinds": ["cr-record", "notice"]},
     "cr.title": {"type": "string", "source": "CR record `title`", "example": "[Sep 28 2026] Release: iOS Faster checkout",
                  "kinds": ["cr-record", "notice"]},
     "cr.risk": {"type": "string", "source": "CR record `risk`", "example": "Low", "kinds": ["cr-record"]},
@@ -141,6 +141,13 @@ CANONICAL_FACTS: Dict[str, Dict[str, Any]] = {
                     "example": "PASS", "kinds": ["cr-record"]},
     "prod.soak24h": {"type": "string", "source": "as `prod.soak2h`, for `24h`", "example": "pending",
                      "kinds": ["cr-record"]},
+    # ---- rollback.* (GAMMA failure, spec 13.3; XACA-1349-005) -----------
+    "rollback.sha": {"type": "string",
+                     "source": "CR record `gammaFailure.rollbackSha`, else release record `gammaFailure.rollbackSha` (the production SHA GAMMA was rolled back to); empty if no GAMMA failure",
+                     "example": "3c1d9e0", "kinds": ["testing-log", "cr-record", "notice"]},
+    "rollback.summary": {"type": "string",
+                         "source": "CR record `gammaFailure.summary`, else release record `gammaFailure.summary` (what failed, as the lead stated it); empty if no GAMMA failure",
+                         "example": "T+2h soak: checkout error rate above threshold", "kinds": ["testing-log", "cr-record", "notice"]},
     # ---- stage.* (single-stage view) ------------------------------------
     "stage.name": {"type": "string", "source": "the stage being rendered (default: `release.currentStage`)",
                    "example": "QA", "kinds": ["testing-log"]},
@@ -359,6 +366,20 @@ def _waiver(stage: Dict[str, Any], stage_name: str) -> Optional[Dict[str, Any]]:
     if w is not None:
         _str_list(w.get("tests"), "stages.%s.waiver.tests" % stage_name)
     return w
+
+
+def _gamma_failure(rel: Dict[str, Any], cr: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """The GAMMA failure (written by `kb-release gamma-fail`) this document is about, or {} when there was none.
+    The CR's own marker wins: a superseded CR's cr-record must describe ITS failure, not a later one that has
+    since overwritten release.gammaFailure (XACA-1349-005 QA). Falls back to the release's marker."""
+    for holder, label in ((cr, "cr"), (rel, "release")):
+        g = (holder or {}).get("gammaFailure")
+        if g is None:
+            continue
+        if not isinstance(g, dict):
+            raise FactSetError("%s.gammaFailure is %s, expected an object" % (label, type(g).__name__))
+        return g
+    return {}
 
 
 # ----------------------------------------------------- scope-exclusion filter
@@ -647,6 +668,10 @@ def build_fact_set(release_record: Dict[str, Any], cr_record: Optional[Dict[str,
             "deployedSha": stage_sha.get("GAMMA", ""),
             "deployedAt": _fmt_ts(_get(cr, "cr_deployed_prod_at", "deployedProdAt", default=None), tz),
             "soak2h": _soak(rel, "2h"), "soak24h": _soak(rel, "24h"),
+        },
+        "rollback": {
+            "sha": str(_gamma_failure(rel, cr).get("rollbackSha") or ""),
+            "summary": str(_gamma_failure(rel, cr).get("summary") or ""),
         },
         "stage": build_stage_facts(rel, current, tz=tz),
         "tests": {"byStage": _by_stage(rel, tz), "failuresAndReruns": _failures(rel, tz)},

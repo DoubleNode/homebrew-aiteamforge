@@ -2,6 +2,10 @@
 
 **Release:** {{release.id}} | **Platform:** {{release.platform}} | **Version:** {{release.version}} | **Current stage:** {{release.currentStage}}
 
+{{#if rollback.sha}}
+**GAMMA failure:** {{rollback.summary}}. Production was rolled back to {{rollback.sha}}; the release returns to DEV for the fix and ships under a new Change Request.
+
+{{/if}}
 ## Scope
 
 {{#each release.items}}

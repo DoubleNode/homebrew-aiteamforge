@@ -105,6 +105,12 @@ _CREATED_RE = re.compile(r"Created CR \[([^\]]+)\]")
 _TESTING_LINK_RULES = ("link-required-unresolved", "link-required-missing")
 
 
+def is_gamma_held(cr: Dict[str, Any]) -> bool:
+    """True for a CR that `kb-release gamma-fail` held (crState cr-held AND the gammaFailure marker it stamps)."""
+    return (isinstance(cr, dict) and cr.get("crState") == "cr-held" and isinstance(cr.get("gammaFailure"), dict)
+            and bool(cr["gammaFailure"].get("at")))
+
+
 class CrStageError(Exception):
     """A step cannot continue. ``rc`` is the CLI exit code; ``step`` names the step."""
 
@@ -227,16 +233,16 @@ class ShellTools:
     """The real tools: kb-cr (a zsh function, so each call sources kanban-helpers.sh), kb-wiki, kb-notify, git."""
 
     def __init__(self, team: str, kanban_dir: str, repo_dir: str, helpers: str, *, run: Callable[..., Any] = subprocess.run,
-                 terminal: str = "agent"):
+                 terminal: str = "agent", actor: str = "kb-release cr-stage"):
         self.team, self.kanban_dir, self.repo_dir, self.helpers = team, kanban_dir, repo_dir, helpers
-        self.run, self.terminal = run, terminal
+        self.run, self.terminal, self.actor = run, terminal, actor
 
     # -- kb-cr
     def _kb_cr(self, *args: str) -> str:
         if not self.helpers or not os.path.isfile(self.helpers):
             raise ToolError("kanban-helpers.sh not found (%r); pass --helpers" % self.helpers, 2)
         cmd = ["zsh", "-c", 'source "$1" >/dev/null 2>&1 || exit 97; shift; kb-cr "$@"', "kb-cr", self.helpers, *args]
-        env = _clean_env({"KB_TEAM": self.team, "KB_TERMINAL": self.terminal, "KB_CR_ACTOR": "kb-release cr-stage"})
+        env = _clean_env({"KB_TEAM": self.team, "KB_TERMINAL": self.terminal, "KB_CR_ACTOR": self.actor})
         r = self.run(cmd, capture_output=True, text=True, env=env)
         if r.returncode != 0:
             raise ToolError("kb-cr %s failed (exit %d): %s" % (args[0] if args else "", r.returncode,
@@ -262,6 +268,15 @@ class ShellTools:
 
     def cr_submit(self, cr_id: str) -> None:
         self._kb_cr("submit", cr_id)
+
+    def cr_hold(self, cr_id: str, reason: str) -> None:          # XACA-1349-005 (spec 13.3 step 3)
+        self._kb_cr("hold", cr_id, "--reason", reason)
+
+    def cr_close(self, cr_id: str, reason: str) -> None:         # XACA-1349-005 (spec 13.3 step 4: superseded)
+        self._kb_cr("close", cr_id, "--reason", reason)
+
+    def cr_publish_record(self, cr_id: str) -> None:             # XACA-1349-005 (spec 13.3 step 6)
+        self._kb_cr("publish-record", cr_id)
 
     # -- kb-wiki
     def _wiki(self, args: List[str]) -> Tuple[int, Dict[str, Any]]:
@@ -378,6 +393,7 @@ class CrStage:
             resolve = _rpr.resolve_profile
         self._resolve = resolve
         self.cr_id: Optional[str] = None
+        self._gamma_held: List[Dict[str, Any]] = []
         self._profiles: Dict[str, Dict[str, Any]] = {}
 
     # -- loading ----------------------------------------------------------------------------------
@@ -490,7 +506,10 @@ class CrStage:
         if missing:
             raise CrStageError("release %s links CR(s) that are not on the board: %s"
                                % (self.rel_id, ", ".join(map(str, missing))), RC_REFUSED)
-        open_crs = [c for c in crs if c.get("crState") not in RETIRED_STATES]
+        # XACA-1349-005 (spec 13.3 / G9): a CR held by a GAMMA failure is NOT reusable and NOT an "open CR" for the
+        # one-CR rule: the fix ships under a NEW CR and the held one is closed as superseded once that exists.
+        self._gamma_held = [c for c in crs if is_gamma_held(c)]
+        open_crs = [c for c in crs if c.get("crState") not in RETIRED_STATES and not is_gamma_held(c)]
         if len(open_crs) > 1:
             raise CrStageError("release %s has %d open CRs (%s); close the extras (kb-cr close <CR> --reason ...) so "
                                "exactly one remains" % (self.rel_id, len(open_crs), ", ".join(c["id"] for c in open_crs)),
@@ -597,8 +616,33 @@ class CrStage:
             if not cur:
                 detail.append("stageSha.CR=%s" % head[:12])
             detail.append("%sed cr_stage_sha=%s" % ("re-stamp" if restamp else "stamp", head[:12]))
-        return ("done" if any(d.startswith(("created", "adopted", "stageSha", "stamp", "re-stamp")) for d in detail)
+        detail.extend(self._close_superseded())
+        return ("done" if any(d.startswith(("created", "adopted", "stageSha", "stamp", "re-stamp", "closed")) for d in detail)
                 else "skipped", "; ".join(detail))
+
+    def _close_superseded(self) -> List[str]:
+        """Spec 13.3 step 4 / G9: the NEW CR now exists and is linked (and stamped), so close every GAMMA-held CR of
+        this release as superseded. Order matters for resumability: create+link first, close second; a crash or a
+        failed close leaves the held CR held and the next run closes it (the held CR is never reused meanwhile).
+        After the close, make sure its cr-record exists: `kb-cr close` only re-publishes a page that is already there."""
+        out: List[str] = []
+        for held in list(self._gamma_held):
+            hid = held["id"]
+            try:
+                self.tools.cr_close(hid, "superseded by %s" % self.cr_id)
+            except ToolError as exc:
+                raise CrStageError("the new CR %s is linked, but closing the GAMMA-held %s as superseded failed (%s). "
+                                   "Re-run; or close it by hand: kb-cr close %s --reason \"superseded by %s\""
+                                   % (self.cr_id, hid, exc, hid, self.cr_id), RC_FAILED)
+            out.append("closed %s (superseded by %s)" % (hid, self.cr_id))
+            board = read_board(self.board_file)
+            if get_wiki_handle(_find(board, "crs", hid), "cr-record") is None:
+                try:
+                    self.tools.cr_publish_record(hid)
+                except ToolError as exc:
+                    out.append("WARNING: cr-record for %s not published (%s); run: kb-cr publish-record %s" % (hid, exc, hid))
+        self._gamma_held = []
+        return out
 
     def _adopt_orphan(self, board: Dict[str, Any], title: str) -> Optional[Dict[str, Any]]:
         """A CR a previous run created but never linked (kb-cr create succeeded, assign-release did not):
