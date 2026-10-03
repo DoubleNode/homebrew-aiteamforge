@@ -11,6 +11,7 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 - **XACA-1404** (Fixed): last 3 in-place board writers (`handle_resolve_calendar_conflict` in `share/lcars-ui/server.py`, `share/kanban-hooks/kanban_utils.py`, `share/kanban-hooks/kanban-reset.py`) now take the board lock and write atomically (tmp+fsync+rename). Mirrors the dev changes.
 - **XACA-1386** (Perf): `share/lcars-ui/server.py` a racy board-cache entry sheds its content digest on the first verified hit
   outside the racy window, so later hits are stat-only instead of re-reading + hashing the board. Mirrors the dev change.
+  `aged` is sampled before the verifying read, so a same-tick write cannot be shed unverified.
 - **XACA-1388** (Added): LCARS fleet dashboard CI/CD section — new `fleet-monitor/server/public/lcars/js/lcars-cicd.js`, sidebar
   button + `data-section="cicd"` in `lcars-dashboard.html`, `cicd-*` styles in `lcars-dashboards.css`, refresh wiring in
   `lcars-dashboard-app.js` / `lcars-fleet-core.js`, jsdom tests + fixtures. Renders `GET /api/ci-runners` (v1 contract,

@@ -3536,13 +3536,17 @@ def _cached_board(path):
             return entry[1]
         # Racy entry (XACA-1386): the signature alone cannot prove the bytes
         # are unchanged. Verify the content without re-parsing.
+        # Sample "aged" BEFORE reading (git's racy rule compares against when
+        # verification STARTED): if the mtime had already left the racy window
+        # then, any write after that lands on a newer clock tick and changes
+        # the signature, so the bytes read next can be trusted without a
+        # digest. Sampled after the read, a same-tick write between the read
+        # and the check could be shed unverified (PR #1035 review).
+        aged = time.time_ns() - sig[0] >= _BOARD_CACHE_RACY_NS
         with open(path, 'r', encoding='utf-8') as f:
             if _board_digest(f.read()) == digest:
-                # The bytes were verified after the mtime left the racy
-                # window, so any later write lands on a newer clock tick and
-                # changes the signature: shed the digest (git's racy rule),
-                # so later hits go back to stat-only instead of re-hashing.
-                aged = time.time_ns() - sig[0] >= _BOARD_CACHE_RACY_NS
+                # Verified with the window already closed: shed the digest so
+                # later hits go back to stat-only instead of re-hashing.
                 with _BOARD_CACHE_LOCK:
                     _BOARD_CACHE_STATS["hits"] += 1
                     if aged and _BOARD_CACHE.get(key) is entry:
