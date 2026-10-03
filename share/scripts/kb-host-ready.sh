@@ -140,6 +140,10 @@ KB_HOST_READY_PROBE_TIMEOUT="${KB_HOST_READY_PROBE_TIMEOUT:-3}"
 # field (§6.2 step 1).
 KB_HOST_READY_LOCK_MECHANISM="${KB_HOST_READY_LOCK_MECHANISM:-}"
 
+# Interpreter for the utmpx probe in _hr_console_login_epoch — a TEST SEAM
+# (XACA-1408-005) so tests can stub the interpreter while the real chain runs.
+KB_HOST_READY_PYTHON="${KB_HOST_READY_PYTHON:-/usr/bin/python3}"
+
 # Working dir: the directory that holds `<team>-startup.sh`. Reused verbatim
 # from the convention every other script in this repo already uses
 # (lcars-launch-helpers.sh, kb-ttyd-bridge.sh, ...): unset AITEAMFORGE_DIR on
@@ -209,31 +213,119 @@ usage() {
 # Login-session identity (§4.5) — used by BOTH guards.
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Echoes the epoch start-time of the current `loginwindow` process, or
-# nothing (+ non-zero) if it cannot be determined. Verified format on this
-# machine: `ps -o lstart=` prints e.g. "Mon Aug 24  9:24:31 2026"; macOS
-# `date -j -f` with "%a %b %e %T %Y" parses that (both single- and
-# double-digit days, %e is space-padded).
-_hr_loginwindow_start_epoch() {
-    local pid epoch lstart
-    pid=$(pgrep -x loginwindow 2>/dev/null | head -1)
-    if [ -z "$pid" ]; then
-        return 1
-    fi
-    # LC_ALL=C on the PROBE as well as on the date parse below: both guards read
-    # this single value and BOTH fail open when it is empty, so one locale
-    # difference in ps's output format removes the entire guard set at once. The
-    # launchd path pins LANG via the plist; the CLI path inherits the user's.
-    lstart=$(LC_ALL=C ps -o lstart= -p "$pid" 2>/dev/null)
-    if [ -z "$lstart" ]; then
-        return 1
-    fi
+# Echoes the epoch start-time of process $1, or nothing (+ non-zero). Verified
+# format: `ps -o lstart=` prints e.g. "Mon Aug 24  9:24:31 2026    " — note the
+# TRAILING padding, which `date -j` warns about ("Ignoring N extraneous
+# characters"), so it is trimmed before the parse. macOS `date -j -f` with
+# "%a %b %e %T %Y" parses single- and double-digit days (%e is space-padded).
+# LC_ALL=C on the PROBE as well as on the parse: both guards read the login
+# identity and BOTH fail open when it is empty, so one locale difference in
+# ps's output format would remove the entire guard set at once. The launchd
+# path pins LANG via the plist; the CLI path inherits the user's.
+_hr_pid_start_epoch() {
+    local lstart epoch
+    [ -n "${1:-}" ] || return 1
+    lstart=$(LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null)
+    lstart="${lstart%"${lstart##*[![:space:]]}"}"
+    [ -n "$lstart" ] || return 1
     epoch=$(LC_ALL=C date -j -f "%a %b %e %T %Y" "$lstart" "+%s" 2>/dev/null)
-    if [ -z "$epoch" ]; then
-        return 1
-    fi
+    case "$epoch" in ''|*[!0-9]*) return 1 ;; esac
     printf '%s\n' "$epoch"
-    return 0
+}
+
+# Echoes the epoch start-time of the current `loginwindow` process, or
+# nothing (+ non-zero). XACA-1408: this is NOT the login time on a host
+# without auto-login. loginwindow starts when the login WINDOW appears and
+# survives the human's login (M1Pro measured 40 min apart). Kept only as the
+# last fallback of _hr_console_login_epoch below.
+_hr_loginwindow_start_epoch() {
+    local pid
+    pid=$(pgrep -x loginwindow 2>/dev/null | head -1)
+    [ -n "$pid" ] || return 1
+    _hr_pid_start_epoch "$pid"
+}
+
+# XACA-1408: echoes the epoch at which the CURRENT console user logged in, or
+# nothing (+ non-zero). This is the login-session identity for BOTH guards
+# (guard 1's login_session_stamp and guard 2's session age). Order:
+#   1. utmpx USER_PROCESS record with ut_line "console" and ut_user == the
+#      /dev/console owner, read via /usr/bin/python3 ctypes getutxent() (the
+#      system 3.9, never PATH python). Second resolution, fixed for the whole
+#      session, unaffected by screen lock or loginwindow/Dock/Finder respawns.
+#   2. Oldest Dock/Finder owned by the console user. Within ~20 s of login on
+#      every measured host, but `killall Dock` resets it, so it errs YOUNGER
+#      (toward locking), never toward a silent skip.
+#   3. _hr_loginwindow_start_epoch (the pre-XACA-1408 probe).
+# A candidate must be <= now and >= kern.boottime, else the next is tried.
+# Both guards still fail OPEN on an empty result (unchanged, by design; see
+# cmd_lock / cmd_login). The three-deep chain just makes empty much rarer.
+_hr_console_login_epoch() {
+    local user uid now boot cand pid best n
+    user=$(LC_ALL=C stat -f %Su /dev/console 2>/dev/null)
+    now=$(date +%s)
+    boot=$(LC_ALL=C sysctl -n kern.boottime 2>/dev/null | sed -n 's/^{ sec = \([0-9][0-9]*\),.*/\1/p')
+    [ -n "$boot" ] || boot=0
+
+    # (1) utmpx. struct utmpx on macOS: user[256] id[4] line[32] pid_t,
+    # short type, struct timeval {long, int32}, host[256], pad[16].
+    if [ -n "$user" ] && [ "$user" != "root" ] && [ -x "$KB_HOST_READY_PYTHON" ]; then
+        cand=$(HR_CONSOLE_USER="$user" LC_ALL=C "$KB_HOST_READY_PYTHON" - 2>/dev/null <<'PY'
+import ctypes, os
+class TV(ctypes.Structure):
+    _fields_ = [("tv_sec", ctypes.c_long), ("tv_usec", ctypes.c_int32)]
+class U(ctypes.Structure):
+    _fields_ = [("ut_user", ctypes.c_char * 256), ("ut_id", ctypes.c_char * 4),
+                ("ut_line", ctypes.c_char * 32), ("ut_pid", ctypes.c_int32),
+                ("ut_type", ctypes.c_short), ("ut_tv", TV),
+                ("ut_host", ctypes.c_char * 256), ("ut_pad", ctypes.c_uint32 * 16)]
+libc = ctypes.CDLL("/usr/lib/libc.dylib")
+libc.getutxent.restype = ctypes.POINTER(U)
+want = os.getenv("HR_CONSOLE_USER", "").encode()
+best = 0
+libc.setutxent()
+try:
+    while True:
+        p = libc.getutxent()
+        if not p:
+            break
+        u = p.contents
+        # 7 = USER_PROCESS; a DEAD_PROCESS console row is a previous session.
+        if want and u.ut_type == 7 and u.ut_line == b"console" and u.ut_user == want:
+            best = max(best, u.ut_tv.tv_sec)
+finally:
+    libc.endutxent()
+if best:
+    print(best)
+PY
+)
+        case "$cand" in
+            ''|*[!0-9]*) ;;
+            *) if [ "$cand" -le "$now" ] && [ "$cand" -ge "$boot" ]; then
+                   printf '%s\n' "$cand"; return 0
+               fi ;;
+        esac
+    fi
+
+    # (2) Oldest Dock/Finder owned by the console user.
+    best=""
+    if [ -n "$user" ] && [ "$user" != "root" ]; then
+        uid=$(id -u "$user" 2>/dev/null)
+        if [ -n "$uid" ]; then
+            for n in Dock Finder; do
+                for pid in $(pgrep -u "$uid" -x "$n" 2>/dev/null); do
+                    cand=$(_hr_pid_start_epoch "$pid") || continue
+                    { [ "$cand" -le "$now" ] && [ "$cand" -ge "$boot" ]; } || continue
+                    if [ -z "$best" ] || [ "$cand" -lt "$best" ]; then best="$cand"; fi
+                done
+            done
+        fi
+    fi
+    if [ -n "$best" ]; then printf '%s\n' "$best"; return 0; fi
+
+    # (3) loginwindow, last resort.
+    cand=$(_hr_loginwindow_start_epoch) || return 1
+    { [ "$cand" -le "$now" ] && [ "$cand" -ge "$boot" ]; } || return 1
+    printf '%s\n' "$cand"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1623,7 +1715,11 @@ cmd_lock() {
 
     if [ "$force" -ne 1 ]; then
         local epoch now age
-        epoch="$(_hr_loginwindow_start_epoch)" || epoch=""
+        # XACA-1408: age from the console LOGIN, not loginwindow's start. On a
+        # FileVault/no-auto-login host loginwindow predates the human's login
+        # by an arbitrary gap, which refused every real login lock on M1Pro.
+        # Same identity as guard 1 (cmd_login), so the two guards cannot disagree.
+        epoch="$(_hr_console_login_epoch)" || epoch=""
         if [ -n "$epoch" ]; then
             now=$(date +%s)
             age=$(( now - epoch ))
@@ -2185,8 +2281,14 @@ cmd_login() {
     # Guard 1 (§4.5): already ran for this login session? Bypassed by
     # --force. A missing/unreadable stamp never triggers this guard — only
     # an exact match does.
+    # XACA-1408: the stamp is the console-login epoch (shared with guard 2).
+    # Stamps written before XACA-1408 hold the loginwindow epoch, so guard 1
+    # misses ONCE per host after the upgrade and the login runs one extra time
+    # (same as --force). The value is still a bare epoch, so readers that treat
+    # it as an opaque session id (XACA-1380 PR B archive-dir names) are unaffected
+    # beyond one extra archive dir.
     local current_epoch prior_epoch
-    current_epoch="$(_hr_loginwindow_start_epoch)" || current_epoch=""
+    current_epoch="$(_hr_console_login_epoch)" || current_epoch=""
     if [ "$force" -ne 1 ] && [ -n "$current_epoch" ]; then
         prior_epoch="$(_hr_read_state_field login_session_stamp)" || prior_epoch=""
         if [ -n "$prior_epoch" ] && [ "$prior_epoch" = "$current_epoch" ]; then
