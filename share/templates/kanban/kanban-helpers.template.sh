@@ -13250,10 +13250,11 @@ _kb_gate_verdict_landed() {
                 echo "cannot verify: no board/item to read the [UX] subitem from" >&2
                 return 2
             fi
-            # The evaluation subitem is titled "[UX] ..." (class tag + space); findings are
-            # "[UX][Blocking]..." / "[UX][Advisory]..." and must not be mistaken for it.
+            # The evaluation subitem is the planner's "[UX] UX/UI Evaluation". Findings --
+            # "[UX][Blocking]...", "[UX][Advisory]..." and legacy untagged "[UX] <finding>"
+            # rows -- must not be mistaken for it (PR #1038 review advisory).
             out=$(jq -r --argjson i "$bidx" '[ (.backlog[$i].subitems // [])[]
-                | select((.title // "") | startswith("[UX] ")) | (.status // "todo") ] | join(",")' "$board_file" 2>/dev/null)
+                | select((.title // "") | startswith("[UX] UX/UI Evaluation")) | (.status // "todo") ] | join(",")' "$board_file" 2>/dev/null)
             jq_rc=$?
             if (( jq_rc != 0 )); then
                 echo "cannot verify: could not read the board ($board_file)" >&2
@@ -13299,10 +13300,28 @@ _kb_gate_resolve_pr() {
         rc=$?
         if (( rc != 0 )); then pr=""; fi
     fi
-    if ! [[ "$pr" =~ ^[0-9]+$ ]] && [[ -n "$item_id" ]]; then
-        pr=$(gh pr list --repo "$repo" --search "$item_id" --state open --json number --jq '.[0].number // empty' 2>/dev/null)
+    # Fallback: free-text search. It matches ANY open PR that mentions the id anywhere
+    # (body included), so the first hit can be a foreign PR whose bot review would read
+    # as THIS gate's verdict -- a false green (PR #1038 review). Accept a hit only when
+    # its branch or title names the id on a token boundary (XACA-142 != XACA-1423), and
+    # only when exactly ONE open PR does; anything else is "cannot verify" (fail closed).
+    if ! [[ "$pr" =~ ^[0-9]+$ ]] && [[ "$item_id" =~ ^[A-Za-z0-9-]+$ ]]; then
+        local hits="" nhits=0
+        hits=$(gh pr list --repo "$repo" --search "$item_id" --state open --json number,headRefName,title 2>/dev/null)
         rc=$?
-        if (( rc != 0 )); then pr=""; fi
+        if (( rc == 0 )); then
+            hits=$(printf '%s' "$hits" | jq -r --arg id "$item_id" '
+                ($id | ascii_downcase) as $i
+                | def names_id: ascii_downcase | test("(^|[^0-9a-z])" + $i + "($|[^0-9])");
+                  [ .[]? | select(((.headRefName // "") | names_id) or ((.title // "") | names_id))
+                         | .number | tostring ] | join(" ")' 2>/dev/null) || hits=""
+            nhits=${#${(z)hits}}
+            if (( nhits > 1 )); then
+                echo "cannot verify: $nhits open PRs name $item_id (#${hits// /, #}) -- refusing to guess which one is this gate's" >&2
+                return 2
+            fi
+            if (( nhits == 1 )); then pr="$hits"; fi
+        fi
     fi
     if ! [[ "$pr" =~ ^[0-9]+$ ]]; then
         echo "cannot verify: no open PR found for $item_id (branch '${branch:-unknown}')" >&2
