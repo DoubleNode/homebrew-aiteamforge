@@ -13126,6 +13126,13 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             # still awaiting the CR-Proper (IT Connect) link is exactly the kind
             # of stalled-mid-pipeline work this heuristic exists to surface —
             # same rationale as cr-drafted/cr-submitted, so it joins the set.
+            #
+            # cr-completed (XACA-1390) is DELIBERATELY absent, alongside
+            # deployed-prod / emergency-deployed / cr-closed: a completed CR is
+            # done (post-deploy), so it must never surface as late/pending
+            # work. This is an inclusion list, so a new terminal state is
+            # excluded by default — pinned by
+            # lcars-ui/tests/test_xaca1390_edit_state_v2_targets.py.
             late_states = frozenset({
                 'cr-submitted', 'cr-published', 'cr-drafted', 'cr-held', 'implementing',
             })
@@ -15183,7 +15190,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     _CR_VALID_STATES = frozenset([
         "cr-drafted", "cr-published", "cr-submitted", "cr-approved", "cr-rejected",
         "cr-held", "implementing", "deployed-dev", "deployed-prod",
-        "emergency-deployed", "cr-closed",
+        "emergency-deployed", "cr-completed", "cr-closed",
     ])
 
     # Required fields per target state.
@@ -15206,6 +15213,11 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         "deployed-dev":       [("deploy_estimate", "ISO 8601 date/time")],
         "deployed-prod":      [("deploy_estimate", "ISO 8601 date/time")],
         "emergency-deployed": [("emergency_justification", None), ("deploy_estimate", "ISO 8601 date/time")],
+        # cr-completed (XACA-1390): v2 terminal state after deployed-prod /
+        # emergency-deployed. `kb-cr complete` takes no operator-typed field;
+        # its prerequisite evidence (deploy stamp + approval) is enforced by
+        # kb-cr's evidence gate in _kb_cr_stamp_state_entry, not here.
+        "cr-completed":       [],
         "cr-closed":          [],
     }
 
@@ -15245,6 +15257,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         "deployed-dev":       "cr_deployed_dev_at",
         "deployed-prod":      "cr_deployed_prod_at",
         "emergency-deployed": "cr_emergency_deployed_at",
+        "cr-completed":       "cr_completed_at",   # XACA-1390 (kb-cr.sh XACA-1348)
     }
 
     @classmethod
@@ -15619,6 +15632,61 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             )
         return True, None
 
+    # ── v2 structural refusals (XACA-1390-001) ──────────────────────────────
+    # A CR marked `cr_lifecycle: "v2"` is subject to kb-cr.sh's
+    # _kb_cr_v2_guard on EVERY force-write — including this endpoint, which
+    # reaches it through _kb_cr_stamp_state_entry. Some of that guard's
+    # refusals depend only on (from_state, to_state) and therefore refuse
+    # ALWAYS, whatever evidence the CR carries. EDIT STATE must never offer
+    # those targets, and this endpoint rejects them with a clear 400 before
+    # shelling out.
+    #
+    # THIS IS THE STRUCTURAL SUBSET ONLY. The guard's evidence-conditional
+    # refusals — cr-approved without a recorded approver/approval_basis, the
+    # deployed-prod timing gate, the cr-published lead-draft-approval gate —
+    # are NOT replicated here; they reach the client through the guard's own
+    # message (the generated script runs the real guard first, exit 5 -> 400).
+    #
+    # Mirrors (keep all three in sync; the pytest below executes the real
+    # shell guard over every (from, to) pair and fails on any divergence):
+    #   * scripts/kb-cr.sh                 _kb_cr_v2_guard
+    #   * lcars-ui/js/lcars-cr-tab.js      _crV2StructurallyRefused
+    #   * lcars-ui/tests/test_xaca1390_edit_state_v2_targets.py (the oracle)
+    _CR_V2_NO_STAGE_TARGETS = frozenset({"implementing", "deployed-dev"})
+
+    @staticmethod
+    def _cr_is_v2(cr):
+        """True iff the CR carries the immutable v2 lifecycle marker — the ONLY
+        signal kb-cr.sh's _kb_cr_is_v2 accepts (never inferred from
+        legacy_state, timestamps or crState)."""
+        return isinstance(cr, dict) and cr.get("cr_lifecycle") == "v2"
+
+    @classmethod
+    def _cr_v2_structural_refusal(cls, from_state, to_state):
+        """Return kb-cr's refusal reason when a v2 CR can NEVER move
+        from_state -> to_state, else None. Rules in _kb_cr_v2_guard's order."""
+        if to_state in cls._CR_V2_NO_STAGE_TARGETS:
+            return (f"a v2 CR has no implementing / deployed-dev stage; "
+                    f"'{to_state}' is for legacy CRs only")
+        if from_state == "cr-closed" and to_state != "cr-closed":
+            return "closed is terminal for a v2 CR — create a new CR instead"
+        if from_state == "cr-rejected" and to_state not in ("cr-closed", "cr-rejected"):
+            return ("a rejected v2 CR is never reused — close it and create a "
+                    "new CR")
+        if to_state == "deployed-prod" and from_state != "cr-approved":
+            return ("a v2 CR reaches deployed-prod only from cr-approved "
+                    "(break-glass: kb-cr emergency-deploy)")
+        if to_state == "cr-held" and from_state != "cr-held":
+            return ("a v2 CR is held only through 'kb-cr hold', which records "
+                    "the state to resume to")
+        if from_state == "cr-held" and to_state not in ("cr-closed", "cr-held", "cr-rejected"):
+            return ("a held v2 CR leaves cr-held only through 'kb-cr resume' "
+                    "or close/reject")
+        if to_state == "cr-completed" and from_state not in ("deployed-prod", "emergency-deployed"):
+            return ("cr-completed is entered only from deployed-prod or "
+                    "emergency-deployed")
+        return None
+
     @staticmethod
     def _build_cr_transition_shell_parts(board_file_str, cr_id, target_state,
                                          helpers_root=None, approval_waiver=None,
@@ -15686,6 +15754,22 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             f'cr_idx=$(_kb_jq_read "{board_file_str}" \'.crs | to_entries[] '
             f'| select(.value.id == "{cr_id}") | .key\' -r 2>/dev/null)',
             'if [ -z "$cr_idx" ]; then echo "CR not found in board" >&2; exit 2; fi',
+            # XACA-1390-001: run kb-cr's v2 guard FIRST, read-only, so a
+            # refusal (structural or evidence-conditional) is (a) reported as
+            # its own exit code — handle_cr_transition maps 5 to a 400 that
+            # carries kb-cr's message instead of a generic 500 — and (b)
+            # reached BEFORE the waiver write below, so a refused move can
+            # never leave a recorded waiver behind with the state unchanged.
+            # Legacy (unmarked) CRs return 0 immediately. The guard runs again
+            # inside _kb_cr_stamp_state_entry; it only reads, so that is safe.
+            # The `typeset -f` test keeps a kb-cr.sh that predates XACA-1348
+            # (no guard function) from turning every transition into a
+            # command-not-found exit 5; such a kb-cr.sh has no v2 rules for
+            # _kb_cr_stamp_state_entry to enforce either, so nothing is lost.
+            f'cr_from_state=$(_kb_cr_container_get_state "{board_file_str}" "$cr_idx" 2>/dev/null || echo "")',
+            f'if typeset -f _kb_cr_v2_guard >/dev/null 2>&1; then '
+            f'_kb_cr_v2_guard "{board_file_str}" "$cr_idx" {shlex.quote(cr_id)} transition '
+            f'"$cr_from_state" {shlex.quote(target_state)} || exit 5; fi',
         ]
         if approval_waiver is not None:
             waiver_actor = actor if (actor and str(actor).strip()) else "lcars-ui"
@@ -15870,6 +15954,24 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 )
                 return
 
+            # ── v2 structural refusal (XACA-1390-001) ──────────────────────────
+            # After the concurrency check (a stale client should be told to
+            # reload, not that its move is illegal from a state it never saw).
+            # 400, not 409: a structural refusal is not a conflict — reloading
+            # cannot make the move legal. (The JS reserves its "modified by
+            # another session" text for the 409 that carries
+            # currentUpdatedAt; see _crTransition409Message.)
+            if self._cr_is_v2(current_cr):
+                from_state = current_cr.get("crState", "")
+                refusal = self._cr_v2_structural_refusal(from_state, target_state)
+                if refusal:
+                    self._send_json_response(
+                        {"ok": False, "error":
+                         f"kb-cr refuses {cr_id} {from_state} -> {target_state}: {refusal}."},
+                        status=400,
+                    )
+                    return
+
             # ── Per-CR pre-check for approval_waiver (XACA-1239, D3/D5) ────────
             # _kb_cr_waive_approval itself refuses a wrong-state waiver, a
             # second waiver, or a waiver over a real approval — but
@@ -16031,6 +16133,17 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 env=env,
                 timeout=30,
             )
+
+            if result.returncode == 5:
+                # kb-cr's v2 guard refused (see _build_cr_transition_shell_parts).
+                # Nothing was written; surface kb-cr's own message verbatim.
+                stderr = result.stderr.strip()
+                print(f"[LCARS] CR transition refused by kb-cr v2 guard for {cr_id}: {stderr}")
+                self._send_json_response(
+                    {"ok": False, "error": stderr or "kb-cr refused this transition (v2 lifecycle)"},
+                    status=400,
+                )
+                return
 
             if result.returncode != 0:
                 stderr = result.stderr.strip()

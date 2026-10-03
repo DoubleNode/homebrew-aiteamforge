@@ -785,6 +785,9 @@ function createFilterBar(options) {
     // omitted so the list stays short):
     // XACA-0895: cr-published added — same pre-submission tier as cr-drafted,
     // so it belongs in this "active" set for the same reason cr-drafted does.
+    // XACA-1390: cr-completed (v2 terminal, after deployed-prod) is deliberately
+    // NOT active — same reasoning as deployed-prod / emergency-deployed / cr-closed,
+    // which are also omitted. Pinned by test_cr_tab_completed_state.js.
     const CR_ACTIVE_STATES = new Set([
         'cr-drafted', 'cr-published', 'cr-submitted', 'cr-approved', 'implementing', 'deployed-dev',
     ]);

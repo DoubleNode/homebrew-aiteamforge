@@ -60,6 +60,7 @@
     var AGE_TERMINAL_STATES = new Set([
         'deployed-prod',
         'emergency-deployed',
+        'cr-completed',   // XACA-1390: v2 terminal state; mirrors lcars-cr-tab.js TERMINAL (SSOT test)
         'cr-rejected',
     ]);
 

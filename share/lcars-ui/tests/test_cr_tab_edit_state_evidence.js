@@ -976,3 +976,159 @@ test('sanity: an unrelated event type with a note still uses the generic fallbac
     var html = sb._crActivityDetails({ type: 'some_other_event', note: 'plain note' });
     assert.ok(html.indexOf('cr-activity-note') !== -1, html);
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// (C) XACA-1390-001 — EDIT STATE target filter for v2-marked CRs.
+//     _crEditStateTargets / _crV2StructurallyRefused are sliced from the
+//     shipped file. Parity with server.py and kb-cr.sh's real _kb_cr_v2_guard
+//     over EVERY (from, to) pair is pinned by
+//     lcars-ui/tests/test_xaca1390_edit_state_v2_targets.py; these tests pin
+//     the dialog-facing behaviour.
+// ═══════════════════════════════════════════════════════════════════════════
+
+var targetsSrc = slice('const _CR_STATES = [', 'function _findRawCRById(crId) {');
+
+function buildTargetsSandbox() {
+    var sandbox = {};
+    vm.createContext(sandbox);
+    vm.runInContext(
+        targetsSrc +
+        '\nthis._CR_STATES = _CR_STATES;' +
+        '\nthis._crEditStateTargets = _crEditStateTargets;' +
+        '\nthis._crV2StructurallyRefused = _crV2StructurallyRefused;',
+        sandbox
+    );
+    return sandbox;
+}
+
+function v2(state)     { return { id: 'CR-T-20261002-1', crState: state, cr_lifecycle: 'v2' }; }
+function legacy(state) { return { id: 'CR-T-20261002-1', crState: state }; }
+
+test('XACA-1390 extraction sanity: _crEditStateTargets / _crV2StructurallyRefused load from the shipped file', () => {
+    var sb = buildTargetsSandbox();
+    assert.equal(typeof sb._crEditStateTargets, 'function');
+    assert.equal(typeof sb._crV2StructurallyRefused, 'function');
+    assert.ok(Array.from(sb._CR_STATES).indexOf('cr-completed') !== -1);
+});
+
+test('XACA-1390: v2 CR is NEVER offered implementing or deployed-dev, from any state', () => {
+    var sb = buildTargetsSandbox();
+    Array.from(sb._CR_STATES).forEach(function (from) {
+        var t = Array.from(sb._crEditStateTargets(v2(from), from));
+        assert.ok(t.indexOf('implementing') === -1, 'implementing offered from ' + from);
+        assert.ok(t.indexOf('deployed-dev') === -1, 'deployed-dev offered from ' + from);
+    });
+});
+
+test('XACA-1390: v2 CR is offered cr-held ONLY when already cr-held (entry is via kb-cr hold)', () => {
+    var sb = buildTargetsSandbox();
+    Array.from(sb._CR_STATES).forEach(function (from) {
+        var has = Array.from(sb._crEditStateTargets(v2(from), from)).indexOf('cr-held') !== -1;
+        assert.equal(has, from === 'cr-held', 'cr-held offered=' + has + ' from ' + from);
+    });
+});
+
+test('XACA-1390: v2 CR is offered cr-completed ONLY from deployed-prod / emergency-deployed', () => {
+    var sb = buildTargetsSandbox();
+    Array.from(sb._CR_STATES).forEach(function (from) {
+        var has = Array.from(sb._crEditStateTargets(v2(from), from)).indexOf('cr-completed') !== -1;
+        assert.equal(has, from === 'deployed-prod' || from === 'emergency-deployed',
+            'cr-completed offered=' + has + ' from ' + from);
+    });
+});
+
+test('XACA-1390: v2 terminal/held exits — closed stays closed, rejected only closes, held only closes/rejects', () => {
+    var sb = buildTargetsSandbox();
+    assert.deepEqual(Array.from(sb._crEditStateTargets(v2('cr-closed'), 'cr-closed')), ['cr-closed']);
+    assert.deepEqual(Array.from(sb._crEditStateTargets(v2('cr-rejected'), 'cr-rejected')), ['cr-rejected', 'cr-closed']);
+    assert.deepEqual(Array.from(sb._crEditStateTargets(v2('cr-held'), 'cr-held')), ['cr-rejected', 'cr-held', 'cr-closed']);
+});
+
+test('XACA-1390: v2 CR is offered deployed-prod ONLY from cr-approved', () => {
+    var sb = buildTargetsSandbox();
+    Array.from(sb._CR_STATES).forEach(function (from) {
+        var has = Array.from(sb._crEditStateTargets(v2(from), from)).indexOf('deployed-prod') !== -1;
+        assert.equal(has, from === 'cr-approved', 'deployed-prod offered=' + has + ' from ' + from);
+    });
+});
+
+test('XACA-1390: legacy (unmarked) CR keeps the FULL target list, unchanged, from every state', () => {
+    var sb = buildTargetsSandbox();
+    var all = Array.from(sb._CR_STATES);
+    all.forEach(function (from) {
+        assert.deepEqual(Array.from(sb._crEditStateTargets(legacy(from), from)), all, 'legacy from ' + from);
+    });
+});
+
+test('XACA-1390: only the literal marker "v2" filters — other cr_lifecycle values and a missing raw record do not', () => {
+    var sb = buildTargetsSandbox();
+    var all = Array.from(sb._CR_STATES);
+    assert.deepEqual(Array.from(sb._crEditStateTargets(null, 'cr-submitted')), all);
+    assert.deepEqual(Array.from(sb._crEditStateTargets({ crState: 'cr-submitted', cr_lifecycle: 'V2' }, 'cr-submitted')), all);
+    assert.deepEqual(Array.from(sb._crEditStateTargets({ crState: 'cr-submitted', cr_lifecycle: 'v1' }, 'cr-submitted')), all);
+});
+
+test('XACA-1390: the dialog builds its options from _crEditStateTargets, not the raw _CR_STATES list', () => {
+    var dialogSrc = slice('function _showCRStateChangeDialog(view) {', 'dialog.innerHTML =');
+    assert.ok(/_crEditStateTargets\(\s*rawCR\s*,/.test(dialogSrc), 'options builder no longer calls _crEditStateTargets(rawCR, ...)');
+    assert.ok(!/_CR_STATES\.map\(/.test(dialogSrc), 'options builder maps _CR_STATES directly — v2 filter bypassed');
+});
+
+// ── XACA-1390: 409 message — only the concurrency 409 reads as "another session" ──
+
+function build409Sandbox() {
+    var src = slice('// ── _crTransition409Message:start ──', '// ── _crTransition409Message:end ──');
+    var sandbox = {};
+    vm.createContext(sandbox);
+    vm.runInContext(src + '\nthis._crTransition409Message = _crTransition409Message;', sandbox);
+    return sandbox;
+}
+
+var STALE_409 = 'This CR was modified by another session. Reload to see the latest state.';
+
+test('XACA-1390: waiver pre-check 409 (no currentUpdatedAt) shows the server\'s own message', () => {
+    var sb = build409Sandbox();
+    var msg = 'CR-ACAD-0001 already carries an approval; an approval waiver is not applicable.';
+    assert.equal(sb._crTransition409Message({ ok: false, conflict: true, error: msg }), msg);
+});
+
+test('XACA-1390: concurrency 409 (carries currentUpdatedAt) keeps the stale-session text', () => {
+    var sb = build409Sandbox();
+    assert.equal(sb._crTransition409Message({
+        ok: false, conflict: true, error: 'CR was modified by another writer',
+        currentUpdatedAt: '2026-10-02T00:00:00Z',
+    }), STALE_409);
+});
+
+test('XACA-1390: unreadable / error-less 409 body falls back to the stale-session text', () => {
+    var sb = build409Sandbox();
+    [null, undefined, {}, { error: '' }, { error: 42 }].forEach(function (d) {
+        assert.equal(sb._crTransition409Message(d), STALE_409, JSON.stringify(d));
+    });
+});
+
+test('XACA-1390: _doSubmitTransition routes BOTH 409 paths through _crTransition409Message', () => {
+    var src = slice('function _doSubmitTransition(', 'if (!r.ok) {');
+    assert.equal((src.match(/_crTransition409Message\(/g) || []).length, 2);
+    assert.ok(src.indexOf("'This CR was modified by another session") === -1, 'hardcoded stale text still in the 409 branch');
+});
+
+// ── XACA-1390-013: the v2 hint is accessible text, not faint decoration ──
+
+test('XACA-1390-013: v2 hint is linked to the select via aria-describedby and avoids tool jargon', () => {
+    var dialogSrc = slice('function _showCRStateChangeDialog(view) {', 'dialog.innerHTML =') +
+        slice('dialog.innerHTML =', 'const targetSelect');
+    assert.ok(/<select id="cr-sc-target-select"[^`]*aria-describedby="cr-sc-v2-hint"/.test(dialogSrc), 'select not linked to the hint');
+    assert.ok(dialogSrc.indexOf('id="cr-sc-v2-hint"') !== -1, 'hint has no id');
+    assert.ok(dialogSrc.indexOf('kb-cr refuses') === -1, 'hint still names the internal tool');
+});
+
+test('XACA-1390-013: .cr-sc-v2-hint overrides the faint hint style (AA-readable)', () => {
+    var css = fs.readFileSync(path.join(__dirname, '../css/lcars-cr-tab.css'), 'utf8');
+    var m = css.match(/\.cr-sc-v2-hint\s*\{([^}]*)\}/);
+    assert.ok(m, '.cr-sc-v2-hint rule missing');
+    var alpha = /rgba\(\s*255\s*,\s*255\s*,\s*255\s*,\s*([0-9.]+)\s*\)/.exec(m[1]);
+    assert.ok(alpha && parseFloat(alpha[1]) >= 0.7, 'hint alpha too low for AA on the black dialog');
+    var size = /font-size:\s*(\d+)px/.exec(m[1]);
+    assert.ok(size && parseInt(size[1], 10) >= 11, 'hint font-size below 11px');
+});

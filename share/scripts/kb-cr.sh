@@ -904,6 +904,15 @@ _kb_cr_v2_guard() {
         echo "kb-cr $verb: CR '$cr_id' is in state '$from'; a v2 CR reaches deployed-prod only from cr-approved (break-glass: kb-cr emergency-deploy)." >&2
         return 1
     fi
+    # XACA-1390-006: and ENTERS cr-held only through `kb-cr hold`, the single
+    # writer of held_from. A force-write into cr-held (transition / the LCARS
+    # endpoint) records no held_from, so `resume` would refuse it forever, and the
+    # rule above stops every other exit but close/reject — an unresumable CR. hold
+    # does not route through this guard, so it is unaffected.
+    if [[ "$to" == "cr-held" && "$from" != "cr-held" ]]; then
+        echo "kb-cr $verb: CR '$cr_id' cannot be moved to cr-held by $verb; a v2 CR is held only through 'kb-cr hold' (from cr-submitted or cr-approved), which records the state to resume to." >&2
+        return 1
+    fi
     if [[ "$from" == "cr-held" && "$to" != "cr-closed" && "$to" != "cr-held" && "$to" != "cr-rejected" ]]; then
         local _hf
         _hf=$(_kb_jq_read "$board_file" ".crs[$cr_idx].held_from // \"\"" -r 2>/dev/null)
@@ -3121,6 +3130,51 @@ _kb_cr_container_revert() {
     # never-approved (Requirement 4).
     if [[ "$target_state" == "cr-rejected" ]] && _kb_cr_is_v2 "$_cr_board" "$cr_idx"; then
         echo "kb-cr $operation: refusing to $operation CR '$cr_id' to 'cr-rejected' — rejection goes through 'kb-cr reject', which preserves any recorded approval." >&2
+        return 1
+    fi
+
+    # XACA-1390-006: a v2 CR enters cr-held ONLY through `kb-cr hold`, the single
+    # writer of held_from (and of the spec-9.3 assumption suppression that goes
+    # with a hold on an unapproved CR). A revert/undo landing on cr-held is
+    # REFUSED rather than taught to record held_from, because neither value it
+    # could record is safe:
+    #   * held_from=cr-approved — this revert has just stripped cr_approved_at
+    #     and approver (cr-held ranks below cr-approved), and `resume` is a
+    #     STATE-ONLY write that does not consult _kb_cr_v2_guard, so resume would
+    #     put the CR in cr-approved with no approval on record: laundering
+    #     (cat9 invariant; resume never re-checks the evidence).
+    #   * held_from=cr-submitted — honest, but it would need this function to
+    #     duplicate hold's suppression rule (a cr-held target ranks ABOVE
+    #     cr-submitted, so the XACA-1348-021 withdrawal suppression below does not
+    #     fire), or resume -> cr-submitted becomes a sweep candidate and the
+    #     withdrawn approval is re-minted at the next sweep. A second writer of the
+    #     hold rules is exactly the drift this file keeps paying for.
+    # Before this guard the revert succeeded with NO held_from, and `resume`
+    # (fail-closed on a missing held_from) refused forever: an unresumable CR.
+    # The same outcome is reachable as two existing verbs that each own their
+    # rule: `revert --to cr-submitted` (withdraws + suppresses) then `hold`.
+    # Covers `undo` too: _kb_cr_revert_compute_predecessor picks cr-held whenever
+    # cr_held_at is the latest stamp below the current rank (any CR that was held
+    # and resumed), which would ALSO strip a still-valid approval on the way.
+    if [[ "$target_state" == "cr-held" ]] && _kb_cr_is_v2 "$_cr_board" "$cr_idx"; then
+        echo "kb-cr $operation: refusing to $operation CR '$cr_id' to 'cr-held' — a v2 CR is held only through 'kb-cr hold', which records the state to resume to." >&2
+        echo "  To withdraw the approval and park it: kb-cr revert $cr_id --to cr-submitted --reason \"...\" && kb-cr hold $cr_id" >&2
+        echo "  To park it with the approval intact: kb-cr revert $cr_id --to cr-approved (if not already there) && kb-cr hold $cr_id" >&2
+        return 1
+    fi
+
+    # XACA-1390-006: implementing / deployed-dev do not exist in the v2 lifecycle
+    # (_kb_cr_v2_guard refuses them for transition/LCARS; start-dev / start-test /
+    # deploy-dev refuse them as verbs). revert was the one path left that could put
+    # a v2 CR there — e.g. deployed-prod -> revert --to implementing. Checked AFTER
+    # the default target is computed, so `undo` / revert-with-no---to is covered
+    # even if a stray cr_started_dev_at / cr_deployed_dev_at makes the heuristic
+    # pick one of them. Legacy CRs are unchanged.
+    if [[ "$target_state" == "implementing" || "$target_state" == "deployed-dev" ]] \
+       && _kb_cr_is_v2 "$_cr_board" "$cr_idx"; then
+        echo "kb-cr $operation: refusing to $operation CR '$cr_id' to '$target_state' — the v2 lifecycle has no implementing / deployed-dev stage (legacy CRs only)." >&2
+        echo "  v2 path: cr-drafted -> cr-published -> cr-submitted -> cr-approved -> deployed-prod -> cr-completed -> cr-closed" >&2
+        echo "  Pass --to cr-approved (keeps the approval) or an earlier v2 state." >&2
         return 1
     fi
 
@@ -7343,7 +7397,8 @@ _kb_cr_help() {
     echo "  resume  <CR-ID> [--note \"<text>\"]  [XACA-1348]"
     echo "              cr-held → the state the CR was held from (v2 CRs; hold records"
     echo "              held_from). cr_approved_at is never touched. A v2 CR leaves cr-held"
-    echo "              only via resume or close."
+    echo "              only via resume or close, and ENTERS it only via hold (transition,"
+    echo "              revert and undo to cr-held are refused for v2 CRs) [XACA-1390]."
     echo "  approve <CR-ID> --assumed  [XACA-1348]"
     echo "              Stamp the assumed (schedule) approval IF it is due: cr_approved_at ="
     echo "              cr_approval_expected_at (never the wall clock), approval_assumed=true."
@@ -7385,6 +7440,8 @@ _kb_cr_help() {
     echo "              Forward walks (target rank ≥ current) are refused."
     echo "              Multi-item CRs propagate atomically (state lives on .crs[i])."
     echo "              pushback_count and pushback_notes are PRESERVED."
+    echo "              v2 CRs: --to cr-held / cr-rejected are refused (use hold / reject),"
+    echo "              and so are implementing / deployed-dev (not v2 stages)."
     echo "  undo   <CR-ID|item-id> [--reason \"<text>\"]"
     echo "              One-step convenience: same as 'revert' with no --to."
     echo "              The --to flag is rejected on undo; use revert for explicit targets."

@@ -25,7 +25,7 @@
  *   Total CR age from cr_created_at (fallback addedAt). Format: 15m/3h/2d/3w/2mo.
  *   title="" tooltip carries absolute ISO timestamp (covers REQUESTED-AT use case).
  *   Suppressed to "—" on terminal states (deployed-prod, emergency-deployed,
- *   cr-rejected) since age stops being a queue-management signal once the CR is done.
+ *   cr-completed, cr-rejected) since age stops being a queue-management signal once the CR is done.
  *
  * XACA-0310 Phase 2.5:
  *   001: CR rows carry linkedItemIds[]; item-count badge in TITLE cell.
@@ -121,6 +121,7 @@
         // Terminal-state rationale:
         //   'deployed-prod'      — end of standard pipeline; no further transitions expected.
         //   'emergency-deployed' — end of emergency pipeline; no further transitions expected.
+        //   'cr-completed'       — v2 terminal state entered after deployed-prod (XACA-1390).
         //   'cr-rejected'        — dead-end in current submission cycle. If the CR is
         //                          re-submitted it transitions back to 'cr-submitted',
         //                          which automatically puts it back into the active set.
@@ -134,7 +135,7 @@
             sortKey: 'STAGE-AGE',
             predicate: item => {
                 // Active = any non-terminal cr-* state. Terminal states excluded (see above).
-                const TERMINAL = new Set(['deployed-prod', 'emergency-deployed', 'cr-rejected']);
+                const TERMINAL = new Set(['deployed-prod', 'emergency-deployed', 'cr-completed', 'cr-rejected']);
                 return !TERMINAL.has(item.crState) && item.crState && item.crState.length > 0;
             },
         },
@@ -180,10 +181,16 @@
         'deployed-dev':       3,
         'deployed-prod':      4,
         'emergency-deployed': 5,
-        'cr-published':       6,
-        'cr-drafted':         7,
-        'cr-rejected':        8,
-        'cr-held':            9,
+        // XACA-1390: cr-completed is the v2 terminal state entered AFTER
+        // deployed-prod / emergency-deployed, so it sorts with the deployed
+        // tier (just below emergency-deployed), above the pre-submission tier.
+        // Without an entry it fell through to the 99 default and sank below
+        // cr-held — a finished CR ranked as the LEAST important row.
+        'cr-completed':       6,
+        'cr-published':       7,
+        'cr-drafted':         8,
+        'cr-rejected':        9,
+        'cr-held':           10,
     };
 
     const PRIORITY_ORDER = { critical: 0, high: 1, medium: 2, med: 2, low: 3 };
@@ -664,6 +671,7 @@
         'deployed-dev':       'cr-state-deployed-dev',
         'deployed-prod':      'cr-state-deployed-prod',
         'emergency-deployed': 'cr-state-emergency',
+        'cr-completed':       'cr-state-completed',   // XACA-1390
         'cr-closed':          'cr-state-closed',
     };
 
@@ -747,6 +755,9 @@
         'deployed-dev':       item => item.cr_deployed_dev_at,
         'deployed-prod':      item => item.cr_deployed_prod_at,
         'emergency-deployed': item => item.cr_emergency_deployed_at,
+        // cr-completed (XACA-1390): anchor to the completion stamp, not the
+        // deploy stamp, so STAGE AGE measures time-in-cr-completed.
+        'cr-completed':       item => item.cr_completed_at,
         // cr-closed: terminal state — anchor to the close timestamp when available
         'cr-closed':          item => item.cr_closed_at,
     };
@@ -856,7 +867,7 @@
     // Terminal states for the DELAYED badge — mirrors the plan-doc definition.
     // A CR in any of these states has already resolved the deploy-window concern;
     // showing a DELAYED badge on a closed/rejected/deployed CR would be noise.
-    const _DELAY_TERMINAL = new Set(['deployed-prod', 'cr-rejected', 'cr-closed', 'emergency-deployed']);
+    const _DELAY_TERMINAL = new Set(['deployed-prod', 'cr-rejected', 'cr-closed', 'emergency-deployed', 'cr-completed']);
 
     /**
      * Return HTML for the ⏰ DRAFTED 24h+ and/or ⚠ DELAYED automation badges.
@@ -1580,6 +1591,7 @@
         'deployed-dev',
         'deployed-prod',
         'emergency-deployed',
+        'cr-completed',
         'cr-closed',
     ];
 
@@ -1623,8 +1635,42 @@
             { key: 'deploy_estimate', label: 'DEPLOY TIMESTAMP', type: 'datetime-local',
               required: true, defaultNow: true },
         ],
+        // cr-completed (XACA-1390): v2 terminal state. No operator-typed
+        // field — its prerequisite evidence (prod/emergency deploy stamp,
+        // approval) is checked by the server-side gap logic, same as cr-closed.
+        'cr-completed':       [],
         'cr-closed':          [],
     };
+
+    // ── v2 structural refusals (XACA-1390-001) ────────────────────────────────
+    // MIRROR of server.py LCARSHandler._cr_v2_structural_refusal, which is in
+    // turn pinned against kb-cr.sh's real _kb_cr_v2_guard over every
+    // (from, to) pair by lcars-ui/tests/test_xaca1390_edit_state_v2_targets.py
+    // — that test also executes THIS function and fails on any divergence.
+    // Structural subset only: evidence-conditional refusals (cr-approved
+    // approval record, deployed-prod timing, cr-published lead draft approval)
+    // stay server-side and come back as the guard's own message.
+    function _crV2StructurallyRefused(fromState, toState) {
+        if (toState === 'implementing' || toState === 'deployed-dev') return true;
+        if (fromState === 'cr-closed' && toState !== 'cr-closed') return true;
+        if (fromState === 'cr-rejected' && toState !== 'cr-closed' && toState !== 'cr-rejected') return true;
+        if (toState === 'deployed-prod' && fromState !== 'cr-approved') return true;
+        if (toState === 'cr-held' && fromState !== 'cr-held') return true;
+        if (fromState === 'cr-held' && toState !== 'cr-closed' && toState !== 'cr-held' && toState !== 'cr-rejected') return true;
+        if (toState === 'cr-completed' && fromState !== 'deployed-prod' && fromState !== 'emergency-deployed') return true;
+        return false;
+    }
+
+    /**
+     * Target states EDIT STATE offers for a CR (XACA-1390-001).
+     * Legacy (unmarked) CR, or raw record unavailable: every state, exactly as
+     * before. v2-marked CR (cr_lifecycle === 'v2' — the ONLY v2 signal, same as
+     * kb-cr's _kb_cr_is_v2): drop every target kb-cr would always refuse.
+     */
+    function _crEditStateTargets(rawCR, currentState) {
+        if (!rawCR || rawCR.cr_lifecycle !== 'v2') return _CR_STATES.slice();
+        return _CR_STATES.filter(s => !_crV2StructurallyRefused(currentState, s));
+    }
 
     /**
      * Locate the raw CR record from boardData.crs by cr_id.
@@ -1867,8 +1913,13 @@
         const dialog = document.createElement('div');
         dialog.className = 'lcars-modal cr-state-dialog';
 
-        // Build dropdown options — exclude the current state (can't transition to self)
-        const options = _CR_STATES.map(s => {
+        // Build dropdown options. The current state stays listed (marked
+        // data-is-current). v2 CRs only get targets kb-cr can accept
+        // (XACA-1390-001) — see _crEditStateTargets.
+        const currentState = (rawCR && rawCR.crState) || view.crState;
+        const offeredStates = _crEditStateTargets(rawCR, currentState);
+        const v2Filtered = offeredStates.length < _CR_STATES.length;
+        const options = offeredStates.map(s => {
             const label = s.toUpperCase().replace(/-/g, ' ');
             const isCurrent = s === view.crState;
             return `<option value="${escapeHtml(s)}"${isCurrent ? ' data-is-current="true"' : ''}>${escapeHtml(label)}</option>`;
@@ -1888,10 +1939,13 @@
                 `</div>` +
                 `<div class="cr-sc-field-group cr-sc-target-group">` +
                     `<label class="cr-sc-label" for="cr-sc-target-select">TARGET STATE</label>` +
-                    `<select id="cr-sc-target-select" class="cr-sc-select">` +
+                    `<select id="cr-sc-target-select" class="cr-sc-select"${v2Filtered ? ' aria-describedby="cr-sc-v2-hint"' : ''}>` +
                         `<option value="">— SELECT —</option>` +
                         options +
                     `</select>` +
+                    (v2Filtered
+                        ? `<span id="cr-sc-v2-hint" class="cr-sc-hint cr-sc-v2-hint">v2 lifecycle: only valid next states are listed.</span>`
+                        : '') +
                 `</div>` +
                 `<div id="cr-sc-map-notice" class="cr-sc-map-notice" role="status" style="display:none"></div>` +
                 `<div class="cr-sc-divider"></div>` +
@@ -2123,6 +2177,26 @@
         });
     }
 
+    // ── _crTransition409Message:start ──
+    /**
+     * Text for a 409 from the transition endpoint (XACA-1390).
+     *
+     * The endpoint answers 409 for two different reasons: the optimistic
+     * concurrency check (the only one that carries `currentUpdatedAt`) and
+     * the XACA-1239-019 approval-waiver pre-check (a precise `error`, e.g.
+     * "already approved"). Rendering every 409 as "modified by another
+     * session" hid the second message entirely. Only the concurrency 409 —
+     * or an unreadable body — falls back to the stale-session text.
+     */
+    function _crTransition409Message(data) {
+        const STALE = 'This CR was modified by another session. Reload to see the latest state.';
+        if (!data || data.currentUpdatedAt || typeof data.error !== 'string' || !data.error) {
+            return STALE;
+        }
+        return data.error;
+    }
+    // ── _crTransition409Message:end ──
+
     /**
      * POST the transition request and handle the response.
      * On success: close dialog, re-open docs modal with fresh data.
@@ -2202,17 +2276,9 @@
         .then(r => {
             if (r.status === 409) {
                 return r.json().then(data => {
-                    _showError(
-                        'This CR was modified by another session. Reload to see the latest state.',
-                        true,   // withReload
-                        false,  // withRetry
-                    );
+                    _showError(_crTransition409Message(data), true, false);
                 }).catch(() => {
-                    _showError(
-                        'This CR was modified by another session. Reload to see the latest state.',
-                        true,
-                        false,
-                    );
+                    _showError(_crTransition409Message(null), true, false);
                 });
             }
             if (!r.ok) {

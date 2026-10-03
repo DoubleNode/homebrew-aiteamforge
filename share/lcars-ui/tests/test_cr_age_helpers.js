@@ -210,8 +210,9 @@ test('computeCRAgeMs: undefined item → null (defensive)', () => {
 
 // ─── AGE_TERMINAL_STATES — set membership and SSOT invariant ──────────────────
 
-test('AGE_TERMINAL_STATES: contains exactly deployed-prod, emergency-deployed, cr-rejected', () => {
-    assert.equal(AGE_TERMINAL_STATES.size, 3);
+test('AGE_TERMINAL_STATES: contains exactly deployed-prod, emergency-deployed, cr-completed, cr-rejected', () => {
+    assert.equal(AGE_TERMINAL_STATES.size, 4);
+    assert.ok(AGE_TERMINAL_STATES.has('cr-completed'));   // XACA-1390
     assert.ok(AGE_TERMINAL_STATES.has('deployed-prod'));
     assert.ok(AGE_TERMINAL_STATES.has('emergency-deployed'));
     assert.ok(AGE_TERMINAL_STATES.has('cr-rejected'));

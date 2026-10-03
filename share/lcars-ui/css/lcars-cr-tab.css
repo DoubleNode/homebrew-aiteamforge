@@ -538,6 +538,17 @@
     font-weight: 700;
 }
 
+/* cr-completed (XACA-1390): v2 terminal "done" state, entered after deployed-prod.
+   Teal (--lcars-teal #66cccc): reads as finished/healthy but is ~60deg of hue
+   away from deployed-prod's green (#66cc66) and 30deg from implementing's cyan
+   (#99ccff), so the two adjacent "done-ish" states do not collapse into one
+   colour. The badge text (COMPLETED) carries the meaning, not colour alone. */
+.cr-state-completed {
+    background: rgba(102, 204, 204, 0.16);
+    color: var(--lcars-teal, #66cccc);
+    border: 1px solid rgba(102, 204, 204, 0.40);
+}
+
 /* cr-closed — manual terminal/archive state. Dimmed gray to read as inactive. */
 .cr-state-closed {
     background: rgba(107, 114, 128, 0.10);
@@ -932,6 +943,18 @@ input[type="datetime-local"].cr-sc-input::-webkit-calendar-picker-indicator {
     letter-spacing: 0.06em;
     color: rgba(255, 255, 255, 0.35);
     font-style: italic;
+}
+
+/* XACA-1390-013: the v2 hint explains why targets are MISSING from the select,
+   so it is meaningful text, not decoration — WCAG AA contrast (~13:1 on the
+   black dialog) and a readable size, unlike the faint generic .cr-sc-hint.
+   Linked to #cr-sc-target-select via aria-describedby. */
+.cr-sc-v2-hint {
+    display: block;
+    margin-top: 4px;
+    font-size: 11px;
+    color: rgba(255, 255, 255, 0.75);
+    font-style: normal;
 }
 
 /* ── XACA-1239-005: EDIT STATE evidence-gap UI ──────────────────────────────

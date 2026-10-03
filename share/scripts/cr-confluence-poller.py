@@ -12,6 +12,11 @@ two-stage path) and cr-drafted CRs second (CRs that acquired a Confluence
 page without going through kb-cr publish — see the XACA-0465 fallback below).
 Both converge on cr-submitted.
 
+Post-deploy states (deployed-prod, emergency-deployed and XACA-1348's terminal
+cr-completed) are deliberately never scanned: every finder matches its source
+state exactly, so an unknown or later state falls through to "skip" (pinned by
+tests/test_xaca1390_cr_completed_state.py, XACA-1390-004).
+
 Also runs a second pass (Auto 2, XACA-0294-004) that scans cr-submitted CRs for
 approval-readiness signals on their CR-Proper Confluence page, records a
 cr_approval_candidate_detected activity event, and (if --auto-approve is set AND
@@ -106,6 +111,10 @@ Exit codes:
     1 — credentials missing / config error
     2 — fatal error during scan
 """
+
+# PEP 604 annotations (dict | None) below; defer their evaluation so the
+# script imports under the system /usr/bin/python3 (3.9) too (XACA-1390).
+from __future__ import annotations
 
 import argparse
 import json
