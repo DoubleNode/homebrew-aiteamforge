@@ -143,11 +143,21 @@ CANONICAL_FACTS: Dict[str, Dict[str, Any]] = {
                      "kinds": ["cr-record"]},
     # ---- rollback.* (GAMMA failure, spec 13.3; XACA-1349-005) -----------
     "rollback.sha": {"type": "string",
-                     "source": "CR record `gammaFailure.rollbackSha`, else release record `gammaFailure.rollbackSha` (the production SHA GAMMA was rolled back to); empty if no GAMMA failure",
-                     "example": "3c1d9e0", "kinds": ["testing-log", "cr-record", "notice"]},
+                     "source": "the CR record's OWN `gammaFailure.rollbackSha` only -- never the release's (a new CR that supersedes a held one has no marker and renders nothing); empty if this CR has no GAMMA failure marker",
+                     "example": "3c1d9e0", "kinds": ["cr-record", "notice"]},
     "rollback.summary": {"type": "string",
-                         "source": "CR record `gammaFailure.summary`, else release record `gammaFailure.summary` (what failed, as the lead stated it); empty if no GAMMA failure",
-                         "example": "T+2h soak: checkout error rate above threshold", "kinds": ["testing-log", "cr-record", "notice"]},
+                         "source": "the CR record's OWN `gammaFailure.summary` only (what failed, as the lead stated it); empty if this CR has no GAMMA failure marker",
+                         "example": "T+2h soak: checkout error rate above threshold", "kinds": ["cr-record", "notice"]},
+    "gammaFailure.rollbackSha": {"type": "string", "source": "release record `gammaFailure.rollbackSha`; empty if none",
+                                 "example": "3c1d9e0", "kinds": ["testing-log"]},
+    "gammaFailure.summary": {"type": "string", "source": "release record `gammaFailure.summary`; empty if none",
+                             "example": "T+2h soak: checkout error rate above threshold", "kinds": ["testing-log"]},
+    "gammaFailure.failedSha": {"type": "string", "source": "release record `gammaFailure.gammaSha` (the build that failed GAMMA); empty if none",
+                               "example": "9f2c1ab", "kinds": ["testing-log"]},
+    "gammaFailure.active": {"type": "boolean", "source": "release carries a `gammaFailure` marker with no `regressedAt` (the failure is still in force)",
+                            "example": "true", "kinds": ["testing-log"]},
+    "gammaFailure.regressed": {"type": "boolean", "source": "release `gammaFailure.regressedAt` is set (history: the release has been returned to DEV, whatever build it holds now)",
+                               "example": "false", "kinds": ["testing-log"]},
     # ---- stage.* (single-stage view) ------------------------------------
     "stage.name": {"type": "string", "source": "the stage being rendered (default: `release.currentStage`)",
                    "example": "QA", "kinds": ["testing-log"]},
@@ -368,18 +378,27 @@ def _waiver(stage: Dict[str, Any], stage_name: str) -> Optional[Dict[str, Any]]:
     return w
 
 
-def _gamma_failure(rel: Dict[str, Any], cr: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """The GAMMA failure (written by `kb-release gamma-fail`) this document is about, or {} when there was none.
-    The CR's own marker wins: a superseded CR's cr-record must describe ITS failure, not a later one that has
-    since overwritten release.gammaFailure (XACA-1349-005 QA). Falls back to the release's marker."""
-    for holder, label in ((cr, "cr"), (rel, "release")):
-        g = (holder or {}).get("gammaFailure")
-        if g is None:
-            continue
-        if not isinstance(g, dict):
-            raise FactSetError("%s.gammaFailure is %s, expected an object" % (label, type(g).__name__))
-        return g
-    return {}
+def _gamma_failure(holder: Optional[Dict[str, Any]], label: str) -> Dict[str, Any]:
+    """The `gammaFailure` marker carried by ONE record (a CR or the release), or {} when it has none.
+    No fallback between records: a document describes only the failure its own record carries (XACA-1349 PR #1044
+    review). The release's marker survives the regress by design (it keeps `history`), so a CR with no marker of its
+    own -- notably the NEW CR that supersedes a held one -- must render NO failure narrative, not the old CR's."""
+    g = (holder or {}).get("gammaFailure")
+    if g is None:
+        return {}
+    if not isinstance(g, dict):
+        raise FactSetError("%s.gammaFailure is %s, expected an object" % (label, type(g).__name__))
+    return g
+
+
+def _release_gamma_failure_facts(g: Dict[str, Any]) -> Dict[str, Any]:
+    """Release-level failure facts for the Testing Log banner. `active` = the failure is still in force (the
+    protocol has not regressed the release yet); `regressed` = it has, so the banner is history, named by the
+    failed build's SHA, and stays accurate after the release re-enters GAMMA on a newer build."""
+    regressed = bool(g.get("regressedAt"))
+    return {"rollbackSha": str(g.get("rollbackSha") or ""), "summary": str(g.get("summary") or ""),
+            "failedSha": str(g.get("gammaSha") or ""),
+            "active": bool(g) and not regressed, "regressed": bool(g) and regressed}
 
 
 # ----------------------------------------------------- scope-exclusion filter
@@ -669,10 +688,11 @@ def build_fact_set(release_record: Dict[str, Any], cr_record: Optional[Dict[str,
             "deployedAt": _fmt_ts(_get(cr, "cr_deployed_prod_at", "deployedProdAt", default=None), tz),
             "soak2h": _soak(rel, "2h"), "soak24h": _soak(rel, "24h"),
         },
-        "rollback": {
-            "sha": str(_gamma_failure(rel, cr).get("rollbackSha") or ""),
-            "summary": str(_gamma_failure(rel, cr).get("summary") or ""),
+        "rollback": {   # the CR's OWN marker only (cr-record / notice); never the release's
+            "sha": str(_gamma_failure(cr, "cr").get("rollbackSha") or ""),
+            "summary": str(_gamma_failure(cr, "cr").get("summary") or ""),
         },
+        "gammaFailure": _release_gamma_failure_facts(_gamma_failure(rel, "release")),
         "stage": build_stage_facts(rel, current, tz=tz),
         "tests": {"byStage": _by_stage(rel, tz), "failuresAndReruns": _failures(rel, tz)},
         "waivers": waivers,
