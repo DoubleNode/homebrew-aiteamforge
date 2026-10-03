@@ -14,6 +14,10 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 - **XACA-1386** (Perf): `share/lcars-ui/server.py` a racy board-cache entry sheds its content digest on the first verified hit
   outside the racy window, so later hits are stat-only instead of re-reading + hashing the board. Mirrors the dev change.
   `aged` is sampled before the verifying read, so a same-tick write cannot be shed unverified.
+- **XACA-1423** (Fix): `share/templates/kanban/kanban-helpers.template.sh` — gate launchers (`kb-run-`/`kb-work-` `review`/`test`) no longer report a gate
+  as complete when its headless `cc` session exits 0 without submitting a verdict. Ports `_kb_gate_verdict_landed`, `_kb_gate_resolve_pr`,
+  `_kb_gate_postcondition`, the launch-epoch capture + post-condition call in the four launchers, and the Headless Session Rule in the
+  review/test prompt builders. Fails closed (unknown PR / API error / bad JSON => non-zero). Mirrors the dev change; the template has no ux launchers.
 - **XACA-1388** (Added): LCARS fleet dashboard CI/CD section — new `fleet-monitor/server/public/lcars/js/lcars-cicd.js`, sidebar
   button + `data-section="cicd"` in `lcars-dashboard.html`, `cicd-*` styles in `lcars-dashboards.css`, refresh wiring in
   `lcars-dashboard-app.js` / `lcars-fleet-core.js`, jsdom tests + fixtures. Renders `GET /api/ci-runners` (v1 contract,

@@ -13180,6 +13180,169 @@ _kb_parse_gate_run_flags() {
     return 0
 }
 
+# XACA-1423: post-condition for the gate launchers. A gate is launched by piping its prompt into
+# `cc` on stdin, which makes it a one-shot headless session that ENDS when the model ends its
+# turn. A model that backgrounds a long job and ends its turn "waiting to be notified" kills the
+# job and exits 0 without ever submitting -- and the launcher used to report that as a completed
+# gate. These helpers verify the verdict actually landed for THIS run. Fail CLOSED throughout.
+
+# Usage: _kb_gate_verdict_landed <gate:test|review|ux> <repo> <pr> <launch_epoch> [<board_file> <index>]
+# rc 0 = landed, 1 = not landed, 2 = cannot verify (reason on stderr in both non-zero cases).
+#   test/review: a review by the gate's OWN bot with submitted_at >= launch_epoch (paginated:
+#                the reviews endpoint pages at 30, XACA-0897-098).
+#   ux:          the item's "[UX] ..." evaluation subitem (board_file + 0-based index) is no
+#                longer todo/in_progress. Limitation: on a RE-evaluation the subitem is already
+#                completed, so this reads as landed; status carries no per-run stamp.
+_kb_gate_verdict_landed() {
+    local gate="${1-}" repo="${2-}" pr="${3-}" launch_epoch="${4-}"
+    local board_file="${5-}" bidx="${6-}"
+
+    if ! [[ "$launch_epoch" =~ ^[0-9]+$ ]]; then
+        echo "cannot verify: launch time '$launch_epoch' is not an epoch" >&2
+        return 2
+    fi
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "cannot verify: jq not found" >&2
+        return 2
+    fi
+
+    local out="" api_rc=0 jq_rc=0 count="" bot=""
+    case "$gate" in
+        test|review)
+            if [[ "$gate" == test ]]; then bot='ds9-tester-bot[bot]'; else bot='ai-security-review-bot[bot]'; fi
+            if ! [[ "$repo" == */* ]]; then
+                echo "cannot verify: no repository resolved" >&2
+                return 2
+            fi
+            if ! [[ "$pr" =~ ^[0-9]+$ ]]; then
+                echo "cannot verify: no PR number resolved" >&2
+                return 2
+            fi
+            out=$(gh api --paginate "repos/$repo/pulls/$pr/reviews" 2>/dev/null)
+            api_rc=$?   # capture-first: nothing may run between the command and this line
+            if (( api_rc != 0 )); then
+                echo "cannot verify: 'gh api repos/$repo/pulls/$pr/reviews' failed (rc $api_rc)" >&2
+                return 2
+            fi
+            if [[ -z "$out" ]]; then
+                echo "cannot verify: empty response from the reviews API for PR #$pr" >&2
+                return 2
+            fi
+            # -s: --paginate emits one JSON array per page. A non-array page, bad JSON, or a
+            # non-object element is an error -> cannot verify, never "zero reviews".
+            count=$(printf '%s' "$out" | jq -s --arg bot "$bot" --argjson t "$launch_epoch" '
+                [ .[] | if type == "array" then .[] else error("not an array") end
+                  | select(.user.login == $bot)
+                  | select(((.submitted_at // "") | try fromdateiso8601 catch 0) >= $t) ] | length' 2>/dev/null)
+            jq_rc=$?
+            if (( jq_rc != 0 )) || ! [[ "$count" =~ ^[0-9]+$ ]]; then
+                echo "cannot verify: could not parse the reviews response for PR #$pr" >&2
+                return 2
+            fi
+            if (( count == 0 )); then
+                echo "no review by $bot on PR #$pr submitted at or after launch" >&2
+                return 1
+            fi
+            return 0
+            ;;
+        ux)
+            if [[ ! -f "$board_file" ]] || ! [[ "$bidx" =~ ^[0-9]+$ ]]; then
+                echo "cannot verify: no board/item to read the [UX] subitem from" >&2
+                return 2
+            fi
+            # The evaluation subitem is titled "[UX] ..." (class tag + space); findings are
+            # "[UX][Blocking]..." / "[UX][Advisory]..." and must not be mistaken for it.
+            out=$(jq -r --argjson i "$bidx" '[ (.backlog[$i].subitems // [])[]
+                | select((.title // "") | startswith("[UX] ")) | (.status // "todo") ] | join(",")' "$board_file" 2>/dev/null)
+            jq_rc=$?
+            if (( jq_rc != 0 )); then
+                echo "cannot verify: could not read the board ($board_file)" >&2
+                return 2
+            fi
+            if [[ -z "$out" ]]; then
+                echo "cannot verify: item has no [UX] evaluation subitem" >&2
+                return 2
+            fi
+            case ",$out," in
+                *,todo,*|*,in_progress,*)
+                    echo "the [UX] evaluation subitem is still open (status: $out)" >&2
+                    return 1
+                    ;;
+                *,completed,*) return 0 ;;
+            esac
+            echo "cannot verify: [UX] evaluation subitem status is '$out'" >&2
+            return 2
+            ;;
+        *)
+            echo "cannot verify: unknown gate '$gate'" >&2
+            return 2
+            ;;
+    esac
+}
+
+# Usage: _kb_gate_resolve_pr <item_id> <branch>
+# Echoes "<owner/repo> <pr-number>" for the item's open PR. rc 2 + reason on stderr when
+# either cannot be resolved. The repo comes from `gh repo view` (this repo's remote is named
+# `dev-team`, so the `git remote get-url origin` form never resolves -- cf. scripts/kb-pr-monitor).
+_kb_gate_resolve_pr() {
+    local item_id="${1-}" branch="${2-}"
+    local repo="" pr="" rc=0
+    [[ -n "$branch" ]] || branch=$(git branch --show-current 2>/dev/null)
+    repo=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null)
+    rc=$?
+    if (( rc != 0 )) || ! [[ "$repo" == */* ]]; then
+        echo "cannot verify: could not resolve the repository (gh repo view failed)" >&2
+        return 2
+    fi
+    if [[ -n "$branch" ]]; then
+        pr=$(gh pr list --repo "$repo" --head "$branch" --state open --json number --jq '.[0].number // empty' 2>/dev/null)
+        rc=$?
+        if (( rc != 0 )); then pr=""; fi
+    fi
+    if ! [[ "$pr" =~ ^[0-9]+$ ]] && [[ -n "$item_id" ]]; then
+        pr=$(gh pr list --repo "$repo" --search "$item_id" --state open --json number --jq '.[0].number // empty' 2>/dev/null)
+        rc=$?
+        if (( rc != 0 )); then pr=""; fi
+    fi
+    if ! [[ "$pr" =~ ^[0-9]+$ ]]; then
+        echo "cannot verify: no open PR found for $item_id (branch '${branch:-unknown}')" >&2
+        return 2
+    fi
+    echo "$repo $pr"
+}
+
+# Usage: _kb_gate_postcondition <launcher> <gate> <item_id> <branch> <launch_epoch> <board_file> <index>
+# Called by each gate launcher AFTER cc returned 0. rc 0 = verdict landed; non-zero = it did
+# not (or could not be verified), with a loud actionable message. Always returns the verdict
+# as its own rc so a launcher can end with it (no `[[ ]] &&` last line, XACA-1284).
+_kb_gate_postcondition() {
+    local launcher="${1-}" gate="${2-}" item_id="${3-}" branch="${4-}" launch_epoch="${5-}"
+    local board_file="${6-}" bidx="${7-}"
+    local rp="" repo="" pr="" what="" reason="" rc=0
+    if [[ "$gate" == ux ]]; then
+        what="$item_id"
+    else
+        rp=$(_kb_gate_resolve_pr "$item_id" "$branch" 2>&1)
+        rc=$?
+        if (( rc != 0 )); then
+            echo "✗ $launcher: $rp -- the gate's verdict could not be confirmed; do not treat it as complete. Re-run it, or run the gate as a foreground Agent." >&2
+            return 1
+        fi
+        repo="${rp%% *}"; pr="${rp##* }"
+        what="PR #$pr"
+    fi
+    reason=$(_kb_gate_verdict_landed "$gate" "$repo" "$pr" "$launch_epoch" "$board_file" "$bidx" 2>&1)
+    rc=$?
+    if (( rc == 0 )); then
+        return 0
+    elif (( rc == 1 )); then
+        echo "✗ $launcher: gate session ended without submitting a verdict for $what ($reason) — re-run it, or run the gate as a foreground Agent" >&2
+    else
+        echo "✗ $launcher: gate verdict for $what could not be confirmed ($reason) — re-run it, or run the gate as a foreground Agent" >&2
+    fi
+    return 1
+}
+
 # Internal helper: Build the standard PR review prompt text
 # Usage: _kb_build_review_prompt <item_id> <title> <description> <item_worktree_branch>
 #                                 [<delta_sha>] [<round>]   (XACA-1299-004/005, both optional)
@@ -13320,6 +13483,9 @@ _kb_build_review_prompt() {
     prompt+="- Be specific about what needs to change and why\n"
     prompt+="- Provide code examples when suggesting alternatives\n"
 
+    prompt+="\n## Headless Session Rule (XACA-1423)\n"
+    prompt+="You are a one-shot headless session: the process exits when you end your turn. Never end your turn while a background job is pending — poll it to completion (Bash calls may be auto-backgrounded past their timeout; check their output files). You MUST submit your verdict before your final message.\n"
+
     echo -e "$prompt"
 }
 
@@ -13429,6 +13595,7 @@ kb-run-review() {
         unset CC_SESSION_NAME
         return 1
     fi
+    local _kb_launch_epoch; _kb_launch_epoch=$(date +%s)   # XACA-1423: verdict must land AFTER this
     printf '%s\n' "$prompt" | \cc
     local _kb_cc_rc=$?   # XACA-1284-016: capture before anything else runs
     unset CC_SESSION_NAME
@@ -13447,6 +13614,11 @@ kb-run-review() {
         echo "✗ kb-run-review: cc exited $_kb_cc_rc -- the session may not have launched (see the error above); do not treat this as a completed launch." >&2
         return $_kb_cc_rc
     fi
+
+    # XACA-1423: cc exiting 0 means the SESSION ended, not that the gate submitted -- a headless
+    # session that backgrounds a job and ends its turn exits 0 with no verdict. Verify it landed,
+    # fail closed. Last command, so its rc is the launcher's rc (if-form rule, XACA-1284).
+    _kb_gate_postcondition kb-run-review review "$item_id" "$item_worktree_branch" "$_kb_launch_epoch" "$board_file" "$index"
 }
 
 # Review a PR for a kanban item in the current directory (no worktree switch)
@@ -13541,6 +13713,7 @@ kb-work-review() {
         unset CC_SESSION_NAME
         return 1
     fi
+    local _kb_launch_epoch; _kb_launch_epoch=$(date +%s)   # XACA-1423: verdict must land AFTER this
     printf '%s\n' "$prompt" | \cc
     local _kb_cc_rc=$?   # XACA-1284-016: capture before anything else runs
     unset CC_SESSION_NAME
@@ -13552,6 +13725,11 @@ kb-work-review() {
         echo "✗ kb-work-review: cc exited $_kb_cc_rc -- the session may not have launched (see the error above); do not treat this as a completed launch." >&2
         return $_kb_cc_rc
     fi
+
+    # XACA-1423: cc exiting 0 means the SESSION ended, not that the gate submitted -- a headless
+    # session that backgrounds a job and ends its turn exits 0 with no verdict. Verify it landed,
+    # fail closed. Last command, so its rc is the launcher's rc (if-form rule, XACA-1284).
+    _kb_gate_postcondition kb-work-review review "$item_id" "$item_worktree_branch" "$_kb_launch_epoch" "$board_file" "$index"
 }
 
 # Usage: _kb_build_test_prompt <item_id> <title> <description> <item_worktree_branch>
@@ -13693,6 +13871,9 @@ _kb_build_test_prompt() {
     prompt+="- Be specific about what failed, how to reproduce it, and what the expected behavior is\n"
     prompt+="- Provide steps to reproduce for any failures you report\n"
 
+    prompt+="\n## Headless Session Rule (XACA-1423)\n"
+    prompt+="You are a one-shot headless session: the process exits when you end your turn. Never end your turn while a background job is pending — poll it to completion (Bash calls may be auto-backgrounded past their timeout; check their output files). You MUST submit your verdict before your final message.\n"
+
     echo -e "$prompt"
 }
 
@@ -13802,6 +13983,7 @@ kb-run-test() {
         unset CC_SESSION_NAME
         return 1
     fi
+    local _kb_launch_epoch; _kb_launch_epoch=$(date +%s)   # XACA-1423: verdict must land AFTER this
     printf '%s\n' "$prompt" | \cc
     local _kb_cc_rc=$?   # XACA-1284-016: capture before anything else runs
     unset CC_SESSION_NAME
@@ -13820,6 +14002,11 @@ kb-run-test() {
         echo "✗ kb-run-test: cc exited $_kb_cc_rc -- the session may not have launched (see the error above); do not treat this as a completed launch." >&2
         return $_kb_cc_rc
     fi
+
+    # XACA-1423: cc exiting 0 means the SESSION ended, not that the gate submitted -- a headless
+    # session that backgrounds a job and ends its turn exits 0 with no verdict. Verify it landed,
+    # fail closed. Last command, so its rc is the launcher's rc (if-form rule, XACA-1284).
+    _kb_gate_postcondition kb-run-test test "$item_id" "$item_worktree_branch" "$_kb_launch_epoch" "$board_file" "$index"
 }
 
 # QA test a PR for a kanban item in the current directory (no worktree switch)
@@ -13914,6 +14101,7 @@ kb-work-test() {
         unset CC_SESSION_NAME
         return 1
     fi
+    local _kb_launch_epoch; _kb_launch_epoch=$(date +%s)   # XACA-1423: verdict must land AFTER this
     printf '%s\n' "$prompt" | \cc
     local _kb_cc_rc=$?   # XACA-1284-016: capture before anything else runs
     unset CC_SESSION_NAME
@@ -13925,6 +14113,11 @@ kb-work-test() {
         echo "✗ kb-work-test: cc exited $_kb_cc_rc -- the session may not have launched (see the error above); do not treat this as a completed launch." >&2
         return $_kb_cc_rc
     fi
+
+    # XACA-1423: cc exiting 0 means the SESSION ended, not that the gate submitted -- a headless
+    # session that backgrounds a job and ends its turn exits 0 with no verdict. Verify it landed,
+    # fail closed. Last command, so its rc is the launcher's rc (if-form rule, XACA-1284).
+    _kb_gate_postcondition kb-work-test test "$item_id" "$item_worktree_branch" "$_kb_launch_epoch" "$board_file" "$index"
 }
 
 # Internal helper: Build the debug/investigation prompt text
