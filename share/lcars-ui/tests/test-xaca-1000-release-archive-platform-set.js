@@ -149,6 +149,8 @@ try {
         extractFunction('getReleaseEnvironments'),
         extractFunction('buildItemTagsHtml'),
         extractFunction('promoteStrandedBadgeHtml'),  // XACA-1375-015: renderReleaseCard calls it
+        extractFunction('computeReleaseStageTestTotals'),  // XACA-1351-003: renderReleaseCard calls it via releaseLifecycleHtml
+        extractFunction('releaseLifecycleHtml'),
         extractFunction('renderReleaseCard'),
     ].join('\n\n');
 
@@ -707,7 +709,10 @@ function checkGuardedButton(label, exactClassAttr, fnName) {
         /aria-describedby=/.test(activeTag), false);
 }
 
-checkGuardedButton('PROMOTE', 'release-action-btn promote-btn', 'promoteRelease');
+// XACA-1351-001: the PROMOTE control is gone (Releases tab is read-only). Negative control:
+// neither render may carry a promote button or a promoteRelease() call.
+check('XACA-1351: archived card has no PROMOTE button', archivedCardHtml.indexOf('promote-btn') === -1 && archivedCardHtml.indexOf('promoteRelease') === -1, true);
+check('XACA-1351: active card has no PROMOTE button', activeCardHtml.indexOf('promote-btn') === -1 && activeCardHtml.indexOf('promoteRelease') === -1, true);
 checkGuardedButton('EDIT', 'release-action-btn edit-btn', 'showEditReleaseModal');
 checkGuardedButton('DELETE', 'release-action-btn danger delete-btn', 'deleteRelease');
 
@@ -835,10 +840,6 @@ function buildHostileCards(archived) {
 const hostileArchivedHtml = buildHostileCards(true);
 const hostileActiveHtml = buildHostileCards(false);
 
-checkOnclickEscaping('PROMOTE (archived)', hostileArchivedHtml,
-    'release-action-btn promote-btn', "promoteRelease('", false);
-checkOnclickEscaping('PROMOTE (active)', hostileActiveHtml,
-    'release-action-btn promote-btn', "promoteRelease('", false);
 checkOnclickEscaping('EDIT (archived)', hostileArchivedHtml,
     'release-action-btn edit-btn', "showEditReleaseModal('", false);
 checkOnclickEscaping('EDIT (active)', hostileActiveHtml,
@@ -850,9 +851,9 @@ checkOnclickEscaping('DELETE (active)', hostileActiveHtml,
 
 // Positive control: the escaped forms must actually be present, not silently
 // dropped -- mirrors the equivalent XACA-1000-021 check on renderArchiveAction.
-check('PROMOTE onclick: the id is present in escaped form, not silently discarded',
+check('EDIT onclick: the id is present in escaped form, not silently discarded',
     /\\'\); alert\(document\.cookie\)/.test(
-        getAttr(extractButtonTag(hostileArchivedHtml, 'release-action-btn promote-btn'), 'onclick') || ''
+        getAttr(extractButtonTag(hostileArchivedHtml, 'release-action-btn edit-btn'), 'onclick') || ''
     ), true);
 check('DELETE onclick: both id and name are present in escaped form',
     /\\'\); alert\(document\.cookie\)/.test(

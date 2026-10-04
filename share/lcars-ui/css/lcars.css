@@ -9280,6 +9280,79 @@ body {
 }
 
 /* XACA-0657-005: Linked Change Requests section inside release card body */
+/* XACA-1351-003: read-only release lifecycle block (stage, per-stage test totals, CR). No controls. */
+.release-lifecycle {
+    margin-top: 12px;
+    padding-top: 10px;
+    border-top: 1px solid rgba(255, 255, 255, 0.07);
+    font-size: 11px;
+    color: var(--lcars-text, #cccccc);
+}
+
+.release-lifecycle-head,
+.release-lifecycle-row,
+.release-lifecycle-cr {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 10px;
+    padding: 2px 0;
+}
+
+.release-lifecycle-label {
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    color: var(--lcars-orange, #ff9900);
+}
+
+.release-lifecycle-current {
+    font-weight: 700;
+    color: var(--lcars-amber, #ffcc00);
+}
+
+.release-lifecycle-ro,
+.release-lifecycle-nr,
+.release-lifecycle-total {
+    color: var(--lcars-grey, #888888);
+    font-style: italic;
+}
+
+.release-lifecycle-row.current .release-lifecycle-stage-name {
+    color: var(--lcars-amber, #ffcc00);
+}
+
+.release-lifecycle-stage-name {
+    min-width: 72px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+}
+
+.release-lifecycle-status {
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    padding: 1px 6px;
+    border-radius: 3px;
+    background: rgba(136, 136, 136, 0.2);
+    color: var(--lcars-grey, #888888);
+}
+
+.release-lifecycle-status.status-passed { background: rgba(153, 255, 153, 0.2); color: var(--lcars-green, #99ff99); }
+.release-lifecycle-status.status-failed { background: rgba(255, 85, 85, 0.2); color: #ff5555; }
+.release-lifecycle-status.status-running { background: rgba(153, 153, 255, 0.2); color: var(--lcars-blue, #9999ff); }
+.release-lifecycle-status.status-waived { background: rgba(255, 204, 0, 0.2); color: var(--lcars-amber, #ffcc00); }
+
+.release-lifecycle-pass { color: var(--lcars-green, #99ff99); }
+.release-lifecycle-fail { color: #ff5555; }
+.release-lifecycle-skip,
+.release-lifecycle-other { color: var(--lcars-amber, #ffcc00); }
+
+.release-lifecycle-cr-link {
+    color: var(--lcars-amber, #ffcc00);
+    text-decoration: underline;
+}
+
 .release-linked-crs {
     display: flex;
     flex-wrap: wrap;
@@ -9376,14 +9449,14 @@ body {
 
 /* XACA-1000-020: attribute-based disabled styling for release-card actions.
 
-   The rules below this block dim PROMOTE/EDIT/DELETE, but they are scoped to
+   The rules below this block dim EDIT/DELETE, but they are scoped to
    `.release-card.archived` and matched by CLASS, so they only fire on an
    archived card. XACA-1000 introduced a disabled ARCHIVE button on
    NON-archived cards (an incomplete release now explains why it cannot be
    archived instead of rendering nothing), and no rule reached it: it inherited
    the base `.release-action-btn` styling — full teal, `cursor: pointer`, and an
    unguarded `:hover` that LIGHTENS it — so an inert control looked identical to
-   the live PROMOTE/RELNOTES/EDIT beside it and lit up when hovered. Matching on
+   the live RELNOTES/EDIT beside it and lit up when hovered. Matching on
    `:disabled` rather than on a card state fixes that for any disabled action
    button, wherever it appears.
 
@@ -9439,20 +9512,18 @@ body {
 
 /* XACA-0056-005: Archived Release Cards - Disabled Buttons
    XACA-1001: `pointer-events: none` REMOVED. It killed mouse hover, which
-   meant `title` never rendered for archived PROMOTE/EDIT/DELETE -- silently
+   meant `title` never rendered for archived EDIT/DELETE -- silently
    defeating the reason-text fix in the same ticket. Safe to remove ONLY
    because the click guard (`if (this.getAttribute('aria-disabled') ===
    'true') return;`, added in the same change) now blocks activation; without
    that guard this would turn a safely-inert control into a live one. */
 .release-card.archived .release-action-btn.edit-btn,
-.release-card.archived .release-action-btn.promote-btn,
 .release-card.archived .release-action-btn.delete-btn {
     opacity: 0.3;
     cursor: not-allowed;
 }
 
 .release-card.archived .release-action-btn.edit-btn:hover,
-.release-card.archived .release-action-btn.promote-btn:hover,
 .release-card.archived .release-action-btn.delete-btn:hover {
     background: rgba(102, 204, 204, 0.2);
     color: var(--lcars-teal, #66cccc);
@@ -9460,7 +9531,7 @@ body {
 
 /* XACA-1001-014: focus indicator for .release-action-btn, including its
    NOW-FOCUSABLE-FOR-THE-FIRST-TIME inert states -- the ARCHIVE button at
-   opacity 0.5 ([aria-disabled="true"]) and the archived-card PROMOTE/EDIT/
+   opacity 0.5 ([aria-disabled="true"]) and the archived-card EDIT/
    DELETE group at opacity 0.3 (.release-card.archived .release-action-btn.*).
    Matches the existing outline+box-shadow idiom used by .release-card-id,
    .release-cr-link and .epic-card-id elsewhere in this file.
@@ -9496,7 +9567,6 @@ body {
 }
 
 .release-card.archived .release-action-btn.edit-btn:focus-visible,
-.release-card.archived .release-action-btn.promote-btn:focus-visible,
 .release-card.archived .release-action-btn.delete-btn:focus-visible {
     opacity: 1;
     outline: 2px solid var(--lcars-amber, #ffcc00);
@@ -9967,188 +10037,21 @@ body {
 }
 
 /* =========================================================================
-   PROMOTE MODAL STYLES (XACA-0026)
-   3-step wizard for promoting release platforms
+   FORMER PROMOTE MODAL STYLES (XACA-0026)
+   XACA-1351: the promote-prefixed rules were removed (Releases tab is read-only).
+   The shared helper classes below are kept; other surfaces use them.
    ========================================================================= */
 
-.promote-modal .lcars-modal-header {
-    background: linear-gradient(90deg, var(--lcars-amber, #ffcc00) 0%, var(--lcars-orange, #ff9900) 100%);
-}
-
-.promote-modal .lcars-modal-title {
-    color: var(--lcars-black, #0a0a0f);
-}
-
-/* Step Indicator */
-.promote-steps {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 0;
-    margin-bottom: 24px;
-    padding: 16px 0;
-    border-bottom: 1px solid rgba(102, 204, 204, 0.2);
-}
-
-.promote-step {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 6px;
-    opacity: 0.4;
-    transition: all 0.3s ease;
-}
-
-.promote-step.active {
-    opacity: 1;
-}
-
-.promote-step.completed {
-    opacity: 0.8;
-}
-
-.promote-step .step-number {
-    width: 32px;
-    height: 32px;
-    border-radius: 50%;
-    background: rgba(102, 204, 204, 0.2);
-    border: 2px solid var(--lcars-teal, #66cccc);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-family: 'Antonio', sans-serif;
-    font-size: 14px;
-    font-weight: bold;
-    color: var(--lcars-teal, #66cccc);
-}
-
-.promote-step.active .step-number {
-    background: var(--lcars-amber, #ffcc00);
-    border-color: var(--lcars-amber, #ffcc00);
-    color: var(--lcars-black, #0a0a0f);
-}
-
-.promote-step.completed .step-number {
-    background: var(--lcars-green, #99ff99);
-    border-color: var(--lcars-green, #99ff99);
-    color: var(--lcars-black, #0a0a0f);
-}
-
-.promote-step .step-label {
-    font-family: 'Antonio', sans-serif;
-    font-size: 10px;
-    color: var(--lcars-text, #99ccff);
-    letter-spacing: 0.5px;
-}
-
-.promote-step-connector {
-    width: 60px;
-    height: 2px;
-    background: rgba(102, 204, 204, 0.3);
-    margin: 0 12px;
-    margin-bottom: 20px;
-}
-
-/* Release Info Header */
-.promote-release-info {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    margin-bottom: 16px;
-    padding: 12px 16px;
-    background: rgba(102, 204, 204, 0.1);
-    border-radius: 8px;
-    border-left: 4px solid var(--lcars-amber, #ffcc00);
-}
-
-.promote-release-info .release-name {
-    font-family: 'Antonio', sans-serif;
-    font-size: 16px;
-    color: var(--lcars-text, #99ccff);
-    font-weight: 600;
-}
-
-.promote-release-info .release-id {
-    font-family: 'Antonio', sans-serif;
-    font-size: 12px;
-    color: var(--lcars-teal, #66cccc);
-    opacity: 0.7;
-}
-
-.promote-instruction {
-    font-family: 'Antonio', sans-serif;
-    font-size: 13px;
-    color: var(--lcars-text, #99ccff);
-    margin-bottom: 16px;
-}
-
 /* Platform Checkboxes */
-.platform-checkboxes {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-}
 
-.platform-checkbox-item {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 12px 16px;
-    background: rgba(10, 10, 15, 0.6);
-    border: 1px solid rgba(102, 204, 204, 0.3);
-    border-radius: 8px;
-    transition: all 0.2s ease;
-}
 
-.platform-checkbox-item:hover:not(.disabled) {
-    border-color: var(--lcars-teal, #66cccc);
-    background: rgba(102, 204, 204, 0.1);
-}
 
-.platform-checkbox-item.disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-}
 
-.platform-checkbox-label {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    cursor: pointer;
-}
 
-.platform-checkbox-item.disabled .platform-checkbox-label {
-    cursor: not-allowed;
-}
 
-.platform-checkbox {
-    display: none;
-}
 
-.platform-checkbox-custom {
-    width: 20px;
-    height: 20px;
-    border: 2px solid var(--lcars-teal, #66cccc);
-    border-radius: 4px;
-    background: transparent;
-    transition: all 0.2s ease;
-    position: relative;
-}
 
-.platform-checkbox:checked + .platform-checkbox-custom {
-    background: var(--lcars-teal, #66cccc);
-}
 
-.platform-checkbox:checked + .platform-checkbox-custom::after {
-    content: '✓';
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
-    color: var(--lcars-black, #0a0a0f);
-    font-size: 14px;
-    font-weight: bold;
-}
 
 .platform-icon {
     font-size: 20px;
@@ -10195,31 +10098,6 @@ body {
 }
 
 /* Step 2: Preview */
-.promote-section-title {
-    font-family: 'Antonio', sans-serif;
-    font-size: 14px;
-    color: var(--lcars-amber, #ffcc00);
-    margin-bottom: 16px;
-    padding-bottom: 8px;
-    border-bottom: 1px solid rgba(255, 204, 0, 0.3);
-}
-
-.promote-preview-list {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-}
-
-.promote-preview-item {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 14px 16px;
-    background: rgba(10, 10, 15, 0.6);
-    border: 1px solid rgba(102, 204, 204, 0.3);
-    border-radius: 8px;
-}
-
 .preview-platform {
     display: flex;
     align-items: center;
@@ -10232,21 +10110,7 @@ body {
     gap: 8px;
 }
 
-.env-badge {
-    font-family: 'Antonio', sans-serif;
-    font-size: 11px;
-    padding: 4px 10px;
-    border-radius: 4px;
-    font-weight: 600;
-}
 
-.env-badge.env-planned { background: rgba(128, 128, 128, 0.15); color: var(--lcars-grey, #888888); }
-.env-badge.env-dev { background: rgba(153, 153, 255, 0.2); color: var(--lcars-blue, #9999ff); }
-.env-badge.env-qa { background: rgba(102, 204, 204, 0.2); color: var(--lcars-teal, #66cccc); }
-.env-badge.env-alpha { background: rgba(255, 204, 0, 0.2); color: var(--lcars-amber, #ffcc00); }
-.env-badge.env-beta { background: rgba(255, 153, 0, 0.2); color: var(--lcars-orange, #ff9900); }
-.env-badge.env-gamma { background: rgba(204, 102, 255, 0.2); color: #cc66ff; }
-.env-badge.env-prod { background: rgba(153, 255, 153, 0.2); color: var(--lcars-green, #99ff99); }
 
 .transition-arrow {
     color: var(--lcars-text, #99ccff);
@@ -10261,14 +10125,6 @@ body {
 }
 
 /* Warnings */
-.promote-warnings {
-    margin-top: 20px;
-    padding: 12px 16px;
-    background: rgba(255, 68, 102, 0.1);
-    border: 1px solid var(--lcars-crimson, #ff4466);
-    border-radius: 8px;
-}
-
 .warning-title {
     font-family: 'Antonio', sans-serif;
     font-size: 12px;
@@ -10285,28 +10141,6 @@ body {
 
 .warning-list li {
     margin-bottom: 4px;
-}
-
-/* XACA-1346-052: the remedy that fixes the reason above it */
-.promote-remedy {
-    margin: 2px 0 6px;
-    font-size: 11px;
-    color: var(--lcars-text, #99ccff);
-    opacity: 0.85;
-}
-
-.promote-remedy code {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    background: rgba(255, 255, 255, 0.08);
-    padding: 1px 4px;
-    border-radius: 3px;
-    user-select: all;
-}
-
-/* Step 3: Summary & Progress */
-.promote-summary {
-    text-align: center;
-    padding: 20px;
 }
 
 .summary-header {
@@ -10337,10 +10171,6 @@ body {
     font-size: 14px;
     color: var(--lcars-text, #99ccff);
     opacity: 0.8;
-}
-
-.promote-progress {
-    margin-top: 20px;
 }
 
 .progress-message {
@@ -10398,11 +10228,6 @@ body {
     border: 1px solid rgba(255, 204, 0, 0.3);
 }
 
-.results-list {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-}
 
 .result-item {
     display: flex;

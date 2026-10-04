@@ -11,6 +11,9 @@ All notable changes to the LCARS Kanban Workflow Monitor will be documented in t
 
 ## [Unreleased]
 
+- **XACA-1351: Releases tab is read-only.** PROMOTE button, `promoteRelease()` and the promote modal are removed; stages change only via
+  `kb-release` (gated endpoint, XACA-1346). Cards show stage, per-stage status, test totals computed from `tests[]`, and CR link/state/expected
+  approval joined from `boardData.crs[]`.
 - **XACA-1376: stale-asset "LCARS was updated - reload" banner.** Server sends `X-LCARS-Asset-Version` (hash of index.html's `?v=` stamps,
   recomputed when index.html's mtime/size changes) on board data and `/api/status`, exposed via CORS. `lcars.js` baselines the first value,
   compares inside the existing `loadBoardData()` (no new poller, missing header never alarms) and shows a non-blocking aria-live bar

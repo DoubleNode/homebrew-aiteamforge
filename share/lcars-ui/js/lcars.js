@@ -11555,7 +11555,7 @@ function getIncompletePlatforms(release) {
  * why the XACA-1000 platform-set defect went unnoticed: operators on six teams
  * could not tell "you may not archive this yet" apart from "this product has
  * no archive feature", and had nothing to search for or report. Every sibling
- * control on this card (PROMOTE / EDIT / DELETE) already renders as a DISABLED
+ * control on this card (EDIT / DELETE) already renders as a DISABLED
  * button when unavailable, so the empty string was also the odd one out.
  *
  * An incomplete release now renders a disabled ARCHIVE button whose tooltip
@@ -11770,7 +11770,7 @@ function displayReleases(releases, flowConfig = null, projectEnvironments = {}) 
             : 'No Active Releases';
         const hint = filter === 'archived' ? 'Completed releases will appear here when archived'
             : filter === 'planned' ? 'Create a release to see it here'
-            : 'Promote a release platform to DEV to see it here';
+            : 'Releases move between stages via the kb-release CLI; they show here once active';
         dashboard.innerHTML = `
             <div class="releases-empty">
                 <div class="releases-empty-icon">${icon}</div>
@@ -11883,11 +11883,10 @@ function renderReleaseCard(release, flowConfig = null, projectEnvironments = {})
     const isArchived = release.status === 'archived';
     const archivedClass = isArchived ? 'archived' : '';
 
-    // XACA-1001: reason text for the inert PROMOTE/EDIT/DELETE controls when
+    // XACA-1001: reason text for the inert EDIT/DELETE controls when
     // archived, surfaced via both `title` (sighted hover) and
     // `aria-describedby` (screen reader) -- matching the voice of the
     // ARCHIVE-button reason composed in renderArchiveAction() below.
-    const promoteReason = 'Promote unavailable — this release is archived. Unarchive it to promote.';
     const editReason = 'Edit unavailable — this release is archived. Unarchive it to edit.';
     const deleteReason = 'Delete unavailable — this release is archived. Unarchive it to delete.';
     const safeReleaseId = escapeAttr(release.id);
@@ -12111,6 +12110,7 @@ function renderReleaseCard(release, flowConfig = null, projectEnvironments = {})
                 <div class="release-platforms">
                     ${platformsHtml}
                 </div>
+                ${releaseLifecycleHtml(release)}
                 ${linkedCRsHtml}
             </div>
             <div class="release-card-items" id="release-items-${release.id}">
@@ -12118,8 +12118,6 @@ function renderReleaseCard(release, flowConfig = null, projectEnvironments = {})
             </div>
             <div class="release-card-actions">
                 <button class="release-action-btn docs" data-item-id="${release.id}" onclick="event.stopPropagation(); showPlanDocModal('${release.id}', this.getAttribute('data-retro-exists') === 'true', this.getAttribute('data-cr-exists') === 'true')" style="display:none">DOCS</button>
-                <button class="release-action-btn promote-btn" onclick="event.stopPropagation(); if (this.getAttribute('aria-disabled') === 'true') return; promoteRelease('${jsAttrEscape(release.id)}')" ${isArchived ? `aria-disabled="true" aria-describedby="release-promote-reason-${safeReleaseId}" title="${escapeAttr(promoteReason)}"` : ''}>PROMOTE</button>
-                ${isArchived ? `<span id="release-promote-reason-${safeReleaseId}" class="sr-only">${escapeHtml(promoteReason)}</span>` : ''}
                 <button class="release-action-btn" onclick="event.stopPropagation(); viewReleaseNotes('${release.id}')">RELNOTES</button>
                 <button class="release-action-btn edit-btn" onclick="event.stopPropagation(); if (this.getAttribute('aria-disabled') === 'true') return; showEditReleaseModal('${jsAttrEscape(release.id)}')" ${isArchived ? `aria-disabled="true" aria-describedby="release-edit-reason-${safeReleaseId}" title="${escapeAttr(editReason)}"` : ''}>EDIT</button>
                 ${isArchived ? `<span id="release-edit-reason-${safeReleaseId}" class="sr-only">${escapeHtml(editReason)}</span>` : ''}
@@ -12530,188 +12528,193 @@ function viewReleaseItems(releaseId) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// PROMOTE MODAL (XACA-0026, redesigned XACA-1346-048/047/049/052/053/054)
+// READ-ONLY RELEASE LIFECYCLE VIEW (XACA-1351-003; spec RELEASE-LIFECYCLE.md 5.4 / 15.2)
 //
-// Stage state is RELEASE-LEVEL, so the modal is about the RELEASE, not its platforms:
-//   1. REVIEW: one preview "current stage -> target stage", computed by the SERVER
-//      (POST /promote {dryRun:true}: the real gate, no write, no log). Unmet conditions are
-//      listed, each next to the remedy that fixes THAT condition. Platforms are read-only.
-//   2. RESULT: on confirm ONE request {targetStage: <previewed stage>, actor, confirmDeploy:false}.
-//      Sending the previewed stage means a STALE preview is refused (409), never skipped past.
-// The UI never confirms a production deploy: the server has no auth and leads are CLI-attested
-// (decision XACA-1346-038), so lead-only refusals show the CLI path forward.
+// Release state is written ONLY by the gated server endpoints (driven by the kb-release CLI).
+// LCARS shows it and never changes it. Everything here is derived from the release RECORD:
+//   release.stage            current stage
+//   release.stages{S}.status pending|running|passed|failed|waived
+//   release.tests[]          append-only records {stage, result: PASS|FAIL|SKIP, supersededBy, ...}
+//   release.linkedCRs[]      CR snapshots; state / link / expected-approval are shown only when the
+//                            record carries them
+// A field the record does not carry renders as an explicit "not recorded" / em dash. It NEVER
+// becomes a zero: a missing tests[] is not "0 passed".
 // ═══════════════════════════════════════════════════════════════════════════════
 
-let promoteModalState = {
-    releaseId: null,
-    releaseData: null,
-    currentStep: 1,
-    preview: null,
-    result: null,
-    inFlight: false,
-    loading: false,
-    token: 0
-};
-
-// >>> PROMOTE-MODAL-PURE-START (DOM-free; sliced by lcars-ui/tests/test-xaca-1346-promote-modal-single-request.js)
 /**
- * The CLI commands the modal advises. PR 3b (kanban-helpers.sh kb-release-promote / kb-release-waive)
- * ADDS these flags: they are NOT on develop before 3b merges, which is why every remedy is built from
- * THIS table and nowhere else. PR 3b's zsh suite cross-checks `flags` against the CLI parsers, and
- * test-xaca-1346-promote-modal-single-request.js asserts each built command uses exactly the declared
- * flag set. Change a flag here and in the CLI together, never in a string.
+ * Per-stage test totals from release.tests[], counted by raw record (so they match
+ * `jq 'group_by(.stage) | map({stage: .[0].stage, n: length})'` and a per-result count of the same
+ * array). Pure and DOM-free; unit tested by lcars-ui/tests/test-xaca-1351-release-readonly-view.js.
+ *
+ * @param {*} tests - release.tests (anything; only an array counts as "recorded")
+ * @returns {{recorded: boolean, rows: Array, overall: (Object|null), invalid: number}}
+ *   rows: [{stage, total, pass, fail, skip, other, superseded}] canonical stages first, then
+ *   unknown stages in first-seen order. `other` = a result that is not PASS/FAIL/SKIP.
+ *   `superseded` is informational (records with a non-empty supersededBy; they ARE counted).
+ *   A record that is not an object is counted in `invalid`, in no stage.
  */
-const PROMOTE_REMEDY_COMMANDS = {
-    GAMMA_CONFIRM: { command: 'kb-release promote', flags: ['--to', '--confirm-deploy', '--actor'] },
-    WAIVE: { command: 'kb-release waive', flags: ['--stage', '--tests', '--reason', '--by'] }
-};
-
-/**
- * POSIX single-quote a value so a shell reads it back as ONE inert word (XACA-1346-057/-058).
- * Inside single quotes nothing is special ($, backtick, !, ", backslash, newline); the only character
- * that cannot appear is the quote itself, so each embedded ' closes the string, emits an escaped \',
- * and reopens it: x'y -> 'x'\''y'. Applied to EVERY interpolated arg (release id, stage, test name).
- */
-function promoteQuoteArg(value) {
-    return "'" + String(value).replace(/'/g, "'\\''") + "'";
-}
-
-function promoteGammaCommand(releaseId, data) {
-    // XACA-1375-013: the confirm stage is GAMMA, or PROD on a team with GAMMA disabled; the server names it.
-    const stage = (data && /^[A-Z]+$/.test(data.stage || '')) ? data.stage : 'GAMMA';
-    return PROMOTE_REMEDY_COMMANDS.GAMMA_CONFIRM.command + ' ' + promoteQuoteArg(releaseId) +
-        ' --to ' + stage + ' --confirm-deploy --actor <lead>';
-}
-
-function promoteWaiveCommand(releaseId, data, by) {
-    const stage = (data && data.stage) ? promoteQuoteArg(data.stage) : '<STAGE>';
-    const test = (data && data.test) ? promoteQuoteArg(data.test) : '<test>';
-    return PROMOTE_REMEDY_COMMANDS.WAIVE.command + ' ' + promoteQuoteArg(releaseId) + ' --stage ' + stage +
-        ' --tests ' + test + ' --reason "..." --by ' + by;
-}
-
-/**
- * Preview-load guard (XACA-1346-056). The modal opens IMMEDIATELY in a loading state (PROMOTE disabled)
- * while the dryRun preview loads. Returns the fresh state, or null when a preview is already loading
- * (a second click must not start a second preview). `token` lets a late response detect it is stale.
- */
-let promotePreviewSeq = 0;
-function promoteBeginPreview(prev, releaseId) {
-    if (prev && prev.loading) return null;
-    promotePreviewSeq += 1;
-    return { releaseId: releaseId, releaseData: null, currentStep: 1, preview: null, result: null,
-             inFlight: false, loading: true, token: promotePreviewSeq };
-}
-
-function promoteLoadingModel() {
-    return { message: 'Checking gate…', nextLabel: 'CHECKING GATE…', nextDisabled: true };
-}
-
-/**
- * Per-reason-class remedy, keyed on the server's stable reason CODE (release_gate.REASON_CODES),
- * never on prose. `conditional` = the promote is allowed anyway (report mode), so the remedy is
- * phrased as what ENFORCE mode would require, not as an instruction that contradicts PROMOTE.
- * Returns {text, command|null} or null (no remedy: the reason stands alone).
- */
-function promoteRemedyFor(code, data, releaseId, conditional, leadsMissing) {
-    const phrase = (imperative, needs) =>
-        conditional ? 'In enforce mode this would require ' + needs + ':' : imperative + ':';
-    const leadCommand = (mk) => (leadsMissing ? null : mk());
-    let r = null;
-    switch (code) {
-        case 'GAMMA_CONFIRM_REQUIRED':
-        case 'GAMMA_ACTOR_NOT_LEAD':
-            r = { text: phrase('A release lead must confirm the production deploy', "a release lead's deploy confirmation"),
-                  command: leadCommand(() => promoteGammaCommand(releaseId, data)) };
-            break;
-        case 'WAIVER_NEEDED':
-            r = { text: phrase('A release lead can waive this test', "a release lead's waiver for this test"),
-                  command: leadCommand(() => promoteWaiveCommand(releaseId, data, '<lead>')) };
-            break;
-        case 'WAIVER_NOT_LEAD':
-        case 'NOT_IN_LEADS':
-            r = { text: phrase('Re-grant it as a release lead (a name listed in releaseConfig.leads)',
-                               'a waiver granted by a name listed in releaseConfig.leads'),
-                  command: leadCommand(() => promoteWaiveCommand(releaseId, data, '<a name in releaseConfig.leads>')) };
-            break;
-        case 'WAIVER_VOID_SHA':
-            r = { text: phrase('The waiver was granted at a different SHA. Re-run the test at the new SHA, or have a lead re-waive at that SHA',
-                               'the test re-run at the new SHA, or a lead re-waiving at that SHA'),
-                  command: leadCommand(() => promoteWaiveCommand(releaseId, data, '<lead>')) };
-            break;
-        case 'WAIVER_VOID_INVALID':
-            r = { text: phrase('The stored waiver is invalid; have a release lead grant it again', 'a valid waiver from a release lead'),
-                  command: leadCommand(() => promoteWaiveCommand(releaseId, data, '<lead>')) };
-            break;
-        case 'TEST_MISSING':
-            r = { text: 'Run this test at the graded SHA (a waiver cannot cover a test that has no record).', command: null };
-            break;
-        case 'LEADS_NOT_CONFIGURED':
-            r = { text: 'Configure releaseConfig.leads on this board (the list of release leads); no lead command can succeed until it is set.', command: null };
-            break;
-        default:
-            r = null;
+function computeReleaseStageTestTotals(tests) {
+    const canonical = ['PLANNED', 'DEV', 'QA', 'ALPHA', 'BETA', 'CR', 'GAMMA', 'PROD'];
+    if (!Array.isArray(tests)) {
+        return { recorded: false, rows: [], overall: null, invalid: 0 };
     }
-    return r;
+    const index = Object.create(null);
+    const rows = [];
+    const overall = { stage: 'ALL', total: 0, pass: 0, fail: 0, skip: 0, other: 0, superseded: 0 };
+    let invalid = 0;
+    for (let i = 0; i < tests.length; i++) {
+        const rec = tests[i];
+        if (rec === null || typeof rec !== 'object' || Array.isArray(rec)) { invalid++; continue; }
+        const stageName = (typeof rec.stage === 'string' && rec.stage !== '') ? rec.stage : '(no stage)';
+        let row = index[stageName];
+        if (!row) {
+            row = { stage: stageName, total: 0, pass: 0, fail: 0, skip: 0, other: 0, superseded: 0 };
+            index[stageName] = row;
+            rows.push(row);
+        }
+        const bump = (r) => {
+            r.total++;
+            if (rec.result === 'PASS') r.pass++;
+            else if (rec.result === 'FAIL') r.fail++;
+            else if (rec.result === 'SKIP') r.skip++;
+            else r.other++;
+            if (typeof rec.supersededBy === 'string' && rec.supersededBy !== '') r.superseded++;
+        };
+        bump(row);
+        bump(overall);
+    }
+    // Canonical stages first (in lifecycle order); unknown stages keep first-seen order.
+    const known = rows.filter((r) => canonical.indexOf(r.stage) !== -1)
+        .sort((a, b) => canonical.indexOf(a.stage) - canonical.indexOf(b.stage));
+    const unknown = rows.filter((r) => canonical.indexOf(r.stage) === -1);
+    return { recorded: true, rows: known.concat(unknown), overall: overall, invalid: invalid };
 }
 
 /**
- * Pair every reason with its remedy. Every applicable remedy is shown, but an identical remedy is
- * shown ONCE (next to the first reason it fixes). `payload` = {reasons, reasonCodes, reasonData}.
+ * Read-only lifecycle block for a release card: current stage, per-stage status and test totals,
+ * CR link/state and expected approval. No controls. Never throws (a malformed record yields a
+ * "not recorded" block, not a broken card). Every value is escaped; a CR link is an href only when
+ * it is http(s).
+ *
+ * @param {Object} release
+ * @param {Array} [crList] board crs[] records; defaults to window.boardData.crs
+ * @returns {string} HTML
  */
-function buildPromoteReasonItems(releaseId, payload, conditional) {
-    const reasons = Array.isArray(payload && payload.reasons) ? payload.reasons.map(String) : [];
-    const codes = Array.isArray(payload && payload.reasonCodes) ? payload.reasonCodes : [];
-    const data = Array.isArray(payload && payload.reasonData) ? payload.reasonData : [];
-    const leadsMissing = codes.indexOf('LEADS_NOT_CONFIGURED') !== -1;
-    const seen = new Set();
-    return reasons.map((text, i) => {
-        let remedy = promoteRemedyFor(codes[i] || 'other', data[i] || null, releaseId, !!conditional, leadsMissing);
-        if (remedy) {
-            const key = remedy.text + '\u0000' + (remedy.command || '');
-            if (seen.has(key)) { remedy = null; } else { seen.add(key); }
+function releaseLifecycleHtml(release, crList) {
+    if (crList === undefined) {
+        crList = (typeof window !== 'undefined' && window.boardData && window.boardData.crs) || [];
+    }
+    const NR = '<span class="release-lifecycle-nr">not recorded</span>';
+    const DASH = '<span class="release-lifecycle-nr">—</span>';
+    const canonical = ['PLANNED', 'DEV', 'QA', 'ALPHA', 'BETA', 'CR', 'GAMMA', 'PROD'];
+    const knownStatuses = ['pending', 'running', 'passed', 'failed', 'waived'];
+    const str = (v) => (typeof v === 'string' && v.trim() !== '') ? v.trim() : '';
+    const safeUrl = (v) => {
+        const u = str(v);
+        return /^https?:\/\/[^\s<>"'`\\]+$/i.test(u) ? u : '';
+    };
+    try {
+        const rel = (release && typeof release === 'object') ? release : {};
+        const cur = str(rel.stage);
+        const stages = (rel.stages && typeof rel.stages === 'object' && !Array.isArray(rel.stages)) ? rel.stages : null;
+        const totals = computeReleaseStageTestTotals(rel.tests);
+
+        // Which stages get a row: every canonical stage the record mentions, then unknown ones.
+        const names = [];
+        const add = (n) => { if (n && names.indexOf(n) === -1) names.push(n); };
+        const recordedStages = stages ? Object.getOwnPropertyNames(stages) : [];
+        canonical.forEach((n) => {
+            if (n === cur || recordedStages.indexOf(n) !== -1 || totals.rows.some((r) => r.stage === n)) add(n);
+        });
+        recordedStages.forEach(add);
+        totals.rows.forEach((r) => add(r.stage));
+
+        const rowsHtml = names.map((name) => {
+            const srec = (stages && Object.prototype.hasOwnProperty.call(stages, name) &&
+                stages[name] && typeof stages[name] === 'object') ? stages[name] : null;
+            const status = srec ? str(srec.status) : '';
+            const statusHtml = status
+                ? `<span class="release-lifecycle-status status-${knownStatuses.indexOf(status) !== -1 ? escapeAttr(status) : 'unknown'}">${escapeHtml(status.toUpperCase())}</span>`
+                : DASH;
+            let testsHtml;
+            if (!totals.recorded) {
+                testsHtml = '<span class="release-lifecycle-nr">tests not recorded</span>';
+            } else {
+                const row = totals.rows.filter((r) => r.stage === name)[0];
+                if (!row) {
+                    testsHtml = '<span class="release-lifecycle-nr">no results recorded</span>';
+                } else {
+                    testsHtml = `<span class="release-lifecycle-pass">${row.pass} pass</span> / ` +
+                        `<span class="release-lifecycle-fail">${row.fail} fail</span> / ` +
+                        `<span class="release-lifecycle-skip">${row.skip} skip</span>` +
+                        (row.other ? ` / <span class="release-lifecycle-other">${row.other} other</span>` : '') +
+                        ` <span class="release-lifecycle-total">(${row.total} total` +
+                        (row.superseded ? `, ${row.superseded} superseded` : '') + ')</span>';
+                }
+            }
+            return `<div class="release-lifecycle-row${name === cur ? ' current' : ''}">` +
+                `<span class="release-lifecycle-stage-name">${escapeHtml(name)}${name === cur ? ' ◀' : ''}</span>` +
+                `${statusHtml}<span class="release-lifecycle-tests">${testsHtml}</span></div>`;
+        }).join('');
+
+        // CR link / state / expected approval come from the board's crs[] record (the source of truth),
+        // joined by id. A release's CRs = linkedCRs[] snapshot ids plus crs[] whose
+        // releaseAssignment.releaseId is this release. The linkedCRs snapshot only carries id/title.
+        const crRecords = Array.isArray(crList) ? crList : [];
+        const crById = Object.create(null);
+        crRecords.forEach((c) => { if (c && typeof c === 'object' && str(c.id)) crById[str(c.id)] = c; });
+        const crIds = [];
+        const addCr = (id) => { if (id && crIds.indexOf(id) === -1) crIds.push(id); };
+        (Array.isArray(rel.linkedCRs) ? rel.linkedCRs : []).forEach((entry) => {
+            addCr((entry && typeof entry === 'object') ? str(entry.crId) : str(entry));
+        });
+        const relId = str(rel.id);
+        if (relId) {
+            crRecords.forEach((c) => {
+                const ra = (c && typeof c === 'object' && c.releaseAssignment && typeof c.releaseAssignment === 'object') ? c.releaseAssignment : null;
+                if (ra && str(ra.releaseId) === relId) addCr(str(c.id));
+            });
         }
-        return { text: text, code: codes[i] || 'other', remedy: remedy };
-    });
+        const crHtml = crIds.length === 0
+            ? `<div class="release-lifecycle-cr"><span class="release-lifecycle-label">CR</span> <span class="release-lifecycle-nr">none linked</span></div>`
+            : crIds.map((id) => {
+                const rec = crById[id];
+                if (!rec) {
+                    return `<div class="release-lifecycle-cr"><span class="release-lifecycle-label">CR</span> ${escapeHtml(id)}` +
+                        ` <span class="release-lifecycle-nr">CR record not found on this board</span></div>`;
+                }
+                const ts = (rec.timestamps && typeof rec.timestamps === 'object') ? rec.timestamps : {};
+                const state = str(rec.crState);
+                const expected = str(ts.cr_approval_expected_at);
+                const url = safeUrl(rec.cr_confluence_url);
+                const idHtml = id
+                    ? (url
+                        ? `<a class="release-lifecycle-cr-link" href="${escapeAttr(url)}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">${escapeHtml(id)}</a>`
+                        : escapeHtml(id))
+                    : DASH;
+                return `<div class="release-lifecycle-cr"><span class="release-lifecycle-label">CR</span> ${idHtml}` +
+                    ` <span class="release-lifecycle-label">STATE</span> ${state ? escapeHtml(state) : NR}` +
+                    ` <span class="release-lifecycle-label">APPROVAL EXPECTED</span> ${expected ? escapeHtml(expected) : NR}</div>`;
+            }).join('');
+
+        return `<div class="release-lifecycle" aria-label="Release lifecycle (read-only)">` +
+            `<div class="release-lifecycle-head"><span class="release-lifecycle-label">STAGE</span> ` +
+            `<span class="release-lifecycle-current">${cur ? escapeHtml(cur) : DASH}</span>` +
+            `<span class="release-lifecycle-ro">read-only — stages change via kb-release</span></div>` +
+            (rowsHtml || `<div class="release-lifecycle-row"><span class="release-lifecycle-nr">stage detail not recorded</span></div>`) +
+            crHtml + `</div>`;
+    } catch (err) {
+        return `<div class="release-lifecycle"><span class="release-lifecycle-nr">lifecycle detail not recorded</span></div>`;
+    }
 }
 
-function promotePlatformLabel(platform) {
-    const known = { ios: 'iOS', android: 'Android', firebase: 'Firebase', web: 'Web' };
-    const p = String(platform);
-    return known[p] || (p.charAt(0).toUpperCase() + p.slice(1));
-}
-
-/** CSS class for a stage badge; an unknown stage gets env-unknown, never a class built from null. */
-function promoteEnvClass(stage) {
-    return 'env-' + (stage ? String(stage).toLowerCase() : 'unknown');
-}
-
-/**
- * XACA-1375-014: reason codes that are INFORMATIONAL notes, never refusals. CR_SUPPORT_DISABLED = the
- * release sits at a CR stage the team no longer has; it can only LEAVE it, and that never blocks. These
- * must not render as "the gate would refuse" text and must not turn the result toast into a warning.
- */
-const PROMOTE_INFO_CODES = ['CR_SUPPORT_DISABLED'];
-const PROMOTE_NOTES_HEADING = 'Note: CR support is off; this release can only leave CR';
-
-/** Split {reasons, reasonCodes, reasonData} into the blocking payload and the informational note texts. */
-function promoteSplitReasons(payload) {
-    const reasons = Array.isArray(payload && payload.reasons) ? payload.reasons.map(String) : [];
-    const codes = Array.isArray(payload && payload.reasonCodes) ? payload.reasonCodes : [];
-    const data = Array.isArray(payload && payload.reasonData) ? payload.reasonData : [];
-    const blocking = { reasons: [], reasonCodes: [], reasonData: [] };
-    const notes = [];
-    reasons.forEach((text, i) => {
-        if (PROMOTE_INFO_CODES.indexOf(codes[i]) !== -1) {
-            notes.push(text);
-        } else {
-            blocking.reasons.push(text);
-            blocking.reasonCodes.push(codes[i] || 'other');
-            blocking.reasonData.push(data[i] || null);
-        }
-    });
-    return { blocking: blocking, notes: notes };
-}
+// ═══════════════════════════════════════════════════════════════════════════════
+// RELEASE STAGE BADGE (XACA-1375-015)
+//
+// XACA-1351: the LCARS Releases tab is READ-ONLY. The PROMOTE modal (XACA-0026,
+// XACA-1346-048) is gone: promotion happens only through the gated server
+// endpoint, driven by the `kb-release` CLI. Only the read-only badge survives.
+// ═══════════════════════════════════════════════════════════════════════════════
 
 /**
  * XACA-1375-015: badge for a release stranded at a CR stage the team turned off (server-derived
@@ -12721,368 +12724,6 @@ function promoteStrandedBadgeHtml(release) {
     return (release && release.strandedInCR === true)
         ? '<span class="archived-badge release-stranded-badge" title="CR support is off for this team; this release is still at the CR stage and can only leave it">STRANDED IN CR: CR OFF, CAN ONLY LEAVE</span>'
         : '';
-}
-
-/**
- * View model for the REVIEW step from the server's dry-run payload
- * ({allowed, mode, from, to, next, reasons, reasonCodes, reasonData, error}).
- */
-function buildPromotePreviewModel(release, preview) {
-    const releaseId = release && release.id;
-    const split = promoteSplitReasons(preview);
-    const payload = split.blocking;
-    const notes = split.notes;
-    const to = (preview && preview.to) || null;
-    const from = (preview && preview.from) || null;
-    const allowed = !!(preview && preview.allowed === true && to);
-    const platformEntries = Object.entries((release && release.platforms) || {});
-    const platformLines = platformEntries.map(([name, d]) => {
-        const data = d || {};
-        const version = data.version ? 'v' + data.version : 'version not set';
-        const build = (data.buildNumber !== undefined && data.buildNumber !== null) ? ' (build ' + data.buildNumber + ')' : '';
-        return promotePlatformLabel(name) + ' ' + version + build;
-    });
-    const warnings = [];
-    if (to === 'PROD') warnings.push('This promotes the release to PRODUCTION.');
-    // XACA-1375-016: the confirm stage is whichever stage ENTERS production (GAMMA, or PROD when the team
-    // has no GAMMA). The server names it (`confirmStage`); an older server falls back to GAMMA.
-    const confirmStage = (preview && preview.confirmStage) || 'GAMMA';
-    if (to && to === confirmStage) {
-        warnings.push(to === 'GAMMA'
-            ? 'GAMMA is live in production: the release lead must confirm the deploy.'
-            : to + ' is production: the release lead must confirm the deploy.');
-    }
-    // XACA-1375-015: config drift the server flags (e.g. flowConfig CR still enabled while CR support is off)
-    if (preview && typeof preview.configWarning === 'string' && preview.configWarning) {
-        warnings.push(preview.configWarning);
-    }
-    if (!to && !payload.reasons.length && !notes.length) {
-        payload.reasons.push((preview && preview.error) || 'The server did not return a target stage.');
-    }
-    let reasonsHeading = null;
-    if (payload.reasons.length) {
-        reasonsHeading = allowed
-            ? 'The gate would refuse this promotion in enforce mode (it will still proceed in report mode):'
-            : 'This promotion is refused:';
-    }
-    return {
-        from: from, to: to, canPromote: allowed,
-        mode: (preview && preview.mode) || null,
-        platformsInfo: platformLines.length ? 'Platforms moving together (read-only):' : null,
-        platformLines: platformLines,
-        warnings: warnings,
-        notes: notes, notesHeading: notes.length ? PROMOTE_NOTES_HEADING : null,
-        reasons: payload.reasons, reasonsHeading: reasonsHeading,
-        reasonItems: buildPromoteReasonItems(releaseId, payload, allowed)
-    };
-}
-
-/**
- * View model for the RESULT step. outcome = {ok, status, data}: data is the server's JSON body
- * (or {error} for a transport failure).
- */
-function buildPromoteResultModel(releaseId, preview, outcome) {
-    const data = (outcome && outcome.data) || {};
-    if (outcome && outcome.ok) {
-        const okSplit = promoteSplitReasons(data);
-        const reasons = okSplit.blocking.reasons;
-        const from = data.from || data.previousEnvironment || (preview && preview.from);
-        const to = data.to || data.newEnvironment || (preview && preview.to);
-        return {
-            success: true, from: from, to: to,
-            title: 'Release promoted: ' + from + ' → ' + to,
-            reasons: reasons,
-            notes: okSplit.notes, notesHeading: okSplit.notes.length ? PROMOTE_NOTES_HEADING : null,
-            reasonsHeading: reasons.length ? 'Promoted; the gate would have refused in enforce mode:' : null,
-            reasonItems: buildPromoteReasonItems(releaseId, okSplit.blocking, true),
-            toast: 'Release ' + releaseId + ' promoted to ' + to
-        };
-    }
-    const failSplit = promoteSplitReasons(data);
-    let reasons = failSplit.blocking.reasons;
-    let payload = failSplit.blocking;
-    if (!reasons.length) {
-        // nothing blocking came back (transport error, or only an informational note). XACA-1375-020: never
-        // promote a NOTE into the refusal line/toast: use the server's `error`, unless that is just the note
-        // echoed back (the server summarises reasons[0]), else 'HTTP <status>'. The note stays in `notes`.
-        const err = (typeof data.error === 'string' && data.error && failSplit.notes.indexOf(data.error) === -1)
-            ? data.error : null;
-        reasons = [err || ('HTTP ' + (outcome && outcome.status))];
-        payload = { reasons: reasons };
-    }
-    const target = (preview && preview.to) || data.to || null;
-    return {
-        success: false, from: (preview && preview.from) || null, to: target,
-        title: 'Promotion refused',
-        notes: failSplit.notes, notesHeading: failSplit.notes.length ? PROMOTE_NOTES_HEADING : null,
-        reasons: reasons, reasonsHeading: 'Unmet conditions:',
-        reasonItems: buildPromoteReasonItems(releaseId, payload, false),
-        toast: 'Promotion refused: ' + reasons[0]
-    };
-}
-// <<< PROMOTE-MODAL-PURE-END
-
-/**
- * Show the promote modal for a release (XACA-0026)
- * @param {string} releaseId - The release ID to promote
- */
-async function promoteRelease(releaseId) {
-    const begun = promoteBeginPreview(promoteModalState, releaseId);
-    if (!begun) return;          // a preview is already loading: no second request
-    promoteModalState = begun;
-    const token = begun.token;
-    showPromoteLoading(releaseId);
-
-    const stale = () => promoteModalState.token !== token;
-    const abort = () => { if (!stale()) hidePromoteModal(); };
-
-    try {
-        const releaseResponse = await fetch(apiUrl(`/api/releases/${releaseId}`));
-        if (stale()) return;
-        if (!releaseResponse.ok) {
-            abort();
-            showToast(`Failed to load release: ${releaseId}`, 'error');
-            return;
-        }
-        const releaseData = await releaseResponse.json();
-        if (stale()) return;
-        promoteModalState.releaseData = releaseData;
-    } catch (error) {
-        console.error('Error loading release for promotion:', error);
-        abort();
-        showToast('Failed to load release data', 'error');
-        return;
-    }
-
-    // The preview is the SERVER's verdict (real gate, dry run: no write, no log).
-    let preview;
-    try {
-        const response = await apiFetch(apiUrl(`/api/releases/${releaseId}/promote`), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ dryRun: true, actor: 'lcars-ui', confirmDeploy: false })
-        });
-        const data = await response.json().catch(() => ({}));
-        preview = response.ok
-            ? data
-            : { allowed: false, reasons: Array.isArray(data.reasons) ? data.reasons : [data.error || `HTTP ${response.status}`],
-                reasonCodes: data.reasonCodes, reasonData: data.reasonData,
-                configWarning: data.configWarning, confirmStage: data.confirmStage };
-    } catch (error) {
-        preview = { allowed: false, reasons: [error.message] };
-    }
-    if (stale()) return;
-    promoteModalState.preview = preview;
-    promoteModalState.loading = false;
-
-    populatePromotePreview();
-    updatePromoteStepIndicator(1);
-    showPromoteStep(1);
-    document.getElementById('promote-cancel-btn').disabled = false;
-    document.getElementById('promote-modal').style.display = 'flex';
-}
-
-/** Open the modal right away with a "Checking gate..." state and PROMOTE disabled. */
-function showPromoteLoading(releaseId) {
-    const m = promoteLoadingModel();
-    document.getElementById('promote-release-info').innerHTML =
-        `<span class="release-id">${escapeHtml(String(releaseId))}</span>`;
-    document.getElementById('promote-preview').innerHTML =
-        `<p class="promote-instruction">${escapeHtml(m.message)}</p>`;
-    const nextBtn = document.getElementById('promote-next-btn');
-    nextBtn.disabled = m.nextDisabled;
-    nextBtn.textContent = m.nextLabel;
-    updatePromoteStepIndicator(1);
-    showPromoteStep(1);
-    document.getElementById('promote-cancel-btn').disabled = false;
-    document.getElementById('promote-modal').style.display = 'flex';
-}
-
-/**
- * Hide the promote modal. Refused while a promote request is in flight: a request cannot be
- * cancelled (it will still complete and write), so the modal stays up and shows the result.
- */
-function hidePromoteModal() {
-    if (promoteModalState.inFlight) return;
-    document.getElementById('promote-modal').style.display = 'none';
-    promoteModalState = { releaseId: null, releaseData: null, currentStep: 1, preview: null, result: null, inFlight: false };
-}
-
-function promoteListHtml(items) {
-    return `<ul class="warning-list">${items.map(i => `<li>${escapeHtml(String(i))}</li>`).join('')}</ul>`;
-}
-
-/** Reasons as a list, each followed by the remedy that fixes it (command in <code>). */
-function promoteReasonItemsHtml(items) {
-    return `<ul class="warning-list">${items.map(i => {
-        let html = `<li>${escapeHtml(i.text)}`;
-        if (i.remedy) {
-            html += `<div class="promote-remedy">${escapeHtml(i.remedy.text)}`;
-            if (i.remedy.command) {
-                html += ` <code>${escapeHtml(i.remedy.command)}</code>`;
-            }
-            html += '</div>';
-        }
-        return html + '</li>';
-    }).join('')}</ul>`;
-}
-
-/**
- * REVIEW step: one release-level preview (current stage -> server-computed target)
- */
-function populatePromotePreview() {
-    const release = promoteModalState.releaseData;
-    if (!release) return;
-    const m = buildPromotePreviewModel(release, promoteModalState.preview);
-    promoteModalState.previewModel = m;
-
-    document.getElementById('promote-release-info').innerHTML = `
-        <span class="release-name">${escapeHtml(release.name || 'Unnamed Release')}</span>
-        <span class="release-id">${escapeHtml(release.id)}</span>
-        ${promoteStrandedBadgeHtml(release)}
-    `;
-
-    let html = '';
-    if (m.to) {
-        html += `
-            <div class="promote-preview-item">
-                <div class="preview-transition">
-                    <span class="env-badge ${escapeHtml(promoteEnvClass(m.from))}">${escapeHtml(m.from || 'UNKNOWN')}</span>
-                    <span class="transition-arrow">→</span>
-                    <span class="env-badge ${escapeHtml(promoteEnvClass(m.to))}">${escapeHtml(m.to)}</span>
-                </div>
-            </div>`;
-    }
-    if (m.platformsInfo) {
-        html += `<p class="promote-instruction">${escapeHtml(m.platformsInfo)}</p>${promoteListHtml(m.platformLines)}`;
-    }
-    if (m.reasonItems.length) {
-        html += `<div class="promote-warnings"><h4 class="warning-title">${escapeHtml(m.reasonsHeading)}</h4>${promoteReasonItemsHtml(m.reasonItems)}</div>`;
-    }
-    if (m.notes && m.notes.length) {
-        html += `<p class="promote-instruction">${escapeHtml(m.notesHeading)}</p>${promoteListHtml(m.notes)}`;
-    }
-    if (m.warnings.length) {
-        html += `<div class="promote-warnings"><h4 class="warning-title">WARNINGS</h4>${promoteListHtml(m.warnings)}</div>`;
-    }
-    document.getElementById('promote-preview').innerHTML = html;
-
-    const nextBtn = document.getElementById('promote-next-btn');
-    nextBtn.disabled = !m.canPromote;
-    nextBtn.textContent = 'PROMOTE';
-}
-
-/**
- * Update the step indicator UI
- */
-function updatePromoteStepIndicator(step) {
-    document.querySelectorAll('.promote-step').forEach((el, idx) => {
-        el.classList.remove('active', 'completed');
-        if (idx + 1 < step) {
-            el.classList.add('completed');
-        } else if (idx + 1 === step) {
-            el.classList.add('active');
-        }
-    });
-}
-
-/**
- * Show a specific step and hide others
- */
-function showPromoteStep(step) {
-    for (let i = 1; i <= 2; i++) {
-        const stepEl = document.getElementById(`promote-step-${i}`);
-        if (stepEl) {
-            stepEl.style.display = i === step ? 'block' : 'none';
-        }
-    }
-    const cancelBtn = document.getElementById('promote-cancel-btn');
-    cancelBtn.style.display = step === 2 && promoteModalState.result ? 'none' : 'inline-block';
-}
-
-/**
- * Footer button: PROMOTE on the review step, DONE on the result step
- */
-function promoteStepNext() {
-    const step = promoteModalState.currentStep;
-    if (step === 1) {
-        if (!promoteModalState.previewModel || !promoteModalState.previewModel.canPromote) return;
-        if (promoteModalState.inFlight || promoteModalState.loading) return;
-        promoteModalState.currentStep = 2;
-        updatePromoteStepIndicator(2);
-        showPromoteStep(2);
-        document.getElementById('promote-progress').style.display = 'block';
-        document.getElementById('promote-results').style.display = 'none';
-        document.getElementById('promote-next-btn').disabled = true;
-        // Once the request is in flight it cannot be cancelled: disable Cancel (and the X, via the
-        // hidePromoteModal guard) and show the eventual result instead of pretending to cancel.
-        document.getElementById('promote-cancel-btn').disabled = true;
-        executePromotion();
-    } else {
-        hidePromoteModal();
-        loadReleases(); // Refresh releases list
-    }
-}
-
-/**
- * Execute the promotion: ONE request carrying the PREVIEWED target stage. If the release moved
- * since the preview, the server refuses (409) rather than advancing past what the user saw.
- */
-async function executePromotion() {
-    const releaseId = promoteModalState.releaseId;
-    const preview = promoteModalState.preview;
-    const progressBar = document.getElementById('promote-progress-bar');
-    const progressMessage = document.getElementById('progress-message');
-    progressMessage.textContent = `Promoting ${releaseId} to ${preview && preview.to}...`;
-    progressBar.style.width = '50%';
-    promoteModalState.inFlight = true;
-
-    let outcome;
-    try {
-        const response = await apiFetch(apiUrl(`/api/releases/${releaseId}/promote`), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ targetStage: preview.to, actor: 'lcars-ui', confirmDeploy: false })
-        });
-        const data = await response.json().catch(() => ({}));
-        outcome = { ok: response.ok, status: response.status, data: data };
-    } catch (error) {
-        outcome = { ok: false, status: 0, data: { error: error.message } };
-    }
-    promoteModalState.inFlight = false;
-    const model = buildPromoteResultModel(releaseId, preview, outcome);
-
-    progressBar.style.width = '100%';
-    promoteModalState.result = model;
-    progressMessage.textContent = 'Complete!';
-    displayPromotionResult(model);
-}
-
-/**
- * Display the promotion result (one release-level outcome). The container is an aria-live region
- * (index.html), so a screen reader announces the result or the refusal reasons.
- */
-function displayPromotionResult(model) {
-    document.getElementById('promote-progress').style.display = 'none';
-    const resultsEl = document.getElementById('promote-results');
-
-    let html = `<div class="results-summary"><div class="results-status ${model.success ? 'success' : 'error'}">${model.success ? '✓' : '✗'} ${escapeHtml(model.title)}</div>`;
-    if (model.reasonItems.length) {
-        html += `<div class="results-list"><p class="promote-instruction">${escapeHtml(model.reasonsHeading || '')}</p>${promoteReasonItemsHtml(model.reasonItems)}</div>`;
-    }
-    if (model.notes && model.notes.length) {
-        html += `<div class="results-list"><p class="promote-instruction">${escapeHtml(model.notesHeading)}</p>${promoteListHtml(model.notes)}</div>`;
-    }
-    html += '</div>';
-    resultsEl.innerHTML = html;
-    resultsEl.style.display = 'block';
-
-    const nextBtn = document.getElementById('promote-next-btn');
-    nextBtn.disabled = false;
-    nextBtn.textContent = 'DONE';
-    document.getElementById('promote-cancel-btn').style.display = 'none';
-
-    showToast(model.toast, model.success ? (model.reasons.length ? 'warning' : 'success') : 'error');
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -13874,11 +13515,6 @@ document.addEventListener('keydown', function(e) {
         const createModal = document.getElementById('release-create-modal');
         if (createModal && createModal.style.display !== 'none') {
             hideCreateReleaseModal();
-        }
-        // XACA-0026: Close Promote modal on Escape
-        const promoteModal = document.getElementById('promote-modal');
-        if (promoteModal && promoteModal.style.display !== 'none') {
-            hidePromoteModal();
         }
         // XACA-0026: Close Relnotes modal on Escape
         const relnotesModal = document.getElementById('relnotes-modal');

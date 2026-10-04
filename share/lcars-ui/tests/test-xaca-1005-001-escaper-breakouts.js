@@ -319,6 +319,8 @@ try {
         extractFunction('formatTargetDate'),
         extractFunction('formatDate'),
         extractFunction('promoteStrandedBadgeHtml'),  // XACA-1375-015: renderReleaseCard calls it
+        extractFunction('computeReleaseStageTestTotals'),  // XACA-1351-003: renderReleaseCard calls it via releaseLifecycleHtml
+        extractFunction('releaseLifecycleHtml'),
         extractFunction('renderReleaseCard'),
     ].join('\n\n');
 

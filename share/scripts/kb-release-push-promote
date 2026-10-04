@@ -5,7 +5,8 @@
 #   kb-release-push-promote --branch <branch-name> [--team <team>]
 #                           [--platform <plat>] [--auto-bump] [--dry-run]
 #
-# Called by kb-git-push after a successful push. Resolves the pushed branch to
+# NOTE (XACA-1351): kb-git-push no longer calls this script; push never promotes.
+# Formerly called by kb-git-push (XACA-0658). Resolves the pushed branch to
 # an environment via branch_env_map, finds the active release for the team,
 # runs the version gate, calls the LCARS promote API, and promotes RELNOTES.
 #
@@ -196,8 +197,8 @@ Usage: kb-release-push-promote --branch <branch-name> [options]
   --dry-run          Print intended actions without calling promote API or
                      running RELNOTES promotion.
 
-Called automatically by kb-git-push after a successful push.
-Direct invocation is also supported for testing / manual recovery.
+No longer called by kb-git-push (push-to-promote retired, XACA-1351).
+Direct invocation remains supported for testing / manual recovery.
 
 Exit 0 on success or non-mapped branch; exit 1 on hard block.
 EOF
