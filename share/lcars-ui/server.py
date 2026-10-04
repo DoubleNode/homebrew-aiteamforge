@@ -172,6 +172,14 @@ except ImportError as e:  # pragma: no cover
     _release_supersede = None
     print(f"[LCARS] Warning: release_gate unavailable, release promote/regress/waiver fail closed: {e}")
 
+# Release branch cut (XACA-1352). Missing module = the PLANNED->DEV cut raises, which the gate
+# turns into a reason (fails closed, never "no branch needed").
+try:
+    import release_branches as _release_branches
+except ImportError as e:  # pragma: no cover
+    _release_branches = None
+    print(f"[LCARS] Warning: release_branches unavailable, PLANNED->DEV branch cut fails closed: {e}")
+
 # CR approval providers (XACA-1349-014): feeds release.cr to the gate. Missing module = no feed =
 # the gate sees no CR state and refuses (fail closed).
 try:
@@ -1672,9 +1680,11 @@ _PATH_LOCKS_REGISTRY_LOCK = threading.Lock()
 
 
 def _cut_release_branch(release, board, dry_run=False):
-    """PLANNED->DEV branch-cut hook (XACA-1346 decision -002; STUB until XACA-1352).
+    """PLANNED->DEV branch-cut hook (XACA-1346 decision -002; implemented by XACA-1352 in
+    kanban-hooks/release_branches.py: release mode pushes releases/<ver> from the integration tip,
+    trunk mode records the integration branch itself).
 
-    CONTRACT for XACA-1352, which replaces this body (keep the name and signature):
+    CONTRACT (name and signature are fixed):
       release: the release dict from the board (READ-ONLY: do not mutate it)
       board:   the raw board JSON dict (READ-ONLY)
       dry_run: passed (as True) ONLY by a `{"dryRun": true}` promote preview; it is omitted on a
@@ -1691,7 +1701,28 @@ def _cut_release_branch(release, board, dry_run=False):
     find the branch it already cut), and never write the release record. XACA-1346 is the
     hook's sole caller; XACA-1352 never writes the release record.
     """
-    raise NotImplementedError("branch cut is delivered by XACA-1352")
+    if _release_branches is None:
+        raise RuntimeError("release_branches module unavailable; cannot cut the release branch")
+    team = board.get('team') if isinstance(board, dict) else None
+    repo_root = _resolve_team_repo_root(team)
+    if repo_root is None:
+        raise RuntimeError("cannot resolve the git repository for team %r" % (team,))
+    return _release_branches.cut_release_branch(release, board, repo_root, dry_run=dry_run)
+
+
+def _resolve_team_repo_root(team):
+    """Team's git working dir (aiteamforge_paths registry), else kanban dir's parent, else None."""
+    try:
+        from aiteamforge_paths import get_team_working_dir  # noqa: PLC0415
+        root = Path(get_team_working_dir(team))
+        if root.is_dir():
+            return root
+    except Exception:
+        pass
+    kd = TEAM_KANBAN_DIRS.get(team)
+    if kd and Path(kd).parent.is_dir():
+        return Path(kd).parent
+    return None
 
 
 def _validate_branch_cut(result):
@@ -9015,17 +9046,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
     def _release_repo_root(self, team):
         """Team's git working dir (aiteamforge_paths registry), else kanban dir's parent."""
-        try:
-            from aiteamforge_paths import get_team_working_dir  # noqa: PLC0415
-            root = Path(get_team_working_dir(team))
-            if root.is_dir():
-                return root
-        except Exception:
-            pass
-        kd = TEAM_KANBAN_DIRS.get(team)
-        if kd and Path(kd).parent.is_dir():
-            return Path(kd).parent
-        return None
+        return _resolve_team_repo_root(team)
 
     def _release_branch_head(self, release, team):
         """`git rev-parse <release.branch>` in the team repo, or None. None makes the gate

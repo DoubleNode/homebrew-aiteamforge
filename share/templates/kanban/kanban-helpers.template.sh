@@ -1250,6 +1250,66 @@ _kb_release_sync() {
     return 1
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# XACA-1352: branch-per-release helpers (thin wrappers over kanban-hooks/release_branches.py)
+# ─────────────────────────────────────────────────────────────────────────────
+# The Python CLI is the single source of truth for branch-role config parsing, the
+# item -> release branch lookup and the branch cut. Nothing here re-parses config.
+# Spec: docs/release-workflow/RELEASE-LIFECYCLE.md section 4.2.
+
+# _kb_release_branches_script -- absolute path to kanban-hooks/release_branches.py,
+# self-located next to board_settings.py (works for the dev repo and tap installs).
+# Prints the path (rc 0) or prints nothing (rc 1).
+_kb_release_branches_script() {
+    local _bs
+    _bs=$(_kb_board_settings_script) || return 1
+    printf '%s\n' "$(dirname "$_bs")/release_branches.py"
+}
+
+# _kb_get_release_branches <board_file>
+# Echoes the JSON {integration,production,releasePrefix,mode}. rc != 0 (message on
+# stderr) on invalid config or a missing CLI -- never silently defaults.
+_kb_get_release_branches() {
+    local board_file="${1-}" script
+    script=$(_kb_release_branches_script) || { echo "Error: cannot locate kanban-hooks/" >&2; return 1; }
+    [[ -f "$script" ]] || { echo "Error: missing $script" >&2; return 1; }
+    python3 "$script" branches --board "$board_file"
+}
+
+# _kb_get_release_branch_role <board_file> <integration|production|releasePrefix|mode>
+# Echoes one value out of _kb_get_release_branches. rc != 0 on any failure.
+_kb_get_release_branch_role() {
+    local board_file="${1-}" role="${2-}" json
+    json=$(_kb_get_release_branches "$board_file") || return 1
+    printf '%s\n' "$json" | jq -er --arg r "$role" '.[$r] // empty'
+}
+
+# _kb_get_item_release_branch <board_file> <item_id>
+# Echoes the branch of the release the item is assigned to, or NOTHING (rc 0) when
+# there is no assignment / dangling release / branch not yet recorded -- the caller
+# then falls through to the pre-XACA-1352 behaviour. rc != 0 = real error (unknown
+# item, missing CLI): callers must abort, not guess.
+_kb_get_item_release_branch() {
+    local board_file="${1-}" item_id="${2-}" script
+    script=$(_kb_release_branches_script) || { echo "Error: cannot locate kanban-hooks/" >&2; return 1; }
+    [[ -f "$script" ]] || { echo "Error: missing $script" >&2; return 1; }
+    # Validate the team's branch-role config first: a malformed releaseConfig.branches
+    # must abort the start path (rc != 0), never be guessed around.
+    python3 "$script" branches --board "$board_file" >/dev/null || return 1
+    python3 "$script" item-branch --board "$board_file" --item "$item_id"
+}
+
+# _kb_cut_release_branch <board_file> <release_id> [--repo <dir>] [--dry-run]
+# Thin wrapper over `release_branches.py cut`; echoes its JSON {branch,branchBaseSha}.
+# The promote engine calls the Python directly; this is for scripts/parity.
+_kb_cut_release_branch() {
+    local board_file="${1-}" release_id="${2-}" script
+    shift 2 2>/dev/null || shift $#
+    script=$(_kb_release_branches_script) || { echo "Error: cannot locate kanban-hooks/" >&2; return 1; }
+    [[ -f "$script" ]] || { echo "Error: missing $script" >&2; return 1; }
+    python3 "$script" cut --board "$board_file" --release-id "$release_id" "$@"
+}
+
 # Detect the main/development branch for the current repo
 # Usage: _kb_get_main_branch [remote_name]
 # Prints the branch name (e.g., "develop", "main", "master")
@@ -1297,11 +1357,14 @@ _kb_get_main_branch() {
 }
 
 # Reset the current worktree to the latest main branch from remote
-# Usage: _kb_reset_worktree
-# Auto-detects the remote name and main branch
+# Usage: _kb_reset_worktree [branch_override]
+# Auto-detects the remote name and main branch. XACA-1352: when branch_override is
+# non-empty (the item's release branch) it replaces the detected main branch; empty
+# or omitted = the pre-XACA-1352 behaviour, unchanged.
 # Returns: 0 = success, 1 = failed but user chose to continue, 2 = user aborted
 # On failure, prompts user for confirmation before continuing
 _kb_reset_worktree() {
+    local branch_override="${1-}"
     # Auto-detect remote name (first remote listed)
     local remote
     remote=$(git remote 2>/dev/null | head -1)
@@ -1321,7 +1384,11 @@ _kb_reset_worktree() {
 
     # Detect the main branch for this repo
     local main_branch
-    main_branch=$(_kb_get_main_branch "$remote")
+    if [[ -n "$branch_override" ]]; then
+        main_branch="$branch_override"
+    else
+        main_branch=$(_kb_get_main_branch "$remote")
+    fi
 
     echo "─────────────────────────────────────"
     echo "🔄 Resetting worktree to ${remote}/${main_branch}..."
@@ -1505,11 +1572,16 @@ _kb_resolve_project_root() {
 }
 
 # Create a worktree for an item and cd into it
-# Usage: _kb_create_item_worktree <item_id> <title>
+# Usage: _kb_create_item_worktree <item_id> <title> [start_branch]
 # Returns the worktree path, or empty on failure
+# XACA-1352: a non-empty start_branch (the item's release branch) makes the NEW
+# branch start from <remote>/<start_branch> instead of the current checkout. A fetch
+# failure is a hard error (never a silent fallback to the current checkout: the
+# base MUST be the release). Empty/omitted = pre-XACA-1352 behaviour, unchanged.
 _kb_create_item_worktree() {
     local item_id="${1-}"
     local title="${2-}"
+    local start_branch="${3-}"
 
     local git_root worktree_dir branch_name worktree_name project_root git_common
 
@@ -1594,8 +1666,30 @@ _kb_create_item_worktree() {
     echo "  Branch: $branch_name" >&2
 
     local git_error
+    local start_ref=""
+    if [[ -n "$start_branch" ]]; then
+        local start_remote fetch_out
+        start_remote=$(git remote 2>/dev/null | head -1)
+        if [[ -z "$start_remote" ]]; then
+            echo "Error: release branch '$start_branch' requested but no git remote found" >&2
+            return 1
+        fi
+        if ! fetch_out=$(git fetch "$start_remote" "$start_branch" 2>&1); then
+            echo "Error: could not fetch release branch ${start_remote}/${start_branch}" >&2
+            echo "  ${fetch_out}" >&2
+            echo "  The worktree base MUST be the release branch; refusing to fall back to the current checkout." >&2
+            return 1
+        fi
+        start_ref="${start_remote}/${start_branch}"
+        echo "  Base: ${start_ref} (release branch)" >&2
+    fi
     # Try to create with new branch first
-    if git_error=$(git worktree add -b "$branch_name" "$worktree_dir" 2>&1); then
+    if [[ -n "$start_ref" ]]; then
+        git_error=$(git worktree add --no-track -b "$branch_name" "$worktree_dir" "$start_ref" 2>&1)
+    else
+        git_error=$(git worktree add -b "$branch_name" "$worktree_dir" 2>&1)
+    fi
+    if [[ $? -eq 0 ]]; then
         echo "✓ Created new worktree with branch $branch_name" >&2
         echo "$worktree_dir"
         return 0
@@ -11008,6 +11102,36 @@ _kb_require_release() {
             '([.releases[]? | select(.id == $rid)] | length) > 0' -r \
             --arg rid "$release_id" 2>/dev/null)
         if [[ "$release_exists" == "true" ]]; then
+            # XACA-1352-013: the release exists -- it must also have a branch
+            # (cut on promotion out of PLANNED). Mirrors server.py's gate-mode
+            # resolver: absent/"report" = report; "enforce" or any unrecognised
+            # value = enforce.
+            local rel_branch rel_stage gate_mode
+            rel_branch=$(_kb_jq_read "$board_file" \
+                '[.releases[]? | select(.id == $rid)][0].branch // empty' -r \
+                --arg rid "$release_id" 2>/dev/null)
+            if [[ -n "$rel_branch" ]]; then
+                return 0
+            fi
+            rel_stage=$(_kb_jq_read "$board_file" \
+                '[.releases[]? | select(.id == $rid)][0] | (.stage // .status // "PLANNED")' -r \
+                --arg rid "$release_id" 2>/dev/null)
+            [[ -z "$rel_stage" ]] && rel_stage="PLANNED"
+            gate_mode=$(_kb_jq_read "$board_file" \
+                'if (.releaseConfig // {}) | has("gateEnforcement") then (.releaseConfig.gateEnforcement | if . == "report" then "report" else "enforce" end) else "report" end' -r \
+                2>/dev/null)
+            [[ -z "$gate_mode" ]] && gate_mode="report"
+            if [[ "$gate_mode" == "enforce" ]]; then
+                echo "─────────────────────────────────────"
+                echo "⛔ Cannot start [$item_id]: [$item_id] is assigned to $release_id, which has no release branch yet (stage $rel_stage)."
+                echo "   Work must branch from the release. Either:"
+                echo "     kb-release assign $item_id <REL-ID>     (move it to a release that has a branch)"
+                echo "     kb-release promote $release_id          (promote $release_id to DEV, which cuts its branch)"
+                echo "─────────────────────────────────────"
+                return 1
+            fi
+            echo "⚠️  [$item_id] is assigned to $release_id, which has no release branch yet (stage $rel_stage)." >&2
+            echo "   Run 'kb-release assign $item_id <REL-ID>' (a release with a branch) or 'kb-release promote $release_id' (to DEV)." >&2
             return 0
         fi
     fi
@@ -12066,8 +12190,16 @@ kb-run() {
         echo "   Setting up worktree for isolated work..."
         echo "─────────────────────────────────────"
 
+        # XACA-1352: resolve the item's release branch ONCE; empty = no release
+        # (pre-XACA-1352 behaviour). A lookup error aborts rather than guessing.
+        local release_branch
+        release_branch=$(_kb_get_item_release_branch "$board_file" "$item_id") || {
+            echo "Error: could not resolve the release branch for [$item_id]; aborting." >&2
+            return 1
+        }
+
         local new_worktree
-        new_worktree=$(_kb_create_item_worktree "$item_id" "$title")
+        new_worktree=$(_kb_create_item_worktree "$item_id" "$title" "$release_branch")
 
         if [[ -n "$new_worktree" ]] && [[ -d "$new_worktree" ]]; then
             echo "─────────────────────────────────────"
@@ -12095,9 +12227,9 @@ kb-run() {
             kb_wt_session_created=1
             kb_wt_session_path="$new_worktree"
 
-            # Reset worktree to remote main branch for clean starting state
+            # Reset worktree to remote main branch (or the release branch) for clean starting state
             local reset_rc=0
-            _kb_reset_worktree || reset_rc=$?
+            _kb_reset_worktree "$release_branch" || reset_rc=$?
             if [[ $reset_rc -eq 2 ]]; then
                 echo "⛔ Worktree operation aborted by user." >&2
                 return 1
@@ -12901,6 +13033,14 @@ _kb_switch_to_item_worktree() {
     local item_id="${3-}"
     local cmd_name="${4:-kb-run}"
 
+    # XACA-1352: resolve the item's release branch ONCE for every create/reset below.
+    # Empty = no release (pre-XACA-1352 behaviour); an error is a HARD refusal (rc 2).
+    local release_branch
+    release_branch=$(_kb_get_item_release_branch "$board_file" "$item_id") || {
+        echo "Error: could not resolve the release branch for [$item_id]; aborting." >&2
+        return 2
+    }
+
     # item_worktree is set by _kb_display_item_box in the caller's scope
     if [[ -n "$item_worktree" ]] && [[ -d "$item_worktree" ]]; then
         # Verify the on-disk branch matches the kanban record before trusting the fast path
@@ -12919,7 +13059,7 @@ _kb_switch_to_item_worktree() {
                 return 2
             }
             local reset_rc=0
-            _kb_reset_worktree || reset_rc=$?
+            _kb_reset_worktree "$release_branch" || reset_rc=$?
             if [[ $reset_rc -eq 2 ]]; then
                 echo "⛔ Worktree operation aborted by user." >&2
                 return 2
@@ -12964,7 +13104,7 @@ _kb_switch_to_item_worktree() {
         item_worktree_branch="$wt_branch"
 
         local reset_rc=0
-        _kb_reset_worktree || reset_rc=$?
+        _kb_reset_worktree "$release_branch" || reset_rc=$?
         if [[ $reset_rc -eq 2 ]]; then
             echo "⛔ Worktree operation aborted by user." >&2
             return 2
@@ -12994,7 +13134,7 @@ _kb_switch_to_item_worktree() {
         echo "─────────────────────────────────────"
 
         local new_worktree
-        new_worktree=$(_kb_create_item_worktree "$item_id" "$title")
+        new_worktree=$(_kb_create_item_worktree "$item_id" "$title" "$release_branch")
 
         if [[ -n "$new_worktree" ]] && [[ -d "$new_worktree" ]]; then
             cd "$new_worktree" || {
@@ -13027,7 +13167,7 @@ _kb_switch_to_item_worktree() {
             kb_wt_session_path="$new_worktree"
 
             local reset_rc=0
-            _kb_reset_worktree || reset_rc=$?
+            _kb_reset_worktree "$release_branch" || reset_rc=$?
             if [[ $reset_rc -eq 2 ]]; then
                 echo "⛔ Worktree operation aborted by user." >&2
                 return 2
