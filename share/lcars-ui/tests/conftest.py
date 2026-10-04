@@ -160,29 +160,32 @@ if _pytest_xaca1382 is not None:
         _clear()
 
 
-@_pytest_xaca1382.fixture(autouse=True)
-def _xaca1397_no_lazy_reconcile_refresher(monkeypatch):
-    """XACA-1397-001: board GETs lazily start a background reconcile refresher
-    that would run the REAL zsh helper. Two layers, both per test:
+# Guarded like the XACA-1382 fixture above: harnesses that load this conftest
+# without pytest installed (e.g. test-git-env-hermetic-runners.sh) must not crash.
+if _pytest_xaca1382 is not None:
+    @_pytest_xaca1382.fixture(autouse=True)
+    def _xaca1397_no_lazy_reconcile_refresher(monkeypatch):
+        """XACA-1397-001: board GETs lazily start a background reconcile refresher
+        that would run the REAL zsh helper. Two layers, both per test:
 
-    1. LCARS_RECONCILE_REFRESHER_DISABLED=1 -- server.py checks it on the lazy
-       start path on every call, so it covers EVERY module object loaded from
-       server.py, whatever name it was imported under (lcars_server,
-       lcars_server_x1239, ...) and including modules loaded mid-test, which a
-       sys.modules["server"] lookup can never see.
-    2. stop the canonical `server` module's refresher (also kills a thread a
-       previous test started explicitly).
+        1. LCARS_RECONCILE_REFRESHER_DISABLED=1 -- server.py checks it on the lazy
+           start path on every call, so it covers EVERY module object loaded from
+           server.py, whatever name it was imported under (lcars_server,
+           lcars_server_x1239, ...) and including modules loaded mid-test, which a
+           sys.modules["server"] lookup can never see.
+        2. stop the canonical `server` module's refresher (also kills a thread a
+           previous test started explicitly).
 
-    The XACA-1397 suite re-enables lazy start with a stubbed compute."""
-    import sys
+        The XACA-1397 suite re-enables lazy start with a stubbed compute."""
+        import sys
 
-    def _off():
-        mod = sys.modules.get("server")
-        stop = getattr(mod, "stop_reconcile_refresher", None)
-        if callable(stop):
-            stop()
+        def _off():
+            mod = sys.modules.get("server")
+            stop = getattr(mod, "stop_reconcile_refresher", None)
+            if callable(stop):
+                stop()
 
-    monkeypatch.setenv("LCARS_RECONCILE_REFRESHER_DISABLED", "1")
-    _off()
-    yield
-    _off()
+        monkeypatch.setenv("LCARS_RECONCILE_REFRESHER_DISABLED", "1")
+        _off()
+        yield
+        _off()

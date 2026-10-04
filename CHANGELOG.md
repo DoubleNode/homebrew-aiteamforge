@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1397** (Fixed, PR #1040 CI): re-mirror `share/lcars-ui/tests/conftest.py` — the XACA-1397 lazy-refresher fixture is now inside the same
+  `if _pytest_xaca1382 is not None:` guard as the XACA-1382 fixture, so harnesses that load the conftest without pytest no longer crash.
 - **XACA-1397** (Fixed, PR #1040 round 3): re-mirror `share/lcars-ui/js/lcars.js` (stale-board banner writes its aria-live text only on change; dated
   "as of" stamp) and `tests/test-xaca-1397-board-refresh-failure.js`; `share/lcars-ui/index.html` takes only the `lcars.js?v=4.03` bump on top of the
   existing XACA-1390 merge (1390's `lcars-filter-bar.js?v=1.2` kept).
