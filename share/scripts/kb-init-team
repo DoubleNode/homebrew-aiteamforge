@@ -511,7 +511,9 @@ PYEOF
 _port_in_use() {
     local port="$1"
     # Check lcars-ports/ files
-    if grep -r "^${port}$" "${LCARS_PORTS_DIR}"/ 2>/dev/null | grep -q .; then
+    local _hits
+    _hits=$(grep -r "^${port}$" "${LCARS_PORTS_DIR}"/ 2>/dev/null) || _hits=""
+    if grep -q . <<<"$_hits"; then
         return 0
     fi
     # Check team-paths.json

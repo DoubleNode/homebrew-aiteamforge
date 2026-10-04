@@ -1494,7 +1494,7 @@ PERSONA
   local t6_out
   t6_out=$(_transform_persona "$t6_src" "alpha")
   local t6_name
-  t6_name=$(printf '%s\n' "$t6_out" | awk '/^---/{f++} f==1 && /^name[[:space:]]*:/{print; exit}')
+  t6_name=$(printf '%s\n' "$t6_out" | awk '/^---/{f++} !d && f==1 && /^name[[:space:]]*:/{print; d=1}')
   if [ "$t6_name" = "name: alpha" ]; then
     _pass "Test 6 (_transform_persona name: rewritten to 'alpha')"
   else
@@ -1584,7 +1584,7 @@ PERSONA
   local t11_out
   t11_out=$(AITEAMFORGE_DIR="$fake_aitf" OPT_DRY_RUN=false OPT_FORCE=false OPT_VERBOSE=false \
     _deploy "$dev_wt" "testteam" 2>&1) || true
-  if printf '%s\n' "$t11_out" | grep -q "Already deployed"; then
+  if grep -q "Already deployed" <<<"$t11_out"; then
     _pass "Test 11 (idempotency: already-deployed message)"
   else
     _fail "Test 11 — expected 'Already deployed' message, got: ${t11_out}"
@@ -1597,7 +1597,7 @@ PERSONA
   local t12_out
   t12_out=$(AITEAMFORGE_DIR="$fake_aitf" OPT_DRY_RUN=false OPT_FORCE=true OPT_VERBOSE=false \
     _deploy "$dev_wt" "testteam" 2>&1) || true
-  if printf '%s\n' "$t12_out" | grep -q "Done:"; then
+  if grep -q "Done:" <<<"$t12_out"; then
     _pass "Test 12 (--force triggers re-deploy)"
   else
     _fail "Test 12 — expected 'Done:' output, got: ${t12_out}"
@@ -1615,7 +1615,7 @@ PERSONA
   t13_out=$(AITEAMFORGE_DIR="$fake_aitf_empty" \
     OPT_DRY_RUN=false OPT_FORCE=false OPT_VERBOSE=false \
     _deploy_devmachine_check "testteam" "$fake_devteam" "$fake_aitf_empty" 2>&1) || true
-  if printf '%s\n' "$t13_out" | grep -q "Dev-machine detected"; then
+  if grep -q "Dev-machine detected" <<<"$t13_out"; then
     _pass "Test 13 (dev-machine no-op fallback triggered)"
   else
     _fail "Test 13 — expected dev-machine message, got: ${t13_out}"
@@ -1630,7 +1630,7 @@ PERSONA
   local t14_out t14_rc=0
   t14_out=$(AITEAMFORGE_DIR="$t14_aitf" OPT_DRY_RUN=false OPT_FORCE=false OPT_VERBOSE=false \
     _deploy_devmachine_check "testteam" "/nonexistent/devteam" "$t14_aitf" 2>&1) || t14_rc=$?
-  if printf '%s\n' "$t14_out" | grep -q "No personas found" && [ "$t14_rc" -eq 0 ]; then
+  if grep -q "No personas found" <<<"$t14_out" && [ "$t14_rc" -eq 0 ]; then
     _pass "Test 14 (no-personas: warning + exit 0)"
   else
     _fail "Test 14 — expected warning + exit 0, got rc=${t14_rc}: ${t14_out}"
@@ -1754,7 +1754,7 @@ PERSONA
   t19_out=$(AITEAMFORGE_DIR="$fake_aitf" OPT_DRY_RUN=false OPT_FORCE=false OPT_VERBOSE=false \
     _deploy_all "testteam" "$empty_ctr" 2>&1) || t19_rc=$?
 
-  if [ "$t19_rc" -eq 0 ] && printf '%s\n' "$t19_out" | grep -qi "not a git repo\|no inner git"; then
+  if [ "$t19_rc" -eq 0 ] && grep -qi "not a git repo\|no inner git" <<<"$t19_out"; then
     _pass "Test 19 (--all backfill: empty container → benign warn + exit 0)"
   else
     _fail "Test 19 — expected warn + exit 0 for empty container, got rc=${t19_rc}: ${t19_out}"

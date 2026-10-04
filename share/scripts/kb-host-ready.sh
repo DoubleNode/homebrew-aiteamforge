@@ -240,7 +240,7 @@ _hr_pid_start_epoch() {
 # last fallback of _hr_console_login_epoch below.
 _hr_loginwindow_start_epoch() {
     local pid
-    pid=$(pgrep -x loginwindow 2>/dev/null | head -1)
+    pid=$(pgrep -x loginwindow 2>/dev/null | awk 'NR==1')
     [ -n "$pid" ] || return 1
     _hr_pid_start_epoch "$pid"
 }
@@ -2218,7 +2218,7 @@ PY
 
 # Read the RESUME record out of a resolved stream. Echoes "<true|false> <stagger>".
 _hr_resume_cfg_from() {
-    printf '%s\n' "$1" | awk -F$'\x1f' '$1=="RESUME"{print $2, $3; found=1; exit} END{if(!found) print "false 8"}'
+    printf '%s\n' "$1" | awk -F$'\x1f' '!found && $1=="RESUME"{print $2, $3; found=1} END{if(!found) print "false 8"}'
 }
 
 # Standalone entry point: `kb-host-ready.sh resume [--dry-run]`. No restore ran in
@@ -2311,7 +2311,7 @@ cmd_login() {
         notify "kb-host-ready: config resolver failed to complete — no teams restored, no lock. Run: kb-host-ready.sh check"
         return 1
     fi
-    resolved_state="$(printf '%s\n' "$_HR_PRERESOLVED" | awk -F$'\x1f' '$1=="STATE"{print $2; exit}')"
+    resolved_state="$(printf '%s\n' "$_HR_PRERESOLVED" | awk -F$'\x1f' '!d && $1=="STATE"{print $2; d=1}')"
     if [ "$resolved_state" = "absent" ]; then
         log "login: no config at ${KB_HOST_READY_CONFIG} — nothing to do, touching nothing"
         return 0

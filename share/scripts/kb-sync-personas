@@ -498,7 +498,7 @@ _deploy_field() {
 # Get deployment index by team name; prints -1 if not found
 _deploy_index_by_team() {
   local team="$1"
-  jq -r --arg t "$team" '.deployments | to_entries[] | select(.value.team == $t) | .key' "$MANIFEST" | head -1
+  jq -r --arg t "$team" '.deployments | to_entries[] | select(.value.team == $t) | .key' "$MANIFEST" | awk 'NR==1'
 }
 
 # XACA-1261: resolve the source directory for one persona group.
@@ -2381,7 +2381,7 @@ _kbsp_selftest() {
   # --- Test 4: Drift detected after file modification ---
   _info "[selftest] Test 4: modify a deployed file, check drift detection..."
   local first_file
-  first_file=$(find "$tmp_target" -maxdepth 1 -name '*.md' | sort | head -1)
+  first_file=$(find "$tmp_target" -maxdepth 1 -name '*.md' | sort | awk 'NR==1')
   local first_bname
   first_bname=$(basename "$first_file")
   echo "# selftest drift injection" >> "$first_file"
@@ -2814,7 +2814,7 @@ SYNTH_MANIFEST
   t14b_out=$(_kbsp_sync_worktrees synth-team 2>&1) || t14b_ok=false
 
   # copied= counter in output should be 0 (all files already deployed, hashes match)
-  if ! echo "$t14b_out" | grep -qF "copied=0"; then
+  if ! grep -qF "copied=0" <<<"$t14b_out"; then
     t14b_ok=false
     _err "[selftest] Test 14b: expected copied=0 on second run; output: $t14b_out"
   fi
@@ -2883,7 +2883,7 @@ SYNTH_MANIFEST
   else
     # Compute canonical persona count for ios (groups: ios + mainevent)
     local ios_idx
-    ios_idx=$(jq -r '.deployments | to_entries[] | select(.value.team == "ios") | .key' "$MANIFEST" | head -1)
+    ios_idx=$(jq -r '.deployments | to_entries[] | select(.value.team == "ios") | .key' "$MANIFEST" | awk 'NR==1')
     local ios_canonical_count=0
     if [ -n "$ios_idx" ]; then
       ios_canonical_count=$(_source_files_for_deployment "$ios_idx" | wc -l | tr -d ' ')
@@ -3252,7 +3252,7 @@ T19_MANIFEST
   # Induce drift: remove one persona file from the nested main root
   local t19_main_agents="${t19_inner}/.claude/agents"
   local t19_drifted_file
-  t19_drifted_file=$(find "$t19_main_agents" -maxdepth 1 -name 'persona-s.md' 2>/dev/null | head -1)
+  t19_drifted_file=$(find "$t19_main_agents" -maxdepth 1 -name 'persona-s.md' 2>/dev/null | awk 'NR==1')
   if [ -n "$t19_drifted_file" ]; then
     rm "$t19_drifted_file"
   fi
@@ -3899,11 +3899,11 @@ T23_MAN
   MANIFEST="$_sv_man_23"; TEAM_PATHS_JSON="$_sv_tp_23"
   KBSP_MODE="$_sv_mode_23"; DEV_TEAM="$_sv_dt_23"
 
-  if ! printf '%s\n' "$t23_out" | grep -q 't23-hosted'; then
+  if ! grep -q 't23-hosted' <<<"$t23_out"; then
     t23_ok=false
     _err "[selftest] Test 23a: hosted team was SILENTLY SKIPPED by the consumer-mode filter (exit 0, deployed nothing). output=$t23_out"
   fi
-  if printf '%s\n' "$t23_out" | grep -q 't23-unhosted'; then
+  if grep -q 't23-unhosted' <<<"$t23_out"; then
     t23_ok=false
     _err "[selftest] Test 23b: unhosted team should be omitted in consumer mode; it was processed. output=$t23_out"
   fi

@@ -675,7 +675,7 @@ if [ -x "$SYNCTAP_SCRIPT" ] && [ -f "$ATTRIB_SCRIPT" ]; then
         check_fail "Tap mirror has CANONICAL-AHEAD, DIVERGED, or unmirrored (NEW) drift. Run ./sync-tap.sh and commit the result first (this remedy IS correct/safe for these directions)."
         ;;
       0)
-        if printf '%s\n' "$DIR_REPORT" | grep -qE '^[[:space:]]*TAP-AHEAD[[:space:]]'; then
+        if grep -qE '^[[:space:]]*TAP-AHEAD[[:space:]]' <<<"$DIR_REPORT"; then
           if [ -n "$TAP_AHEAD_RELEASE_REASON" ]; then
             TAP_AHEAD_WAIVED=1
             check_pass "sync-tap drift is TAP-AHEAD only — WAIVED via --tap-ahead-release=\"${TAP_AHEAD_RELEASE_REASON}\" (recorded as a commit trailer below)."
@@ -904,7 +904,7 @@ git -C "${TAP_DIR}" add CHANGELOG.md VERSION Formula/aiteamforge.rb
 # Verify staged
 STAGED="$(git -C "${TAP_DIR}" diff --cached --name-only)"
 STAGED_OK=0
-echo "$STAGED" | grep -q "CHANGELOG.md" && echo "$STAGED" | grep -q "VERSION" && echo "$STAGED" | grep -q "Formula/aiteamforge.rb" && STAGED_OK=1
+grep -q "CHANGELOG.md" <<<"$STAGED" && grep -q "VERSION" <<<"$STAGED" && grep -q "Formula/aiteamforge.rb" <<<"$STAGED" && STAGED_OK=1
 
 if [ "$STAGED_OK" -eq 0 ]; then
   echo "Error: expected CHANGELOG.md, VERSION, and Formula/aiteamforge.rb to be staged. Got:" >&2
@@ -955,7 +955,7 @@ git add homebrew-tap
 
 # Verify staged
 OUTER_STAGED="$(git diff --cached --name-only)"
-if echo "$OUTER_STAGED" | grep -q "homebrew-tap"; then
+if grep -q "homebrew-tap" <<<"$OUTER_STAGED"; then
   echo "  Staged: homebrew-tap submodule pointer."
 else
   echo "Error: homebrew-tap not staged after 'git add homebrew-tap'." >&2

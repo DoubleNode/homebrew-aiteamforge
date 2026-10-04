@@ -1032,7 +1032,7 @@ except Exception:
 
 if [[ "$_lcars_valid" != "ok" ]]; then
     echo "Error: Release '${_release_id}' not found or LCARS returned an error." >&2
-    echo "  Response: $(echo "$_release_json" | head -c 200)" >&2
+    echo "  Response: $(head -c 200 <<<"$_release_json")" >&2
     exit 1
 fi
 

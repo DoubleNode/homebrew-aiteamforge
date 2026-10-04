@@ -303,7 +303,7 @@ else
     _pjf_file="$1"; _pjf_field="$2"
     [ -f "$_pjf_file" ] && [ -r "$_pjf_file" ] || return 1
     LC_ALL=C grep -a -o -E "\"$_pjf_field\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" "$_pjf_file" \
-      | head -1 | sed -E "s/^\"$_pjf_field\"[[:space:]]*:[[:space:]]*\"([^\"]*)\"\$/\1/"
+      | awk 'NR==1' | sed -E "s/^\"$_pjf_field\"[[:space:]]*:[[:space:]]*\"([^\"]*)\"\$/\1/"
   }
 
   # _npm_pkg_ok <dir> -- rc=0 and sets $_CAND_VERSION when <dir> is
@@ -324,7 +324,7 @@ else
     _name=$(_pkg_json_field "$_d/package.json" name) || return 1
     [ "$_name" = "@anthropic-ai/claude-code" ] || return 1
     _v=$(_pkg_json_field "$_d/package.json" version) || return 1
-    printf '%s' "$_v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+' || return 1
+    grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+' <<<"$_v" || return 1
     _CAND_VERSION="$_v"; return 0
   }
 
@@ -719,7 +719,7 @@ _RH_HITS=$(LC_ALL=C grep -a -o -E "=${IDENT}-[0-9]+,${IDENT}=${IDENT}\.testPctOv
 case "$_RH_HITS" in ''|*[!0-9]*) _RH_HITS=0 ;; esac
 [ "$_RH_HITS" -gt 1 ] && note "A4 the qPe headroom anchor matched $_RH_HITS sites — ambiguous, refusing to guess."
 RESERVE_HEADROOM=$(LC_ALL=C grep -a -o -E "=${IDENT}-[0-9]+,${IDENT}=${IDENT}\.testPctOverride" "$BIN" \
-                    | head -1 | sed -E 's/^.*-([0-9]+),.*$/\1/')
+                    | awk 'NR==1' | sed -E 's/^.*-([0-9]+),.*$/\1/')
 [ "$_RH_HITS" -eq 1 ] || RESERVE_HEADROOM=""   # ambiguous or unreadable -> could-not-verify
 # W6 body: `function W6(e,n){let r=Math.min(<maxOutputFn>(e), <K>)`.
 #
@@ -747,7 +747,7 @@ _A0_HITS=$(LC_ALL=C grep -a -o -E "$A0_ANCHOR" "$BIN" | wc -l | tr -d ' ')
 case "$_A0_HITS" in ''|*[!0-9]*) _A0_HITS=0 ;; esac
 if [ "$_A0_HITS" -eq 1 ]; then
   RESERVE_OUTPUT_ID=$(LC_ALL=C grep -a -o -E "$A0_ANCHOR" "$BIN" \
-                       | head -1 | sed -E 's/^Math\.min\([^,]*,([A-Za-z0-9_$]+)\).*$/\1/')
+                       | awk 'NR==1' | sed -E 's/^Math\.min\([^,]*,([A-Za-z0-9_$]+)\).*$/\1/')
 else
   RESERVE_OUTPUT_ID=""
   [ "$_A0_HITS" -gt 1 ] && note "A5 the W6 anchor matched $_A0_HITS sites — ambiguous, refusing to guess which is the real one."
@@ -761,7 +761,7 @@ if [ -n "$RESERVE_OUTPUT_ID" ]; then
   case "$_RO_HITS" in ''|*[!0-9]*) _RO_HITS=0 ;; esac
   if [ "$_RO_HITS" -eq 1 ]; then
     RESERVE_OUTPUT=$(LC_ALL=C grep -a -o -E "[^A-Za-z0-9_$]$(esc_ere "$RESERVE_OUTPUT_ID")=[0-9]+[,;]" "$BIN" \
-                      | head -1 | sed -E 's/^.*=([0-9]+)[,;]$/\1/')
+                      | awk 'NR==1' | sed -E 's/^.*=([0-9]+)[,;]$/\1/')
   else
     # 0 hits = cannot read it; >1 = ambiguous, and picking one would be a guess.
     RESERVE_OUTPUT=""
@@ -771,17 +771,17 @@ else
   RESERVE_OUTPUT=""
 fi
 # Name-free: `Att` is minifier output (2.1.274 `Att` -> 2.1.275 `utt`).
-BUFFER_DEFAULT=$(LC_ALL=C grep -a -o -E "${IDENT}=0\.[0-9]+[,;]?function ${IDENT}\(\)\{let ${IDENT}=${IDENT}\(\"tengu_amber_rokovoko\"" "$BIN" | head -1 | sed -E 's/^[^=]*=(0\.[0-9]+).*$/\1/')
+BUFFER_DEFAULT=$(LC_ALL=C grep -a -o -E "${IDENT}=0\.[0-9]+[,;]?function ${IDENT}\(\)\{let ${IDENT}=${IDENT}\(\"tengu_amber_rokovoko\"" "$BIN" | awk 'NR==1' | sed -E 's/^[^=]*=(0\.[0-9]+).*$/\1/')
 # Direct read of the fallback constant name used by Att().
 ATT_CONST=$(LC_ALL=C grep -a -o -E "function ${IDENT}\(\)\{let ${IDENT}=${IDENT}\(\"tengu_amber_rokovoko\",${IDENT}\)" "$BIN" \
-             | head -1 | sed -E 's/^.*tengu_amber_rokovoko","?([A-Za-z0-9_$]+)\)$/\1/')
+             | awk 'NR==1' | sed -E 's/^.*tengu_amber_rokovoko","?([A-Za-z0-9_$]+)\)$/\1/')
 if [ -n "$ATT_CONST" ]; then
   # Same uniqueness assertion as A5 above — A6 rests entirely on this path
   # (its primary pattern was measured to match ZERO times in real 2.1.274).
   _AC_HITS=$(count_defs "$ATT_CONST")
   case "$_AC_HITS" in ''|*[!0-9]*) _AC_HITS=0 ;; esac
   if [ "$_AC_HITS" -eq 1 ]; then
-    V=$(LC_ALL=C grep -a -o -E "[^A-Za-z0-9_$]$(esc_ere "$ATT_CONST")=(0?\.[0-9]+)[,;]" "$BIN" | head -1 | sed -E 's/^.*=([0-9.]+)[,;]$/\1/')
+    V=$(LC_ALL=C grep -a -o -E "[^A-Za-z0-9_$]$(esc_ere "$ATT_CONST")=(0?\.[0-9]+)[,;]" "$BIN" | awk 'NR==1' | sed -E 's/^.*=([0-9.]+)[,;]$/\1/')
   else
     V=""
     [ "$_AC_HITS" -gt 1 ] && note "A6 '$ATT_CONST' has $_AC_HITS definition sites — ambiguous, refusing to guess."
@@ -1277,7 +1277,8 @@ else
     else
       note "observed over $TOTAL records on THIS machine:"
       printf '%s\n' "$_D2_REST" | tail -n +2 | while IFS=$'\t' read -r v k; do note "  $v  ($k)"; done
-      if printf '%s\n' "$_D2_REST" | tail -n +2 | grep -qE '^(remote_cowork|local-agent)\b'; then
+      _D2_TAIL=$(printf '%s\n' "$_D2_REST" | tail -n +2)  # capture first: grep -q on a pipe SIGPIPEs the writer under pipefail (XACA-1404)
+      if grep -qE '^(remote_cowork|local-agent)\b' <<<"$_D2_TAIL"; then
         fail "D2 a gated entrypoint has APPEARED in this machine's transcripts — re-derive the Sonnet window before leaving P=$P in place."
       elif [ "${FILES_FAILED:-0}" -gt 0 ]; then
         # XACA-1297-019c (PR #955 round 2, BLOCKING): same shape as check C --
