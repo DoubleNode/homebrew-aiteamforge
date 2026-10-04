@@ -512,7 +512,10 @@ _port_in_use() {
     local port="$1"
     # Check lcars-ports/ files
     local _hits
-    _hits=$(grep -r "^${port}$" "${LCARS_PORTS_DIR}"/ 2>/dev/null) || _hits=""
+    # `|| true`, not `|| _hits=""`: grep -r exits 2 when ANY file in the dir is
+    # unreadable, even after printing a real match; keep what it captured
+    # (XACA-1404-032/033).
+    _hits=$(grep -r "^${port}$" "${LCARS_PORTS_DIR}"/ 2>/dev/null) || true
     if grep -q . <<<"$_hits"; then
         return 0
     fi
