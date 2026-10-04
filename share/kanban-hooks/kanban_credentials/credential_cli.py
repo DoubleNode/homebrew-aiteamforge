@@ -21,7 +21,7 @@ import json
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from integrations.credential_store import get_credential_store, CredentialStoreError
+from kanban_credentials.credential_store import get_credential_store, CredentialStoreError
 
 
 def output(success, data=None, error=None):

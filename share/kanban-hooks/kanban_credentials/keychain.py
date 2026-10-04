@@ -7,7 +7,7 @@ This provides an additional layer of security by storing the encryption
 master key in the system keychain rather than deriving it from machine ID.
 
 Usage:
-    from integrations.keychain import KeychainManager
+    from kanban_credentials.keychain import KeychainManager
 
     keychain = KeychainManager()
 

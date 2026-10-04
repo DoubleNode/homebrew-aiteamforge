@@ -909,6 +909,39 @@ provision_msg_routing() {
     return 0
 }
 
+# XACA-1429: kanban-hooks/integrations/ was renamed kanban-hooks/kanban_credentials/.
+# LCARS puts kanban-hooks/ at sys.path[0], so a leftover integrations/ package
+# shadows lcars-ui/integrations and disables every LCARS import/sync endpoint.
+# The hooks copy is additive (never deletes), so retire the old dir explicitly.
+# Moved aside, never deleted (credential data lives in ~/dev-team/config, not
+# here), and only when it holds nothing but files we used to ship.
+retire_legacy_kanban_integrations() {
+  local hooks_dir="$1"
+  local legacy="${hooks_dir}/integrations"
+  [ -d "$legacy" ] || return 0
+
+  local entry name
+  for entry in "$legacy"/* "$legacy"/.[!.]*; do
+    [ -e "$entry" ] || continue
+    name=$(basename "$entry")
+    case "$name" in
+      __init__.py|credential_cli.py|credential_store.py|jira_provider.py|keychain.py|__pycache__|.DS_Store) ;;
+      *)
+        warning "Legacy ${legacy} contains unexpected '${name}'; left in place. Rename or remove it by hand: it shadows LCARS integrations (XACA-1429)"
+        return 0
+        ;;
+    esac
+  done
+
+  local retired="${legacy}.xaca-1429-retired-$(date +%Y%m%d%H%M%S)"
+  if mv "$legacy" "$retired"; then
+    info "Retired legacy kanban-hooks/integrations -> $(basename "$retired") (XACA-1429)"
+  else
+    warning "Could not retire ${legacy}; LCARS issue import will stay disabled until it is moved (XACA-1429)"
+  fi
+  return 0
+}
+
 # Install kanban hooks
 install_kanban_hooks() {
     local hooks_src="$INSTALL_ROOT/share/kanban-hooks"
@@ -926,6 +959,7 @@ install_kanban_hooks() {
 
     # Copy all Python hook files
     cp -r "$hooks_src"/* "$hooks_dest/"
+    retire_legacy_kanban_integrations "$hooks_dest"
 
     # Make hook scripts executable
     chmod +x "$hooks_dest"/*.py 2>/dev/null || true

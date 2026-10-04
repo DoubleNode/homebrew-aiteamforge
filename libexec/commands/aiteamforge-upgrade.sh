@@ -765,6 +765,39 @@ update_lcars() {
   fi
 }
 
+# XACA-1429: kanban-hooks/integrations/ was renamed kanban-hooks/kanban_credentials/.
+# LCARS puts kanban-hooks/ at sys.path[0], so a leftover integrations/ package
+# shadows lcars-ui/integrations and disables every LCARS import/sync endpoint.
+# The hooks copy is additive (never deletes), so retire the old dir explicitly.
+# Moved aside, never deleted (credential data lives in ~/dev-team/config, not
+# here), and only when it holds nothing but files we used to ship.
+retire_legacy_kanban_integrations() {
+  local hooks_dir="$1"
+  local legacy="${hooks_dir}/integrations"
+  [ -d "$legacy" ] || return 0
+
+  local entry name
+  for entry in "$legacy"/* "$legacy"/.[!.]*; do
+    [ -e "$entry" ] || continue
+    name=$(basename "$entry")
+    case "$name" in
+      __init__.py|credential_cli.py|credential_store.py|jira_provider.py|keychain.py|__pycache__|.DS_Store) ;;
+      *)
+        print_warning "Legacy ${legacy} contains unexpected '${name}'; left in place. Rename or remove it by hand: it shadows LCARS integrations (XACA-1429)"
+        return 0
+        ;;
+    esac
+  done
+
+  local retired="${legacy}.xaca-1429-retired-$(date +%Y%m%d%H%M%S)"
+  if mv "$legacy" "$retired"; then
+    print_info "Retired legacy kanban-hooks/integrations -> $(basename "$retired") (XACA-1429)"
+  else
+    print_warning "Could not retire ${legacy}; LCARS issue import will stay disabled until it is moved (XACA-1429)"
+  fi
+  return 0
+}
+
 # Update kanban hooks (Python lifecycle hooks consumed by LCARS + kanban-helpers).
 # BUGFIX XACA-0558: in-place upgrades previously never synced kanban-hooks, so a
 # `brew upgrade` that shipped a new aiteamforge_paths.py to the Cellar left the
@@ -794,9 +827,13 @@ update_kanban_hooks() {
     # framework-shipped hooks while preserving any operator-added files.
     rsync -av "${hooks_source}/" "${hooks_target}/"
     chmod +x "${hooks_target}"/*.py 2>/dev/null || true
+    retire_legacy_kanban_integrations "${hooks_target}"
     print_success "Kanban hooks updated"
   else
     echo "Would sync: ${hooks_source}/ -> ${hooks_target}/"
+    if [ -d "${hooks_target}/integrations" ]; then
+      echo "Would retire legacy: ${hooks_target}/integrations (XACA-1429)"
+    fi
   fi
 }
 

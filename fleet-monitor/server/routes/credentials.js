@@ -26,7 +26,7 @@ const router  = express.Router();
 // When installed via AITeamForge homebrew, kanban-hooks land at $AITEAMFORGE_DIR/kanban-hooks/
 const AITEAMFORGE_DIR  = process.env.AITEAMFORGE_DIR || path.join(process.env.HOME || '/Users/darrenehlers', 'aiteamforge');
 const CREDENTIAL_CLI   = process.env.CREDENTIAL_CLI_PATH ||
-    path.join(AITEAMFORGE_DIR, 'kanban-hooks', 'integrations', 'credential_cli.py');
+    path.join(AITEAMFORGE_DIR, 'kanban-hooks', 'kanban_credentials', 'credential_cli.py');
 
 // ============================================================================
 // CLI HELPER

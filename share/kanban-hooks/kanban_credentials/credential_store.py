@@ -114,7 +114,7 @@ class CredentialStore:
             Passphrase if available, None otherwise
         """
         try:
-            from integrations.keychain import get_passphrase_from_keychain
+            from kanban_credentials.keychain import get_passphrase_from_keychain
             return get_passphrase_from_keychain()
         except ImportError:
             return None
@@ -133,7 +133,7 @@ class CredentialStore:
             True if successful, False otherwise
         """
         try:
-            from integrations.keychain import get_keychain_manager
+            from kanban_credentials.keychain import get_keychain_manager
             keychain = get_keychain_manager()
             if keychain.is_available():
                 keychain.store_passphrase(passphrase)
@@ -151,7 +151,7 @@ class CredentialStore:
             True if successful, False otherwise
         """
         try:
-            from integrations.keychain import get_keychain_manager
+            from kanban_credentials.keychain import get_keychain_manager
             keychain = get_keychain_manager()
             if keychain.is_available():
                 keychain.delete_passphrase()

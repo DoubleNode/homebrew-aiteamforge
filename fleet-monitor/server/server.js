@@ -2604,7 +2604,7 @@ app.get('/api/backup-status', (req, res) => {
 // ============================================================================
 
 // Path to credential CLI
-const CREDENTIAL_CLI = path.join(process.env.HOME || '/Users/darrenehlers', 'dev-team', 'kanban-hooks', 'integrations', 'credential_cli.py');
+const CREDENTIAL_CLI = path.join(process.env.HOME || '/Users/darrenehlers', 'dev-team', 'kanban-hooks', 'kanban_credentials', 'credential_cli.py');
 
 /**
  * Execute credential CLI command
