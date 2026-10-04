@@ -1287,10 +1287,18 @@ _kb_get_release_branch_role() {
 # _kb_get_item_release_branch <board_file> <item_id>
 # Echoes the branch of the release the item is assigned to, or NOTHING (rc 0) when
 # there is no assignment / dangling release / branch not yet recorded -- the caller
-# then falls through to the pre-XACA-1352 behaviour. rc != 0 = real error (unknown
-# item, missing CLI): callers must abort, not guess.
+# then falls through to the pre-XACA-1352 behaviour. An item with no assignment (or
+# an id not on the board) returns before the CLI is touched. rc != 0 = real error
+# for an ASSIGNED item (missing CLI, malformed config): callers must abort, not guess.
 _kb_get_item_release_branch() {
-    local board_file="${1-}" item_id="${2-}" script
+    local board_file="${1-}" item_id="${2-}" script assigned
+    # Fast path: an item (or a subitem's parent) with no releaseAssignment never
+    # touches the CLI, so the pre-XACA-1352 path cannot fail on a missing script.
+    assigned=$(_kb_jq_read "$board_file" \
+        '[.backlog[]? | select(.id == $id or ([.subitems[]?.id] | index($id)))
+          | .releaseAssignment.releaseId // empty] | first // empty' -r \
+        --arg id "$item_id" 2>/dev/null)
+    [[ -z "$assigned" ]] && return 0
     script=$(_kb_release_branches_script) || { echo "Error: cannot locate kanban-hooks/" >&2; return 1; }
     [[ -f "$script" ]] || { echo "Error: missing $script" >&2; return 1; }
     # Validate the team's branch-role config first: a malformed releaseConfig.branches
