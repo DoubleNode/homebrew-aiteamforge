@@ -9513,6 +9513,22 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                             if not isinstance(release.get('stageSha'), dict):
                                 release['stageSha'] = {}
                             release['stageSha']['GAMMA'] = _src
+                    # XACA-1350-005 (spec 3.2 "Records stageSha.<STAGE>", 6.5 one SHA through every pre-CR stage):
+                    # entering QA/ALPHA/BETA records the SHA the stage is graded and tested at, in the SAME locked
+                    # write. Nothing else did, so `kb-release test` (and the /tests endpoint, which accepts only
+                    # sha == stageSha[STAGE]) refused every stage after the first. Source = the EXITED stage's
+                    # graded SHA (DEV's equals the branch HEAD by the DEV exit gate), which with a disabled
+                    # intervening stage is the last recorded one. NEVER overwrites an existing value: new-sha /
+                    # pendingSha keep later stages' entries in step, so a re-promote after a regress already has
+                    # the right one. CR is not here (kb-release cr-stage records stageSha.CR against the branch
+                    # HEAD itself) and GAMMA is the block above. dryRun never reaches this.
+                    if (eff_target in ('QA', 'ALPHA', 'BETA')
+                            and _release_schema.STAGES.index(eff_target) > _release_schema.STAGES.index(cur)):
+                        _src = _release_gate.graded_sha(release, cur) if cur in _release_schema.STAGES else None
+                        if isinstance(_src, str) and _src:
+                            if not isinstance(release.get('stageSha'), dict):
+                                release['stageSha'] = {}
+                            release['stageSha'].setdefault(eff_target, _src)
                     if cut:  # same locked write as the stage change
                         release['branch'] = cut['branch']
                         release['branchBaseSha'] = cut['branchBaseSha']

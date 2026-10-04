@@ -357,11 +357,13 @@ class _Records(object):
 
     def __init__(self, stage, sha, ts):
         self.stage, self.sha, self.ts, self.items = stage, sha, ts, []
+        self._n = 0                 # monotonic: a dropped record (run_stage `only`) must never free its ref for reuse
         self.names = set()          # every record name already written (run-wide uniqueness, XACA-1347-030)
 
     def add(self, test, result, notes, env, parent_ref=None):
         self.names.add(test)
-        ref = "r%d" % (len(self.items) + 1)
+        self._n += 1
+        ref = "r%d" % self._n
         self.items.append({"ref": ref, "parentRef": parent_ref, "stage": self.stage, "type": "Automated",
                            "ts": self.ts, "env": env, "sha": self.sha, "test": test, "result": result,
                            "runBy": "pipeline", "notes": notes or ""})
@@ -521,8 +523,13 @@ def _per_file_rows(fid, protos, pname, owner, seen):
 
 def run_stage(release, stage, providers, *, repo_dir, kanban_dir, env_label_default=None,
               now=None, run=subprocess.run, environ=None, verify=verify_stage_sha,
-              include_scheduled=False, list_timeout=LIST_TIMEOUT_SEC):
+              include_scheduled=False, list_timeout=LIST_TIMEOUT_SEC, only=None):
     """Verify the stage SHA, build the expected set, run AUTOMATED providers.
+
+    `only` (XACA-1350-004, spec 5.2 "running only the expected tests with no current record"): None runs everything;
+    a set of test names runs only those. A provider whose tests are all outside `only` is NOT run; a perFile provider
+    runs just its files in `only`; any other provider runs whole but the records of tests outside `only` are dropped,
+    so a record that is still current is never re-run or re-posted.
 
     Returns {"expected": [...], "records": [proto...], "problems": [...]}.
     Raises RunnerError (nothing run) on a GAMMA safety violation, a missing/invalid stageSha, a dirty
@@ -544,13 +551,25 @@ def run_stage(release, stage, providers, *, repo_dir, kanban_dir, env_label_defa
         if not p.get("envLabel") and env_label_default:
             p = dict(p, envLabel=env_label_default)
         if problem:  # automated AND manual: the reason must reach the board, not only this process's stderr
-            rec.add(_harness(p), "FAIL", problem, p["envLabel"])
+            if only is None or _harness(p) in only:
+                rec.add(_harness(p), "FAIL", problem, p["envLabel"])
             continue
         if p.get("kind") == "manual":
             continue
         if p.get("schedule") and not include_scheduled:
             continue
-        if _run_provider(p, rec, names, repo_dir, environ, run, owner):
+        if only is not None:
+            if not (set(names) & only):
+                continue   # every test of this provider already has a current record
+            if p.get("perFile"):
+                names = [n for n in names if n in only]
+        start = len(rec.items)
+        failed = _run_provider(p, rec, names, repo_dir, environ, run, owner)
+        if only is not None and not p.get("perFile"):
+            drop = {r["ref"] for r in rec.items[start:]
+                    if not r["parentRef"] and r["test"] not in only and not r["test"].endswith("::harness")}
+            rec.items[start:] = [r for r in rec.items[start:] if r["ref"] not in drop and r["parentRef"] not in drop]
+        if failed:
             h = _harness(p)
             if h not in expected:
                 expected.append(h)

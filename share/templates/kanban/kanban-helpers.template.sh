@@ -11320,6 +11320,10 @@ _kb_build_planning_gate_section() {
 #                   Planning Gate tail)
 #   item_json       full backlog item JSON (subitem lines are rendered from .subitems[])
 #   team            team slug for the persona delegation guide
+#   launch_mode     (optional 9th) "release" = a `kb-run <REL-ID>` session (XACA-1350): no Planning Gate, no
+#                   subitem delegation; emits the release resume plan + release rules instead. Empty/absent =
+#                   the item prompt, BYTE-IDENTICAL to before (tests/test-xaca-1350-001-launch-prompt-parity.sh)
+#   launch_extra    (optional 10th) the resume-plan text for release mode (raw; escaped here like every user field)
 #
 # Output: published in the GLOBAL $_KB_LAUNCH_PROMPT (NOT stdout). The result is meant for
 # `echo -e "$_KB_LAUNCH_PROMPT" | cc`, so it contains literal \n sequences.
@@ -11335,6 +11339,8 @@ _kb_build_launch_prompt() {
     local subitem_count="${6-0}"
     local item_json="${7-}"
     local team="${8-}"
+    local launch_mode="${9-}"
+    local launch_extra="${10-}"
     _KB_LAUNCH_PROMPT=""
 
     # XACA-1128: this prompt is emitted via `echo -e`, which expands backslash
@@ -11377,6 +11383,23 @@ _kb_build_launch_prompt() {
     _kb_build_prior_knowledge_section "$item_id" "$title"
     if [[ -n "$_KB_PRIOR_KNOWLEDGE_SECTION" ]]; then
         prompt+="\n\n${_KB_PRIOR_KNOWLEDGE_SECTION}"
+    fi
+
+    # XACA-1350-004: release session (`kb-run <REL-ID>`). The resume plan is computed from the release record by
+    # kanban-hooks/release_resume.py; this branch only frames it. Returns before the item-only sections below.
+    if [[ "$launch_mode" == "release" ]]; then
+        local _kb_prompt_extra="${launch_extra//\\/\\\\}"   # XACA-1128: plan text carries item titles (user text)
+        prompt+="\n\n## Release Resume Plan (computed from the release record; do not re-derive it)\n${_kb_prompt_extra}\n"
+        prompt+="\n## Release session rules\n"
+        prompt+="- Resume exactly at the row above. NEVER re-run a test record that is still current.\n"
+        prompt+="- Stage changes happen ONLY through \`kb-release promote\` (the one gated endpoint). Never edit board or release JSON.\n"
+        prompt+="- QA, ALPHA and BETA chain automatically: run \`kb-release chain ${_kb_prompt_item_id}\` (it promotes only QA->ALPHA, ALPHA->BETA, BETA->CR and stops at failures, manual cases and human gates).\n"
+        prompt+="- Missing automated tests: \`kb-release test ${_kb_prompt_item_id} --repo-dir . --only-missing\`. Manual cases: \`kb-release walkthrough ${_kb_prompt_item_id}\`, one case at a time, each answer recorded at once.\n"
+        prompt+="- DEV->QA is the lead's deliberate call. GAMMA and PROD need the lead's explicit deploy confirmation. Waivers are the lead's alone (\`kb-release waive\`).\n"
+        prompt+="- CR stage: \`kb-release cr-stage ${_kb_prompt_item_id}\`. GAMMA failure: \`kb-release gamma-fail ${_kb_prompt_item_id}\`.\n"
+        prompt+="\nReview the plan, tell the lead what you will do, then do it. Stop at the first human gate."
+        _KB_LAUNCH_PROMPT="$prompt"
+        return 0
     fi
 
     # Planning gate (XACA-0801): items with ZERO subitems have no Review/Test/UX merge
@@ -11905,6 +11928,14 @@ kb-run() {
             *) [[ -z "$selector" ]] && selector="$_kb_arg" ;;
         esac
     done
+
+    # XACA-1350-002 (spec 5.1): any ^REL- selector is a RELEASE session. Dispatched BEFORE the usage block, team
+    # resolution and _kb_resolve_selector: a release id is never an item selector and must not reach that path.
+    # Item selectors fall through untouched.
+    if [[ "$selector" == REL-* ]]; then
+        _kb_release_run "$selector" "$_kb_yes"
+        return $?
+    fi
 
     if [[ -z "$selector" ]]; then
         echo "Usage: kb-run <id> [--yes]"
@@ -26123,6 +26154,156 @@ kb-release-gamma-fail() {
 
 # Unified release command
 # Usage: kb-release <subcommand> [args...]
+# XACA-1350-004: print the resume plan for a release (spec 5.2). Read-only; all logic is kanban-hooks/release_resume.py.
+# Usage: kb-release resume <REL-ID> [--repo-dir <path>] [--json]
+kb-release-resume() {
+    local release_id="" opt_repo="" opt_json=0
+    local usage="Usage: kb-release resume <release-id> [--repo-dir <path>] [--json]"
+    while [[ $# -gt 0 ]]; do
+        case "${1-}" in
+            --repo-dir)
+                if [[ $# -lt 2 ]]; then echo "Error: --repo-dir needs a value" >&2; echo "$usage" >&2; return 2; fi
+                opt_repo="${2-}"; shift 2 ;;
+            --json) opt_json=1; shift ;;
+            --help|-h)
+                echo "$usage"
+                echo ""
+                echo "Compute what a release session resumes with, from the release record alone (spec 5.2): the"
+                echo "table row, the next action, the tests still missing (never one that is current), the first"
+                echo "unanswered manual case, due soak checks, the offered promote. Changes nothing."
+                echo "--repo-dir lets it read the release branch HEAD and enumerate soak providers (default: none)."
+                return 0 ;;
+            -*) echo "Error: Unknown option: ${1-}" >&2; echo "$usage" >&2; return 2 ;;
+            *)
+                if [[ -z "$release_id" ]]; then release_id="${1-}"
+                else echo "Error: Unexpected argument: ${1-}" >&2; echo "$usage" >&2; return 2; fi
+                shift ;;
+        esac
+    done
+    if [[ -z "$release_id" ]]; then echo "Error: Release ID is required" >&2; echo "$usage" >&2; return 2; fi
+    if ! _kb_release_valid_token "$release_id"; then echo "Error: invalid release id: $release_id" >&2; return 2; fi
+    _kb_release_stage_ctx || return 1
+    local args=(plan --release "$release_id" --kanban-dir "$_KB_RS_KDIR")
+    [[ -n "$opt_repo" ]] && args+=(--repo-dir "$opt_repo")
+    (( opt_json )) && args+=(--json)
+    python3 "$(dirname "$_KB_RS_CLI")/release_resume.py" "${args[@]}"
+}
+
+# XACA-1350-005: the auto-promote chain driver (spec 3.3). Thin shell around kanban-hooks/release_chain.py, which owns
+# every rule; every promote it makes is POST /api/releases/<id>/promote, the same gated endpoint as kb-release promote.
+# Usage: kb-release chain <REL-ID> [--repo-dir <path>] [--actor <name>] [--dry-run] [--json]
+# Exit: 0 stopped at a human gate / GAMMA-ready / CR entered | 1 error or no progress | 2 usage | 3 gate or test run
+#       refused | 5 manual case needs the lead | 6 stage failed | 7 stageSha not recorded
+kb-release-chain() {
+    local release_id="" opt_repo="$PWD" opt_actor="" opt_dry=0 opt_json=0
+    local usage="Usage: kb-release chain <release-id> [--repo-dir <path>] [--actor <name>] [--dry-run] [--json]"
+    while [[ $# -gt 0 ]]; do
+        case "${1-}" in
+            --repo-dir)
+                if [[ $# -lt 2 ]]; then echo "Error: --repo-dir needs a value" >&2; echo "$usage" >&2; return 2; fi
+                opt_repo="${2-}"; shift 2 ;;
+            --actor)
+                if [[ $# -lt 2 ]]; then echo "Error: --actor needs a value" >&2; echo "$usage" >&2; return 2; fi
+                opt_actor="${2-}"; shift 2 ;;
+            --dry-run) opt_dry=1; shift ;;
+            --json) opt_json=1; shift ;;
+            --help|-h)
+                echo "$usage"
+                echo ""
+                echo "Auto-promote chain: run the current stage's missing automated tests, and when the stage passed"
+                echo "promote it QA->ALPHA, ALPHA->BETA or BETA->CR (or across disabled stages), then run the new"
+                echo "stage's tests, and repeat. Never DEV->QA, never into GAMMA, never from CR. Stops on a failed"
+                echo "stage, a manual case (kb-release walkthrough), a gate refusal, or a human gate (non-CR teams:"
+                echo "BETA passed = GAMMA-ready). --dry-run changes nothing and reports the first step."
+                echo ""
+                echo "Exit codes: 0 stopped normally, 1 error/no progress, 2 usage, 3 refused, 5 manual case,"
+                echo "            6 stage failed, 7 stageSha not recorded"
+                return 0 ;;
+            -*) echo "Error: Unknown option: ${1-}" >&2; echo "$usage" >&2; return 2 ;;
+            *)
+                if [[ -z "$release_id" ]]; then release_id="${1-}"
+                else echo "Error: Unexpected argument: ${1-}" >&2; echo "$usage" >&2; return 2; fi
+                shift ;;
+        esac
+    done
+    if [[ -z "$release_id" ]]; then echo "Error: Release ID is required" >&2; echo "$usage" >&2; return 2; fi
+    if ! _kb_release_valid_token "$release_id"; then echo "Error: invalid release id: $release_id" >&2; return 2; fi
+    [[ -z "$opt_actor" ]] && opt_actor=$(_kb_release_default_actor)
+    _kb_release_stage_ctx || return 1
+    local args=(--release "$release_id" --kanban-dir "$_KB_RS_KDIR" --repo-dir "$opt_repo" --port "$_KB_RS_PORT" --actor "$opt_actor")
+    (( opt_dry )) && args+=(--dry-run)
+    (( opt_json )) && args+=(--json)
+    python3 "$(dirname "$_KB_RS_CLI")/release_chain.py" "${args[@]}"
+}
+
+# XACA-1350-002/003/004 (spec 5.1): the release runner behind `kb-run <REL-ID>`.
+#   1. load the release record + resume plan (kanban-hooks/release_resume.py)
+#   2. attach to / create the release worktree on release.branch (a PLANNED release has none: stay put, the plan
+#      offers the DEV promote that cuts it -- never invent a branch, never default to develop)
+#   3. build the prompt through the shared _kb_build_launch_prompt (release mode), launch cc
+# Usage (via kb-run): kb-run <REL-ID> [--yes]
+_kb_release_run() {
+    local release_id="${1-}" assume_yes="${2:-0}"
+    if ! _kb_release_valid_token "$release_id"; then echo "Error: invalid release id: $release_id" >&2; return 2; fi
+    _kb_release_stage_ctx || return 1
+    local resume_cli plan_json branch name stage context team
+    resume_cli="$(dirname "$_KB_RS_CLI")/release_resume.py"
+    context=$(_kb_detect_context 2>/dev/null)
+    team="${context%%:*}"
+    plan_json=$(python3 "$resume_cli" plan --release "$release_id" --kanban-dir "$_KB_RS_KDIR" --json) || {
+        echo "✗ kb-run: cannot load release $release_id (see above)" >&2; return 1; }
+    branch=$(printf '%s\n' "$plan_json" | jq -r '.branch // empty')
+    name=$(printf '%s\n' "$plan_json" | jq -r '.name // empty')
+    stage=$(printf '%s\n' "$plan_json" | jq -r '.stage // empty')
+
+    if [[ -n "$branch" ]]; then
+        local git_common git_root project_root wt_out wt_rc
+        git_common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+        [[ -n "$git_common" ]] && git_root=$(dirname "$git_common")
+        if [[ -z "$git_root" || "$git_root" == "." ]]; then
+            echo "✗ kb-run: not in a git repository; run it from the team's repo so release.branch ($branch) can be attached" >&2
+            return 1
+        fi
+        project_root=$(_kb_resolve_project_root "$git_root")
+        wt_out=$(python3 "$resume_cli" worktree --release "$release_id" --kanban-dir "$_KB_RS_KDIR" \
+            --repo-dir "$git_root" --worktree-dir "${project_root}/worktrees/$(printf '%s' "$release_id" | tr '[:upper:]' '[:lower:]')")
+        wt_rc=$?
+        if (( wt_rc != 0 )) || [[ -z "$wt_out" ]]; then
+            echo "✗ kb-run: could not attach/create the worktree for $release_id on $branch" >&2
+            return 1
+        fi
+        echo "✓ Release worktree ${wt_out%%$'\t'*}: ${wt_out#*$'\t'}  (branch $branch)"
+        cd "${wt_out#*$'\t'}" || { echo "✗ kb-run: cannot cd into the release worktree" >&2; return 1; }
+    else
+        echo "ℹ $release_id is $stage with no release branch yet: no worktree (the DEV promote cuts releases/<ver>)."
+    fi
+    # the plan the session starts from; with a worktree it also reads branch HEAD + the soak providers
+    local plan_text
+    local -a plan_args=(plan --release "$release_id" --kanban-dir "$_KB_RS_KDIR")
+    [[ -n "$branch" ]] && plan_args+=(--repo-dir "$PWD")
+    plan_text=$(python3 "$resume_cli" "${plan_args[@]}") || return 1
+    echo "─────────────────────────────────────"
+    printf '%s\n' "$plan_text"
+    echo "─────────────────────────────────────"
+    _kb_confirm_launch kb-run "Start the release session? [Y/n]: " "$assume_yes"
+    local _kb_confirm_rc=$?
+    if [[ $_kb_confirm_rc -eq 2 ]]; then return 2
+    elif [[ $_kb_confirm_rc -ne 0 ]]; then echo "Cancelled. Release session not started."; return 0; fi
+
+    _kb_build_launch_prompt "$release_id" "Release session: ${name:-$release_id} (stage $stage)" "" "" "" 0 "{}" "$team" release "$plan_text"
+    local prompt="$_KB_LAUNCH_PROMPT"
+    export CC_SESSION_NAME="${release_id}: ${name:-release}"
+    if ! _kb_ensure_cc_function "kb-run"; then unset CC_SESSION_NAME; return 1; fi
+    echo -e "$prompt" | \cc
+    local _kb_cc_rc=$?
+    unset CC_SESSION_NAME
+    if (( _kb_cc_rc != 0 )); then
+        echo "✗ kb-run: cc exited $_kb_cc_rc -- the release session may not have launched." >&2
+        return $_kb_cc_rc
+    fi
+    return 0
+}
+
 kb-release() {
     local subcmd="${1-}"
     shift
@@ -26184,6 +26365,14 @@ kb-release() {
             # XACA-1349-005: resumable GAMMA failure / rollback protocol (spec 13.3)
             kb-release-gamma-fail "$@"
             ;;
+        resume)
+            # XACA-1350-004: the resume plan `kb-run <REL-ID>` starts from (spec 5.2)
+            kb-release-resume "$@"
+            ;;
+        chain)
+            # XACA-1350-005: auto-promote chain QA>ALPHA>BETA>CR (spec 3.3)
+            kb-release-chain "$@"
+            ;;
         reschedule)
             kb-release-reschedule "$@"
             ;;
@@ -26224,6 +26413,10 @@ kb-release() {
             echo "                                              Resumable CR stage: draft, lead approval, publish, notify, submit (XACA-1349)"
             echo "  kb-release gamma-fail <id> --by LEAD --summary \"...\" [--rollback-result PASS|FAIL] [--smoke-result PASS|FAIL] [--status]"
             echo "                                              GAMMA failure: record rollback, hold CR, regress to DEV, notify, re-publish (XACA-1349)"
+            echo "  kb-release resume <id> [--repo-dir PATH] [--json]"
+            echo "                                              What a release session resumes with, from the record (XACA-1350)"
+            echo "  kb-release chain <id> [--repo-dir PATH] [--actor NAME] [--dry-run]"
+            echo "                                              Auto-promote chain QA>ALPHA>BETA>CR with stop conditions (XACA-1350)"
             echo "  kb-release plan <id> --reason \"...\"       Demote back to PLANNED (XACA-0729; reason required)"
             echo "  kb-release reschedule <id> <date>          Change target date"
             echo "  kb-release link-cr <rel> <cr>              Link a CR to this release (XACA-0657)"

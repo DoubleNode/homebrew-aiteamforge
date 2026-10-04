@@ -130,6 +130,18 @@ def _gamma_failed_refusal(release, stage, sha, verb, rel_id):
             % (verb, str(sha)[:12], gf.get("at", "?"), gf.get("summary", "?"), rel_id))
 
 
+def missing_tests(release, stage, sha):
+    """Names of the stage's expected tests with NO current record at `sha` (spec 6.4 grading, release_gate._grade), or
+    None when no expected set is stored for this SHA (nothing is known to be current: run everything)."""
+    import release_gate
+    st = (release.get("stages") or {}).get(stage) or {}
+    exp = st.get("expected")
+    if not release_gate._norm_expected(exp) or str(st.get("expectedSha") or "").lower() != str(sha or "").lower():
+        return None
+    return {n for n, o, _w in release_gate._grade(exp, release.get("tests"), sha, st.get("waiver"), stage)
+            if o == "missing"}
+
+
 def cmd_test(a, *, run=None, post=None, out=None):
     import subprocess
     run = run or subprocess.run
@@ -149,11 +161,24 @@ def cmd_test(a, *, run=None, post=None, out=None):
     if refusal:
         print(refusal, file=sys.stderr)
         return RC_REFUSED
+    only = None
+    if getattr(a, "provider", None):   # XACA-1350-004: an explicit provider (a due soak slot) re-runs by design
+        providers = [p for p in providers if p["name"] in a.provider]
+        if not providers:
+            print("kb-release test: no %s provider named %s" % (stage, ", ".join(a.provider)), file=sys.stderr)
+            return RC_USAGE
+    elif getattr(a, "only_missing", False):
+        only = missing_tests(release, stage, sha)
+        if only is not None and not only:
+            say("Nothing to run: every expected test of %s stage %s has a current record at %s"
+                % (a.release, stage, str(sha)[:12]))
+            return RC_OK
     if a.dry_run:
         return _dry_run(a, release, stage, sha, providers, run, say)
     try:
         result = run_stage(release, stage, providers, repo_dir=a.repo_dir, kanban_dir=a.kanban_dir,
-                           verify=verify_only, include_scheduled=a.include_scheduled, run=run)
+                           verify=verify_only, include_scheduled=a.include_scheduled or bool(getattr(a, "provider", None)),
+                           run=run, only=only)
     except RunnerError as e:  # SHA/tree refusal or missing stageSha: nothing ran, nothing posted
         print("kb-release test: refused: %s" % (e,), file=sys.stderr)
         return RC_REFUSED
@@ -240,6 +265,10 @@ def build_parser():
     t.add_argument("--port", type=int, required=True)
     t.add_argument("--include-scheduled", action="store_true")
     t.add_argument("--dry-run", action="store_true")
+    t.add_argument("--only-missing", action="store_true",
+                   help="run only the expected tests with no current record (XACA-1350-004, spec 5.2)")
+    t.add_argument("--provider", action="append", default=None,
+                   help="run only this provider (repeatable; includes scheduled ones). XACA-1350-004")
     w = sub.add_parser("walkthrough")
     w.add_argument("--release", required=True)
     w.add_argument("--kanban-dir", required=True)
