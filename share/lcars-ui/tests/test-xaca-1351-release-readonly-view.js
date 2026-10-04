@@ -70,6 +70,7 @@ vm.runInContext(
     extractFunction('escapeAttr') + '\n' +
     extractFunction('computeReleaseStageTestTotals') + '\n' +
     extractFunction('releaseLifecycleHtml') + '\n' +
+    extractFunction('formatAbsoluteTime') + '\n' +
     extractFunction('promoteStrandedBadgeHtml') + '\n',
     sandbox);
 const totals = sandbox.computeReleaseStageTestTotals;
@@ -183,6 +184,21 @@ check('CR joined via crs[].releaseAssignment.releaseId is shown', h.indexOf('CR-
 check('a CR assigned to another release is not shown', h.indexOf('CR-OTHER') === -1, true);
 check('snapshot-only fields are ignored (state must come from crs[])',
     html({ id: 'R', linkedCRs: [{ crId: 'CR-S', crState: 'cr-approved' }] }, [{ id: 'CR-S' }]).indexOf('cr-approved') === -1, true);
+// XACA-1351-012/013/014 (UX gate advisories)
+check('CR id is plain text; the external page is a separately labelled "Confluence" link',
+    h.indexOf('>CR</span> CR-0001 <a class="release-lifecycle-cr-link"') !== -1 && /cr-link"[^>]*>Confluence<span aria-hidden="true"> ↗<\/span><span class="sr-only"> \(opens in a new tab\)/.test(h), true);
+check('lifecycle block is a named group', h.indexOf('class="release-lifecycle" role="group" aria-label="Release lifecycle (read-only)"') !== -1, true);
+check('current-stage glyph is aria-hidden with sr-only text',
+    h.indexOf('QA<span aria-hidden="true"> ◀</span><span class="sr-only"> (current stage)</span>') !== -1 && h.indexOf('QA ◀') === -1, true);
+check('approval expected is formatted local time with the raw value as tooltip',
+    h.indexOf('<span title="2026-10-05T14:00:00Z">' + sandbox.formatAbsoluteTime('2026-10-05T14:00:00Z') + '</span>') !== -1 &&
+    /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(sandbox.formatAbsoluteTime('2026-10-05T14:00:00Z')), true);
+check('an unparseable approval value is shown escaped as-is, not "NaN"', (() => {
+    const o = html({ id: 'R', linkedCRs: ['CR-X'] }, [{ id: 'CR-X', timestamps: { cr_approval_expected_at: 'soon<b>' } }]);
+    return o.indexOf('soon&lt;b&gt;') !== -1 && o.indexOf('NaN') === -1;
+})(), true);
+check('lcars.css gives the lifecycle CR link a focus-visible outline',
+    /\.release-lifecycle-cr-link:focus-visible\s*\{[^}]*outline:/.test(fs.readFileSync(path.join(__dirname, '..', 'css', 'lcars.css'), 'utf8')), true);
 check('a linked CR with no crs[] record says so explicitly',
     html({ id: 'R', linkedCRs: [{ crId: 'CR-GONE' }] }, []).indexOf('CR record not found on this board') !== -1, true);
 check('defaults crList to window.boardData.crs', (() => {

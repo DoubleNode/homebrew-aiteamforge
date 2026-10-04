@@ -12653,7 +12653,7 @@ function releaseLifecycleHtml(release, crList) {
                 }
             }
             return `<div class="release-lifecycle-row${name === cur ? ' current' : ''}">` +
-                `<span class="release-lifecycle-stage-name">${escapeHtml(name)}${name === cur ? ' ◀' : ''}</span>` +
+                `<span class="release-lifecycle-stage-name">${escapeHtml(name)}${name === cur ? '<span aria-hidden="true"> ◀</span><span class="sr-only"> (current stage)</span>' : ''}</span>` +
                 `${statusHtml}<span class="release-lifecycle-tests">${testsHtml}</span></div>`;
         }).join('');
 
@@ -12687,17 +12687,22 @@ function releaseLifecycleHtml(release, crList) {
                 const state = str(rec.crState);
                 const expected = str(ts.cr_approval_expected_at);
                 const url = safeUrl(rec.cr_confluence_url);
-                const idHtml = id
-                    ? (url
-                        ? `<a class="release-lifecycle-cr-link" href="${escapeAttr(url)}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">${escapeHtml(id)}</a>`
-                        : escapeHtml(id))
-                    : DASH;
-                return `<div class="release-lifecycle-cr"><span class="release-lifecycle-label">CR</span> ${idHtml}` +
+                // The id stays plain text: the Linked CRs chip already navigates in-app, so the
+                // external Confluence page gets its own, distinctly labelled link (XACA-1351-012).
+                const linkHtml = url
+                    ? ` <a class="release-lifecycle-cr-link" href="${escapeAttr(url)}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">Confluence<span aria-hidden="true"> ↗</span><span class="sr-only"> (opens in a new tab)</span></a>`
+                    : '';
+                // Human-readable local time; the raw stored value stays in the tooltip (XACA-1351-014).
+                const expectedHtml = !expected ? NR
+                    : (isNaN(Date.parse(expected)) || typeof formatAbsoluteTime !== 'function')
+                        ? escapeHtml(expected)
+                        : `<span title="${escapeAttr(expected)}">${escapeHtml(formatAbsoluteTime(expected))}</span>`;
+                return `<div class="release-lifecycle-cr"><span class="release-lifecycle-label">CR</span> ${escapeHtml(id)}${linkHtml}` +
                     ` <span class="release-lifecycle-label">STATE</span> ${state ? escapeHtml(state) : NR}` +
-                    ` <span class="release-lifecycle-label">APPROVAL EXPECTED</span> ${expected ? escapeHtml(expected) : NR}</div>`;
+                    ` <span class="release-lifecycle-label">APPROVAL EXPECTED</span> ${expectedHtml}</div>`;
             }).join('');
 
-        return `<div class="release-lifecycle" aria-label="Release lifecycle (read-only)">` +
+        return `<div class="release-lifecycle" role="group" aria-label="Release lifecycle (read-only)">` +
             `<div class="release-lifecycle-head"><span class="release-lifecycle-label">STAGE</span> ` +
             `<span class="release-lifecycle-current">${cur ? escapeHtml(cur) : DASH}</span>` +
             `<span class="release-lifecycle-ro">read-only — stages change via kb-release</span></div>` +
