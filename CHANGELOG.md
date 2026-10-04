@@ -6,6 +6,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1351** (Fixed, PR #1052 static-guards): re-mirror `share/lcars-ui/js/lcars.js` and `index.html` — approval-time span restructured so the escaper-context classifier stays at its baseline; output unchanged.
 - **XACA-1351** (Fixed, gate advisories): re-mirror `share/lcars-ui/js/lcars.js`, `index.html`, `css/lcars.css`, `CHANGELOG.md` and `tests/test-xaca-1351-release-readonly-view.js` — lifecycle block a11y, distinct "Confluence ↗" CR link, local-time expected approval.
 - **XACA-1351** (Changed): mirror the read-only LCARS Releases tab — `share/lcars-ui/js/lcars.js`, `index.html`, `css/lcars.css` drop the PROMOTE button/modal (stages change only via `kb-release` through the gated endpoint) and gain a read-only stage / test-totals / CR block; `share/scripts/kb-release-push-promote` help no longer claims kb-git-push calls it. Retired promote-modal tests (`test-xaca-1346-promote-*`, `test-xaca-1375-promote-cr-notes.js`) are deleted; `test-xaca-1351-release-readonly-view.js` added.
 - **XACA-1404** (Fixed, PR #1050 advisories -032/-033): `share/scripts/kb-init-team` `_port_in_use` keeps a real match when `grep -r` exits 2 on an unreadable `lcars-ports/` file (`|| true` instead of `|| _hits=""`), so a taken port no longer reads free.

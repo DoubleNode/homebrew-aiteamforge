@@ -12696,7 +12696,7 @@ function releaseLifecycleHtml(release, crList) {
                 const expectedHtml = !expected ? NR
                     : (isNaN(Date.parse(expected)) || typeof formatAbsoluteTime !== 'function')
                         ? escapeHtml(expected)
-                        : `<span title="${escapeAttr(expected)}">${escapeHtml(formatAbsoluteTime(expected))}</span>`;
+                        : `<span title="${escapeAttr(expected)}">` + escapeHtml(formatAbsoluteTime(expected)) + '</span>';
                 return `<div class="release-lifecycle-cr"><span class="release-lifecycle-label">CR</span> ${escapeHtml(id)}${linkHtml}` +
                     ` <span class="release-lifecycle-label">STATE</span> ${state ? escapeHtml(state) : NR}` +
                     ` <span class="release-lifecycle-label">APPROVAL EXPECTED</span> ${expectedHtml}</div>`;
