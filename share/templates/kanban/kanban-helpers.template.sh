@@ -11939,10 +11939,12 @@ kb-run() {
 
     if [[ -z "$selector" ]]; then
         echo "Usage: kb-run <id> [--yes]"
+        echo "       kb-run <REL-ID> [--yes]   release session: attach/create the release worktree, resume from the record (XACA-1350)"
         echo "  --yes, -y   skip the confirmation prompt (required without a tty; or set KB_ASSUME_YES=1)"
         echo "Launches Claude Code with task details and auto-creates worktree."
         echo "Use 'kb-backlog list' to see available items"
         echo "Example: kb-run XFRE-0001"
+        echo "Example: kb-run REL-2026-Q3-012"
         echo ""
         echo "Auto-created worktrees will prompt for cleanup when Claude exits."
         echo "Disable with: KB_WT_CLEANUP_PROMPT=0"
@@ -26426,7 +26428,7 @@ kb-release() {
             echo "                                              GAMMA failure: record rollback, hold CR, regress to DEV, notify, re-publish (XACA-1349)"
             echo "  kb-release resume <id> [--repo-dir PATH] [--json]"
             echo "                                              What a release session resumes with, from the record (XACA-1350)"
-            echo "  kb-release chain <id> [--repo-dir PATH] [--actor NAME] [--dry-run]"
+            echo "  kb-release chain <id> [--repo-dir PATH] [--actor NAME] [--dry-run] [--json]"
             echo "                                              Auto-promote chain QA>ALPHA>BETA>CR with stop conditions (XACA-1350)"
             echo "  kb-release plan <id> --reason \"...\"       Demote back to PLANNED (XACA-0729; reason required)"
             echo "  kb-release reschedule <id> <date>          Change target date"
