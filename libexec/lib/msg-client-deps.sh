@@ -37,6 +37,37 @@
 # (feedback_set_e_last_line_short_circuit.md) — every branch below returns
 # explicitly via an `if`/`return 0`, never via `&&` short-circuit.
 
+# XACA-1225-021: the vault-tier readiness vocabulary (credential census +
+# the LOUD install/upgrade warning below). Located relative to THIS file so
+# both callers (install-shell.sh via $SCRIPT_DIR/../lib, aiteamforge-upgrade.sh
+# via $LIBEXEC_DIR/lib) pick up the sibling without threading a path through.
+# Defensive: if the sibling is missing (partially-upgraded install), the call
+# sites below fall back to an unconditional loud warning — never silence.
+# shellcheck source=./vault-readiness.sh
+_aitf_mcd_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
+if [ -n "$_aitf_mcd_dir" ] && [ -f "$_aitf_mcd_dir/vault-readiness.sh" ]; then
+  . "$_aitf_mcd_dir/vault-readiness.sh"
+fi
+unset _aitf_mcd_dir
+
+# _aitf_mcd_vault_warning <scripts_dir> <reason> — LOUD (not fatal) warning
+# that the vault credential tier is off. Delegates the condition and wording
+# to vault-readiness.sh; if that lib is unavailable, prints a short loud
+# banner unconditionally (fail-closed: loud is the safe direction).
+_aitf_mcd_vault_warning() {
+  if command -v aitf_vault_tier_loud_warning >/dev/null 2>&1; then
+    aitf_vault_tier_loud_warning "$1" "$2"
+    return 0
+  fi
+  {
+    echo "################################################################################"
+    echo "##  WARNING: VAULT CREDENTIAL TIER IS OFF (${2}) — teams without an env-var"
+    echo "##  key will REFUSE TO LAUNCH. Fix: (cd \"${1}\" && npm ci --omit=dev)"
+    echo "################################################################################"
+  } >&2
+  return 0
+}
+
 # _aitf_consumer_datafiles: the non-executed require()/import payload that
 # must ship alongside the executable helper scripts in
 # $AITEAMFORGE_DIR/scripts/ on EVERY consumer box — msg-client.js's and
@@ -112,8 +143,11 @@ _xaca1225_lockfile_stamp() {
 # ALWAYS returns 0 — every failure mode here (files not shipped, no node/npm
 # on PATH, a network failure, npm exiting non-zero) is fail-soft: this must
 # never abort `aiteamforge setup` or `aiteamforge upgrade`. A missing Node.js
-# only disables cross-machine kb-msg (Tier 2, sealed relay) — same-machine
-# kb-msg (Tier 1) is unaffected. Callers that need to know whether deps ended
+# disables cross-machine kb-msg (Tier 2, sealed relay) — same-machine kb-msg
+# (Tier 1) is unaffected — AND the vault credential tier (vault-fetch.sh needs
+# the same libsodium-wrappers), which is why those two failure branches print
+# a LOUD boxed warning via _aitf_mcd_vault_warning (XACA-1225-021). Loud, not
+# fatal: the rc stays 0. Callers that need to know whether deps ended
 # up installed should test scripts_dir/node_modules/libsodium-wrappers
 # themselves rather than trusting this function's exit code for that.
 provision_msg_client_node_deps() {
@@ -135,6 +169,9 @@ provision_msg_client_node_deps() {
   if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
     echo "Note: Node.js/npm not found on PATH — skipping kb-msg client dependency install." >&2
     echo "      Cross-machine kb-msg (Tier 2, sealed relay) will be unavailable until Node.js >= 18 is installed; same-machine kb-msg is unaffected." >&2
+    # XACA-1225-021: the same Node deps back the vault credential tier, and
+    # its failure mode is NOT benign — say so loudly.
+    _aitf_mcd_vault_warning "$scripts_dir" "Node.js/npm not found on PATH"
     return 0
   fi
 
@@ -173,5 +210,8 @@ provision_msg_client_node_deps() {
   echo "Warning: npm ci failed for kb-msg client deps in $scripts_dir." >&2
   echo "         Cross-machine kb-msg (Tier 2, sealed relay) will be unavailable until this is resolved by hand:" >&2
   echo "         (cd \"$scripts_dir\" && npm ci --omit=dev)" >&2
+  # XACA-1225-021: ...and the vault credential tier is off too, which makes
+  # undeclared/keyless routed teams REFUSE to launch. Loud, still non-fatal.
+  _aitf_mcd_vault_warning "$scripts_dir" "npm ci --omit=dev failed in $scripts_dir"
   return 0
 }

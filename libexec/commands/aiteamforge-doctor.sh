@@ -33,6 +33,11 @@ source "${LIBEXEC_DIR}/lib/launchagents.sh"
 # vault-drift.sh's own header comment for why the duplicate mattered).
 # shellcheck source=../lib/vault-drift.sh
 [ -f "${LIBEXEC_DIR}/lib/vault-drift.sh" ] && source "${LIBEXEC_DIR}/lib/vault-drift.sh" 2>/dev/null || true
+# XACA-1225-021: vault credential-tier readiness (node / libsodium-wrappers /
+# vault-fetch smoke) — ONE implementation shared with bin/aiteamforge-doctor.sh
+# and msg-client-deps.sh's install-time loud warning.
+# shellcheck source=../lib/vault-readiness.sh
+[ -f "${LIBEXEC_DIR}/lib/vault-readiness.sh" ] && source "${LIBEXEC_DIR}/lib/vault-readiness.sh" 2>/dev/null || true
 # XACA-1070-007: mandatory-team vocabulary (atf_mandatory_teams/
 # atf_is_mandatory_team/atf_team_provisioned) — the SAME lib the setup
 # wizard's force-append and the upgrade backfill source, so this doctor
@@ -83,6 +88,7 @@ Components:
   version-drift   Cellar vs working-dir version drift (XACA-0578)
   helpers-drift   Installed kanban-helpers.sh function inventory vs shipped template (XACA-1095)
   vault-drift     vault-fetch.js / vault-keygen.js vs shipped copy byte drift (XACA-1322)
+  vault-readiness node + libsodium-wrappers + vault-fetch smoke for routed teams (XACA-1225-021)
   config          Configuration files and validity
   board           Kanban board resolution + template/stub-collision detection (XACA-0655)
   connect         Cockpit connect scripts vs installed team instances (XACA-0845)
@@ -1192,6 +1198,33 @@ check_vault_keygen_drift() {
     FAIL) check_result fail "$_AITF_VD_MSG" ;;
     *) : ;;  # SKIP (or unset) -- nothing to render; the fetch_js gate above already covers it
   esac
+}
+
+# XACA-1225-021: is the vault credential tier usable? Renders
+# aitf_vault_readiness_report (lib/vault-readiness.sh) — see that lib's header
+# for the checks, the fail-closed severity rule and why the scripts dir is
+# <working_dir>/scripts. Mirrored in bin/aiteamforge-doctor.sh (XACA-0807).
+check_vault_readiness() {
+  print_section "Checking Vault Credential Tier Readiness"
+
+  if ! command -v aitf_vault_readiness_report >/dev/null 2>&1; then
+    check_result warn "vault-readiness.sh not available — could not check the vault credential tier" \
+      "Expected: ${LIBEXEC_DIR}/lib/vault-readiness.sh"
+    return
+  fi
+
+  local working_dir report _sev _msg _detail
+  working_dir=$(get_working_dir)
+  report="$(aitf_vault_readiness_report "${working_dir}/scripts" "${working_dir}/kanban-hooks")" || true
+  while IFS="$(printf '\t')" read -r _sev _msg _detail; do
+    case "$_sev" in
+      pass|warn|fail) check_result "$_sev" "$_msg" "$_detail" ;;
+      info) print_info "  $_msg" ;;
+      *) : ;;
+    esac
+  done <<VREOF
+$report
+VREOF
 }
 
 # Check: Configuration
@@ -2467,6 +2500,9 @@ case "$CHECK_COMPONENT" in
   vault-drift)
     check_vault_keygen_drift
     ;;
+  vault-readiness)
+    check_vault_readiness
+    ;;
   config)
     check_config
     ;;
@@ -2508,6 +2544,7 @@ case "$CHECK_COMPONENT" in
     check_version_drift
     check_kanban_helpers_inventory
     check_vault_keygen_drift
+    check_vault_readiness
     check_config
     check_board_resolution
     check_connect_scripts

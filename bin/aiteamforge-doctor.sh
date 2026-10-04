@@ -70,6 +70,14 @@ if [ -f "$AITEAMFORGE_HOME/libexec/lib/mandatory-teams.sh" ]; then
   . "$AITEAMFORGE_HOME/libexec/lib/mandatory-teams.sh" && _MANDATORY_TEAMS_LIB_OK=true
 fi
 
+# XACA-1225-021: vault credential-tier readiness — the SAME lib
+# libexec/commands/aiteamforge-doctor.sh and msg-client-deps.sh source, so the
+# two doctors cannot disagree (XACA-0807). Defensive, same idiom as above.
+_VAULT_READINESS_LIB_OK=false
+if [ -f "$AITEAMFORGE_HOME/libexec/lib/vault-readiness.sh" ]; then
+  . "$AITEAMFORGE_HOME/libexec/lib/vault-readiness.sh" && _VAULT_READINESS_LIB_OK=true
+fi
+
 # Working directory
 AITEAMFORGE_DIR="${AITEAMFORGE_DIR:-$HOME/aiteamforge}"
 
@@ -107,6 +115,7 @@ Components:
   permissions     Check file permissions
   install         Validate post-install structure (teams, scripts, LCARS, venv)
   mandatory-teams Missing/unprovisioned mandatory team fleet install (XACA-1070)
+  vault-readiness node + libsodium-wrappers + vault-fetch smoke for routed teams (XACA-1225-021)
   all             Run all checks (default)
 
 Examples:
@@ -1136,6 +1145,36 @@ EOF
   echo ""
 }
 
+# XACA-1225-021: vault credential-tier readiness. Renders
+# aitf_vault_readiness_report (libexec/lib/vault-readiness.sh); see that lib's
+# header for the checks and severity rule. Mirrored in
+# libexec/commands/aiteamforge-doctor.sh (XACA-0807).
+check_vault_readiness() {
+  echo -e "${CYAN}Checking vault credential tier readiness...${NC}"
+  echo ""
+
+  if [ "$_VAULT_READINESS_LIB_OK" != true ] || ! command -v aitf_vault_readiness_report >/dev/null 2>&1; then
+    check_result warn "vault-readiness.sh not available — could not check the vault credential tier" \
+      "Expected: ${AITEAMFORGE_HOME}/libexec/lib/vault-readiness.sh"
+    echo ""
+    return
+  fi
+
+  local report _sev _msg _detail
+  report="$(aitf_vault_readiness_report "${AITEAMFORGE_DIR}/scripts" "${AITEAMFORGE_DIR}/kanban-hooks")" || true
+  while IFS="$(printf '\t')" read -r _sev _msg _detail; do
+    case "$_sev" in
+      pass|warn|fail) check_result "$_sev" "$_msg" "$_detail" ;;
+      info) echo -e "  ${BLUE}i${NC} $_msg" ;;
+      *) : ;;
+    esac
+  done <<VREOF
+$report
+VREOF
+
+  echo ""
+}
+
 # Check post-install structure via validate-install library
 check_install() {
   echo -e "${CYAN}Checking post-install structure...${NC}"
@@ -1200,6 +1239,9 @@ case "$CHECK_COMPONENT" in
   mandatory-teams)
     check_mandatory_teams
     ;;
+  vault-readiness)
+    check_vault_readiness
+    ;;
   all)
     check_dependencies
     check_framework
@@ -1209,6 +1251,7 @@ case "$CHECK_COMPONENT" in
     check_permissions
     check_install
     check_mandatory_teams
+    check_vault_readiness
     ;;
   *)
     echo -e "${RED}ERROR: Unknown component: ${CHECK_COMPONENT}${NC}" >&2
