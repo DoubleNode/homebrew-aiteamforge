@@ -25303,10 +25303,11 @@ _kb_release_stage_ctx() {
 }
 
 # Run the CURRENT stage's automated test providers and record the results.
-# Usage: kb-release test <REL-ID> [--repo-dir <path>] [--include-scheduled] [--dry-run]
+# Usage: kb-release test <REL-ID> [--repo-dir <path>] [--include-scheduled] [--dry-run] [--only-missing] [--provider <name>]...
 kb-release-test() {
-    local release_id="" opt_repo="" opt_sched=0 opt_dry=0
-    local usage="Usage: kb-release test <release-id> [--repo-dir <path>] [--include-scheduled] [--dry-run]"
+    local release_id="" opt_repo="" opt_sched=0 opt_dry=0 opt_missing=0
+    local -a opt_providers=()
+    local usage="Usage: kb-release test <release-id> [--repo-dir <path>] [--include-scheduled] [--dry-run] [--only-missing] [--provider <name>]..."
 
     while [[ $# -gt 0 ]]; do
         case "${1-}" in
@@ -25315,6 +25316,10 @@ kb-release-test() {
                 opt_repo="${2-}"; shift 2 ;;
             --include-scheduled) opt_sched=1; shift ;;
             --dry-run) opt_dry=1; shift ;;
+            --only-missing) opt_missing=1; shift ;;
+            --provider)
+                if [[ $# -lt 2 ]]; then echo "Error: --provider needs a value" >&2; echo "$usage" >&2; return 2; fi
+                opt_providers+=("${2-}"); shift 2 ;;
             --help|-h)
                 echo "$usage"
                 echo ""
@@ -25326,6 +25331,9 @@ kb-release-test() {
                 echo "  --include-scheduled  Also run 'schedule'd (soak) providers"
                 echo "  --dry-run            Show providers + expected set; run no tests, post nothing"
                 echo "                       (listCommand IS run to enumerate the expected set)"
+                echo "  --only-missing       Run only the expected tests with no current record (XACA-1350)"
+                echo "  --provider <name>    Run only this provider, including a scheduled (soak) one;"
+                echo "                       repeatable (XACA-1350)"
                 echo ""
                 echo "SHA handling is VERIFY ONLY: the repo's HEAD must equal the release's"
                 echo "stageSha for the current stage and the tree must be clean, otherwise the"
@@ -25362,6 +25370,9 @@ kb-release-test() {
     local args=(test --release "$release_id" --kanban-dir "$_KB_RS_KDIR" --repo-dir "$opt_repo" --port "$_KB_RS_PORT")
     [[ "$opt_sched" -eq 1 ]] && args+=(--include-scheduled)
     [[ "$opt_dry" -eq 1 ]] && args+=(--dry-run)
+    [[ "$opt_missing" -eq 1 ]] && args+=(--only-missing)
+    local _kb_rt_p
+    for _kb_rt_p in "${opt_providers[@]}"; do args+=(--provider "$_kb_rt_p"); done
     python3 "$_KB_RS_CLI" "${args[@]}"
 }
 
@@ -26401,7 +26412,7 @@ kb-release() {
             echo "                                              Move back to an earlier stage (reason required)"
             echo "  kb-release waive <id> --stage STAGE --reason \"...\" --tests t1,t2 [--by NAME]"
             echo "                                              Lead-approved gate waiver"
-            echo "  kb-release test <id> [--repo-dir PATH] [--include-scheduled] [--dry-run]"
+            echo "  kb-release test <id> [--repo-dir PATH] [--include-scheduled] [--dry-run] [--only-missing] [--provider NAME]..."
             echo "                                              Run the current stage's automated test providers (XACA-1347)"
             echo "  kb-release walkthrough <id> [--provider NAME] [--lead NAME]"
             echo "                                              Interactive manual-provider walkthrough (XACA-1347)"
