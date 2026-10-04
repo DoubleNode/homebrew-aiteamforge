@@ -11305,6 +11305,165 @@ _kb_build_planning_gate_section() {
     printf '%s' "$_section"
 }
 
+# _kb_build_launch_prompt — build the Claude launch prompt shared by kb-run and kb-work
+# (XACA-1350-001: extracted verbatim from the two duplicated inline copies; ZERO behavior
+# change — tests/test-xaca-1350-001-launch-prompt-parity.sh pins the output byte-for-byte).
+#
+# Usage:
+#   _kb_build_launch_prompt <item_id> <title> <description> <jira_id> <github_issue> \
+#                           <subitem_count> <item_json> <team>
+#
+# Arguments (all positional, any may be empty; pass the RAW, unescaped values — the helper
+# does the XACA-1128 backslash escaping itself):
+#   item_id, title, description, jira_id, github_issue   board fields for the header block
+#   subitem_count   number of subitems (selects the Subitems/delegation section vs the
+#                   Planning Gate tail)
+#   item_json       full backlog item JSON (subitem lines are rendered from .subitems[])
+#   team            team slug for the persona delegation guide
+#
+# Output: published in the GLOBAL $_KB_LAUNCH_PROMPT (NOT stdout). The result is meant for
+# `echo -e "$_KB_LAUNCH_PROMPT" | cc`, so it contains literal \n sequences.
+# MUST be called as a plain statement, NOT inside $(...): it calls
+# _kb_build_prior_knowledge_section, which detaches a background KB search that a
+# command-substitution subshell would kill on return (XACA-0720).
+_kb_build_launch_prompt() {
+    local item_id="${1-}"
+    local title="${2-}"
+    local description="${3-}"
+    local jira_id="${4-}"
+    local github_issue="${5-}"
+    local subitem_count="${6-0}"
+    local item_json="${7-}"
+    local team="${8-}"
+    _KB_LAUNCH_PROMPT=""
+
+    # XACA-1128: this prompt is emitted via `echo -e`, which expands backslash
+    # escapes in ANY text it's given — including user-authored board data
+    # interpolated below. A literal `\bword\b` or `C:\dev\team` gets mangled,
+    # and `\c` specifically TRUNCATES everything after it. Escape into
+    # separate _kb_prompt_* copies (NOT in place) so echo -e's expansion
+    # collapses each doubled backslash back to one literal backslash IN THE
+    # PROMPT ONLY. The caller's own variables are never touched: this helper takes
+    # the raw values by value, so the non-prompt uses that live in kb-run/kb-work
+    # (terminal echo, kb-plan window title, CC_SESSION_NAME, board writes) keep
+    # showing the user's literal text.
+    local _kb_prompt_item_id="${item_id//\\/\\\\}"
+    local _kb_prompt_title="${title//\\/\\\\}"
+    local _kb_prompt_description="${description//\\/\\\\}"
+    local _kb_prompt_jira_id="${jira_id//\\/\\\\}"
+    local _kb_prompt_github_issue="${github_issue//\\/\\\\}"
+
+    local prompt="Build a todo list to accomplish this task:\n\n"
+    prompt+="## Task ID: $_kb_prompt_item_id\n"
+    prompt+="## Main Task\n$_kb_prompt_title\n"
+
+    if [[ -n "$description" ]]; then
+        prompt+="\n## Description\n$_kb_prompt_description\n"
+    fi
+
+    if [[ -n "$jira_id" ]]; then
+        prompt+="\n## JIRA: $_kb_prompt_jira_id"
+    fi
+
+    if [[ -n "$github_issue" ]]; then
+        prompt+="\n## GitHub: $_kb_prompt_github_issue"
+    fi
+
+    # Prior knowledge injection (XACA-0720): surface relevant KB entries before subitems.
+    # Best-effort: skipped on error/timeout/no-hits; section appears only when non-empty.
+    # MUST be a plain statement (NOT $(...)) — the helper detaches its KB search so the
+    # attributed pre-work telemetry always fires; a command-substitution subshell would
+    # kill that search on return. The section is published into $_KB_PRIOR_KNOWLEDGE_SECTION.
+    _kb_build_prior_knowledge_section "$item_id" "$title"
+    if [[ -n "$_KB_PRIOR_KNOWLEDGE_SECTION" ]]; then
+        prompt+="\n\n${_KB_PRIOR_KNOWLEDGE_SECTION}"
+    fi
+
+    # Planning gate (XACA-0801): items with ZERO subitems have no Review/Test/UX merge
+    # rail. Emits nothing when subitem_count > 0 or KB_PLAN_GATE_DISABLED is set.
+    local _kb_planning_gate_section
+    _kb_planning_gate_section=$(_kb_build_planning_gate_section "$item_id" "$subitem_count")
+    if [[ -n "$_kb_planning_gate_section" ]]; then
+        prompt+="\n\n${_kb_planning_gate_section}"
+    fi
+
+    # Add subitems if present (subitem_count already computed above)
+    if [[ "$subitem_count" -gt 0 ]]; then
+        prompt+="\n\n## Subitems\n"
+        local subitems
+        # Include subitem ID in the output
+        subitems=$(printf '%s\n' "$item_json" | jq -r '.subitems[] | "- **\(.id)**: [\(.status)] \(.title)\(if .jiraKey then " (\(.jiraKey))" else "" end)"')
+        # XACA-1128: subitem titles are user-authored board data; echo -e later
+        # expands backslashes in them (see note above local prompt=). Escape in
+        # place — $subitems is used only for this prompt line.
+        subitems="${subitems//\\/\\\\}"
+        prompt+="$subitems\n"
+
+        prompt+="\n## CRITICAL: Subitem Delegation Requirements\n"
+        prompt+="**Subitems are designed for parallel execution by DIFFERENT subagents.**\n"
+        prompt+="You (the primary agent) should DELEGATE each subitem to a separate subagent using the Task tool.\n\n"
+        prompt+="### Subitem Tracking Commands (for subagents)\n"
+        prompt+="Each subagent MUST run these bash commands:\n\n"
+        prompt+="**Before Starting Work:**\n"
+        prompt+="\`\`\`bash\n"
+        prompt+="source ${AITEAMFORGE_DIR}/kanban-helpers.sh && kb-backlog sub start ${_kb_prompt_item_id}-001\n"
+        prompt+="\`\`\`\n\n"
+        prompt+="**After Completing Work:**\n"
+        prompt+="\`\`\`bash\n"
+        prompt+="source ${AITEAMFORGE_DIR}/kanban-helpers.sh && kb-backlog sub done ${_kb_prompt_item_id}-001\n"
+        prompt+="\`\`\`\n\n"
+        prompt+="### Delegation Workflow\n"
+        prompt+="1. Review all subitems and understand the overall scope\n"
+        prompt+="2. For each subitem with status [todo], spawn a subagent using the Task tool\n"
+        prompt+="3. Include in each subagent prompt:\n"
+        prompt+="   - The subitem ID and description\n"
+        prompt+="   - The tracking commands above (sub start/sub done)\n"
+        prompt+="   - Context about the parent task as needed\n"
+        prompt+="4. Monitor subagent progress or run them in parallel\n"
+        prompt+="5. Verify all subitems are marked [completed]\n"
+        prompt+="6. **IMPORTANT:** When ALL subitems are complete, run \`source ${AITEAMFORGE_DIR}/kanban-helpers.sh && kb-done\` to mark the parent task as completed\n\n"
+
+        # Inject persona selection guide for this team
+        local persona_guide
+        persona_guide=$(_kb_get_persona_delegation_guide "$team")
+        if [[ -n "$persona_guide" ]]; then
+            prompt+="### Subagent Persona Selection\n"
+            prompt+="**REQUIRED:** When delegating subitems via the Task tool, set the \`subagent_type\` parameter to the persona matching the work type.\n\n"
+            prompt+="$persona_guide\n\n"
+            prompt+="Choose the persona whose role best matches the subitem's work. For research/exploration, use \`Explore\`. For simple shell commands, use \`Bash\`.\n\n"
+        fi
+
+        prompt+="### Retrospective Subitem — Special Delegation Rules\n"
+        prompt+="**The 'Retrospective and Knowledge Capture' subitem MUST create a retrospective FILE.**\n"
+        prompt+="When delegating this subitem, your prompt MUST include:\n"
+        prompt+="1. The retrospective file path: \`kb-retro-path ${_kb_prompt_item_id}\` (run this to get the exact path)\n"
+        prompt+="2. The template to copy from: \`~/knowledge/templates/retrospective_template.md\`\n"
+        prompt+="3. Explicit instruction: 'You MUST create the retrospective file. Knowledge entries alone are NOT sufficient.'\n"
+        prompt+="4. The \`kb-backlog sub done\` command will BLOCK completion if the retro file is missing.\n\n"
+
+        prompt+="**DO NOT complete all subitems yourself.** Delegate to subagents for parallel execution.\n"
+        prompt+="**DO NOT skip tracking steps.** They update the kanban board so progress is visible in the Fleet Monitor.\n"
+        prompt+="**DO NOT directly edit the board JSON files.** Always use the commands above.\n"
+        prompt+="**DO NOT close the terminal without running kb-done.** This clears the task from the workflow board.\n"
+    fi
+
+    # XACA-0801: this tail asserted "delegate each subitem" unconditionally, even when
+    # subitem_count is 0 — nonsensical when there's nothing to delegate. The subitem_count>0
+    # branch is BYTE-IDENTICAL to the pre-XACA-0801 text (regression guard: do not reflow).
+    if [[ "$subitem_count" -gt 0 ]]; then
+        prompt+="\n\nReview the task and subitems above, then wait for approval before delegating work.\n"
+        prompt+="When approved, DELEGATE each subitem to a separate subagent using the Task tool.\n"
+        prompt+="When ALL subitems are complete, run \`kb-done\` to mark the task as completed before closing the terminal."
+    else
+        prompt+="\n\nReview the task above. Follow the Planning Gate instructions above to create subitems before proceeding.\n"
+        prompt+="Once subitems exist and are approved, DELEGATE each subitem to a separate subagent using the Task tool.\n"
+        prompt+="When ALL subitems are complete, run \`kb-done\` to mark the task as completed before closing the terminal."
+    fi
+
+    _KB_LAUNCH_PROMPT="$prompt"
+    return 0
+}
+
 # _kb_ensure_cc_function <caller-name>
 #
 # XACA-1300-014: the base ~/.zshrc (home-scripts/.zshrc) USED TO define a
@@ -11921,129 +12080,11 @@ kb-run() {
         fi
     fi
 
-    # Build the prompt
-    # XACA-1128: this prompt is emitted via `echo -e`, which expands backslash
-    # escapes in ANY text it's given — including user-authored board data
-    # interpolated below. A literal `\bword\b` or `C:\dev\team` gets mangled,
-    # and `\c` specifically TRUNCATES everything after it. Escape into
-    # separate _kb_prompt_* copies (NOT in place) so echo -e's expansion
-    # collapses each doubled backslash back to one literal backslash IN THE
-    # PROMPT ONLY — item_id/title/description/jira_id/github_issue stay
-    # unescaped for the non-prompt uses below (terminal echo, kb-plan window
-    # title, CC_SESSION_NAME, board writes), which must keep showing the
-    # user's literal text.
-    local _kb_prompt_item_id="${item_id//\\/\\\\}"
-    local _kb_prompt_title="${title//\\/\\\\}"
-    local _kb_prompt_description="${description//\\/\\\\}"
-    local _kb_prompt_jira_id="${jira_id//\\/\\\\}"
-    local _kb_prompt_github_issue="${github_issue//\\/\\\\}"
-
-    local prompt="Build a todo list to accomplish this task:\n\n"
-    prompt+="## Task ID: $_kb_prompt_item_id\n"
-    prompt+="## Main Task\n$_kb_prompt_title\n"
-
-    if [[ -n "$description" ]]; then
-        prompt+="\n## Description\n$_kb_prompt_description\n"
-    fi
-
-    if [[ -n "$jira_id" ]]; then
-        prompt+="\n## JIRA: $_kb_prompt_jira_id"
-    fi
-
-    if [[ -n "$github_issue" ]]; then
-        prompt+="\n## GitHub: $_kb_prompt_github_issue"
-    fi
-
-    # Prior knowledge injection (XACA-0720): surface relevant KB entries before subitems.
-    # Best-effort: skipped on error/timeout/no-hits; section appears only when non-empty.
-    # MUST be a plain statement (NOT $(...)) — the helper detaches its KB search so the
-    # attributed pre-work telemetry always fires; a command-substitution subshell would
-    # kill that search on return. The section is published into $_KB_PRIOR_KNOWLEDGE_SECTION.
-    _kb_build_prior_knowledge_section "$item_id" "$title"
-    if [[ -n "$_KB_PRIOR_KNOWLEDGE_SECTION" ]]; then
-        prompt+="\n\n${_KB_PRIOR_KNOWLEDGE_SECTION}"
-    fi
-
-    # Planning gate (XACA-0801): items with ZERO subitems have no Review/Test/UX merge
-    # rail. Emits nothing when subitem_count > 0 or KB_PLAN_GATE_DISABLED is set.
-    local _kb_planning_gate_section
-    _kb_planning_gate_section=$(_kb_build_planning_gate_section "$item_id" "$subitem_count")
-    if [[ -n "$_kb_planning_gate_section" ]]; then
-        prompt+="\n\n${_kb_planning_gate_section}"
-    fi
-
-    # Add subitems if present (subitem_count already computed above)
-    if [[ "$subitem_count" -gt 0 ]]; then
-        prompt+="\n\n## Subitems\n"
-        local subitems
-        # Include subitem ID in the output
-        subitems=$(printf '%s\n' "$item_json" | jq -r '.subitems[] | "- **\(.id)**: [\(.status)] \(.title)\(if .jiraKey then " (\(.jiraKey))" else "" end)"')
-        # XACA-1128: subitem titles are user-authored board data; echo -e later
-        # expands backslashes in them (see note above local prompt=). Escape in
-        # place — $subitems is used only for this prompt line.
-        subitems="${subitems//\\/\\\\}"
-        prompt+="$subitems\n"
-
-        prompt+="\n## CRITICAL: Subitem Delegation Requirements\n"
-        prompt+="**Subitems are designed for parallel execution by DIFFERENT subagents.**\n"
-        prompt+="You (the primary agent) should DELEGATE each subitem to a separate subagent using the Task tool.\n\n"
-        prompt+="### Subitem Tracking Commands (for subagents)\n"
-        prompt+="Each subagent MUST run these bash commands:\n\n"
-        prompt+="**Before Starting Work:**\n"
-        prompt+="\`\`\`bash\n"
-        prompt+="source ${AITEAMFORGE_DIR}/kanban-helpers.sh && kb-backlog sub start ${_kb_prompt_item_id}-001\n"
-        prompt+="\`\`\`\n\n"
-        prompt+="**After Completing Work:**\n"
-        prompt+="\`\`\`bash\n"
-        prompt+="source ${AITEAMFORGE_DIR}/kanban-helpers.sh && kb-backlog sub done ${_kb_prompt_item_id}-001\n"
-        prompt+="\`\`\`\n\n"
-        prompt+="### Delegation Workflow\n"
-        prompt+="1. Review all subitems and understand the overall scope\n"
-        prompt+="2. For each subitem with status [todo], spawn a subagent using the Task tool\n"
-        prompt+="3. Include in each subagent prompt:\n"
-        prompt+="   - The subitem ID and description\n"
-        prompt+="   - The tracking commands above (sub start/sub done)\n"
-        prompt+="   - Context about the parent task as needed\n"
-        prompt+="4. Monitor subagent progress or run them in parallel\n"
-        prompt+="5. Verify all subitems are marked [completed]\n"
-        prompt+="6. **IMPORTANT:** When ALL subitems are complete, run \`source ${AITEAMFORGE_DIR}/kanban-helpers.sh && kb-done\` to mark the parent task as completed\n\n"
-
-        # Inject persona selection guide for this team
-        local persona_guide
-        persona_guide=$(_kb_get_persona_delegation_guide "$team")
-        if [[ -n "$persona_guide" ]]; then
-            prompt+="### Subagent Persona Selection\n"
-            prompt+="**REQUIRED:** When delegating subitems via the Task tool, set the \`subagent_type\` parameter to the persona matching the work type.\n\n"
-            prompt+="$persona_guide\n\n"
-            prompt+="Choose the persona whose role best matches the subitem's work. For research/exploration, use \`Explore\`. For simple shell commands, use \`Bash\`.\n\n"
-        fi
-
-        prompt+="### Retrospective Subitem — Special Delegation Rules\n"
-        prompt+="**The 'Retrospective and Knowledge Capture' subitem MUST create a retrospective FILE.**\n"
-        prompt+="When delegating this subitem, your prompt MUST include:\n"
-        prompt+="1. The retrospective file path: \`kb-retro-path ${_kb_prompt_item_id}\` (run this to get the exact path)\n"
-        prompt+="2. The template to copy from: \`~/knowledge/templates/retrospective_template.md\`\n"
-        prompt+="3. Explicit instruction: 'You MUST create the retrospective file. Knowledge entries alone are NOT sufficient.'\n"
-        prompt+="4. The \`kb-backlog sub done\` command will BLOCK completion if the retro file is missing.\n\n"
-
-        prompt+="**DO NOT complete all subitems yourself.** Delegate to subagents for parallel execution.\n"
-        prompt+="**DO NOT skip tracking steps.** They update the kanban board so progress is visible in the Fleet Monitor.\n"
-        prompt+="**DO NOT directly edit the board JSON files.** Always use the commands above.\n"
-        prompt+="**DO NOT close the terminal without running kb-done.** This clears the task from the workflow board.\n"
-    fi
-
-    # XACA-0801: this tail asserted "delegate each subitem" unconditionally, even when
-    # subitem_count is 0 — nonsensical when there's nothing to delegate. The subitem_count>0
-    # branch is BYTE-IDENTICAL to the pre-XACA-0801 text (regression guard: do not reflow).
-    if [[ "$subitem_count" -gt 0 ]]; then
-        prompt+="\n\nReview the task and subitems above, then wait for approval before delegating work.\n"
-        prompt+="When approved, DELEGATE each subitem to a separate subagent using the Task tool.\n"
-        prompt+="When ALL subitems are complete, run \`kb-done\` to mark the task as completed before closing the terminal."
-    else
-        prompt+="\n\nReview the task above. Follow the Planning Gate instructions above to create subitems before proceeding.\n"
-        prompt+="Once subitems exist and are approved, DELEGATE each subitem to a separate subagent using the Task tool.\n"
-        prompt+="When ALL subitems are complete, run \`kb-done\` to mark the task as completed before closing the terminal."
-    fi
+    # Build the prompt (shared with kb-run/kb-work via _kb_build_launch_prompt; see its
+    # header for the XACA-1128 echo -e backslash-escaping contract).
+    _kb_build_launch_prompt "$item_id" "$title" "$description" "$jira_id" "$github_issue" \
+        "$subitem_count" "$item_json" "$team"
+    local prompt="$_KB_LAUNCH_PROMPT"
 
     # Check for worktree conflicts before starting
     local worktree_path conflict
@@ -12298,127 +12339,11 @@ kb-work() {
     _kb_require_epic "$board_file" "$index" "$item_id" || return 1
     _kb_require_release "$board_file" "$index" "$item_id" || return 1
 
-    # Build the prompt (same as kb-run)
-    # XACA-1128: this prompt is emitted via `echo -e`, which expands backslash
-    # escapes in ANY text it's given — including user-authored board data
-    # interpolated below. A literal `\bword\b` or `C:\dev\team` gets mangled,
-    # and `\c` specifically TRUNCATES everything after it. Escape into
-    # separate _kb_prompt_* copies (NOT in place) so echo -e's expansion
-    # collapses each doubled backslash back to one literal backslash IN THE
-    # PROMPT ONLY — item_id/title/description/jira_id/github_issue stay
-    # unescaped for the non-prompt uses below (terminal echo, kb-plan window
-    # title, CC_SESSION_NAME), which must keep showing the user's literal text.
-    local _kb_prompt_item_id="${item_id//\\/\\\\}"
-    local _kb_prompt_title="${title//\\/\\\\}"
-    local _kb_prompt_description="${description//\\/\\\\}"
-    local _kb_prompt_jira_id="${jira_id//\\/\\\\}"
-    local _kb_prompt_github_issue="${github_issue//\\/\\\\}"
-
-    local prompt="Build a todo list to accomplish this task:\n\n"
-    prompt+="## Task ID: $_kb_prompt_item_id\n"
-    prompt+="## Main Task\n$_kb_prompt_title\n"
-
-    if [[ -n "$description" ]]; then
-        prompt+="\n## Description\n$_kb_prompt_description\n"
-    fi
-
-    if [[ -n "$jira_id" ]]; then
-        prompt+="\n## JIRA: $_kb_prompt_jira_id"
-    fi
-
-    if [[ -n "$github_issue" ]]; then
-        prompt+="\n## GitHub: $_kb_prompt_github_issue"
-    fi
-
-    # Prior knowledge injection (XACA-0720): surface relevant KB entries before subitems.
-    # Best-effort: skipped on error/timeout/no-hits; section appears only when non-empty.
-    # MUST be a plain statement (NOT $(...)) — the helper detaches its KB search so the
-    # attributed pre-work telemetry always fires; a command-substitution subshell would
-    # kill that search on return. The section is published into $_KB_PRIOR_KNOWLEDGE_SECTION.
-    _kb_build_prior_knowledge_section "$item_id" "$title"
-    if [[ -n "$_KB_PRIOR_KNOWLEDGE_SECTION" ]]; then
-        prompt+="\n\n${_KB_PRIOR_KNOWLEDGE_SECTION}"
-    fi
-
-    # Planning gate (XACA-0801): items with ZERO subitems have no Review/Test/UX merge
-    # rail. Emits nothing when subitem_count > 0 or KB_PLAN_GATE_DISABLED is set.
-    local _kb_planning_gate_section
-    _kb_planning_gate_section=$(_kb_build_planning_gate_section "$item_id" "$subitem_count")
-    if [[ -n "$_kb_planning_gate_section" ]]; then
-        prompt+="\n\n${_kb_planning_gate_section}"
-    fi
-
-    # Add subitems if present
-    if [[ "$subitem_count" -gt 0 ]]; then
-        prompt+="\n\n## Subitems\n"
-        local subitems
-        subitems=$(printf '%s\n' "$item_json" | jq -r '.subitems[] | "- **\(.id)**: [\(.status)] \(.title)\(if .jiraKey then " (\(.jiraKey))" else "" end)"')
-        # XACA-1128: subitem titles are user-authored board data; echo -e later
-        # expands backslashes in them (see note above local prompt=). Escape in
-        # place — $subitems is used only for this prompt line.
-        subitems="${subitems//\\/\\\\}"
-        prompt+="$subitems\n"
-
-        prompt+="\n## CRITICAL: Subitem Delegation Requirements\n"
-        prompt+="**Subitems are designed for parallel execution by DIFFERENT subagents.**\n"
-        prompt+="You (the primary agent) should DELEGATE each subitem to a separate subagent using the Task tool.\n\n"
-        prompt+="### Subitem Tracking Commands (for subagents)\n"
-        prompt+="Each subagent MUST run these bash commands:\n\n"
-        prompt+="**Before Starting Work:**\n"
-        prompt+="\`\`\`bash\n"
-        prompt+="source ${AITEAMFORGE_DIR}/kanban-helpers.sh && kb-backlog sub start ${_kb_prompt_item_id}-001\n"
-        prompt+="\`\`\`\n\n"
-        prompt+="**After Completing Work:**\n"
-        prompt+="\`\`\`bash\n"
-        prompt+="source ${AITEAMFORGE_DIR}/kanban-helpers.sh && kb-backlog sub done ${_kb_prompt_item_id}-001\n"
-        prompt+="\`\`\`\n\n"
-        prompt+="### Delegation Workflow\n"
-        prompt+="1. Review all subitems and understand the overall scope\n"
-        prompt+="2. For each subitem with status [todo], spawn a subagent using the Task tool\n"
-        prompt+="3. Include in each subagent prompt:\n"
-        prompt+="   - The subitem ID and description\n"
-        prompt+="   - The tracking commands above (sub start/sub done)\n"
-        prompt+="   - Context about the parent task as needed\n"
-        prompt+="4. Monitor subagent progress or run them in parallel\n"
-        prompt+="5. Verify all subitems are marked [completed]\n"
-        prompt+="6. **IMPORTANT:** When ALL subitems are complete, run \`source ${AITEAMFORGE_DIR}/kanban-helpers.sh && kb-done\` to mark the parent task as completed\n\n"
-
-        # Inject persona selection guide for this team
-        local persona_guide
-        persona_guide=$(_kb_get_persona_delegation_guide "$team")
-        if [[ -n "$persona_guide" ]]; then
-            prompt+="### Subagent Persona Selection\n"
-            prompt+="**REQUIRED:** When delegating subitems via the Task tool, set the \`subagent_type\` parameter to the persona matching the work type.\n\n"
-            prompt+="$persona_guide\n\n"
-            prompt+="Choose the persona whose role best matches the subitem's work. For research/exploration, use \`Explore\`. For simple shell commands, use \`Bash\`.\n\n"
-        fi
-
-        prompt+="### Retrospective Subitem — Special Delegation Rules\n"
-        prompt+="**The 'Retrospective and Knowledge Capture' subitem MUST create a retrospective FILE.**\n"
-        prompt+="When delegating this subitem, your prompt MUST include:\n"
-        prompt+="1. The retrospective file path: \`kb-retro-path ${_kb_prompt_item_id}\` (run this to get the exact path)\n"
-        prompt+="2. The template to copy from: \`~/knowledge/templates/retrospective_template.md\`\n"
-        prompt+="3. Explicit instruction: 'You MUST create the retrospective file. Knowledge entries alone are NOT sufficient.'\n"
-        prompt+="4. The \`kb-backlog sub done\` command will BLOCK completion if the retro file is missing.\n\n"
-
-        prompt+="**DO NOT complete all subitems yourself.** Delegate to subagents for parallel execution.\n"
-        prompt+="**DO NOT skip tracking steps.** They update the kanban board so progress is visible in the Fleet Monitor.\n"
-        prompt+="**DO NOT directly edit the board JSON files.** Always use the commands above.\n"
-        prompt+="**DO NOT close the terminal without running kb-done.** This clears the task from the workflow board.\n"
-    fi
-
-    # XACA-0801: this tail asserted "delegate each subitem" unconditionally, even when
-    # subitem_count is 0 — nonsensical when there's nothing to delegate. The subitem_count>0
-    # branch is BYTE-IDENTICAL to the pre-XACA-0801 text (regression guard: do not reflow).
-    if [[ "$subitem_count" -gt 0 ]]; then
-        prompt+="\n\nReview the task and subitems above, then wait for approval before delegating work.\n"
-        prompt+="When approved, DELEGATE each subitem to a separate subagent using the Task tool.\n"
-        prompt+="When ALL subitems are complete, run \`kb-done\` to mark the task as completed before closing the terminal."
-    else
-        prompt+="\n\nReview the task above. Follow the Planning Gate instructions above to create subitems before proceeding.\n"
-        prompt+="Once subitems exist and are approved, DELEGATE each subitem to a separate subagent using the Task tool.\n"
-        prompt+="When ALL subitems are complete, run \`kb-done\` to mark the task as completed before closing the terminal."
-    fi
+    # Build the prompt (shared with kb-run/kb-work via _kb_build_launch_prompt; see its
+    # header for the XACA-1128 echo -e backslash-escaping contract).
+    _kb_build_launch_prompt "$item_id" "$title" "$description" "$jira_id" "$github_issue" \
+        "$subitem_count" "$item_json" "$team"
+    local prompt="$_KB_LAUNCH_PROMPT"
 
     # Check for worktree conflicts before starting
     local worktree_path conflict
