@@ -165,3 +165,4 @@ test-xaca-1225-021-vault-readiness.sh           plain-shell
 test-xaca-1225-001-msg-client-deps.sh           plain-shell
 test-xaca-1225-002-msg-relay-reporter.sh        plain-shell
 test-xaca-1225-msg-inbox-check-shipping.sh      plain-shell
+test-xaca-1225-022-vault-smoke-parity.sh        plain-shell

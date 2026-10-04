@@ -85,6 +85,223 @@ if ! command -v _cc_credential_team >/dev/null 2>&1; then
     unset _cc_ctr_f
 fi
 
+# ═══════════════════════════════════════════════════════════════════════════
+# XACA-1225-022: vault-planning rules, exposed at TOP LEVEL.
+#
+# These used to be nested inside _cc_export_account_credentials (or inline in
+# it). They were moved out VERBATIM so that `aiteamforge doctor --check
+# vault-readiness` (homebrew-tap libexec/lib/vault-readiness.sh) can source
+# THIS file and ask the router itself which vault-fetch it would run, which
+# (engine, account) candidates it would try, and whether it would refuse --
+# instead of re-implementing the rules a second time. A hand copy in the
+# doctor diverged in PR #1053 (XACA-1225-022: V1-V7). Behaviour of the router
+# is unchanged: every call site below calls these with the same arguments it
+# used to evaluate inline. zsh, like the rest of this file.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# _cc_is_team_identity_slug <team> — the XACA-0539-011 team-identity gate:
+# leading alphanumeric, then [A-Za-z0-9_-]. Deliberately LOOSER than
+# _cc_is_vault_slug (it admits uppercase and '_'); see XACA-1184-017 in
+# _cc_vault_candidates for why the vault candidates re-check with the strict
+# predicate.
+_cc_is_team_identity_slug() {
+    local team="$1"
+    [[ -z "${team//[A-Za-z0-9_-]/}" && "$team" == [A-Za-z0-9]* ]]
+}
+
+# VALIDATE BEFORE THE SUBPROCESS, AND NOTE WHY IT IS NOT MERELY HYGIENE.
+# These slugs come from a hand-editable JSON file and are interpolated into
+# both a subprocess argument and a cache path. But there is a second, sharper
+# reason: vault-fetch.js REJECTS a malformed slug with exit 1 — and exit 1 is
+# also what the wrapper returns when libsodium-wrappers is missing under
+# VAULT_FETCH_NO_AUTO_INSTALL=1 (which is how this function always invokes
+# it). Those two conditions are indistinguishable by exit code alone. Letting
+# a bad slug reach the subprocess would manufacture a phantom
+# missing-dependency signal, and the `*)` arm below would then fail CLOSED on
+# a machine whose only actual fault is a typo in a config file. Validating
+# here keeps exit 1 meaning exactly one thing.
+#
+# Pattern is vault-fetch.js's own canonical SLUG_RE (/^[a-z][a-z0-9-]*$/,
+# MAX_SLUG_LEN 64), mirroring server-side vault-store.js SLUG_RE and
+# engines-routes.js ACCOUNT_SLUG_RE. Kept in step with that file by hand;
+# it is a copy, and a copy verified against itself would prove nothing.
+_cc_is_vault_slug() {
+    local _s="$1"
+    [[ -n "$_s" && ${#_s} -le 64 && "$_s" == [a-z]* && -z "${_s//[a-z0-9-]/}" ]]
+}
+
+# _cc_engine_refusal_reason <team> <engine_slug> — Engine guard
+# (XACA-0282-012 §2.5). Prints the refusal message and returns 0 when the
+# route must be REFUSED (a non-empty engine other than "anthropic"); prints
+# nothing and returns 1 when the route is usable. Every tier is
+# Anthropic-specific, so a non-anthropic credential must never reach claude.
+_cc_engine_refusal_reason() {
+    local team="$1" engine_slug="$2"
+    if [[ -n "$engine_slug" && "$engine_slug" != "anthropic" ]]; then
+        print -r -- "Team '${team}' ai.credential targets engine '${engine_slug}', not 'anthropic' — claude cannot use it. Route this team to an anthropic credential, or set AITEAMFORGE_ALLOW_DEFAULT_OAUTH=1 to launch on the machine login."
+        return 0
+    fi
+    return 1
+}
+
+# _cc_resolve_vault_fetch — print the vault-fetch.sh path the router uses.
+# Candidate order (see the call site in _cc_export_account_credentials for the
+# full rationale):
+#   1. CC_ROUTING_VAULT_FETCH, only with CC_ROUTING_TEST_MODE=1 (XACA-1312-012)
+#   2. $_CC_ROUTING_CORE_DIR/../fleet-monitor/client/vault-fetch.sh (dev layout)
+#   3. $_CC_ROUTING_CORE_DIR/vault-fetch.sh (flattened consumer layout)
+_cc_resolve_vault_fetch() {
+    local _vault_fetch=""
+    if [[ -n "${CC_ROUTING_VAULT_FETCH:-}" && "${CC_ROUTING_TEST_MODE:-0}" == "1" ]]; then
+        _vault_fetch="$CC_ROUTING_VAULT_FETCH"
+        print -u2 "ℹ CC_ROUTING_TEST_MODE=1 — vault-fetch path overridden via CC_ROUTING_VAULT_FETCH=${_vault_fetch}"
+    elif [[ -e "${_CC_ROUTING_CORE_DIR}/../fleet-monitor/client/vault-fetch.sh" ]]; then
+        _vault_fetch="${_CC_ROUTING_CORE_DIR}/../fleet-monitor/client/vault-fetch.sh"
+    else
+        _vault_fetch="${_CC_ROUTING_CORE_DIR}/vault-fetch.sh"
+    fi
+    print -r -- "$_vault_fetch"
+}
+
+# _cc_vault_candidates <team> <account_slug> — fill the global array
+# _CC_VAULT_CANDIDATES with the account slugs to ask the vault for, most
+# specific first, printing the router's operator warnings to stderr. The
+# caller tries them IN ORDER and advances past one ONLY on vault-fetch exit 7
+# (definitive not-found). An empty result means "skip the vault tier".
+typeset -ga _CC_VAULT_CANDIDATES
+_cc_vault_candidates() {
+    setopt LOCAL_OPTIONS NO_KSH_ARRAYS
+    local team="$1" account_slug="$2"
+    # --- XACA-1184-005: which (engine, account) pair(s) to ask the vault for ---
+    #
+    # THE DEFECT: both call sites below asked for `anthropic <team>`, but two
+    # independent writers seal into DIFFERENT account namespaces —
+    # vault-migrate-env-keys.js under anthropic/<team>, Fleet Monitor's UI under
+    # <engine_slug>/<account_slug> (XACA-0282-012 §7 Q3). A team routed through
+    # the UI was therefore unreachable from `cc`: the launcher was asking a
+    # question whose answer could only ever live in the other half of the
+    # namespace.
+    #
+    # THE TEAM-KEY FALLBACK IS PERMANENT, NOT A DEPRECATION PATH. The migrator
+    # keeps writing anthropic/<team> and is not scheduled to stop, so a team with
+    # no account_slug is CORRECTLY served there — it is a live, supported layout,
+    # not a legacy remnant. Do NOT attach a deprecation warning, a "legacy key"
+    # notice, or any other per-launch nag to this arm: it would fire on a
+    # correctly-configured machine, every launch, forever.
+    #
+
+
+    # Candidate account slugs, most specific first. Only exit 7 advances past
+    # the first (see the loop below).
+    local -a _vault_accounts
+    _vault_accounts=()
+
+    # Decided BEFORE the account_slug arm below so its message can tell the truth
+    # about what happens next. When both slugs are bad, an unconditional "using
+    # the team vault key" would promise a fallback the very next line retracts.
+    local _team_slug_ok=0
+    if _cc_is_vault_slug "$team"; then
+        _team_slug_ok=1
+    fi
+
+    if [[ -n "$account_slug" ]]; then
+        if _cc_is_vault_slug "$account_slug"; then
+            _vault_accounts+=("$account_slug")
+        else
+            # Declared but unusable. Say so once — this is a real configuration
+            # fault an operator must fix, NOT the routine no-account_slug case
+            # (which is silent, because it is correct).
+            #
+            # XACA-1184-021: state the remedy, echo the offending value, and name
+            # the file it lives in. The message used to say only that the slug was
+            # invalid, which told an operator that something was wrong and nothing
+            # about what to type instead — its siblings all end with an actionable
+            # clause ("Seal a key with vault-put to fix."), and this one must too.
+            # The SLUG is a config field, not a secret, so echoing it is safe and
+            # is the difference between a two-minute fix and a hunt.
+            if [[ "$_team_slug_ok" -eq 1 ]]; then
+                print -u2 "⚠ Team '${team}' has an invalid ai.credential account_slug '${account_slug}' — ignoring it and using the team vault key"
+            else
+                print -u2 "⚠ Team '${team}' has an invalid ai.credential account_slug '${account_slug}' — ignoring it"
+            fi
+            print -u2 "⚠ A valid slug starts with a lowercase letter, then lowercase letters, digits or hyphens, max 64 chars. Fix teams.${team}.ai.credential.account_slug in ~/.aiteamforge/team-paths.json."
+        fi
+    fi
+    # Permanent fallback: the migrator's namespace. Skipped only when it would
+    # duplicate the account-keyed attempt (asking the identical question twice
+    # would double the launch latency and log the same 404 twice).
+    #
+    # XACA-1184-017: the fallback candidate is validated with the SAME predicate
+    # as the account-keyed one. It was not, and the two guards do not agree: the
+    # team guard at the top of this function admits [A-Za-z0-9_-], so 'Academy',
+    # 'acct_1' and '9team' all reach here and are then rejected by vault-fetch.js's
+    # own SLUG_RE with exit 1 — which is ALSO what the wrapper returns for a
+    # missing libsodium-wrappers. That reintroduces exactly the exit-1 ambiguity
+    # the account_slug validation above exists to remove, letting a config typo
+    # manufacture a phantom missing-dependency signal. Latent today (MEASURED: 0
+    # of 27 live slugs offend), which is why it is worth closing now rather than
+    # during the incident that finds it.
+    #
+    # When the team slug itself fails, the candidate is SKIPPED rather than
+    # sanitised or passed through. Sanitising would silently ask the vault about
+    # a DIFFERENT account than the one configured — the wrong-account-billed
+    # failure this whole ticket is about — and passing it through is the exit-1
+    # ambiguity above. Skipping can leave the list empty, and an empty list means
+    # the vault tier is not attempted at all: control falls through to the env-var
+    # tier with _vault_configured=0, which is the same state as "vault-fetch.sh is
+    # not installed" and is already handled correctly downstream. That is the
+    # honest answer — we have no well-formed key to ask for.
+    if [[ "$_team_slug_ok" -eq 1 ]]; then
+        if [[ "${#_vault_accounts[@]}" -eq 0 || "${_vault_accounts[1]}" != "$team" ]]; then
+            _vault_accounts+=("$team")
+        fi
+    elif [[ "${#_vault_accounts[@]}" -eq 0 ]]; then
+        # No usable candidate in either namespace. Only warn here — when a valid
+        # account_slug was queued the team-key fallback is a silent optimisation
+        # whose absence changes nothing the operator can act on.
+        print -u2 "⚠ Team identity '${team}' is not a usable vault account slug — skipping the vault and falling back to the env-var tier"
+        print -u2 "⚠ A valid slug starts with a lowercase letter, then lowercase letters, digits or hyphens, max 64 chars. Rename the team, or seal this team's key under a valid slug with vault-put."
+    fi
+    _CC_VAULT_CANDIDATES=("${_vault_accounts[@]}")
+}
+
+# _cc_vault_probe_plan <team> <engine_slug> <account_slug> — machine-readable
+# plan for the doctor. TAB-separated lines on stdout, in the router's own
+# decision order (team-identity gate -> engine guard -> candidates):
+#   fetch<TAB><vault-fetch.sh path>          (always first)
+#   skip<TAB><reason>                        team identity unusable, or no candidate
+#   refuse<TAB><router refusal message>      non-anthropic engine
+#   engine<TAB><engine>                      then one or more:
+#   candidate<TAB><account>
+# The doctor sources this file under zsh and calls this ONE function; the
+# rc-7-only advance across candidates is the loop rule documented on
+# _cc_vault_candidates.
+_cc_vault_probe_plan() {
+    setopt LOCAL_OPTIONS NO_KSH_ARRAYS
+    local team="$1" engine_slug="$2" account_slug="$3"
+    local _tab=$'\t' _vf _msg _c
+    _vf="$(_cc_resolve_vault_fetch 2>/dev/null)"
+    print -r -- "fetch${_tab}${_vf}"
+    if ! _cc_is_team_identity_slug "$team"; then
+        print -r -- "skip${_tab}Team identity '${team}' is not a valid slug — the router uses default Anthropic OAuth (no vault)"
+        return 0
+    fi
+    if _msg="$(_cc_engine_refusal_reason "$team" "$engine_slug")"; then
+        print -r -- "refuse${_tab}${_msg}"
+        return 0
+    fi
+    _cc_vault_candidates "$team" "$account_slug" 2>/dev/null
+    if [[ "${#_CC_VAULT_CANDIDATES[@]}" -eq 0 ]]; then
+        print -r -- "skip${_tab}Team identity '${team}' is not a usable vault account slug and no valid account_slug — the router skips the vault tier"
+        return 0
+    fi
+    print -r -- "engine${_tab}${engine_slug:-anthropic}"
+    for _c in "${_CC_VAULT_CANDIDATES[@]}"; do
+        print -r -- "candidate${_tab}${_c}"
+    done
+    return 0
+}
+
 # Resolve the Anthropic account credentials for the current team using a tiered
 # source chain (vault → sealed cache → env-var). Reads team identity from
 # SESSION_TYPE / LCARS_TEAM / KB_TEAM (priority order), then looks up the team
@@ -252,7 +469,8 @@ if mode & 0o077:
     # spaces, $, ;, newlines, path separators) is rejected — closes the
     # shell/command-injection surface from operator-controlled SESSION_TYPE /
     # LCARS_TEAM / KB_TEAM env vars.
-    if [[ -n "${team//[A-Za-z0-9_-]/}" || "$team" != [A-Za-z0-9]* ]]; then
+    # XACA-1225-022: predicate shared via the top-level _cc_is_team_identity_slug.
+    if ! _cc_is_team_identity_slug "$team"; then
         print -u2 "⚠ Team identity '${team}' is not a valid slug — using default Anthropic OAuth"
         return 0
     fi
@@ -509,12 +727,16 @@ except Exception:
     # silently wrong (a future gateway/OpenAI key reaching claude as an
     # Anthropic token). Print one line and let claude use its own login.
     # XACA-0283's dispatcher replaces this guard.
-    if [[ -n "$engine_slug" && "$engine_slug" != "anthropic" ]]; then
-        # XACA-1312 §3.2: only cred_state=object can ever produce a non-empty
-        # engine_slug here (absent/null both force every credential field to
-        # ''), so this is by construction a DECLARED, non-anthropic route —
-        # refuse rather than silently fall back to claude's own login.
-        _cc_fail_closed "Team '${team}' ai.credential targets engine '${engine_slug}', not 'anthropic' — claude cannot use it. Route this team to an anthropic credential, or set AITEAMFORGE_ALLOW_DEFAULT_OAUTH=1 to launch on the machine login."
+    # XACA-1225-022: predicate + message now in the top-level
+    # _cc_engine_refusal_reason (shared with the doctor); same text, same
+    # _cc_fail_closed handling.
+    # XACA-1312 §3.2: only cred_state=object can ever produce a non-empty
+    # engine_slug here (absent/null both force every credential field to
+    # ''), so this is by construction a DECLARED, non-anthropic route —
+    # refuse rather than silently fall back to claude's own login.
+    local _cc_engine_refusal=""
+    if _cc_engine_refusal="$(_cc_engine_refusal_reason "$team" "$engine_slug")"; then
+        _cc_fail_closed "$_cc_engine_refusal"
         return $?
     fi
 
@@ -576,15 +798,10 @@ print(json.dumps(rec))
     #      dev layout (this file lives in <repo-root>/scripts/).
     #   3. "$_CC_ROUTING_CORE_DIR/vault-fetch.sh" — flattened consumer
     #      layout (XACA-1312: vault-fetch.sh/.js now ship here, U1).
+    # XACA-1225-022: the candidate order above is implemented ONCE, in the
+    # top-level _cc_resolve_vault_fetch, which the doctor also calls.
     local _vault_fetch=""
-    if [[ -n "${CC_ROUTING_VAULT_FETCH:-}" && "${CC_ROUTING_TEST_MODE:-0}" == "1" ]]; then
-        _vault_fetch="$CC_ROUTING_VAULT_FETCH"
-        print -u2 "ℹ CC_ROUTING_TEST_MODE=1 — vault-fetch path overridden via CC_ROUTING_VAULT_FETCH=${_vault_fetch}"
-    elif [[ -e "${_CC_ROUTING_CORE_DIR}/../fleet-monitor/client/vault-fetch.sh" ]]; then
-        _vault_fetch="${_CC_ROUTING_CORE_DIR}/../fleet-monitor/client/vault-fetch.sh"
-    else
-        _vault_fetch="${_CC_ROUTING_CORE_DIR}/vault-fetch.sh"
-    fi
+    _vault_fetch="$(_cc_resolve_vault_fetch)"
 
     # --- Helper: derive this machine's vault slug -----------------------------
     # SINGLE SOURCE OF TRUTH: ask vault-keygen.js, which OWNS defaultMachineSlug().
@@ -694,119 +911,18 @@ print(h[:64])
     _machine_slug="$(_cc_machine_slug)"
 
     # --- XACA-1184-005: which (engine, account) pair(s) to ask the vault for ---
-    #
-    # THE DEFECT: both call sites below asked for `anthropic <team>`, but two
-    # independent writers seal into DIFFERENT account namespaces —
-    # vault-migrate-env-keys.js under anthropic/<team>, Fleet Monitor's UI under
-    # <engine_slug>/<account_slug> (XACA-0282-012 §7 Q3). A team routed through
-    # the UI was therefore unreachable from `cc`: the launcher was asking a
-    # question whose answer could only ever live in the other half of the
-    # namespace.
-    #
-    # THE TEAM-KEY FALLBACK IS PERMANENT, NOT A DEPRECATION PATH. The migrator
-    # keeps writing anthropic/<team> and is not scheduled to stop, so a team with
-    # no account_slug is CORRECTLY served there — it is a live, supported layout,
-    # not a legacy remnant. Do NOT attach a deprecation warning, a "legacy key"
-    # notice, or any other per-launch nag to this arm: it would fire on a
-    # correctly-configured machine, every launch, forever.
-    #
-    # VALIDATE BEFORE THE SUBPROCESS, AND NOTE WHY IT IS NOT MERELY HYGIENE.
-    # These slugs come from a hand-editable JSON file and are interpolated into
-    # both a subprocess argument and a cache path. But there is a second, sharper
-    # reason: vault-fetch.js REJECTS a malformed slug with exit 1 — and exit 1 is
-    # also what the wrapper returns when libsodium-wrappers is missing under
-    # VAULT_FETCH_NO_AUTO_INSTALL=1 (which is how this function always invokes
-    # it). Those two conditions are indistinguishable by exit code alone. Letting
-    # a bad slug reach the subprocess would manufacture a phantom
-    # missing-dependency signal, and the `*)` arm below would then fail CLOSED on
-    # a machine whose only actual fault is a typo in a config file. Validating
-    # here keeps exit 1 meaning exactly one thing.
-    #
-    # Pattern is vault-fetch.js's own canonical SLUG_RE (/^[a-z][a-z0-9-]*$/,
-    # MAX_SLUG_LEN 64), mirroring server-side vault-store.js SLUG_RE and
-    # engines-routes.js ACCOUNT_SLUG_RE. Kept in step with that file by hand;
-    # it is a copy, and a copy verified against itself would prove nothing.
-    _cc_is_vault_slug() {
-        local _s="$1"
-        [[ -n "$_s" && ${#_s} -le 64 && "$_s" == [a-z]* && -z "${_s//[a-z0-9-]/}" ]]
-    }
-
+    # XACA-1225-022: the candidate rules now live in the top-level
+    # _cc_vault_candidates (see its header for the full XACA-1184-005/-017/-021
+    # rationale) so `aiteamforge doctor --check vault-readiness` can source and
+    # call the SAME rules instead of a hand copy. Moved verbatim; no behaviour
+    # change.
     # The engine guard above already returned unless engine_slug is empty or
     # exactly "anthropic", so this is "anthropic" in every reachable case; it is
     # written as a variable so the cache path and the fetch cannot drift apart.
     local _vault_engine="${engine_slug:-anthropic}"
-
-    # Candidate account slugs, most specific first. Only exit 7 advances past
-    # the first (see the loop below).
     local -a _vault_accounts
-    _vault_accounts=()
-
-    # Decided BEFORE the account_slug arm below so its message can tell the truth
-    # about what happens next. When both slugs are bad, an unconditional "using
-    # the team vault key" would promise a fallback the very next line retracts.
-    local _team_slug_ok=0
-    if _cc_is_vault_slug "$team"; then
-        _team_slug_ok=1
-    fi
-
-    if [[ -n "$account_slug" ]]; then
-        if _cc_is_vault_slug "$account_slug"; then
-            _vault_accounts+=("$account_slug")
-        else
-            # Declared but unusable. Say so once — this is a real configuration
-            # fault an operator must fix, NOT the routine no-account_slug case
-            # (which is silent, because it is correct).
-            #
-            # XACA-1184-021: state the remedy, echo the offending value, and name
-            # the file it lives in. The message used to say only that the slug was
-            # invalid, which told an operator that something was wrong and nothing
-            # about what to type instead — its siblings all end with an actionable
-            # clause ("Seal a key with vault-put to fix."), and this one must too.
-            # The SLUG is a config field, not a secret, so echoing it is safe and
-            # is the difference between a two-minute fix and a hunt.
-            if [[ "$_team_slug_ok" -eq 1 ]]; then
-                print -u2 "⚠ Team '${team}' has an invalid ai.credential account_slug '${account_slug}' — ignoring it and using the team vault key"
-            else
-                print -u2 "⚠ Team '${team}' has an invalid ai.credential account_slug '${account_slug}' — ignoring it"
-            fi
-            print -u2 "⚠ A valid slug starts with a lowercase letter, then lowercase letters, digits or hyphens, max 64 chars. Fix teams.${team}.ai.credential.account_slug in ~/.aiteamforge/team-paths.json."
-        fi
-    fi
-    # Permanent fallback: the migrator's namespace. Skipped only when it would
-    # duplicate the account-keyed attempt (asking the identical question twice
-    # would double the launch latency and log the same 404 twice).
-    #
-    # XACA-1184-017: the fallback candidate is validated with the SAME predicate
-    # as the account-keyed one. It was not, and the two guards do not agree: the
-    # team guard at the top of this function admits [A-Za-z0-9_-], so 'Academy',
-    # 'acct_1' and '9team' all reach here and are then rejected by vault-fetch.js's
-    # own SLUG_RE with exit 1 — which is ALSO what the wrapper returns for a
-    # missing libsodium-wrappers. That reintroduces exactly the exit-1 ambiguity
-    # the account_slug validation above exists to remove, letting a config typo
-    # manufacture a phantom missing-dependency signal. Latent today (MEASURED: 0
-    # of 27 live slugs offend), which is why it is worth closing now rather than
-    # during the incident that finds it.
-    #
-    # When the team slug itself fails, the candidate is SKIPPED rather than
-    # sanitised or passed through. Sanitising would silently ask the vault about
-    # a DIFFERENT account than the one configured — the wrong-account-billed
-    # failure this whole ticket is about — and passing it through is the exit-1
-    # ambiguity above. Skipping can leave the list empty, and an empty list means
-    # the vault tier is not attempted at all: control falls through to the env-var
-    # tier with _vault_configured=0, which is the same state as "vault-fetch.sh is
-    # not installed" and is already handled correctly downstream. That is the
-    # honest answer — we have no well-formed key to ask for.
-    if [[ "$_team_slug_ok" -eq 1 ]]; then
-        if [[ "${#_vault_accounts[@]}" -eq 0 || "${_vault_accounts[1]}" != "$team" ]]; then
-            _vault_accounts+=("$team")
-        fi
-    elif [[ "${#_vault_accounts[@]}" -eq 0 ]]; then
-        # No usable candidate in either namespace. Only warn here — when a valid
-        # account_slug was queued the team-key fallback is a silent optimisation
-        # whose absence changes nothing the operator can act on.
-        print -u2 "⚠ Team identity '${team}' is not a usable vault account slug — skipping the vault and falling back to the env-var tier"
-        print -u2 "⚠ A valid slug starts with a lowercase letter, then lowercase letters, digits or hyphens, max 64 chars. Rename the team, or seal this team's key under a valid slug with vault-put."
-    fi
+    _cc_vault_candidates "$team" "$account_slug"
+    _vault_accounts=("${_CC_VAULT_CANDIDATES[@]}")
 
     # Which pair actually produced the final result — the cache tier below MUST
     # read the entry for the pair that was really asked for, never a hardcoded

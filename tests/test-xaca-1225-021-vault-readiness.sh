@@ -113,7 +113,7 @@ _write_config() {
     case "$1" in
         routed) cat >"$AITEAMFORGE_CONFIG" <<'JEOF'
 {"schema_version": 3, "teams": {
- "academy": {"ai": {"credential": {"account_id": "a1", "nickname": "Acad", "env_var_name": "TEAM_ACADEMY_API_KEY", "engine_slug": "claude", "account_slug": "acad-main"}}},
+ "academy": {"ai": {"credential": {"account_id": "a1", "nickname": "Acad", "env_var_name": "TEAM_ACADEMY_API_KEY", "engine_slug": "anthropic", "account_slug": "acad-main"}}},
  "ios": {"ai": {"credential": null}},
  "android": {}
 }}
@@ -154,6 +154,10 @@ _fresh_install() {
         mkdir -p "$HOOKS"
         cp "$HOOKS_SRC/aiteamforge_registry.py" "$HOOKS_SRC/aiteamforge_paths.py" "$HOOKS/"
     fi
+    # XACA-1225-022: the smoke asks the INSTALLED router for its plan, so the
+    # real cc-account-routing.sh (+ its resolver sibling) ships beside the stub
+    # vault-fetch.sh exactly as on a consumer box.
+    cp "$TAP_ROOT/share/scripts/cc-account-routing.sh" "$TAP_ROOT/share/scripts/cc-credential-team-resolver.sh" "$SCRIPTS/"
     _vault_fetch_stub 0
 }
 
@@ -219,7 +223,7 @@ if [ "$RC" -eq 0 ] \
    && _has_line "$OUT" pass "vault-fetch smoke OK (rc=0)" \
    && ! printf '%s' "$OUT" | grep -q "FAKE-TOKEN" \
    && ! printf '%s' "$OUT" | grep -q "^fail" \
-   && grep -q "args=claude acad-main noauto=1" "$VF_LOG"; then
+   && grep -q "args=anthropic acad-main noauto=1" "$VF_LOG"; then
     test_pass
 else
     test_fail "rc=$RC out=[$OUT] vflog=[$(cat "$VF_LOG")]"
