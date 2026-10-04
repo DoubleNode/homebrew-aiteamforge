@@ -162,3 +162,6 @@ test-xaca-1322-vault-drift.sh                   plain-shell
 test-xaca-1342-release-config-install.sh        plain-shell
 test-xaca-1429-retire-legacy-integrations.sh   plain-shell
 test-xaca-1225-021-vault-readiness.sh           plain-shell
+test-xaca-1225-001-msg-client-deps.sh           plain-shell
+test-xaca-1225-002-msg-relay-reporter.sh        plain-shell
+test-xaca-1225-msg-inbox-check-shipping.sh      plain-shell
