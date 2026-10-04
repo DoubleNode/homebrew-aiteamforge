@@ -6,7 +6,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
-- **XACA-1433** (Fixed): re-mirror XACA-1409's canonical changes — `share/lcars-ui/integrations/import_issue.py` (single item-ID allocator; imports no longer mint duplicate IDs) and the new `share/kanban-hooks/kanban_archive.py` it depends on. Clears develop's `sync-tap-drift` red since #1042.
+- **XACA-1433** (Fixed): re-mirror XACA-1409's canonical changes — `share/lcars-ui/integrations/import_issue.py` (single item-ID allocator; imports no longer mint duplicate IDs) and the new `share/kanban-hooks/kanban_archive.py` it depends on. Clears the CANONICAL-AHEAD + NEW `sync-tap-drift` verdicts #1042 left behind; develop stays red on 3 DIVERGED files from XACA-1390's mirror until #1032 lands.
 - **XACA-1397** (Fixed, PR #1040 CI): re-mirror `share/lcars-ui/tests/conftest.py` — the XACA-1397 lazy-refresher fixture is now inside the same
   `if _pytest_xaca1382 is not None:` guard as the XACA-1382 fixture, so harnesses that load the conftest without pytest no longer crash.
 - **XACA-1397** (Fixed, PR #1040 round 3): re-mirror `share/lcars-ui/js/lcars.js` (stale-board banner writes its aria-live text only on change; dated
