@@ -32,6 +32,14 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from integrations import get_manager, ImportedIssue, FetchResult
 
+# Add kanban-hooks to path for the shared ID allocator (XACA-1409).  Same layout
+# in dev (dev-team/{lcars-ui,kanban-hooks}) and the tap (share/{lcars-ui,kanban-hooks}).
+_KANBAN_HOOKS_DIR = str(Path(__file__).parent.parent.parent / "kanban-hooks")
+if _KANBAN_HOOKS_DIR not in sys.path:
+    sys.path.insert(0, _KANBAN_HOOKS_DIR)
+
+from kanban_archive import allocate_item_id
+
 
 # ANSI color codes for terminal output
 class Colors:
@@ -217,7 +225,12 @@ def map_priority_to_kanban(external_priority: str) -> str:
 
 def get_next_item_id(team: str, board_path: Path, board_data: Optional[Dict[str, Any]] = None) -> str:
     """
-    Generate the next kanban item ID for a team.
+    PEEK at the next kanban item ID for a team (XACA-1409).
+
+    This does NOT reserve the ID and never mutates board_data.  It is kept as a
+    compatibility/preview wrapper (e.g. the CLI --preview).  Writers must call
+    kanban_archive.allocate_item_id(board, team, commit=True) under the board
+    lock so board['nextId'] advances in the dict they save.
 
     Args:
         team: Team identifier
@@ -236,38 +249,7 @@ def get_next_item_id(team: str, board_path: Path, board_data: Optional[Dict[str,
         except Exception:
             board_data = None
 
-    # Priority 1: Use the 'series' field from board configuration (single source of truth)
-    if board_data and 'series' in board_data:
-        prefix = board_data['series']
-    else:
-        # Priority 2: Fall back to hardcoded team prefixes for backwards compatibility
-        prefixes = {
-            'academy': 'XACA',
-            'ios': 'XIOS',
-            'android': 'XAND',
-            'firebase': 'XFIR',
-            'freelance': 'XFRE',
-            'mainevent': 'XME',
-            'command': 'XCMD',
-            'dns': 'XDNS',
-            'legal-coparenting': 'XLCP',
-        }
-        prefix = prefixes.get(team.lower(), 'XGEN')
-
-    # Find highest existing ID
-    max_num = 0
-
-    if board_data:
-        for item in board_data.get('backlog', []):
-            item_id = item.get('id', '')
-            if item_id.startswith(prefix + '-'):
-                try:
-                    num = int(item_id.split('-')[1])
-                    max_num = max(max_num, num)
-                except (IndexError, ValueError):
-                    pass
-
-    return f"{prefix}-{max_num + 1:04d}"
+    return allocate_item_id(board_data or {}, team, commit=False)
 
 
 def create_kanban_item(
@@ -292,7 +274,13 @@ def create_kanban_item(
         Created kanban item dictionary
     """
     timestamp = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
-    item_id = get_next_item_id(team, board_path, board_data)
+    if board_data is not None:
+        # XACA-1409: reserve the ID -- advances board_data['nextId'], which the
+        # caller (holding the board lock) saves.
+        item_id = allocate_item_id(board_data, team, commit=True)
+    else:
+        # No caller-owned board to persist into: peek only (legacy behavior).
+        item_id = get_next_item_id(team, board_path, None)
 
     # Create the item
     item = {
