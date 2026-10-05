@@ -151,6 +151,11 @@ if [ "$M7" -eq 0 ]; then
 # XACA-0853: does this team ship' "$MUT_DIR/m7a.sh"; M7=$?
 fi
 
+# MUT-8: hand-authored (XACA-0853) connect install routed to $disconnect_script.
+mutate "$MUT_DIR/m8.sh" \
+    '"$HOMEBREW_TAP_ROOT/share/scripts/teams/${TEAM_ID}-connect.sh" "$connect_script"' \
+    '"$HOMEBREW_TAP_ROOT/share/scripts/teams/${TEAM_ID}-connect.sh" "$disconnect_script"'; M8=$?
+
 # ── Child driver ─────────────────────────────────────────────────────────────
 CHILD="$SBX/child.sh"
 cat > "$CHILD" <<'CHILD_EOF'
@@ -176,8 +181,18 @@ SHB="$(_ex_branch 'elif [[ -f "$SHUTDOWN_TEMPLATE" ]]; then')"
 eval "$RCD"
 
 # Stubs (callers of things that are out of scope for the writers under test)
-_has_preauthored_connect() { return 1; }
-_is_parametric_team() { [[ "$MODE" == param ]]; }
+# hand|handhalf: the REAL predicate (extracted) -- it answers from the sandbox
+# tap's share/scripts/teams/ contents. Every other mode: stub false.
+case "$MODE" in
+    hand|handhalf)
+        HPC="$(_ex_fn _has_preauthored_connect)"
+        [ -n "$HPC" ] || { echo "CHILD-FATAL: cannot extract _has_preauthored_connect" >&2; exit 96; }
+        eval "$HPC" ;;
+    *) _has_preauthored_connect() { return 1; } ;;
+esac
+# hand modes report parametric=true so a broken branch ORDER would render the
+# parametric template instead (and be caught by the TEMPLATE- marker check).
+_is_parametric_team() { [[ "$MODE" == param || "$MODE" == hand* ]]; }
 _resolve_parametric_defaults() { _DERIVED_DEFAULT_PROJECT=proj; _DERIVED_DEFAULT_GROUP=grp; _DERIVED_MATCH_COUNT=1; }
 _extract_session_order() { echo "s1 s2"; }
 # REAL _xaca0483_install_script (extracted from the file under test)
@@ -215,10 +230,9 @@ if [ "$MODE" = paramss ]; then
     exit 0
 fi
 _render_connect_disconnect
-if [ "$MODE" != param ]; then
-    eval "$SUB"
-    eval "$SHB"
-fi
+case "$MODE" in
+    nonparam|fallback) eval "$SUB"; eval "$SHB" ;;
+esac
 CHILD_EOF
 
 # Build a sandbox tap + pre-existing OLD targets. $1 name, $2 mode.
@@ -229,6 +243,18 @@ make_sandbox() {
     local t="$b/tap/share/templates"
     if [ "$mode" = paramss ]; then
         :
+    elif [ "$mode" = hand ] || [ "$mode" = handhalf ]; then
+        # Templates that MUST NOT be used (TEMPLATE- marker) + hand-authored sources.
+        printf '#!/bin/bash\nTEMPLATE-FLAT-CONNECT\n' > "$t/team-connect.sh.template"
+        printf '#!/bin/bash\nTEMPLATE-FLAT-DISCONNECT\n' > "$t/team-disconnect.sh.template"
+        printf '#!/bin/bash\nTEMPLATE-PARAM-CONNECT\n' > "$t/team-connect-parametric.sh.template"
+        printf '#!/bin/bash\nTEMPLATE-PARAM-DISCONNECT\n' > "$t/team-disconnect-parametric.sh.template"
+        local hd="$b/tap/share/scripts/teams"
+        mkdir -p "$hd"
+        printf '#!/bin/bash\nROLE=connect\nID=zqteam\nDIR=$HOME/dev-team/scripts\n' > "$hd/zqteam-connect.sh"
+        if [ "$mode" = hand ]; then
+            printf '#!/bin/bash\nROLE=disconnect\nID=zqteam\nDIR=${HOME}/dev-team/scripts\n' > "$hd/zqteam-disconnect.sh"
+        fi
     elif [ "$mode" = param ]; then
         printf '#!/bin/bash\nROLE=connect\nID={{TEAM_ID}}\nSOCK={{TEAM_SOCKET}}\n' > "$t/team-connect-parametric.sh.template"
         printf '#!/bin/bash\nROLE=disconnect\nID={{TEAM_ID}}\n' > "$t/team-disconnect-parametric.sh.template"
@@ -259,6 +285,8 @@ make_sandbox() {
     local f
     if [ "$mode" = paramss ]; then
         :
+    elif [ "$mode" = hand ] || [ "$mode" = handhalf ]; then
+        for f in connect disconnect; do echo "OLD-$f" > "$b/aiteamforge/zqteam-$f.sh"; chmod 644 "$b/aiteamforge/zqteam-$f.sh"; done
     elif [ "$mode" = param ]; then
         for f in connect disconnect; do echo "OLD-$f" > "$b/aiteamforge/zqteam-$f.sh"; chmod 644 "$b/aiteamforge/zqteam-$f.sh"; done
     else
@@ -313,6 +341,8 @@ _check_common() {
     [ "$leftovers" = 0 ] || CHK_FAILS="$CHK_FAILS [$leftovers temp leftover(s)]"
     for f in $F_INO_BEFORE; do
         local nm="${f%%=*}" ino="${f#*=}"
+        # INODE_EXPECT_SAME: names whose inode MUST be unchanged (untouched target)
+        case " ${INODE_EXPECT_SAME:-} " in *" $nm "*) continue ;; esac
         if [ -f "$b/aiteamforge/$nm.sh" ] && [ "$(_inode "$b/aiteamforge/$nm.sh")" = "$ino" ]; then
             # a file that stayed untouched (still OLD) is a routing failure too, but
             # report the inode fact precisely
@@ -362,6 +392,32 @@ check_flow() {
             [ "$(printf '%s\n' "$F_OUT" | grep -c -- '-shutdown.sh')" -eq 1 ] && printf '%s\n' "$F_OUT" | grep -- '-shutdown.sh' | grep -q parametric \
                 || CHK_FAILS="$CHK_FAILS [shutdown template branch not a no-op for parametric]"
             ;;
+        hand|handhalf)
+            local f hb="$SBX/$name"
+            _check_role connect "$b/zqteam-connect.sh" connect zqteam no
+            for f in "$b/zqteam-connect.sh" "$b/zqteam-disconnect.sh"; do
+                grep -q 'TEMPLATE-' "$f" && CHK_FAILS="$CHK_FAILS [$(basename "$f"): template content (template/parametric branch ran)]"
+                grep -qE '~/dev-team|\$HOME/dev-team|\$\{HOME\}/dev-team|/Users/[^/]+/dev-team' "$f" \
+                    && CHK_FAILS="$CHK_FAILS [$(basename "$f"): dev-team path not rewritten]"
+            done
+            grep -qF "DIR=$b/scripts" "$b/zqteam-connect.sh" 2>/dev/null || CHK_FAILS="$CHK_FAILS [connect: \$HOME/dev-team not rewritten]"
+            [ "$(printf '%s\n' "$F_OUT" | grep -c -- '-connect.sh')" -eq 1 ] \
+                && printf '%s\n' "$F_OUT" | grep -- '-connect.sh' | grep -q 'hand-authored' \
+                || CHK_FAILS="$CHK_FAILS [connect: not exactly one hand-authored line]"
+            if [ "$mode" = hand ]; then
+                _check_role disconnect "$b/zqteam-disconnect.sh" disconnect zqteam no
+                grep -qF "DIR=$b/scripts" "$b/zqteam-disconnect.sh" 2>/dev/null || CHK_FAILS="$CHK_FAILS [disconnect: \${HOME}/dev-team not rewritten]"
+                [ "$(printf '%s\n' "$F_OUT" | grep -c -- '-disconnect.sh')" -eq 1 ] \
+                    && printf '%s\n' "$F_OUT" | grep -- '-disconnect.sh' | grep -q 'hand-authored' \
+                    || CHK_FAILS="$CHK_FAILS [disconnect: not exactly one hand-authored line]"
+            else
+                # connect present, disconnect source absent: warn, leave OLD disconnect untouched
+                [ "$(cat "$b/zqteam-disconnect.sh" 2>/dev/null)" = "OLD-disconnect" ] || CHK_FAILS="$CHK_FAILS [disconnect: pre-existing target was modified]"
+                [ "$(_inode "$b/zqteam-disconnect.sh")" = "$(printf '%s\n' $F_INO_BEFORE | sed -n 's/^zqteam-disconnect=//p')" ] || CHK_FAILS="$CHK_FAILS [disconnect: inode changed]"
+                case "$F_OUT" in *"no matching disconnect script"*) ;; *) CHK_FAILS="$CHK_FAILS [missing no-disconnect warning]" ;; esac
+                printf '%s\n' "$F_OUT" | grep -q -- '-disconnect.sh (hand' && CHK_FAILS="$CHK_FAILS [disconnect reported installed]"
+            fi
+            ;;
         fallback)
             # Templates for startup/shutdown absent -> heredoc fallbacks.
             # connect/disconnect templates exist (flat) and are checked normally.
@@ -385,9 +441,9 @@ check_flow() {
 }
 
 # ═══ Sanity ══════════════════════════════════════════════════════════════════
-test_start "Sanity: all seven mutants applied (anchors unique) and really differ from the real file"
+test_start "Sanity: all eight mutants applied (anchors unique) and really differ from the real file"
 _san=""
-for _i in 1 2 3 4 5 6 7; do
+for _i in 1 2 3 4 5 6 7 8; do
     eval "_rc=\$M$_i"
     [ "$_rc" -eq 0 ] || _san="$_san [M$_i anchor not unique/absent]"
     cmp -s "$INSTALL_TEAM" "$MUT_DIR/m$_i.sh" && _san="$_san [M$_i identical to real]"
@@ -413,6 +469,18 @@ done
 run_flow "pos-paramss" "$INSTALL_TEAM" paramss
 check_flow "pos-paramss" paramss
 test_start "POSITIVE/paramss: parametric startup/shutdown land in own dst, paths rewritten, mode kept, new inode, helpers, shutdown template no-op"
+if [ -z "$CHK_FAILS" ]; then test_pass; else test_fail "$CHK_FAILS"; fi
+
+run_flow "pos-hand" "$INSTALL_TEAM" hand
+check_flow "pos-hand" hand
+test_start "POSITIVE/hand: XACA-0853 hand-authored connect+disconnect land in own dst, paths rewritten, +x, new inode, no template branch"
+if [ -z "$CHK_FAILS" ]; then test_pass; else test_fail "$CHK_FAILS"; fi
+
+INODE_EXPECT_SAME="zqteam-disconnect"
+run_flow "pos-handhalf" "$INSTALL_TEAM" handhalf
+check_flow "pos-handhalf" handhalf
+INODE_EXPECT_SAME=""
+test_start "POSITIVE/handhalf: connect shipped, disconnect absent -> warning, old disconnect untouched"
 if [ -z "$CHK_FAILS" ]; then test_pass; else test_fail "$CHK_FAILS"; fi
 
 # connect/disconnect have no heredoc fallback: absent templates warn and skip.
@@ -442,6 +510,8 @@ _mut_case MUT-6-param-startup-to-shutdown "$MUT_DIR/m6.sh" paramss
 _mut_case MUT-7-install-script-in-place "$MUT_DIR/m7.sh" paramss
 test_start "NEG-MUT-7: in-place revert is detected specifically as an UNCHANGED INODE"
 case "$CHK_FAILS" in *"inode unchanged"*) test_pass ;; *) test_fail "no inode-unchanged finding: $CHK_FAILS" ;; esac
+
+_mut_case MUT-8-hand-connect-to-disconnect "$MUT_DIR/m8.sh" hand
 
 if [ "$_STANDALONE" = true ]; then
     echo "Results: ${_PASS_COUNT} passed, ${_FAIL_COUNT} failed"
