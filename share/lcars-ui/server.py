@@ -9251,6 +9251,15 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             return str(ce)
         return None
 
+    def _close_out_cr_preflight(self, release, board_raw):
+        """XACA-1353-017: refusal texts for a CR team's linked CRs crClose cannot handle (see
+        approval_providers.close_out_cr_preflight). [] when CR support is off. Fails closed."""
+        if not self._crsupport_enabled(board_raw):
+            return []
+        if _approval_providers is None:
+            return ["linked CR preflight: approval_providers module unavailable; refusing (fails closed)"]
+        return _approval_providers.close_out_cr_preflight(board_raw, release)
+
     def _close_out_unmet(self, release, release_id, board_raw, data):
         """XACA-1353-014: reasons (not CLOSEOUT_INCOMPLETE) a release at GAMMA is NOT ready for close-out. THE
         promote evaluator, asked about PROD: the same dry-run `kb-release close-out` makes before a fresh start,
@@ -10381,11 +10390,17 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     if cur != 'GAMMA':
                         raise _DeferredResponse.json(
                             {"error": "close-out can only start at GAMMA; release is at %s" % cur}, 409)
-                    unmet = self._close_out_unmet(release, release_id, self._read_board_raw_locked(), data)
-                    if unmet:
+                    board_raw = self._read_board_raw_locked()
+                    unmet = self._close_out_unmet(release, release_id, board_raw, data)
+                    # XACA-1353-017: a CR team's linked CRs must all be ones crClose can handle, or the failure
+                    # would surface only AFTER production shipped. Named per CR, in the same refusal.
+                    cr_pre = self._close_out_cr_preflight(release, board_raw)
+                    if unmet or cr_pre:
+                        parts = (["GAMMA has not passed: " + "; ".join(unmet)] if unmet else []) + \
+                                (["linked CR preflight: " + "; ".join(cr_pre)] if cr_pre else [])
                         raise _DeferredResponse.json(
-                            {"error": "close-out refused: GAMMA has not passed: " + "; ".join(unmet),
-                             "reasons": unmet}, 409)
+                            {"error": "close-out refused: " + " | ".join(parts),
+                             "reasons": unmet + cr_pre}, 409)
                 try:
                     _release_closeout.apply_op(release, body, now=self._get_timestamp())
                 except _release_closeout.CloseOutError as ce:

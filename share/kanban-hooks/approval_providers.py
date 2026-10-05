@@ -558,6 +558,40 @@ def open_linked_cr_ids(board, release):
         return []
 
 
+# XACA-1353-017: the CR states `kb-release close-out`'s crClose step can deal with. cr-completed is closed;
+# cr-rejected is closed too (a re-CR history: the rejected CR is part of the release's story and
+# `kb-cr close` accepts it, scripts/kb-cr.sh `_kb_cr_v2_guard` exempts to=cr-closed and `close` records reason
+# "rejected"); cr-closed is already done (skipped). Anything else cannot be closed out without dropping a CR
+# that is still live.
+CLOSE_OUT_CR_CLOSABLE = ("cr-completed", "cr-rejected", "cr-closed")
+
+
+def close_out_cr_preflight(board, release):
+    """XACA-1353-017: refusal texts (empty list = OK) for a CR team about to START a PROD close-out. Names every
+    linked CR crClose could not handle, with its state and the remedy, so the refusal comes BEFORE the tag/merge/
+    branch-delete steps rather than after production shipped. Same linkage as the gate feed (_linked_crs).
+    Fails closed: an unreadable board / release yields one refusal."""
+    try:
+        if not isinstance(board, dict) or not isinstance(release, dict):
+            return ["linked CR preflight: board or release is not an object"]
+        crs, missing = _linked_crs(board, release)
+        out = []
+        for cid in missing:
+            out.append("CR %s is listed on the release but is not on the board; unlink it (or restore it), then re-run" % cid)
+        if not crs and not missing:
+            out.append("no CR is linked to this release; a CR team's GAMMA needs a cr-completed CR")
+        for c in crs:
+            st = c.get("crState")
+            if st in CLOSE_OUT_CR_CLOSABLE:
+                continue
+            out.append("CR %s is '%s': close-out closes only cr-completed, cr-rejected or already-closed CRs; take it to "
+                       "cr-completed, or `kb-cr close %s --reason \"<why>\"` if it is abandoned, then re-run"
+                       % (c.get("id"), st if isinstance(st, str) else "<none>", c.get("id")))
+        return out
+    except Exception as e:  # noqa: BLE001
+        return ["linked CR preflight failed (%s: %s); refusing" % (type(e).__name__, e)]
+
+
 def _release_at_cr(release):
     """True when the release is at CR by the GATE's own derivation (release_gate.current_stage: explicit
     stage, else furthest stages{}.enteredAt, else legacy platform environments). FAILS CLOSED: if the

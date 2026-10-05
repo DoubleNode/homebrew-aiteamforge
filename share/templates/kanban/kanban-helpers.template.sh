@@ -1625,24 +1625,78 @@ _kb_co_delete_branch() {
     return 0
 }
 
+# _kb_co_linked_crs <board_file> <release_id>: "<cr-id> <crState>" per CR linked to the release, one per line,
+# using THE linkage predicate of approval_providers._cr_linked_to (XACA-1353-017 follow-up): a CR's own
+# releaseAssignment.releaseId wins; a CR with NO assignment is linked when the release's linkedCRs[] names it
+# ({crId: ..} objects or bare ids). A linkedCRs id with no CR on the board is emitted with state "<missing>" so
+# both callers fail closed on it; a non-list linkedCRs is a jq error (rc != 0) -> callers fail closed.
+_kb_co_linked_crs() {
+    _kb_jq_read "${1-}" '
+        ([.releases[]? | select(.id == $r) | (.linkedCRs // [])
+          | if type == "array" then . else error("linkedCRs is not a list") end
+          | .[] | (if type == "object" then .crId else . end) | strings] | unique) as $listed
+        | ([.crs[]? | .id]) as $ids
+        | ([.crs[]? | select(
+              ((.releaseAssignment.releaseId // "") as $a
+               | if ($a | type) == "string" and $a != "" then $a == $r else ((.id) as $i | $listed | index($i)) != null end))
+            | "\(.id) \(.crState // "")"]
+           + [$listed[] | select(. as $l | $ids | index($l) | not) | "\(.) <missing>"])
+        | .[]' -r --arg r "${2-}"
+}
+
+# XACA-1353-017: the START-of-close-out preflight for CR teams. Every CR assigned to the release must be one crClose can
+# handle (cr-completed | cr-rejected | cr-closed), or the close-out would fail at its LAST step, after the tag, both
+# merges and the branch delete. Names each offender with its state and the remedy. rc 0 ok / not a CR team, 1 refused.
+# Mirrors approval_providers.close_out_cr_preflight (the server's init refusal); same linkage as crClose (_kb_co_linked_crs = approval_providers._cr_linked_to).
+_kb_co_cr_preflight() {
+    local board_file="${1-}" release_id="${2-}" cr list line cid cst bad=0
+    cr=$(_kb_jq_read "$board_file" 'if (.teamConfig.crSupport.enabled|type) == "boolean" then .teamConfig.crSupport.enabled
+        elif .teamConfig.crSupport.enabled == null then false else error("crSupport.enabled is not a boolean") end' -r) \
+        || { echo "Error: cannot read teamConfig.crSupport.enabled; refusing before any git action" >&2; return 1; }
+    [[ "$cr" == "true" ]] || return 0
+    list=$(_kb_co_linked_crs "$board_file" "$release_id") \
+        || { echo "Error: cannot read the CRs linked to $release_id; refusing before any git action" >&2; return 1; }
+    if [[ -z "$list" ]]; then
+        echo "Error: close-out refused: no CR is linked to $release_id (releaseAssignment, or linkedCRs[] for an unassigned CR); a CR team's GAMMA needs a cr-completed CR" >&2
+        return 1
+    fi
+    while IFS= read -r line; do
+        [[ -n "$line" ]] || continue
+        cid="${line%% *}"; cst="${line#* }"
+        case "$cst" in
+            cr-completed|cr-rejected|cr-closed) ;;
+            *)
+                (( bad )) || echo "Error: close-out refused (nothing was tagged, merged or deleted): linked CR(s) the crClose step cannot handle:" >&2
+                echo "  - CR $cid is '${cst:-<none>}': close-out closes only cr-completed, cr-rejected or already-closed CRs; take it to cr-completed, or 'kb-cr close $cid --reason \"<why>\"' if it is abandoned, then re-run" >&2
+                bad=1 ;;
+        esac
+    done <<EOF_PRE
+$list
+EOF_PRE
+    (( bad == 0 ))
+}
+
 # crClose (CR teams only, XACA-1353-004): `kb-cr close` every CR assigned to this release
 # (crs[].releaseAssignment.releaseId, the XACA-1349 linkage). cr-closed -> skip (idempotent: kb-cr itself
-# exits 1 on an already-closed CR); cr-completed -> close; anything else fails closed. Verified by re-reading the board.
+# exits 1 on an already-closed CR); cr-completed -> close; cr-rejected -> close too (XACA-1353-017: a re-CR history
+# leaves the rejected CR on the release, `kb-cr close` accepts it and records reason "rejected"); anything else fails
+# closed. Verified by re-reading the board.
 _kb_co_close_crs() {
-    local board_file="${1-}" release_id="${2-}" version="${3-}" list line cid cst n=0 after
-    list=$(_kb_jq_read "$board_file" '[.crs[]? | select(.releaseAssignment.releaseId == $r) | "\(.id) \(.crState // "")"] | .[]' -r --arg r "$release_id") \
+    local board_file="${1-}" release_id="${2-}" version="${3-}" list line cid cst n=0 after reason
+    list=$(_kb_co_linked_crs "$board_file" "$release_id") \
         || { _kb_co_fail "$release_id" crClose "cannot read the CRs linked to the release"; return 1; }
-    [[ -n "$list" ]] || { _kb_co_fail "$release_id" crClose "no CR is linked to $release_id (releaseAssignment.releaseId); a CR team's GAMMA needs a cr-completed CR"; return 1; }
+    [[ -n "$list" ]] || { _kb_co_fail "$release_id" crClose "no CR is linked to $release_id (releaseAssignment, or linkedCRs[] for an unassigned CR); a CR team's GAMMA needs a cr-completed CR"; return 1; }
     typeset -f kb-cr >/dev/null 2>&1 || { _kb_co_fail "$release_id" crClose "kb-cr is not available in this shell"; return 1; }
     while IFS= read -r line; do
         [[ -n "$line" ]] || continue
         cid="${line%% *}"; cst="${line#* }"
         case "$cst" in
             cr-closed) echo "  crClose: $cid already closed"; continue ;;
-            cr-completed) ;;
-            *) _kb_co_fail "$release_id" crClose "CR $cid is '$cst', not cr-completed; resolve it, then re-run"; return 1 ;;
+            cr-completed) reason="release ${release_id} (v${version}) closed out" ;;
+            cr-rejected) reason="rejected; release ${release_id} (v${version}) closed out" ;;
+            *) _kb_co_fail "$release_id" crClose "CR $cid is '$cst', not cr-completed or cr-rejected; resolve it, then re-run"; return 1 ;;
         esac
-        kb-cr close "$cid" --reason "release ${release_id} (v${version}) closed out" \
+        kb-cr close "$cid" --reason "$reason" \
             || { _kb_co_fail "$release_id" crClose "kb-cr close $cid failed"; return 1; }
         after=$(_kb_jq_read "$board_file" '[.crs[]? | select(.id == $c) | .crState] | first // ""' -r --arg c "$cid")
         [[ "$after" == "cr-closed" ]] \
@@ -1740,6 +1794,7 @@ print(r.release_version(json.load(sys.stdin)))' "$(dirname "$(_kb_release_branch
         cr=$(_kb_jq_read "$board_file" 'if (.teamConfig.crSupport.enabled|type) == "boolean" then .teamConfig.crSupport.enabled
             elif .teamConfig.crSupport.enabled == null then false else error("crSupport.enabled is not a boolean") end' -r) \
             || { echo "Error: cannot read teamConfig.crSupport.enabled" >&2; return 1; }
+        [[ "$dry_run" == "1" ]] || _kb_co_cr_preflight "$board_file" "$release_id" || return 1   # XACA-1353-017 (belt: the wrapper already ran it)
         targets=""
         # Propagation targets are the other open releases/* ONLY (spec 4.2 "keeping releases current", 13.5 step 6).
         # Never another hotfix/*: it is cut from production and must not absorb unreleased integration work.
@@ -1874,6 +1929,10 @@ _kb_release_close_out() {
     name=$(_kb_release_close_out_release_json "$board_file" "$release_id")
     if printf '%s' "$name" | jq -e '.closeOut | type == "object"' >/dev/null 2>&1 && ! _kb_release_close_out_bound "$name"; then
         echo "Error: $release_id has a close-out record that is not bound to its current build (gammaSha missing or != stageSha.GAMMA); refusing before any git action. It is a leftover of an abandoned GAMMA build" >&2; return 1
+    fi
+    # XACA-1353-017: a FRESH start (no record) refuses before any git action when a linked CR is one crClose cannot handle.
+    if ! printf '%s' "$name" | jq -e '.closeOut | type == "object"' >/dev/null 2>&1; then
+        _kb_co_cr_preflight "$board_file" "$release_id" || return 1
     fi
     name=""
     if [[ "$dry_run" == "1" ]]; then
@@ -27020,6 +27079,8 @@ kb-release-close-out() {
     [[ -n "$rj" ]] || { echo "Error: release '$release_id' not found" >&2; return 1; }
     if (( ! opt_dry )) && ! printf '%s' "$rj" | jq -e '.closeOut | type == "object"' >/dev/null 2>&1; then
         # fresh start: the gate must agree the release is otherwise ready (GAMMA passed). Fail closed.
+        # XACA-1353-017: and a CR team's linked CRs must all be ones crClose can handle (named per CR, before the gate).
+        _kb_co_cr_preflight "$bf" "$release_id" || return 1
         _kb_release_close_out_ready "$release_id" || return 1
     fi
     local -a args=(--repo "$opt_repo")
