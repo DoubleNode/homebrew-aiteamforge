@@ -11132,9 +11132,10 @@ _kb_require_release() {
                 --arg rid "$release_id" 2>/dev/null)
             [[ -z "$rel_stage" ]] && rel_stage="PLANNED"
             gate_mode=$(_kb_jq_read "$board_file" \
-                'if (.releaseConfig // {}) | has("gateEnforcement") then (.releaseConfig.gateEnforcement | if . == "report" then "report" else "enforce" end) else "report" end' -r \
+                'if (.releaseConfig // {}) | has("gateEnforcement") then (.releaseConfig.gateEnforcement | if . == "report" then "report" else "enforce" end) else "enforce" end' -r \
                 2>/dev/null)
-            [[ -z "$gate_mode" ]] && gate_mode="report"
+            # XACA-1352-014: ABSENT and unreadable both mean enforce (fail closed), as in server.py.
+            [[ -z "$gate_mode" ]] && gate_mode="enforce"
             if [[ "$gate_mode" == "enforce" ]]; then
                 echo "─────────────────────────────────────"
                 echo "⛔ Cannot start [$item_id]: [$item_id] is assigned to $release_id, which has no release branch yet (stage $rel_stage)."

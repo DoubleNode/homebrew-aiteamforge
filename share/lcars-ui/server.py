@@ -8934,11 +8934,13 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     _BODY_TOO_LARGE = "request body too large"
     # THE default for a board with no releaseConfig.gateEnforcement (USER DECISION 2026-09-30,
     # XACA-1346-045, superseding -037's "absent = enforce"). It is "report" because "enforce" is
-    # UNPASSABLE today: the PLANNED->DEV branch cut is a stub (XACA-1352) and nothing records
-    # item.prMerged (XACA-1347). XACA-1352 + XACA-1347 FLIP THIS to "enforce" (one line, here)
-    # once enforce can pass. Behaviour never depends on scripts/migrate-release-schema.py having
-    # run: an explicit "enforce" opts a team in, an invalid value still means enforce + warning.
-    _GATE_ENFORCEMENT_DEFAULT = 'report'
+    # UNPASSABLE at the time: the PLANNED->DEV branch cut was a stub and nothing recorded
+    # item.prMerged. XACA-1352-014 FLIPPED it to "enforce" (2026-10-04) once both landed
+    # (XACA-1352 PR A #1054 cuts the branch; XACA-1347 records prMerged). Existing boards are
+    # unaffected: scripts/migrate-release-schema.py stamps an explicit "report" (insert-only),
+    # so ABSENT now only means a board the migration never touched. An invalid value still
+    # means enforce + warning.
+    _GATE_ENFORCEMENT_DEFAULT = 'enforce'
 
     def _read_release_json_body(self, max_bytes=None):
         """(body, error). Missing/empty body is {} (the promote target then defaults to
@@ -9016,8 +9018,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
     @classmethod
     def _gate_mode(cls, release_config):
-        """(mode, config_warning). ABSENT gateEnforcement = _GATE_ENFORCEMENT_DEFAULT ('report'
-        for now). Any other unrecognised value is a config error: treated as enforce, with a warning."""
+        """(mode, config_warning). ABSENT gateEnforcement = _GATE_ENFORCEMENT_DEFAULT ('enforce'
+        since XACA-1352-014). Any other unrecognised value is a config error: treated as enforce, with a warning."""
         if 'gateEnforcement' not in release_config:
             return cls._GATE_ENFORCEMENT_DEFAULT, None
         v = release_config.get('gateEnforcement')
@@ -9332,9 +9334,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         {"platform", "targetEnvironment"} form is accepted (platform ignored: stage state is
         release-level; a legacy body WITHOUT a target is a 400). No targetStage = the gate's
         `next`. The gate is evaluated BEFORE any write. releaseConfig.gateEnforcement:
-        'report' (the default when the key is ABSENT, _GATE_ENFORCEMENT_DEFAULT, XACA-1346-045)
-        evaluates + logs and lets a structurally sane forward move proceed; 'enforce' (explicit
-        opt-in, or an invalid value) refuses with 409 and writes nothing.
+        'report' (explicit opt-out, stamped on existing boards by the schema migration)
+        evaluates + logs and lets a structurally sane forward move proceed; 'enforce' (the default
+        when the key is ABSENT since XACA-1352-014, or an invalid value) refuses with 409 and
+        writes nothing.
         Backward/same/terminal/disabled-target moves are refused in BOTH modes.
         dryRun=true (the LCARS modal preview) runs the SAME evaluation and answers 200
         {allowed, dryRun, mode, from, to, next, reasons, error}: no write, no manifest mirror,
