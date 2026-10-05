@@ -13,6 +13,9 @@ LIBEXEC_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 source "${LIBEXEC_DIR}/lib/common.sh"
 source "${LIBEXEC_DIR}/lib/config.sh"
 source "${LIBEXEC_DIR}/lib/constants.sh"
+# XACA-1240: atomic (temp+mv) installer for scripts that may be executing right now.
+# shellcheck disable=SC1091  # LIBEXEC_DIR resolved at runtime
+source "${LIBEXEC_DIR}/lib/atomic-write.sh"
 # XACA-0611: imgcat provisioning helper (must come after common.sh — uses info/warning/error)
 source "${LIBEXEC_DIR}/lib/imgcat-provision.sh"
 # XACA-0734: shared LaunchAgent vocabulary — the agent→template map, the mandatory
@@ -1266,7 +1269,8 @@ _xaca0608_render_team_script() {
   # extra "/" components in that deeper path, so only a true
   # <home-root>/<user>/dev-team shape matches.
   local src="$1" dst="$2"
-  sed -e "s|\$HOME/dev-team/iterm2_window_manager.py|${WORKING_DIR}/scripts/iterm2_window_manager.py|g" \
+  # XACA-1240: atomic write -- $dst may be the script running this upgrade.
+  _aitf_atomic_write_script "$dst" sed -e "s|\$HOME/dev-team/iterm2_window_manager.py|${WORKING_DIR}/scripts/iterm2_window_manager.py|g" \
       -e "s|\${HOME}/dev-team/iterm2_window_manager.py|${WORKING_DIR}/scripts/iterm2_window_manager.py|g" \
       -e "s|~/dev-team/iterm2_window_manager.py|${WORKING_DIR}/scripts/iterm2_window_manager.py|g" \
       -e "s|/Users/[^/]\{1,\}/dev-team/iterm2_window_manager.py|${WORKING_DIR}/scripts/iterm2_window_manager.py|g" \
@@ -1278,8 +1282,7 @@ _xaca0608_render_team_script() {
         -e "s|/Users/[^/]\{1,\}/dev-team$|${WORKING_DIR}|g" \
       -e "s|/home/[^/]\{1,\}/dev-team\([^A-Za-z0-9_-]\)|${WORKING_DIR}\1|g" \
         -e "s|/home/[^/]\{1,\}/dev-team$|${WORKING_DIR}|g" \
-      "$src" > "$dst"
-  chmod +x "$dst"
+      "$src"
 }
 
 update_team_scripts() {
@@ -3428,8 +3431,7 @@ update_runtime_helpers() {
   if [ -f "$root_wm_dest" ] && [ -f "$root_wm_src" ]; then
     print_info "Updating iterm2_window_manager.py (root copy)..."
     if [ "$DRY_RUN" = false ]; then
-      cp "$root_wm_src" "$root_wm_dest"
-      chmod +x "$root_wm_dest"
+      _aitf_atomic_write_script "$root_wm_dest" cat "$root_wm_src"
       print_success "Updated iterm2_window_manager.py (root copy)"
     else
       echo "Would update: iterm2_window_manager.py (root copy)"
@@ -3454,8 +3456,7 @@ update_runtime_helpers() {
   if [ -f "$fr_dest" ] && [ -f "$fr_src" ]; then
     print_info "Updating fleet-monitor/client/fleet-reporter.sh (operative copy)..."
     if [ "$DRY_RUN" = false ]; then
-      cp "$fr_src" "$fr_dest"
-      chmod +x "$fr_dest"
+      _aitf_atomic_write_script "$fr_dest" cat "$fr_src"
       print_success "Updated fleet-monitor/client/fleet-reporter.sh (operative copy)"
     else
       echo "Would update: fleet-monitor/client/fleet-reporter.sh (operative copy)"
@@ -6113,7 +6114,7 @@ update_shell_helpers() {
     if [ "$agent_src" -nt "$agent_target" ] || [ "$FORCE" = true ]; then
       print_info "Updating update_claude_agent.sh..."
       if [ "$DRY_RUN" = false ]; then
-        cp "$agent_src" "$agent_target"
+        _aitf_atomic_write_script "$agent_target" cat "$agent_src"
         print_success "Updated update_claude_agent.sh"
         updated=$((updated + 1))
       else

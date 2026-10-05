@@ -63,6 +63,8 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TAP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# XACA-1240: extracted upgrade/install functions call the shared atomic-write helper.
+source "$TAP_ROOT/libexec/lib/atomic-write.sh"
 INSTALLER="$TAP_ROOT/libexec/installers/install-kanban.sh"
 UPGRADE_SH="$TAP_ROOT/libexec/commands/aiteamforge-upgrade.sh"
 # NOTE: this test file is designed to run from the MAIN checkout's

@@ -31,6 +31,9 @@ source "${SCRIPT_DIR}/../lib/aiteamforge-org-paths.sh" 2>/dev/null || true
 # shellcheck source=../lib/aiteamforge-paths.sh
 # shellcheck disable=SC1091  # source guarded by file-test or `|| true`; default-mode can't follow
 source "${SCRIPT_DIR}/../lib/aiteamforge-paths.sh"
+# XACA-1240: atomic (temp+mv) script installer.
+# shellcheck source=../lib/atomic-write.sh
+source "${SCRIPT_DIR}/../lib/atomic-write.sh"
 
 # Default installation location (can be overridden)
 AITEAMFORGE_DIR="${AITEAMFORGE_DIR:-$HOME/aiteamforge}"
@@ -834,7 +837,8 @@ _xaca0483_install_script() {
     # from also matching an unrelated deeper path like
     # "/Users/Shared/Development/Main Event/dev-team" — [^/] cannot cross the
     # extra "/" components in that path.
-    sed -e "s|\$HOME/dev-team/iterm2_window_manager.py|$AITEAMFORGE_DIR/scripts/iterm2_window_manager.py|g" \
+    # XACA-1240: atomic write -- $dst may be a script that is running right now.
+    _aitf_atomic_write_script "$dst" sed -e "s|\$HOME/dev-team/iterm2_window_manager.py|$AITEAMFORGE_DIR/scripts/iterm2_window_manager.py|g" \
         -e "s|\${HOME}/dev-team/iterm2_window_manager.py|$AITEAMFORGE_DIR/scripts/iterm2_window_manager.py|g" \
         -e "s|~/dev-team/iterm2_window_manager.py|$AITEAMFORGE_DIR/scripts/iterm2_window_manager.py|g" \
         -e "s|/Users/[^/]\{1,\}/dev-team/iterm2_window_manager.py|$AITEAMFORGE_DIR/scripts/iterm2_window_manager.py|g" \
@@ -846,8 +850,7 @@ _xaca0483_install_script() {
         -e "s|/Users/[^/]\{1,\}/dev-team$|$AITEAMFORGE_DIR|g" \
         -e "s|/home/[^/]\{1,\}/dev-team\([^A-Za-z0-9_-]\)|$AITEAMFORGE_DIR\1|g" \
         -e "s|/home/[^/]\{1,\}/dev-team$|$AITEAMFORGE_DIR|g" \
-        "$src" > "$dst"
-    chmod +x "$dst"
+        "$src"
 }
 
 # XACA-0853: does this team ship HAND-AUTHORED connect/disconnect scripts?
@@ -938,7 +941,7 @@ _render_connect_disconnect() {
             local _session_order
             _session_order="$(_extract_session_order "$HOMEBREW_TAP_ROOT/share/scripts/teams/${TEAM_ID}-startup.sh")"
 
-            sed -e "s|{{TEAM_ID}}|$TEAM_ID|g" \
+            _aitf_atomic_write_script "$connect_script" sed -e "s|{{TEAM_ID}}|$TEAM_ID|g" \
                 -e "s|{{TEAM_NAME}}|$TEAM_NAME|g" \
                 -e "s|{{TEAM_THEME}}|$TEAM_THEME|g" \
                 -e "s|{{TEAM_SOCKET}}|$_socket|g" \
@@ -948,20 +951,18 @@ _render_connect_disconnect() {
                 -e "s|{{TEAM_HAS_GROUP}}|$_has_group|g" \
                 -e "s|{{TEAM_SESSION_ORDER}}|$_session_order|g" \
                 -e "s|{{AITEAMFORGE_DIR}}|$AITEAMFORGE_DIR|g" \
-                "$connect_template" > "$connect_script"
-            chmod +x "$connect_script"
+                "$connect_template"
             echo "  ✓ ${TEAM_ID}-connect.sh (parametric, team-scoped, XACA-0862)"
         fi
 
         if [[ ! -f "$disconnect_template" ]]; then
             echo "  ⚠️  Template not found: team-disconnect-parametric.sh.template (skipping disconnect script)"
         else
-            sed -e "s|{{TEAM_ID}}|$TEAM_ID|g" \
+            _aitf_atomic_write_script "$disconnect_script" sed -e "s|{{TEAM_ID}}|$TEAM_ID|g" \
                 -e "s|{{TEAM_NAME}}|$TEAM_NAME|g" \
                 -e "s|{{TEAM_LCARS_PORT_BASE}}|${TEAM_LCARS_PORT_BASE:-$TEAM_LCARS_PORT}|g" \
                 -e "s|{{AITEAMFORGE_DIR}}|$AITEAMFORGE_DIR|g" \
-                "$disconnect_template" > "$disconnect_script"
-            chmod +x "$disconnect_script"
+                "$disconnect_template"
             echo "  ✓ ${TEAM_ID}-disconnect.sh (parametric, team-scoped, XACA-0862)"
         fi
         return 0
@@ -974,7 +975,7 @@ _render_connect_disconnect() {
     if [[ -f "$connect_template" ]]; then
         # Step 1: single-line substitutions via sed
         # {{TEAM_ID}} → INSTANCE_ID; {{TEAM_TMUX_SOCKET}} → INSTANCE_ID (per-instance socket)
-        sed -e "s|{{TEAM_ID}}|$INSTANCE_ID|g" \
+        _aitf_atomic_write_script "$disconnect_script" sed -e "s|{{TEAM_ID}}|$INSTANCE_ID|g" \
             -e "s|{{TEAM_NAME}}|$TEAM_NAME|g" \
             -e "s|{{TEAM_THEME}}|$TEAM_THEME|g" \
             -e "s|{{TEAM_LCARS_PORT}}|$TEAM_LCARS_PORT|g" \
@@ -1022,8 +1023,7 @@ PYEOF
             -e "s|{{TEAM_NAME}}|$TEAM_NAME|g" \
             -e "s|{{TEAM_LCARS_PORT}}|$TEAM_LCARS_PORT|g" \
             -e "s|{{AITEAMFORGE_DIR}}|$AITEAMFORGE_DIR|g" \
-            "$disconnect_template" > "$disconnect_script"
-        chmod +x "$disconnect_script"
+            "$disconnect_template"
         # XACA-0862 cleanup: see the matching note on the connect-script echo above.
         echo "  ✓ ${TEAM_ID}-disconnect.sh"
     else
@@ -2439,7 +2439,7 @@ elif [[ -f "$STARTUP_TEMPLATE" ]]; then
     # this used TEAM_BASE_WORKING_DIR which stripped the project component and
     # made the legacy template path inherit the same bug as KANBAN_DIR.
     _TEAM_WORKING_DIR_RESOLVED="$(if [[ "$IS_PROJECT_TEAM" == "true" ]]; then echo "$TEAM_WORKING_DIR"; else echo "${TEAM_WORKING_DIR:-$AITEAMFORGE_DIR/$TEAM_ID}"; fi)"
-    sed -e "s|{{TEAM_ID}}|$INSTANCE_ID|g" \
+    _aitf_atomic_write_script "$SHUTDOWN_SCRIPT" sed -e "s|{{TEAM_ID}}|$INSTANCE_ID|g" \
         -e "s|{{TEAM_NAME}}|$TEAM_NAME|g" \
         -e "s|{{TEAM_THEME}}|$TEAM_THEME|g" \
         -e "s|{{TEAM_SHIP}}|$TEAM_SHIP|g" \
@@ -2541,8 +2541,7 @@ elif [[ -f "$SHUTDOWN_TEMPLATE" ]]; then
         -e "s|{{TEAM_LCARS_PORT}}|$TEAM_LCARS_PORT|g" \
         -e "s|{{TEAM_WORKING_DIR}}|${TEAM_WORKING_DIR:-$AITEAMFORGE_DIR/$TEAM_ID}|g" \
         -e "s|{{AITEAMFORGE_DIR}}|$AITEAMFORGE_DIR|g" \
-        "$SHUTDOWN_TEMPLATE" > "$SHUTDOWN_SCRIPT"
-    chmod +x "$SHUTDOWN_SCRIPT"
+        "$SHUTDOWN_TEMPLATE"
     echo "  ✓ $TEAM_SHUTDOWN_SCRIPT"
 else
     cat > "$SHUTDOWN_SCRIPT" <<EOF

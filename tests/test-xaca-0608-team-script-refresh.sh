@@ -52,6 +52,8 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TAP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 UPGRADE_SH="$TAP_ROOT/libexec/commands/aiteamforge-upgrade.sh"
+# XACA-1240: the extracted functions call the shared atomic-write helper.
+source "$TAP_ROOT/libexec/lib/atomic-write.sh"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Standalone framework: works both as a sourced test-runner.sh file AND as a

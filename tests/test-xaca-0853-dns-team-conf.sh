@@ -59,6 +59,8 @@ test_fail()  { _FAIL_COUNT=$((_FAIL_COUNT + 1)); echo "     FAIL: $_CURRENT_TEST
 # ---------------------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TAP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# XACA-1240: extracted upgrade/install functions call the shared atomic-write helper.
+source "$TAP_ROOT/libexec/lib/atomic-write.sh"
 
 CONF="$TAP_ROOT/share/teams/dns.conf"
 REGISTRY="$TAP_ROOT/share/teams/registry.json"
