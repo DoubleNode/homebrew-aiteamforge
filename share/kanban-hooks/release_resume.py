@@ -172,6 +172,10 @@ def resume_plan(release, *, flow_config, cr_support_enabled, items=None, other_r
         return done("stage-passed", "chain", "%s %s: the auto-promote chain continues into %s." % (cur, status, edge))
     if cur == "GAMMA":
         return done("gamma-passed", "offer-promote", "GAMMA %s: offer the PROD promote (session promote)." % status,
+                    # XACA-1353-004: a branch-per-release release enters PROD only through the close-out
+                    ("Close-out is the PROD entry: run `kb-release close-out %s` (tag, merges, branch delete, CR close, "
+                     "then the gated promote); the gate refuses a bare promote until it is done." % rid)
+                    if release.get("branch") else "",
                     offer=promote_offer("PROD") if nxt else None)
     if cur in AUTO_SOURCES:   # no auto edge and not GAMMA: the next enabled stage is GAMMA/PROD (a CR team always has an edge)
         return done("gamma-ready", "offer-promote", "%s %s: GAMMA-ready (no CR stage for this team)." % (cur, status),

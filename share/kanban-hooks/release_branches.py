@@ -5,6 +5,8 @@ Config lives at board `releaseConfig.branches` (every field optional):
     {"integration": "develop", "production": "master", "releasePrefix": "releases/", "mode": "release"}
 mode "release" (default): PLANNED->DEV pushes `<releasePrefix><version>` from the integration tip.
 mode "trunk" (XACA-1352-015): the release branch IS the integration branch; nothing is cut.
+HOTFIX (XACA-1353-005, spec 4.2 "Hotfix" / 13.5): a release record with type "hotfix" cuts `hotfix/<ver>` from the
+PRODUCTION tip instead, in EVERY mode (see cut_release_branch). Same cut code, different (source, prefix).
 
 A stage name is NOT special here (iOS legitimately sets integration="DEV"): refs are never
 derived from stages and never rejected for looking like one. Malformed config FAILS CLOSED.
@@ -26,6 +28,10 @@ from pathlib import Path
 
 DEFAULTS = {"integration": "develop", "production": "master", "releasePrefix": "releases/", "mode": "release"}
 MODES = ("release", "trunk")
+# Release record `type` (kb-release create validates the same four; the server stores it verbatim, so THIS is the
+# fail-closed point for the cut: a typo'd type must not silently cut releases/<ver> from integration).
+RELEASE_TYPES = ("feature", "bugfix", "hotfix", "maintenance")
+HOTFIX_PREFIX = "hotfix/"   # constant: releaseConfig.branches has no hotfix-prefix field (unknown fields are refused)
 _SAFE_REF = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,127}")
 _SAFE_PREFIX = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,30}/")
 _SHA = re.compile(r"[0-9a-f]{40,64}")
@@ -71,6 +77,16 @@ def effective_branches(release_config):
     if unknown:
         raise ValueError("releaseConfig.branches has unknown field(s) %s" % unknown)
     return out
+
+
+def release_type(release):
+    """The release's type; absent/empty = "feature" (the create default). ValueError on an unknown type."""
+    t = release.get("type") if isinstance(release, dict) else None
+    if t is None or t == "":
+        return "feature"
+    if not isinstance(t, str) or t not in RELEASE_TYPES:
+        raise ValueError("release type %r is not one of %s; refusing to cut a branch for it" % (t, list(RELEASE_TYPES)))
+    return t
 
 
 def release_version(release):
@@ -161,46 +177,63 @@ def branch_tip(repo_root, branch, *, run=subprocess.run):
 
 
 def cut_release_branch(release, board, repo_root, *, dry_run=False, run=subprocess.run):
-    """Cut (or, in trunk mode, resolve) the release branch. Returns {"branch","branchBaseSha"}."""
+    """Cut (or, in trunk mode, resolve) the release branch. Returns {"branch","branchBaseSha"}.
+
+    One implementation, parameterised by (source branch, prefix, label):
+      feature/bugfix/maintenance: source = integration, prefix = releasePrefix (trunk mode: no cut, integration).
+      hotfix: source = PRODUCTION, prefix = hotfix/, in every mode. In trunk mode the release branch is normally
+        the integration branch, but a hotfix must be isolated from unreleased trunk work -- cutting it from
+        production is the whole point of a hotfix (spec 13.5). If production == integration in trunk mode there
+        is nothing to isolate it from, so that combination is refused with a reason instead of silently
+        collapsing the hotfix onto the trunk."""
     cfg = effective_branches((board or {}).get("releaseConfig"))
+    rtype = release_type(release)
     git = _Git(repo_root, run)
     remote = _remote(git)
-    integ = cfg["integration"]
-    integ_sha = _remote_tip(git, remote, integ)
-    if not integ_sha:
-        raise RuntimeError("integration branch %r not found on remote %r" % (integ, remote))
-    if cfg["mode"] == "trunk":
-        return {"branch": integ, "branchBaseSha": integ_sha}
+    hotfix = rtype == "hotfix"
+    if hotfix:
+        if cfg["mode"] == "trunk" and cfg["production"] == cfg["integration"]:
+            raise RuntimeError("hotfix release in trunk mode: production and integration are both %r, so a hotfix "
+                               "branch cannot be isolated from unreleased trunk work; refusing to cut"
+                               % cfg["production"])
+        src, prefix = cfg["production"], HOTFIX_PREFIX
+    else:
+        src, prefix = cfg["integration"], cfg["releasePrefix"]
+    src_sha = _remote_tip(git, remote, src)
+    if not src_sha:
+        raise RuntimeError("%s branch %r not found on remote %r" % ("production" if hotfix else "integration", src, remote))
+    if cfg["mode"] == "trunk" and not hotfix:
+        return {"branch": src, "branchBaseSha": src_sha}
 
-    branch = cfg["releasePrefix"] + release_version(release)
+    branch = prefix + release_version(release)
     _check_ref(git, branch)
     existing = _remote_tip(git, remote, branch)
     if existing:
-        if existing == integ_sha:
+        if existing == src_sha:
             return {"branch": branch, "branchBaseSha": existing}
         if dry_run:
-            raise RuntimeError("branch %r already exists at %s (integration is at %s); a dry-run cannot "
-                               "verify its history without fetching" % (branch, existing, integ_sha))
-        git("fetch", "--", remote, integ, branch)   # objects for BOTH tips, so the ancestry checks cannot rc-128
-        if git("merge-base", "--is-ancestor", existing, integ_sha, ok=(0, 1)).returncode != 0:
-            if git("merge-base", "--is-ancestor", integ_sha, existing, ok=(0, 1)).returncode == 0:
+            raise RuntimeError("branch %r already exists at %s (%s is at %s); a dry-run cannot "
+                               "verify its history without fetching" % (branch, existing, src, src_sha))
+        git("fetch", "--", remote, src, branch)   # objects for BOTH tips, so the ancestry checks cannot rc-128
+        if git("merge-base", "--is-ancestor", existing, src_sha, ok=(0, 1)).returncode != 0:
+            if git("merge-base", "--is-ancestor", src_sha, existing, ok=(0, 1)).returncode == 0:
                 raise RuntimeError("branch %r already exists with commits %r lacks (its tip %s is ahead of %s); "
-                                   "refusing to reuse it" % (branch, integ, existing, integ_sha))
-            if git("merge-base", existing, integ_sha, ok=(0, 1)).returncode == 0:
+                                   "refusing to reuse it" % (branch, src, existing, src_sha))
+            if git("merge-base", existing, src_sha, ok=(0, 1)).returncode == 0:
                 raise RuntimeError("branch %r already exists and has diverged from %r (tip %s; %r is at %s); "
-                                   "refusing to reuse it" % (branch, integ, existing, integ, integ_sha))
+                                   "refusing to reuse it" % (branch, src, existing, src, src_sha))
             raise RuntimeError("branch %r exists with unrelated history (tip %s shares no commit with %r)"
-                               % (branch, existing, integ))
+                               % (branch, existing, src))
         return {"branch": branch, "branchBaseSha": existing}
     if dry_run:
-        return {"branch": branch, "branchBaseSha": integ_sha}
-    git("fetch", "--", remote, integ)
+        return {"branch": branch, "branchBaseSha": src_sha}
+    git("fetch", "--", remote, src)
     # XACA-1435: create-only. The cut runs with no board lock held, so two promotes can both find the branch
     # absent; a plain push would let the second fast-forward it past the base the first records. An empty lease
     # value means "the ref must not exist": the loser is rejected (fail closed) and its retry adopts the branch.
     try:
         git("push", "--force-with-lease=refs/heads/%s:" % branch, "--", remote,
-            "%s:refs/heads/%s" % (integ_sha, branch))
+            "%s:refs/heads/%s" % (src_sha, branch))
     except RuntimeError as e:
         try:
             raced = _remote_tip(git, remote, branch)
@@ -211,9 +244,9 @@ def cut_release_branch(release, board, repo_root, *, dry_run=False, run=subproce
                                    "retry the promote to adopt it" % (branch, raced))
         raise RuntimeError("branch %r was not created by this cut (push failed; retry the promote): %s"
                            % (branch, e))
-    if _remote_tip(git, remote, branch) != integ_sha:
-        raise RuntimeError("pushed %r but the remote tip does not equal %s" % (branch, integ_sha))
-    return {"branch": branch, "branchBaseSha": integ_sha}
+    if _remote_tip(git, remote, branch) != src_sha:
+        raise RuntimeError("pushed %r but the remote tip does not equal %s" % (branch, src_sha))
+    return {"branch": branch, "branchBaseSha": src_sha}
 
 
 def team_repo_root(team, kanban_dir=None):

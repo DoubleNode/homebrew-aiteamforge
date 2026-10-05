@@ -180,6 +180,14 @@ except ImportError as e:  # pragma: no cover
     _release_branches = None
     print(f"[LCARS] Warning: release_branches unavailable, PLANNED->DEV branch cut fails closed: {e}")
 
+# PROD close-out step-state (XACA-1353-001): pure logic; the close-out endpoint is the ONE writer of
+# release.closeOut. Missing module = the endpoint answers 500 (fail closed).
+try:
+    import release_closeout as _release_closeout
+except ImportError as e:  # pragma: no cover
+    _release_closeout = None
+    print(f"[LCARS] Warning: release_closeout unavailable, close-out step-state writes fail closed: {e}")
+
 # CR approval providers (XACA-1349-014): feeds release.cr to the gate. Missing module = no feed =
 # the gate sees no CR state and refuses (fail closed).
 try:
@@ -1739,12 +1747,16 @@ def _cut_inputs_fp(release, board):
     """Stable fingerprint of everything cut_release_branch derives the branch from (effective integration,
     releasePrefix and mode, plus the release version). XACA-1435: compared between the unlocked cut and the locked
     record so a config or version edit made while the network git ran refuses the promote instead of recording a
-    stale cut. Keys the cut never reads (e.g. `production`) are deliberately excluded: editing them stales nothing.
-    An unreadable input (invalid version/config) fingerprints as None, which never equals a successful cut's."""
+    stale cut. Keys the cut never reads are deliberately excluded: editing them stales nothing. XACA-1353-005: the
+    cut also reads the release `type` (hotfix cuts from production), so the type is always part of it, and
+    `production` is part of it for a hotfix release only (a non-hotfix cut still never reads it).
+    An unreadable input (invalid version/config/type) fingerprints as None, which never equals a successful cut's."""
     try:
         cfg = _release_branches.effective_branches((board or {}).get("releaseConfig"))
-        return json.dumps([[cfg.get(k) for k in ("integration", "releasePrefix", "mode")],
-                           _release_branches.release_version(release)], sort_keys=True, default=str)
+        rtype = _release_branches.release_type(release)
+        keys = ("integration", "releasePrefix", "mode") + (("production",) if rtype == "hotfix" else ())
+        return json.dumps([[cfg.get(k) for k in keys], _release_branches.release_version(release), rtype],
+                          sort_keys=True, default=str)
     except Exception:
         return None
 
@@ -5521,6 +5533,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             # POST /api/releases/<id>/stages/<STAGE>/tests — the ONE writer of expected[] + tests[] (XACA-1347-004)
             release_id, _sep, tail = path[len('/api/releases/'):].partition('/stages/')
             self.handle_release_stage_tests(release_id, tail[:-len('/tests')])
+        elif path.startswith('/api/releases/') and path.endswith('/close-out'):
+            # POST /api/releases/<id>/close-out — the ONE writer of release.closeOut (XACA-1353-001)
+            release_id = path[len('/api/releases/'):-len('/close-out')]
+            self.handle_release_close_out(release_id)
         elif path.startswith('/api/releases/') and path.endswith('/rollback-override'):
             # POST /api/releases/<id>/rollback-override — lead-set rollback SHA (XACA-1349-004, spec 13.3)
             release_id = path[len('/api/releases/'):-len('/rollback-override')]
@@ -8865,7 +8881,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 # XACA-1346: mirror the release-level stage state (board is authoritative).
                 # tests[] is deliberately NOT mirrored (large, append-only, board-only).
                 for _k in ('stage', 'stages', 'stageSha', 'rollbackSha', 'rollbackShaSource',
-                           'rollbackShaOverride', 'rollbackShaOverrideUsed', 'branch', 'branchBaseSha'):
+                           'rollbackShaOverride', 'rollbackShaOverrideUsed', 'branch', 'branchBaseSha', 'closeOut'):
                     if _k in release:
                         manifest[_k] = release[_k]
                     elif _k == 'rollbackShaOverride':
@@ -8951,7 +8967,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     # Fields the generic PUT /api/releases/<id> must never accept: each has ONE
     # sanctioned, gated writer.
     _RELEASE_STAGE_STATE_FIELDS = ('environment', 'stage', 'stages', 'stageSha', 'tests', 'pendingSha',
-                                   'waiverHistory')
+                                   'waiverHistory', 'closeOut')
     _RELEASE_GATE_MODES = ('enforce', 'report')
     # Cap for the bulk release-state POSTs (/stages/<S>/tests, /new-sha), enforced from Content-Length
     # BEFORE the body is read (413). Measured 2026-09-30: a full per-file run of a 6,585-record suite
@@ -10273,6 +10289,51 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             return
         except Exception as e:
             self.send_error(500, f"Error setting rollback override: {e}")
+
+    def handle_release_close_out(self, release_id):
+        """POST /api/releases/<id>/close-out (XACA-1353-001, spec 13.4) - the sanctioned writer of
+        release.closeOut, the ordered resumable PROD close-out step-state. Body is one of
+        {"op":"init","crTeam":bool,"targets":[branch,..]} | {"op":"set","step":S,"status":X,"error":str?} |
+        {"op":"target","target":branch,"status":X}; release_closeout.apply_op decides (ordering, sticky
+        `done`, deleteBranch gate). 400 bad body, 404 unknown release, 409 refused (or release not at
+        GAMMA/PROD: close-out only exists once GAMMA has passed), 200 {"closeOut"}. Logged as
+        release_close_out_<op>."""
+        try:
+            if self._gate_unavailable():
+                return
+            if _release_closeout is None:
+                return self._send_json_response({"error": "release_closeout module unavailable"}, status=500)
+            body, err = self._read_release_json_body()
+            if err:
+                return self._send_json_response({"error": err}, status=400)
+            if not isinstance(body, dict) or body.get('op') not in ('init', 'set', 'target'):
+                return self._send_json_response({"error": "'op' must be one of init|set|target"}, status=400)
+            with self._board_write_transaction():
+                data = self._load_releases_config(_lock_held=True)
+                release = self._find_release_by_id(data, release_id)
+                if not release:
+                    raise _DeferredResponse.json({"error": "Release not found: %s" % release_id}, 404)
+                cur = _release_gate.current_stage(release)
+                if cur not in ('GAMMA', 'PROD'):
+                    raise _DeferredResponse.json(
+                        {"error": "close-out only runs once GAMMA has passed; release is at %s" % cur}, 409)
+                try:
+                    _release_closeout.apply_op(release, body, now=self._get_timestamp())
+                except _release_closeout.CloseOutError as ce:
+                    raise _DeferredResponse.json({"error": str(ce)}, 409)
+                if not self._save_releases_config(data, _lock_held=True):
+                    raise _DeferredResponse.json({"error": "board write failed"}, 500)
+                snapshot = copy.deepcopy(release)
+            self._mirror_release_manifest(snapshot)
+            self._log_release_activity(release_id, 'release_close_out_' + body['op'], cur, cur,
+                                       actor=str(body.get('by') or 'close-out'), step=body.get('step'),
+                                       status=body.get('status'), target=body.get('target'))
+            return self._send_json_response({"closeOut": snapshot.get('closeOut')})
+        except _DeferredResponse as deferred:
+            deferred.emit(self)
+            return
+        except Exception as e:
+            self.send_error(500, f"Error writing close-out state: {e}")
 
     def handle_plan_release(self, release_id):
         """POST /api/releases/<id>/plan — send a release BACK to the PLANNED holding state.

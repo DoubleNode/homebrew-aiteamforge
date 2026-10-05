@@ -1318,6 +1318,539 @@ _kb_cut_release_branch() {
     python3 "$script" cut --board "$board_file" --release-id "$release_id" "$@"
 }
 
+# ---------------------------------------------------------------------------
+# PROD close-out step-state (XACA-1353-001; spec RELEASE-LIFECYCLE 3.2 PROD, 4.2, 13.4)
+#
+# release.closeOut records the ordered, resumable close-out:
+#   tag -> mergeProduction -> mergeIntegration -> mergeOtherReleases -> deleteBranch -> crClose
+# each {status: pending|done|failed, ts, error?}; mergeOtherReleases also carries per-target
+# {"releases/x": done|conflict|failed|pending} (conflict = terminal-but-flagged, never blocking).
+# The ONE writer is the LCARS server (POST /api/releases/<id>/close-out, board authoritative +
+# manifest mirror) -- the WRITE helpers here only POST to it; there is no offline fallback and
+# NO direct board write. The READ helpers take a release JSON file and never touch a board.
+# Ordering is enforced in kanban-hooks/release_closeout.py (server-side too): a step can only be
+# marked done/failed once every earlier step is done, so deleteBranch cannot run before tag +
+# mergeProduction + mergeIntegration, and `done` is sticky (a resumed run never re-executes it).
+# _kb_release_close_out (XACA-1353-002..004) builds on these; it must not write the record itself.
+#
+#   _kb_release_closeout_script                                  -> path to release_closeout.py
+#   _kb_release_close_out_init <rel> [--cr-team] [--targets a,b] -> POST op=init   (rc 1 if refused)
+#   _kb_release_close_out_set <rel> <step> <status> [error]      -> POST op=set
+#   _kb_release_close_out_set_target <rel> <branch> <status>     -> POST op=target
+#   _kb_release_close_out_first_incomplete <release.json|->      -> step name ("" = all done); rc 1 no record
+#   _kb_release_close_out_step_status <release.json|-> <step>    -> pending|done|failed|n/a
+#   _kb_release_close_out_can_delete <release.json|->            -> rc 0 only when deleteBranch may run
+#   _kb_release_close_out_release_json <board_file> <rel>        -> the release record as JSON
+# ---------------------------------------------------------------------------
+_kb_release_closeout_script() {
+    local _bs
+    _bs=$(_kb_board_settings_script) || return 1
+    printf '%s\n' "$(dirname "$_bs")/release_closeout.py"
+}
+
+# Shared POST wrapper: prints the server's error (409 reason) on refusal; rc 0 only on HTTP 200.
+_kb_release_close_out_post() {
+    local release_id="${1-}" payload="${2-}"
+    [[ -n "$release_id" && -n "$payload" ]] || { echo "Error: close-out post needs a release id and payload" >&2; return 1; }
+    _kb_release_api_post "${release_id}/close-out" "$payload" || return 1
+    if [[ "$_KB_REL_CODE" != "200" ]]; then
+        echo "Error: close-out update refused (HTTP ${_KB_REL_CODE}): $(printf '%s' "$_KB_REL_BODY" | jq -r '.error // empty' 2>/dev/null)" >&2
+        return 1
+    fi
+    return 0
+}
+
+_kb_release_close_out_init() {
+    local release_id="${1-}" cr="false" targets="" payload
+    shift 2>/dev/null || shift $#
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --cr-team) cr="true" ;;
+            --targets) targets="${2-}"; shift ;;
+            *) echo "Error: unknown option '$1'" >&2; return 1 ;;
+        esac
+        shift
+    done
+    payload=$(jq -nc --argjson cr "$cr" --arg t "$targets" \
+        '{op:"init", crTeam:$cr, targets:($t | split(",") | map(select(length>0)))}') || return 1
+    _kb_release_close_out_post "$release_id" "$payload"
+}
+
+_kb_release_close_out_set() {
+    local release_id="${1-}" step="${2-}" new_status="${3-}" error="${4-}" payload
+    # NB: never name a local `status` -- it is a read-only special parameter in zsh.
+    [[ -n "$step" && -n "$new_status" ]] || { echo "Usage: _kb_release_close_out_set <rel> <step> <status> [error]" >&2; return 1; }
+    payload=$(jq -nc --arg s "$step" --arg st "$new_status" --arg e "$error" \
+        '{op:"set", step:$s, status:$st} + (if $e == "" then {} else {error:$e} end)') || return 1
+    _kb_release_close_out_post "$release_id" "$payload"
+}
+
+_kb_release_close_out_set_target() {
+    local release_id="${1-}" target="${2-}" new_status="${3-}" payload
+    [[ -n "$target" && -n "$new_status" ]] || { echo "Usage: _kb_release_close_out_set_target <rel> <branch> <status>" >&2; return 1; }
+    payload=$(jq -nc --arg t "$target" --arg st "$new_status" '{op:"target", target:$t, status:$st}') || return 1
+    _kb_release_close_out_post "$release_id" "$payload"
+}
+
+_kb_release_close_out_first_incomplete() {
+    local src="${1-}" script
+    script=$(_kb_release_closeout_script) || { echo "Error: cannot locate kanban-hooks/" >&2; return 1; }
+    [[ -f "$script" ]] || { echo "Error: missing $script" >&2; return 1; }
+    python3 "$script" first-incomplete --release "$src"
+}
+
+_kb_release_close_out_step_status() {
+    local src="${1-}" step="${2-}" script
+    script=$(_kb_release_closeout_script) || { echo "Error: cannot locate kanban-hooks/" >&2; return 1; }
+    [[ -f "$script" ]] || { echo "Error: missing $script" >&2; return 1; }
+    python3 "$script" step-status --release "$src" --step "$step"
+}
+
+_kb_release_close_out_can_delete() {
+    local src="${1-}" script
+    script=$(_kb_release_closeout_script) || return 1
+    [[ -f "$script" ]] || return 1
+    python3 "$script" can-delete --release "$src" 2>/dev/null
+}
+
+# The release record as the BOARD holds it (authoritative; board.releases[]). Read-only.
+_kb_release_close_out_release_json() {
+    local board_file="${1-}" release_id="${2-}"
+    _kb_jq_read "$board_file" '[.releases[]? | select(.id == $id)] | first // empty' -c \
+        --arg id "$release_id"
+}
+
+# ---------------------------------------------------------------------------
+# _kb_release_close_out <board_file> <release_id> [--repo <dir>] [--dry-run]   (XACA-1353-002)
+#
+# The git engine for the PROD close-out (spec RELEASE-LIFECYCLE 4.2, 13.4), XACA-1353-002..004:
+#   init (if absent) -> tag -> mergeProduction -> mergeIntegration -> mergeOtherReleases -> deleteBranch
+#   -> [crClose, CR teams only] -> PROD promote (the gated POST /promote; the gate refuses it until every
+#   step above is done, so the release stays in GAMMA on any failure).
+# Resumes at the first incomplete step (`done` is sticky; a `failed` step is retried). Every step is
+# recorded through the -001 POST helpers -- this function never writes the board itself.
+#
+# WHERE GIT RUNS: in a THROWAWAY CLONE of the repo's remote (clone --reference <repo>, --no-checkout),
+# deleted on every exit path. The caller's checkout is never switched, dirtied, or fetched into, and no
+# worktree metadata is written into its .git. A conflicted merge is abandoned by `merge --abort` and
+# discarding the clone; the user's tree is clean by construction. deleteBranch deletes the branch on the
+# REMOTE only; a local branch in the caller's checkout is never touched.
+#
+# Fail-closed: missing/malformed branch or stageSha.GAMMA, an unknown mode, no remote, a POST failure, a
+# push rejection -- all stop non-zero. A refusal marks the step `failed` (resume point) and NEVER
+# deletes the release branch; the release stays in GAMMA (spec 13.4). Tags are never moved.
+#
+# TRUNK MODE (releaseConfig.branches.mode = "trunk", user decision 2026-10-05): the release branch IS the
+# integration branch, so GAMMA is an ANCESTOR of its tip (not the tip). tag: GAMMA must be an ancestor of
+# integration; mergeProduction: merge GAMMA into production when production != integration, else done;
+# mergeIntegration / mergeOtherReleases: done (no-op); deleteBranch: done-as-skipped -- integration is never deleted.
+#
+# deleteBranch HARD GUARD (_kb_co_delete_guard, independent of mode): never the integration or production
+# branch, never a name outside the allowed prefixes (_kb_co_delete_prefixes: releasePrefix + hotfix/, XACA-1353-005), and only when the remote tip is already contained in production AND integration.
+#
+# Exit codes of _kb_release_close_out: 0 complete (release at PROD) | 1 a step failed / refused (release stays in GAMMA).
+# ---------------------------------------------------------------------------
+_kb_co_git() { env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE GIT_TERMINAL_PROMPT=0 git "$@" </dev/null; }
+
+# Record a step failure (best effort -- the non-zero return is the real signal) and return 1.
+_kb_co_fail() {
+    local rel="${1-}" step="${2-}" msg="${3-}"
+    echo "Error: close-out step '$step' failed for $rel: $msg" >&2
+    _kb_release_close_out_set "$rel" "$step" failed "$msg" >/dev/null 2>&1 \
+        || echo "Warning: could not record '$step' as failed on the release record" >&2
+    return 1
+}
+
+# Merge <sha> (no-ff) into <branch> in the clone <work> and push. rc 1 + reason in $_KB_CO_ERR on failure.
+_kb_co_merge_into() {
+    local work="${1-}" branch="${2-}" sha="${3-}" label="${4-}" tip
+    _KB_CO_ERR=""; _KB_CO_KIND=""   # kind: missing | conflict | reject | other (per-cause handling in -003)
+    tip=$(_kb_co_git -C "$work" rev-parse --verify "refs/remotes/origin/${branch}^{commit}" 2>/dev/null) \
+        || { _KB_CO_ERR="branch '$branch' not found on the remote"; _KB_CO_KIND=missing; return 1; }
+    if _kb_co_git -C "$work" merge-base --is-ancestor "$sha" "$tip" 2>/dev/null; then
+        echo "  $branch already contains ${sha:0:12}; nothing to merge"
+        return 0
+    fi
+    _kb_co_git -C "$work" checkout -q --detach "$tip" >/dev/null 2>&1 \
+        || { _KB_CO_ERR="could not check out '$branch' in the scratch clone"; _KB_CO_KIND=other; return 1; }
+    if ! _kb_co_git -C "$work" merge --no-ff --no-edit -m "Merge ${label} into ${branch}" "$sha" >/dev/null 2>&1; then
+        _kb_co_git -C "$work" merge --abort >/dev/null 2>&1
+        _KB_CO_ERR="merge of ${label} into '$branch' conflicted (aborted; nothing pushed, release branch kept)"
+        _KB_CO_KIND=conflict; return 1
+    fi
+    if ! _kb_co_git -C "$work" push -q origin "HEAD:refs/heads/${branch}" >/dev/null 2>&1; then
+        _KB_CO_ERR="push to '$branch' was rejected (protected or moved on); nothing published, release branch kept"
+        _KB_CO_KIND=reject; return 1
+    fi
+    echo "  merged ${label} into $branch"
+    return 0
+}
+
+# mergeOtherReleases (XACA-1353-003, spec 4.2 "keeping releases current"): merge the integration branch
+# into every other open releases/* recorded at init, ONE TARGET AT A TIME, each isolated from the rest.
+#   already contains integration tip -> done (no merge; resume-idempotent)
+#   merge conflicts                  -> `merge --abort`, target `conflict` (terminal-but-flagged), CONTINUE.
+#                                       A conflict NEVER fails the closing release: the owner of that release
+#                                       resolves it with a PR into releases/<other> itself (spec 4.2).
+#   fetch/push failure               -> target `failed`, CONTINUE; the step ends `failed` + rc 1 so a resume
+#                                       retries only the non-terminal targets (done/conflict are never redone).
+#   target branch gone from remote   -> `done` ONLY IF the board shows that release closed (stage PROD or
+#                                       status completed/closed/cancelled): its branch was deleted by its own
+#                                       close-out, so there is nothing to keep current. Otherwise (open release
+#                                       with no branch, or no record at all) FAIL CLOSED as `failed`: a missing
+#                                       branch we cannot explain must not be silently reported as propagated.
+# No notice is written onto the OTHER release: the closeOut POST endpoint only writes the closing release's
+# record, and release.notices[] is the notification-receipt log owned by release_notify, so there is no sanctioned
+# writer for it. The durable record is targets[<branch>]=conflict on the closing release plus the stdout notice.
+_kb_co_merge_others() {
+    local board_file="${1-}" release_id="${2-}" work="${3-}" integ="${4-}"
+    local rj list line tgt st itip n_fail=0 n_conf=0 n_done=0 closed
+    rj=$(_kb_release_close_out_release_json "$board_file" "$release_id") || return 1
+    list=$(printf '%s' "$rj" | jq -r '.closeOut.steps.mergeOtherReleases.targets // {} | to_entries[] | "\(.key) \(.value)"') \
+        || { _kb_co_fail "$release_id" mergeOtherReleases "cannot read the recorded targets"; return 1; }
+    if ! _kb_co_git -C "$work" fetch -q origin >/dev/null 2>&1; then
+        _kb_co_fail "$release_id" mergeOtherReleases "could not fetch the remote to read the ${integ} tip"; return 1
+    fi
+    itip=$(_kb_co_git -C "$work" rev-parse --verify "refs/remotes/origin/${integ}^{commit}" 2>/dev/null) \
+        || { _kb_co_fail "$release_id" mergeOtherReleases "integration branch '$integ' not found on the remote"; return 1; }
+    while IFS= read -r -u3 line; do
+        [[ -n "$line" ]] || continue
+        tgt="${line% *}"; st="${line##* }"
+        case "$st" in
+            done) n_done=$((n_done + 1)); echo "  $tgt: already done"; continue ;;
+            conflict) n_conf=$((n_conf + 1)); echo "  $tgt: conflict already recorded (needs a PR into $tgt)"; continue ;;
+        esac
+        if _kb_co_merge_into "$work" "$tgt" "$itip" "$integ"; then
+            _kb_release_close_out_set_target "$release_id" "$tgt" done >/dev/null \
+                || { echo "Error: $tgt was updated in git but could not be recorded; re-run to resume (idempotent)" >&2; n_fail=$((n_fail + 1)); continue; }
+            n_done=$((n_done + 1))
+            continue
+        fi
+        case "${_KB_CO_KIND:-}" in
+        conflict)
+            _kb_release_close_out_set_target "$release_id" "$tgt" conflict >/dev/null \
+                || { echo "Error: could not record the conflict for $tgt; re-run to resume" >&2; n_fail=$((n_fail + 1)); continue; }
+            n_conf=$((n_conf + 1))
+            echo "NOTICE: merging $integ into $tgt CONFLICTED. $tgt is untouched; the close-out of $release_id is NOT blocked." >&2
+            echo "        Remedy: open a PR into $tgt itself that merges $integ and resolves the conflict (that release's next session is stopped until then)." >&2
+            ;;
+        missing)
+            closed=$(_kb_jq_read "$board_file" '[.releases[]? | select(.branch == $b)] | if length == 0 then "unknown"
+                elif all(.[]; (.stage // "") == "PROD" or ((.status // "") | IN("completed","cancelled","closed"))) then "closed" else "open" end' -r --arg b "$tgt") || closed=unknown
+            if [[ "$closed" == "closed" ]]; then
+                _kb_release_close_out_set_target "$release_id" "$tgt" done >/dev/null \
+                    || { echo "Error: could not record $tgt as done; re-run to resume" >&2; n_fail=$((n_fail + 1)); continue; }
+                n_done=$((n_done + 1))
+                echo "  note: $tgt no longer exists on the remote and its release is closed on the board; nothing to propagate (recorded done)"
+            else
+                n_fail=$((n_fail + 1))
+                _kb_release_close_out_set_target "$release_id" "$tgt" failed >/dev/null 2>&1
+                echo "Error: $tgt is gone from the remote but the board shows its release as '$closed'; not assuming it is closed (fail-closed). Resolve, then re-run." >&2
+            fi
+            ;;
+        *)
+            n_fail=$((n_fail + 1))
+            _kb_release_close_out_set_target "$release_id" "$tgt" failed >/dev/null 2>&1
+            echo "Error: $tgt: $_KB_CO_ERR; will be retried on resume" >&2
+            ;;
+        esac
+    done 3<<EOF_TARGETS
+$list
+EOF_TARGETS
+    if [[ "$n_fail" -gt 0 ]]; then
+        _kb_co_fail "$release_id" mergeOtherReleases "$n_fail target(s) failed ($n_done done, $n_conf conflict); resume retries only the failed ones"
+        return 1
+    fi
+    _kb_release_close_out_set "$release_id" mergeOtherReleases done \
+        || { echo "Error: mergeOtherReleases succeeded in git but could not be recorded; re-run to resume (idempotent)" >&2; return 1; }
+    echo "  mergeOtherReleases: $n_done done, $n_conf conflict (needs a PR into that release)"
+    return 0
+}
+
+# --- deleteBranch (XACA-1353-004) -------------------------------------------------------------------
+# Prefixes a close-out may delete a branch under, one per line: releasePrefix + hotfix/ (XACA-1353-005).
+_kb_co_delete_prefixes() {
+    local board_file="${1-}"
+    _kb_get_release_branch_role "$board_file" releasePrefix || return 1
+    echo "hotfix/"   # XACA-1353-005: constant, same as release_branches.HOTFIX_PREFIX (no config field for it)
+}
+
+# rc 0 = this branch name may be deleted; rc 1 + reason in $_KB_CO_ERR = refuse. Pure name check, no git state.
+_kb_co_delete_guard() {
+    local board_file="${1-}" branch="${2-}" prod="${3-}" integ="${4-}" pfx ok=0 prefixes
+    _KB_CO_ERR=""
+    [[ -n "$branch" ]] || { _KB_CO_ERR="empty branch name"; return 1; }
+    if [[ "$branch" == "$integ" || "$branch" == "$prod" || "$branch" == "HEAD" ]]; then
+        _KB_CO_ERR="'$branch' is the configured integration/production branch; it is never deleted"; return 1
+    fi
+    case "$branch" in -*|*..*|*[[:space:]]*|refs/*) _KB_CO_ERR="'$branch' is not a plain branch name"; return 1 ;; esac
+    _kb_co_git check-ref-format "refs/heads/$branch" >/dev/null 2>&1 || { _KB_CO_ERR="'$branch' is not a valid branch name"; return 1; }
+    prefixes=$(_kb_co_delete_prefixes "$board_file") || { _KB_CO_ERR="cannot read the allowed release-branch prefixes"; return 1; }
+    while IFS= read -r pfx; do
+        [[ -n "$pfx" && "$branch" == "$pfx"?* ]] && ok=1
+    done <<EOF_PFX
+$prefixes
+EOF_PFX
+    [[ "$ok" == "1" ]] || { _KB_CO_ERR="'$branch' is not under an allowed release prefix ($(printf '%s' "$prefixes" | tr '\n' ' '))"; return 1; }
+    return 0
+}
+
+# Delete releases/<ver> on the remote, last (after tag + merges). Records deleteBranch done; fails closed.
+_kb_co_delete_branch() {
+    local board_file="${1-}" release_id="${2-}" work="${3-}" branch="${4-}" prod="${5-}" integ="${6-}" rtip t ttip
+    _kb_co_delete_guard "$board_file" "$branch" "$prod" "$integ" \
+        || { _kb_co_fail "$release_id" deleteBranch "refusing to delete: $_KB_CO_ERR"; return 1; }
+    _kb_co_git -C "$work" fetch -q --prune origin >/dev/null 2>&1 \
+        || { _kb_co_fail "$release_id" deleteBranch "could not fetch the remote"; return 1; }
+    if ! _kb_co_git -C "$work" ls-remote --exit-code --heads origin "refs/heads/${branch}" >/dev/null 2>&1; then
+        echo "  deleteBranch: $branch is already gone from the remote"
+    else
+        rtip=$(_kb_co_git -C "$work" rev-parse --verify "refs/remotes/origin/${branch}^{commit}" 2>/dev/null) \
+            || { _kb_co_fail "$release_id" deleteBranch "cannot read the tip of $branch"; return 1; }
+        for t in "$prod" "$integ"; do
+            ttip=$(_kb_co_git -C "$work" rev-parse --verify "refs/remotes/origin/${t}^{commit}" 2>/dev/null) \
+                || { _kb_co_fail "$release_id" deleteBranch "branch '$t' not found on the remote"; return 1; }
+            _kb_co_git -C "$work" merge-base --is-ancestor "$rtip" "$ttip" 2>/dev/null \
+                || { _kb_co_fail "$release_id" deleteBranch "$branch has commits (${rtip:0:12}) that $t does not contain; refusing to delete unmerged work"; return 1; }
+        done
+        _kb_co_git -C "$work" push -q origin --delete "refs/heads/${branch}" >/dev/null 2>&1 \
+            || { _kb_co_fail "$release_id" deleteBranch "deleting $branch on the remote was rejected"; return 1; }
+        if _kb_co_git -C "$work" ls-remote --exit-code --heads origin "refs/heads/${branch}" >/dev/null 2>&1; then
+            _kb_co_fail "$release_id" deleteBranch "pushed the delete but $branch still exists on the remote"; return 1
+        fi
+        echo "  deleted $branch on the remote (local branches are left alone)"
+    fi
+    _kb_release_close_out_set "$release_id" deleteBranch done \
+        || { echo "Error: deleteBranch succeeded but could not be recorded; re-run to resume (idempotent)" >&2; return 1; }
+    return 0
+}
+
+# crClose (CR teams only, XACA-1353-004): `kb-cr close` every CR assigned to this release
+# (crs[].releaseAssignment.releaseId, the XACA-1349 linkage). cr-closed -> skip (idempotent: kb-cr itself
+# exits 1 on an already-closed CR); cr-completed -> close; anything else fails closed. Verified by re-reading the board.
+_kb_co_close_crs() {
+    local board_file="${1-}" release_id="${2-}" version="${3-}" list line cid cst n=0 after
+    list=$(_kb_jq_read "$board_file" '[.crs[]? | select(.releaseAssignment.releaseId == $r) | "\(.id) \(.crState // "")"] | .[]' -r --arg r "$release_id") \
+        || { _kb_co_fail "$release_id" crClose "cannot read the CRs linked to the release"; return 1; }
+    [[ -n "$list" ]] || { _kb_co_fail "$release_id" crClose "no CR is linked to $release_id (releaseAssignment.releaseId); a CR team's GAMMA needs a cr-completed CR"; return 1; }
+    typeset -f kb-cr >/dev/null 2>&1 || { _kb_co_fail "$release_id" crClose "kb-cr is not available in this shell"; return 1; }
+    while IFS= read -r line; do
+        [[ -n "$line" ]] || continue
+        cid="${line%% *}"; cst="${line#* }"
+        case "$cst" in
+            cr-closed) echo "  crClose: $cid already closed"; continue ;;
+            cr-completed) ;;
+            *) _kb_co_fail "$release_id" crClose "CR $cid is '$cst', not cr-completed; resolve it, then re-run"; return 1 ;;
+        esac
+        kb-cr close "$cid" --reason "release ${release_id} (v${version}) closed out" \
+            || { _kb_co_fail "$release_id" crClose "kb-cr close $cid failed"; return 1; }
+        after=$(_kb_jq_read "$board_file" '[.crs[]? | select(.id == $c) | .crState] | first // ""' -r --arg c "$cid")
+        [[ "$after" == "cr-closed" ]] \
+            || { _kb_co_fail "$release_id" crClose "kb-cr close $cid returned success but the CR is '$after' (CR support off?)"; return 1; }
+        n=$((n + 1))
+    done <<EOF_CRS
+$list
+EOF_CRS
+    _kb_release_close_out_set "$release_id" crClose done \
+        || { echo "Error: crClose succeeded but could not be recorded; re-run to resume (idempotent)" >&2; return 1; }
+    echo "  crClose: $n CR(s) closed"
+    return 0
+}
+
+# The terminal act: the sanctioned gated promote GAMMA -> PROD (POST /api/releases/<id>/promote). The gate
+# (release_gate.closeout_gap) refuses it until close-out is complete, so this is also the final cross-check.
+_kb_release_close_out_promote() {
+    local release_id="${1-}" payload
+    payload=$(jq -nc --arg a "$(_kb_release_default_actor)" '{targetStage:"PROD", actor:$a}') || return 1
+    _kb_release_api_post "${release_id}/promote" "$payload" || return 1
+    if [[ "$_KB_REL_CODE" != "200" ]] || [[ "$(printf '%s' "$_KB_REL_BODY" | jq -r '.allowed // true' 2>/dev/null)" == "false" ]]; then
+        echo "Error: close-out finished but the PROD promote was refused (HTTP ${_KB_REL_CODE}): $(printf '%s' "$_KB_REL_BODY" | jq -r '.error // empty' 2>/dev/null)" >&2
+        return 1
+    fi
+    return 0
+}
+
+_kb_release_close_out_run() {
+    local board_file="${1-}" release_id="${2-}" work="${3-}" dry_run="${4-}" repo="${5-}"
+    local rj rtype pfx branch gamma version mode prod integ tag_name rel_tip first cr targets step ex_tip tgt st
+    rj=$(_kb_release_close_out_release_json "$board_file" "$release_id") || return 1
+    [[ -n "$rj" ]] || { echo "Error: release '$release_id' not found in $board_file" >&2; return 1; }
+    branch=$(printf '%s' "$rj" | jq -er '.branch | strings | select(length > 0)') \
+        || { echo "Error: release $release_id has no recorded branch" >&2; return 1; }
+    gamma=$(printf '%s' "$rj" | jq -er '.stageSha.GAMMA | strings | select(test("^[0-9a-f]{40,64}$"))') \
+        || { echo "Error: release $release_id has no valid stageSha.GAMMA; refusing to close out" >&2; return 1; }
+    mode=$(_kb_get_release_branch_role "$board_file" mode) || { echo "Error: cannot read release branch config" >&2; return 1; }
+    [[ "$mode" == "release" || "$mode" == "trunk" ]] || { echo "Error: unknown release branch mode '$mode'" >&2; return 1; }
+    prod=$(_kb_get_release_branch_role "$board_file" production) || return 1
+    integ=$(_kb_get_release_branch_role "$board_file" integration) || return 1
+    # XACA-1353-005: a type:hotfix release has its OWN hotfix/<ver> branch in EVERY mode (even trunk), so it always
+    # gets the non-trunk close-out semantics (tip == GAMMA exact, both merges, propagate, delete last). An absent
+    # type is a normal release; an unknown type fails closed (same set the cut enforces).
+    rtype=$(printf '%s' "$rj" | jq -er '.type // "feature" | select(IN("feature","bugfix","hotfix","maintenance"))') \
+        || { echo "Error: release $release_id has an unknown type; refusing to close out" >&2; return 1; }
+    if [[ "$rtype" == "hotfix" ]]; then
+        mode=release
+        [[ "$branch" == hotfix/?* ]] \
+            || { echo "Error: hotfix release $release_id records branch '$branch', not hotfix/<ver>; refusing" >&2; return 1; }
+    fi
+    if [[ "$mode" == "trunk" && "$branch" != "$integ" ]]; then
+        echo "Error: trunk mode: release $release_id records branch '$branch' but the release branch is the integration branch '$integ'; refusing" >&2; return 1
+    fi
+    version=$(printf '%s' "$rj" | python3 -c '
+import json, sys
+sys.path.insert(0, sys.argv[1])
+import release_branches as r
+print(r.release_version(json.load(sys.stdin)))' "$(dirname "$(_kb_release_branches_script)")") \
+        || { echo "Error: cannot determine the release version" >&2; return 1; }
+    tag_name="v${version}"
+
+    # --- init (only when no record) ---
+    if [[ "$(printf '%s' "$rj" | jq -r 'if (.closeOut|type) == "object" then "yes" else "no" end')" != "yes" ]]; then
+        cr=$(_kb_jq_read "$board_file" 'if (.teamConfig.crSupport.enabled|type) == "boolean" then .teamConfig.crSupport.enabled
+            elif .teamConfig.crSupport.enabled == null then false else error("crSupport.enabled is not a boolean") end' -r) \
+            || { echo "Error: cannot read teamConfig.crSupport.enabled" >&2; return 1; }
+        targets=""
+        # Propagation targets are the other open releases/* ONLY (spec 4.2 "keeping releases current", 13.5 step 6).
+        # Never another hotfix/*: it is cut from production and must not absorb unreleased integration work.
+        pfx=$(_kb_get_release_branch_role "$board_file" releasePrefix) || { echo "Error: cannot read releasePrefix" >&2; return 1; }
+        [[ "$mode" == "trunk" ]] || targets=$(_kb_jq_read "$board_file" '[.releases[]? | select(.id != $id and ((.branch|type) == "string") and (.branch|startswith($p))
+            and ((.stage // "") != "PROD") and ((.status // "") | IN("completed","cancelled","closed") | not)) | .branch] | unique | join(",")' -r \
+            --arg id "$release_id" --arg p "$pfx") || { echo "Error: cannot enumerate other open releases" >&2; return 1; }
+        if [[ "$dry_run" == "1" ]]; then
+            echo "[dry-run] would init close-out (crTeam=$cr targets=${targets:-none})"
+        else
+            if [[ "$cr" == "true" ]]; then
+                _kb_release_close_out_init "$release_id" --cr-team --targets "$targets" || return 1
+            else
+                _kb_release_close_out_init "$release_id" --targets "$targets" || return 1
+            fi
+            rj=$(_kb_release_close_out_release_json "$board_file" "$release_id") || return 1
+            printf '%s' "$rj" | jq -e '.closeOut | type == "object"' >/dev/null 2>&1 \
+                || { echo "Error: close-out init was accepted but the board shows no record; stopping" >&2; return 1; }
+        fi
+    fi
+
+    if [[ "$dry_run" == "1" ]]; then
+        ex_tip=$(_kb_co_git -C "$repo" ls-remote -- "$(_kb_co_git -C "$repo" remote | head -1)" "refs/heads/${branch}" | awk '{print $1}')
+        [[ "$ex_tip" == "$gamma" ]] || echo "[dry-run] WARNING: ${branch} tip '${ex_tip:-absent}' != stageSha.GAMMA ${gamma:0:12}; the tag step would refuse"
+        echo "[dry-run] would: tag ${tag_name} at ${gamma:0:12}; merge ${branch} -> ${prod}; merge ${branch} -> ${integ}"
+        return 0
+    fi
+
+    for step in tag mergeProduction mergeIntegration mergeOtherReleases deleteBranch crClose; do
+        st=$(printf '%s' "$rj" | _kb_release_close_out_step_status - "$step")
+        [[ "$st" == "n/a" ]] && continue          # crClose exists only for CR teams
+        if [[ "$st" == "done" ]]; then echo "  $step: already done"; continue; fi
+        case "$step" in
+        tag)
+            rel_tip=$(_kb_co_git -C "$work" rev-parse --verify "refs/remotes/origin/${branch}^{commit}" 2>/dev/null) \
+                || { _kb_co_fail "$release_id" tag "release branch '$branch' not found on the remote"; return 1; }
+            ex_tip=$(_kb_co_git -C "$work" rev-parse -q --verify "refs/tags/${tag_name}^{commit}" 2>/dev/null)
+            if [[ -n "$ex_tip" ]]; then
+                [[ "$ex_tip" == "$gamma" ]] \
+                    || { _kb_co_fail "$release_id" tag "tag ${tag_name} already exists at ${ex_tip:0:12}, not stageSha.GAMMA ${gamma:0:12}; refusing to move a tag"; return 1; }
+                echo "  tag ${tag_name} already at GAMMA; resuming"
+            else
+                if [[ "$mode" == "trunk" ]]; then
+                    _kb_co_git -C "$work" merge-base --is-ancestor "$gamma" "$rel_tip" 2>/dev/null \
+                        || { _kb_co_fail "$release_id" tag "stageSha.GAMMA ${gamma:0:12} is not an ancestor of ${integ} (${rel_tip:0:12}); the tested build is not on the trunk"; return 1; }
+                else
+                    [[ "$rel_tip" == "$gamma" ]] \
+                        || { _kb_co_fail "$release_id" tag "${branch} tip ${rel_tip:0:12} != stageSha.GAMMA ${gamma:0:12}; the tested build is not the branch tip (spec 4.2)"; return 1; }
+                fi
+                _kb_co_git -C "$work" tag -a -m "Release ${version}" "$tag_name" "$gamma" >/dev/null 2>&1 \
+                    || { _kb_co_fail "$release_id" tag "could not create tag ${tag_name}"; return 1; }
+                _kb_co_git -C "$work" push -q origin "refs/tags/${tag_name}" >/dev/null 2>&1 \
+                    || { _kb_co_fail "$release_id" tag "push of tag ${tag_name} was rejected"; return 1; }
+                echo "  tagged ${tag_name} at ${gamma:0:12}"
+            fi
+            ;;
+        mergeProduction)
+            if [[ "$mode" == "trunk" && "$prod" == "$integ" ]]; then
+                echo "  mergeProduction: trunk mode and production == integration ($integ); nothing to merge (done)"
+            else
+                _kb_co_merge_into "$work" "$prod" "$gamma" "$branch" || { _kb_co_fail "$release_id" "$step" "$_KB_CO_ERR"; return 1; }
+            fi
+            ;;
+        mergeIntegration)
+            if [[ "$mode" == "trunk" ]]; then
+                echo "  mergeIntegration: trunk mode; the release branch IS $integ (no-op, done)"
+            else
+                _kb_co_merge_into "$work" "$integ" "$gamma" "$branch" || { _kb_co_fail "$release_id" "$step" "$_KB_CO_ERR"; return 1; }
+            fi
+            ;;
+        mergeOtherReleases)
+            if [[ "$mode" == "trunk" ]]; then
+                echo "  mergeOtherReleases: trunk mode; other releases share $integ (no-op, done)"
+            else
+                _kb_co_merge_others "$board_file" "$release_id" "$work" "$integ" || return 1
+                rj=$(_kb_release_close_out_release_json "$board_file" "$release_id") || return 1
+                continue
+            fi
+            ;;
+        deleteBranch)
+            if [[ "$mode" == "trunk" ]]; then
+                echo "  deleteBranch: skipped; trunk mode: the release branch is $integ, which is never deleted (done)"
+            else
+                rj=$(_kb_release_close_out_release_json "$board_file" "$release_id") || return 1
+                printf '%s' "$rj" | _kb_release_close_out_can_delete - \
+                    || { echo "Error: deleteBranch refused: tag, both merges and mergeOtherReleases must all be done first" >&2; return 1; }
+                _kb_co_delete_branch "$board_file" "$release_id" "$work" "$branch" "$prod" "$integ" || return 1
+                continue
+            fi
+            ;;
+        crClose)
+            _kb_co_close_crs "$board_file" "$release_id" "$version" || return 1
+            continue
+            ;;
+        esac
+        _kb_release_close_out_set "$release_id" "$step" done \
+            || { echo "Error: '$step' succeeded but could not be recorded; re-run to resume (idempotent)" >&2; return 1; }
+    done
+
+    rj=$(_kb_release_close_out_release_json "$board_file" "$release_id") || return 1
+    if [[ "$(printf '%s' "$rj" | jq -r '.stage // ""')" == "PROD" ]]; then
+        echo "Close-out for $release_id complete; release is already at PROD"
+        return 0
+    fi
+    _kb_release_close_out_promote "$release_id" || return 1
+    echo "Close-out for $release_id complete: release promoted to PROD"
+    return 0
+}
+
+_kb_release_close_out() {
+    local board_file="${1-}" release_id="${2-}" repo="" dry_run=0 remote url work rc name email
+    shift 2 2>/dev/null || shift $#
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --repo) repo="${2-}"; shift ;;
+            --dry-run) dry_run=1 ;;
+            *) echo "Error: unknown option '$1'" >&2; return 1 ;;
+        esac
+        shift
+    done
+    [[ -n "$board_file" && -f "$board_file" && -n "$release_id" ]] || { echo "Usage: _kb_release_close_out <board_file> <release_id> [--repo <dir>] [--dry-run]" >&2; return 1; }
+    [[ -n "$repo" ]] || repo="$PWD"
+    repo=$(_kb_co_git -C "$repo" rev-parse --show-toplevel 2>/dev/null) || { echo "Error: $repo is not a git repository" >&2; return 1; }
+    if [[ "$dry_run" == "1" ]]; then
+        _kb_release_close_out_run "$board_file" "$release_id" "" 1 "$repo"; return $?
+    fi
+    remote=$(_kb_co_git -C "$repo" remote | head -1)
+    [[ -n "$remote" ]] || { echo "Error: repository $repo has no git remote" >&2; return 1; }
+    url=$(_kb_co_git -C "$repo" remote get-url "$remote") || return 1
+    work=$(mktemp -d "${TMPDIR:-/tmp}/kb-closeout.XXXXXX") || return 1
+    if ! _kb_co_git clone -q --no-checkout --reference-if-able "$repo" -- "$url" "$work/clone" >/dev/null 2>&1; then
+        rm -r -f "$work"; echo "Error: could not clone $remote for the close-out scratch checkout" >&2; return 1
+    fi
+    name=$(_kb_co_git -C "$repo" config --get user.name 2>/dev/null); email=$(_kb_co_git -C "$repo" config --get user.email 2>/dev/null)
+    [[ -n "$name" ]] && _kb_co_git -C "$work/clone" config user.name "$name"
+    [[ -n "$email" ]] && _kb_co_git -C "$work/clone" config user.email "$email"
+    _kb_release_close_out_run "$board_file" "$release_id" "$work/clone" 0 "$repo"
+    rc=$?
+    rm -r -f "$work"
+    return $rc
+}
+
 # Detect the main/development branch for the current repo
 # Usage: _kb_get_main_branch [remote_name]
 # Prints the branch name (e.g., "develop", "main", "master")
@@ -24359,6 +24892,7 @@ kb-release-list() {
 
 # Assign a kanban item to a release
 # Usage: kb-release-assign <item-id> <release-id> [platform]
+# NOTE: assign/unassign write JSON only and never move code; see docs/release-workflow/moving-a-ticket.md
 kb-release-assign() {
     local item_id="${1-}"
     local release_id="${2-}"
@@ -26404,12 +26938,70 @@ kb-release-chain() {
     python3 "$(dirname "$_KB_RS_CLI")/release_chain.py" "${args[@]}"
 }
 
+# XACA-1353-004: the PROD close-out (spec 3.2 PROD, 13.4). Thin shell around _kb_release_close_out.
+# Usage: kb-release close-out <REL-ID> [--repo-dir <path>] [--dry-run]
+# A FRESH close-out (no closeOut record yet) first asks the gate, via a promote dry-run, whether the release is
+# otherwise ready for PROD: the only unmet condition allowed is "close-out incomplete". A started close-out resumes
+# at the first incomplete step (the same thing `kb-run <REL-ID>` does automatically). The release reaches PROD only
+# through the gated promote, as the LAST step; on any failure it stays in GAMMA.
+# Exit: 0 complete (release at PROD) | 1 a step failed or was refused | 2 usage
+kb-release-close-out() {
+    local release_id="" opt_repo="$PWD" opt_dry=0 bf rj ctx team dry codes
+    local usage="Usage: kb-release close-out <release-id> [--repo-dir <path>] [--dry-run]"
+    while [[ $# -gt 0 ]]; do
+        case "${1-}" in
+            --repo-dir)
+                if [[ $# -lt 2 ]]; then echo "Error: --repo-dir needs a value" >&2; echo "$usage" >&2; return 2; fi
+                opt_repo="${2-}"; shift 2 ;;
+            --dry-run) opt_dry=1; shift ;;
+            --help|-h)
+                echo "$usage"; echo ""
+                echo "PROD close-out: tag v<ver> at stageSha.GAMMA, merge into production and integration, merge integration"
+                echo "into every other open release, delete the release branch (remote), kb-cr close (CR teams), then the"
+                echo "gated promote to PROD. Resumes at the first incomplete step after a failure; the release stays in GAMMA"
+                echo "until every step is done. Exit: 0 complete, 1 step failed/refused, 2 usage."
+                return 0 ;;
+            -*) echo "Error: Unknown option: ${1-}" >&2; echo "$usage" >&2; return 2 ;;
+            *)
+                if [[ -z "$release_id" ]]; then release_id="${1-}"
+                else echo "Error: Unexpected argument: ${1-}" >&2; echo "$usage" >&2; return 2; fi
+                shift ;;
+        esac
+    done
+    if [[ -z "$release_id" ]]; then echo "Error: Release ID is required" >&2; echo "$usage" >&2; return 2; fi
+    if ! _kb_release_valid_token "$release_id"; then echo "Error: invalid release id: $release_id" >&2; return 2; fi
+    ctx=$(_kb_detect_context 2>/dev/null); team="${ctx%%:*}"
+    bf=$(_kb_get_board_file "$team") || { echo "Error: no board for team '$team'" >&2; return 1; }
+    rj=$(_kb_release_close_out_release_json "$bf" "$release_id")
+    [[ -n "$rj" ]] || { echo "Error: release '$release_id' not found" >&2; return 1; }
+    if (( ! opt_dry )) && ! printf '%s' "$rj" | jq -e '.closeOut | type == "object"' >/dev/null 2>&1; then
+        # fresh start: the gate must agree the release is otherwise ready (GAMMA passed). Fail closed.
+        _kb_release_api_post "${release_id}/promote" "$(jq -nc '{targetStage:"PROD", dryRun:true}')" || return 1
+        if [[ "$_KB_REL_CODE" != "200" ]]; then
+            echo "Error: cannot ask the gate whether $release_id is ready (HTTP ${_KB_REL_CODE}); not starting close-out" >&2; return 1
+        fi
+        codes=$(printf '%s' "$_KB_REL_BODY" | jq -r '[.reasonCodes[]? | select(. != "CLOSEOUT_INCOMPLETE")] | length' 2>/dev/null)
+        if [[ "$codes" != "0" ]]; then
+            echo "Error: $release_id is not ready for close-out (GAMMA has not passed):" >&2
+            printf '%s' "$_KB_REL_BODY" | jq -r '.reasons[]? | "  - " + .' >&2 2>/dev/null
+            return 1
+        fi
+    fi
+    local -a args=(--repo "$opt_repo")
+    (( opt_dry )) && args+=(--dry-run)
+    _kb_release_close_out "$bf" "$release_id" "${args[@]}"
+}
+
 # XACA-1350-002/003/004 (spec 5.1): the release runner behind `kb-run <REL-ID>`.
 #   1. load the release record + resume plan (kanban-hooks/release_resume.py)
 #   2. attach to / create the release worktree on release.branch (a PLANNED release has none: stay put, the plan
 #      offers the DEV promote that cuts it -- never invent a branch, never default to develop)
 #   3. build the prompt through the shared _kb_build_launch_prompt (release mode), launch cc
+#   0. (XACA-1353-004, spec 13.4) BEFORE any of that: a release in GAMMA whose PROD close-out has STARTED (closeOut
+#      record present) is resumed at its first incomplete step by _kb_release_close_out -- no session is launched;
+#      the release reaches PROD as that run's last act. A close-out is STARTED only by `kb-release close-out`.
 # Usage (via kb-run): kb-run <REL-ID> [--yes]
+# Exit: 0 ok | 1 error | 2 usage/not confirmed | 8 PROD close-out resumed but a step failed (release stays in GAMMA)
 _kb_release_run() {
     local release_id="${1-}" assume_yes="${2:-0}"
     if ! _kb_release_valid_token "$release_id"; then echo "Error: invalid release id: $release_id" >&2; return 2; fi
@@ -26423,6 +27015,20 @@ _kb_release_run() {
     branch=$(printf '%s\n' "$plan_json" | jq -r '.branch // empty')
     name=$(printf '%s\n' "$plan_json" | jq -r '.name // empty')
     stage=$(printf '%s\n' "$plan_json" | jq -r '.stage // empty')
+
+    if [[ "$stage" == "GAMMA" ]]; then
+        local _co_bf _co_rj
+        _co_bf=$(_kb_get_board_file "$team") && _co_rj=$(_kb_release_close_out_release_json "$_co_bf" "$release_id")
+        if [[ -n "$_co_rj" ]] && printf '%s' "$_co_rj" | jq -e '.closeOut | type == "object"' >/dev/null 2>&1; then
+            echo "↻ $release_id: PROD close-out is in progress; resuming at its first incomplete step (spec 13.4)"
+            if _kb_release_close_out "$_co_bf" "$release_id" --repo "$PWD"; then
+                echo "✓ kb-run: close-out complete; $release_id is at PROD."
+                return 0
+            fi
+            echo "✗ kb-run: PROD close-out stopped; $release_id stays in GAMMA and nothing was deleted early. Fix the cause above, then re-run: kb-run $release_id" >&2
+            return 8
+        fi
+    fi
 
     if [[ -n "$branch" ]]; then
         local git_common git_root project_root wt_out wt_rc
@@ -26548,6 +27154,10 @@ kb-release() {
             # XACA-0729: demote all platforms back to PLANNED holding state
             kb-release-plan "$@"
             ;;
+        close-out)
+            # XACA-1353-004: PROD close-out (tag, merges, delete branch, kb-cr close, gated promote to PROD)
+            kb-release-close-out "$@"
+            ;;
         link-cr)
             kb-release-link-cr "$@"
             ;;
@@ -26581,6 +27191,8 @@ kb-release() {
             echo "                                              Resumable CR stage: draft, lead approval, publish, notify, submit (XACA-1349)"
             echo "  kb-release gamma-fail <id> --by LEAD --summary \"...\" [--rollback-result PASS|FAIL] [--smoke-result PASS|FAIL] [--status]"
             echo "                                              GAMMA failure: record rollback, hold CR, regress to DEV, notify, re-publish (XACA-1349)"
+            echo "  kb-release close-out <id> [--repo-dir PATH] [--dry-run]"
+            echo "                                              PROD close-out: tag, merge to production + integration, delete branch, kb-cr close, promote (XACA-1353)"
             echo "  kb-release resume <id> [--repo-dir PATH] [--json]"
             echo "                                              What a release session resumes with, from the record (XACA-1350)"
             echo "  kb-release chain <id> [--repo-dir PATH] [--actor NAME] [--dry-run] [--json]"
