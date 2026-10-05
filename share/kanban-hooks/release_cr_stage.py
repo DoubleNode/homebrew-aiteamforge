@@ -87,6 +87,7 @@ def _load_kanban_utils():
 
 kanban_utils = _load_kanban_utils()
 import release_cr_facts as rcf  # noqa: E402
+import release_branches  # noqa: E402
 import release_gate  # noqa: E402
 import release_template_render as trender  # noqa: E402
 
@@ -325,16 +326,8 @@ class ShellTools:
 
     # -- git / activity
     def branch_head(self, release: Dict[str, Any]) -> Optional[str]:
-        branch = release.get("branch")
-        if not isinstance(branch, str) or not branch.strip() or branch.startswith("-"):
-            return None
-        try:
-            r = self.run(["git", "-C", self.repo_dir, "rev-parse", "--verify", "--quiet", branch.strip() + "^{commit}"],
-                         capture_output=True, text=True, timeout=10, env=_clean_env())
-        except (OSError, subprocess.SubprocessError):
-            return None
-        sha = (r.stdout or "").strip()
-        return sha if r.returncode == 0 and re.fullmatch(r"[0-9a-fA-F]{7,64}", sha) else None
+        """The release branch tip AS THE REMOTE HAS IT (XACA-1352-018: the cut is remote-only), else None."""
+        return release_branches.branch_tip(self.repo_dir, release.get("branch"), run=self.run)
 
     def activity(self, board_file: str, cr_id: str) -> List[Dict[str, Any]]:
         path = Path(board_file).parent / "change-requests" / "activity" / ("%s.json" % cr_id)

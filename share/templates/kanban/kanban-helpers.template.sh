@@ -1403,7 +1403,13 @@ _kb_reset_worktree() {
 
     # Fetch latest main branch from remote
     local fetch_output fetch_exit
-    fetch_output=$(git fetch "$remote" "$main_branch" 2>&1)
+    if [[ -n "$branch_override" ]]; then
+        # XACA-1352: explicit refspec so refs/remotes/<remote>/<branch> is updated even in a
+        # --single-branch clone (a bare `git fetch <remote> <branch>` only updates it opportunistically).
+        fetch_output=$(git fetch -- "$remote" "+refs/heads/${main_branch}:refs/remotes/${remote}/${main_branch}" 2>&1)
+    else
+        fetch_output=$(git fetch "$remote" "$main_branch" 2>&1)
+    fi
     fetch_exit=$?
     if [[ -n "$fetch_output" ]]; then
         echo "$fetch_output" | sed 's/^/   /'
@@ -1682,7 +1688,7 @@ _kb_create_item_worktree() {
             echo "Error: release branch '$start_branch' requested but no git remote found" >&2
             return 1
         fi
-        if ! fetch_out=$(git fetch "$start_remote" "$start_branch" 2>&1); then
+        if ! fetch_out=$(git fetch -- "$start_remote" "+refs/heads/${start_branch}:refs/remotes/${start_remote}/${start_branch}" 2>&1); then
             echo "Error: could not fetch release branch ${start_remote}/${start_branch}" >&2
             echo "  ${fetch_out}" >&2
             echo "  The worktree base MUST be the release branch; refusing to fall back to the current checkout." >&2

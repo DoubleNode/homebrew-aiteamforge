@@ -23,6 +23,7 @@ import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 
+import release_branches
 import release_gate as G
 from release_runner import RunnerError, _git
 
@@ -248,10 +249,7 @@ def load_plan(kanban_dir, release_id, repo_dir=None, now=None):
              if isinstance(it.get("releaseAssignment"), dict) and it["releaseAssignment"].get("releaseId") == release_id]
     head = None
     if repo_dir and rel.get("branch"):
-        try:
-            head = _git(subprocess.run, repo_dir, "rev-parse", rel["branch"])
-        except RunnerError:
-            head = None
+        head = release_branches.branch_tip(repo_dir, rel["branch"])   # remote tip; local refs lag/absent (XACA-1352-018)
     manual, sched = [], []
     try:
         provs = providers_for_stage(load_providers(os.path.join(kanban_dir, "config", "test-providers.json")), cur)

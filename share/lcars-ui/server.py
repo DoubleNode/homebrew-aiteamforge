@@ -9049,24 +9049,14 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         return _resolve_team_repo_root(team)
 
     def _release_branch_head(self, release, team):
-        """`git rev-parse <release.branch>` in the team repo, or None. None makes the gate
-        fail closed ("cannot verify"); it is never guessed."""
-        branch = release.get('branch')
-        if not isinstance(branch, str) or not branch.strip() or branch.startswith('-'):
+        """The release branch tip as the REMOTE has it (XACA-1352-018: the cut is remote-only and a local ref
+        can lag), or None. None makes the gate fail closed ("cannot verify"); it is never guessed."""
+        if _release_branches is None:
             return None
         root = self._release_repo_root(team)
         if root is None:
             return None
-        env = {k: v for k, v in os.environ.items()
-               if k not in ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE')}
-        try:
-            r = subprocess.run(['git', '-C', str(root), 'rev-parse', '--verify', '--quiet',
-                                branch.strip() + '^{commit}'],
-                               capture_output=True, text=True, timeout=5, env=env)
-        except (OSError, subprocess.SubprocessError):
-            return None
-        sha = (r.stdout or '').strip()
-        return sha if r.returncode == 0 and re.fullmatch(r'[0-9a-fA-F]{7,64}', sha) else None
+        return _release_branches.branch_tip(root, release.get('branch'))
 
     def _prod_tag_lookup(self, repo_root, branch, prefix, sort):
         """XACA-1349-004: the injectable production-tag lookup (tests replace it)."""

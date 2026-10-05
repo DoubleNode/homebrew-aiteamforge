@@ -29,7 +29,12 @@ MODES = ("release", "trunk")
 _SAFE_REF = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,127}")
 _SAFE_PREFIX = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,30}/")
 _SHA = re.compile(r"[0-9a-f]{40,64}")
-GIT_TIMEOUT = 60
+# XACA-1352 round 1 (-019): these run under the board write lock, so keep them short and never let git prompt.
+LOCAL_TIMEOUT = 10
+LS_REMOTE_TIMEOUT = 20
+FETCH_TIMEOUT = 20
+PUSH_TIMEOUT = 30
+_TIMEOUTS = {"ls-remote": LS_REMOTE_TIMEOUT, "fetch": FETCH_TIMEOUT, "push": PUSH_TIMEOUT}
 
 
 def effective_branches(release_config):
@@ -85,7 +90,9 @@ def release_version(release):
 
 
 def _clean_environ():
-    return {k: v for k, v in os.environ.items() if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE")}
+    cleaned = {k: v for k, v in os.environ.items() if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE")}
+    cleaned["GIT_TERMINAL_PROMPT"] = "0"   # a server started from a terminal must never block on a credential prompt
+    return cleaned
 
 
 class _Git:
@@ -95,7 +102,8 @@ class _Git:
     def __call__(self, *args, ok=(0,)):
         try:
             r = self.run(["git", "-C", self.repo] + list(args), capture_output=True, text=True,
-                         stdin=subprocess.DEVNULL, timeout=GIT_TIMEOUT, env=_clean_environ())
+                         stdin=subprocess.DEVNULL, timeout=_TIMEOUTS.get(args[0], LOCAL_TIMEOUT),
+                         env=_clean_environ())
         except (OSError, subprocess.SubprocessError) as e:
             raise RuntimeError("git %s failed to run: %s" % (args[0], e))
         if r.returncode not in ok:
@@ -112,7 +120,7 @@ def _remote(git):
 
 
 def _remote_tip(git, remote, branch):
-    out = (git("ls-remote", remote, "refs/heads/" + branch).stdout or "").strip()
+    out = (git("ls-remote", "--", remote, "refs/heads/" + branch).stdout or "").strip()
     for line in out.splitlines():
         parts = line.split()
         if len(parts) == 2 and parts[1] == "refs/heads/" + branch and _SHA.fullmatch(parts[0]):
@@ -124,6 +132,24 @@ def _check_ref(git, branch):
     if branch.startswith("-"):
         raise ValueError("branch %r starts with '-'" % branch)
     git("check-ref-format", "--branch", branch)
+
+
+def branch_tip(repo_root, branch, *, run=subprocess.run):
+    """The tip SHA of `branch` as the REMOTE has it, or None. The cut pushes to the remote only (no local branch),
+    and a local `develop` can lag the remote, so no reader may use a local ref (XACA-1352-018). Same remote
+    convention as the cut (first `git remote`). Never guesses: an invalid name, no remote, an unreachable remote or
+    an absent branch all give None, so callers keep their existing fail-closed "cannot verify" paths."""
+    if not isinstance(branch, str):
+        return None
+    branch = branch.strip()
+    if not branch or branch.startswith("-") or not _SAFE_REF.fullmatch(branch):
+        return None
+    try:
+        git = _Git(repo_root, run)
+        _check_ref(git, branch)
+        return _remote_tip(git, _remote(git), branch)
+    except (ValueError, RuntimeError, OSError):
+        return None
 
 
 def cut_release_branch(release, board, repo_root, *, dry_run=False, run=subprocess.run):
@@ -147,16 +173,21 @@ def cut_release_branch(release, board, repo_root, *, dry_run=False, run=subproce
         if dry_run:
             raise RuntimeError("branch %r already exists at %s (integration is at %s); a dry-run cannot "
                                "verify its history without fetching" % (branch, existing, integ_sha))
-        git("fetch", remote, integ)
-        anc = git("merge-base", "--is-ancestor", existing, integ_sha, ok=(0, 1))
-        if anc.returncode != 0:
-            raise RuntimeError("branch %r exists with unrelated history (tip %s is not in %s)"
+        git("fetch", "--", remote, integ, branch)   # objects for BOTH tips, so the ancestry checks cannot rc-128
+        if git("merge-base", "--is-ancestor", existing, integ_sha, ok=(0, 1)).returncode != 0:
+            if git("merge-base", "--is-ancestor", integ_sha, existing, ok=(0, 1)).returncode == 0:
+                raise RuntimeError("branch %r already exists with commits %r lacks (its tip %s is ahead of %s); "
+                                   "refusing to reuse it" % (branch, integ, existing, integ_sha))
+            if git("merge-base", existing, integ_sha, ok=(0, 1)).returncode == 0:
+                raise RuntimeError("branch %r already exists and has diverged from %r (tip %s; %r is at %s); "
+                                   "refusing to reuse it" % (branch, integ, existing, integ, integ_sha))
+            raise RuntimeError("branch %r exists with unrelated history (tip %s shares no commit with %r)"
                                % (branch, existing, integ))
         return {"branch": branch, "branchBaseSha": existing}
     if dry_run:
         return {"branch": branch, "branchBaseSha": integ_sha}
-    git("fetch", remote, integ)
-    git("push", remote, "%s:refs/heads/%s" % (integ_sha, branch))
+    git("fetch", "--", remote, integ)
+    git("push", "--", remote, "%s:refs/heads/%s" % (integ_sha, branch))
     if _remote_tip(git, remote, branch) != integ_sha:
         raise RuntimeError("pushed %r but the remote tip does not equal %s" % (branch, integ_sha))
     return {"branch": branch, "branchBaseSha": integ_sha}
@@ -206,6 +237,15 @@ def _find_item(board, item_id):
     return None
 
 
+def _valid_ref_format(branch):
+    try:
+        r = subprocess.run(["git", "check-ref-format", "--branch", branch], capture_output=True, text=True,
+                           stdin=subprocess.DEVNULL, timeout=LOCAL_TIMEOUT, env=_clean_environ())
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return r.returncode == 0
+
+
 def _cmd_item_branch(a):
     board = _load_board(a.board)
     item = _find_item(board, a.item)
@@ -222,7 +262,11 @@ def _cmd_item_branch(a):
         return 0
     br = rel.get("branch")
     if isinstance(br, str) and br.strip():
-        print(br.strip())
+        br = br.strip()
+        if br.startswith("-") or not _SAFE_REF.fullmatch(br) or not _valid_ref_format(br):
+            print("error: release %s has an unusable branch %r" % (rid, br), file=sys.stderr)
+            return 1
+        print(br)
     return 0
 
 
