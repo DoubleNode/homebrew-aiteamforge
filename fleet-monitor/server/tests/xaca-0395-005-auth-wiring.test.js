@@ -28,8 +28,8 @@
  *     -> 7 post + 4 put + 3 delete = 14 mutating routes
  *   grep -nE "^\s*app\.(get|post|put|patch|delete)\(" lib/vault-routes.js
  *     -> 6 mutating (2 post, 2 put, 2 delete); 4 GET, including the
- *        ciphertext route, deliberately left ungated (contract §6 — GET is
- *        outside this ticket's verb scope; XACA-0398 carries that gap)
+ *        ciphertext route, which XACA-1328 gates at the fleet tier (it was
+ *        left ungated here per contract §6); the other 3 GETs stay public
  *   grep -nE "^\s*app\.(get|post|put|patch|delete)\(" lib/engines-routes.js
  *     -> 3 mutating (1 post, 1 put, 1 delete); 2 GET left ungated
  *
@@ -211,9 +211,27 @@ describe('vault-routes.js — requireApiKey actually mounted (not just imported)
         assert.notEqual(res.status, 401);
     });
 
-    test('GET /api/vault/secrets/:engineSlug/:accountSlug/ciphertext stays UNGATED — known, accepted gap (contract §6, carried to XACA-0398)', async () => {
-        const res = await request(app).get('/api/vault/secrets/dummy-engine/dummy-account/ciphertext');
-        assert.notEqual(res.status, 401, 'ciphertext GET must remain reachable without auth — this is a documented gap, not a regression to fix here');
+    test('GET /api/vault/secrets/:engineSlug/:accountSlug/ciphertext is GATED at the fleet tier (XACA-1328, reverses the old contract §6 gap)', async () => {
+        const url = '/api/vault/secrets/dummy-engine/dummy-account/ciphertext?machine_id=m';
+        const res = await request(app).get(url);
+        assert.equal(res.status, 401);
+        assert.deepEqual(res.body, EXPECTED_401_BODY);
+        const ok = await request(app).get(url).set('Authorization', `Bearer ${TEST_TOKEN}`);
+        assert.notEqual(ok.status, 401, 'a valid fleet credential must reach the handler');
+    });
+
+    test('requireApiKey is mounted on the ciphertext GET ONLY; the other 3 vault GETs stay public (source-derived)', async () => {
+        const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'vault-routes.js'), 'utf8');
+        const gets = [...src.matchAll(/app\.get\(\s*'([^']+)'\s*,([^\n]*)/g)].map(m => ({ route: m[1], gated: /requireApiKey/.test(m[2]) }));
+        assert.equal(gets.length, 4, `expected 4 vault GET routes, found ${gets.length}`);
+        for (const g of gets) {
+            assert.equal(g.gated, g.route.endsWith('/ciphertext'),
+                `${g.route}: gated=${g.gated} — only the ciphertext GET may carry requireApiKey`);
+        }
+        for (const url of ['/api/vault/mode', '/api/vault/machines', '/api/vault/secrets']) {
+            const res = await request(app).get(url);
+            assert.notEqual(res.status, 401, `${url} must stay public`);
+        }
     });
 
     test('GET /api/vault/machines stays UNGATED (read routes are out of this ticket verb scope)', async () => {

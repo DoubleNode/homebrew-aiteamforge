@@ -51,6 +51,11 @@ const TEST_VAULT_FILE   = path.join(os.tmpdir(), `vault-routes-vault-${process.p
 const TEST_ENGINES_FILE = path.join(os.tmpdir(), `vault-routes-engines-${process.pid}-${Date.now()}.json`);
 process.env.FLEET_VAULT_FILE   = TEST_VAULT_FILE;
 process.env.FLEET_ENGINES_FILE = TEST_ENGINES_FILE;
+// XACA-1328: auth tokens are read from the environment per request; a value
+// exported in the developer's shell must not close the gates under the
+// pre-existing tests.
+delete process.env.FLEET_AUTH_TOKEN;
+delete process.env.FLEET_ADMIN_TOKEN;
 
 const { test, before, after, beforeEach } = require('node:test');
 const assert   = require('node:assert/strict');
@@ -889,4 +894,142 @@ test('GET /api/vault/mode — response body contains only mode and source (no cr
     // The values must also be strings (not objects that could smuggle nested data).
     assert.equal(typeof res.body.mode,   'string', 'mode field must be a string');
     assert.equal(typeof res.body.source, 'string', 'source field must be a string');
+});
+
+// ===========================================================================
+// XACA-1328-003: ciphertext GET is gated at the FLEET tier (requireApiKey);
+// the other three vault GETs stay public.
+// ===========================================================================
+
+const { requireApiKey: gateProbeMiddleware } = require('../lib/auth-middleware');
+
+const FLEET_TOK_1328 = 'xaca1328-fleet-token-not-real';
+const ADMIN_TOK_1328 = 'xaca1328-admin-token-not-real';
+
+/** Run fn with the given token env set, ALWAYS restoring (never leak into other tests). */
+async function withTokens({ fleet, admin }, fn) {
+    const E = process['env'];
+    const prev = { f: E.FLEET_AUTH_TOKEN, a: E.FLEET_ADMIN_TOKEN };
+    const put = (k, v) => { if (v === undefined) delete E[k]; else E[k] = v; };
+    try {
+        put('FLEET_AUTH_TOKEN', fleet);
+        put('FLEET_ADMIN_TOKEN', admin);
+        return await fn();
+    } finally {
+        put('FLEET_AUTH_TOKEN', prev.f);
+        put('FLEET_ADMIN_TOKEN', prev.a);
+    }
+}
+
+const CT_1328 = () => `/api/vault/secrets/${TEST_ENGINE_SLUG}/${TEST_ACCOUNT_SLUG}/ciphertext`;
+
+/** Seed machine + secret with the gates OPEN (admin routes); returns the sealed box. */
+async function seed1328(machineId) {
+    await registerMachine(machineId, 'XACA-1328 machine', testPublicKey);
+    const sealedBox = await makeSealed('xaca-1328-secret', testPublicKey);
+    const r = await request(app).post('/api/vault/secrets').send({
+        engine_slug: TEST_ENGINE_SLUG, account_slug: TEST_ACCOUNT_SLUG,
+        ciphertexts: [{ machine_id: machineId, sealed: sealedBox }]
+    });
+    assert.equal(r.status, 201, `seed failed: ${JSON.stringify(r.body)}`);
+    return sealedBox;
+}
+
+test('XACA-1328: ciphertext GET, fleet gate closed, no credential -> 401 byte-identical to an existing fleet-tier route', async () => {
+    const sealedBox = await seed1328('m-1328-a');
+    await withTokens({ fleet: FLEET_TOK_1328 }, async () => {
+        // Reference: a route gated by the very same requireApiKey fleet middleware.
+        const probeApp = express();
+        probeApp.get('/probe', gateProbeMiddleware, (req, res) => res.json({ ok: true }));
+        const ref = await request(probeApp).get('/probe');
+        assert.equal(ref.status, 401);
+
+        const res = await request(app).get(`${CT_1328()}?machine_id=m-1328-a`);
+        assert.equal(res.status, 401);
+        assert.equal(res.text, ref.text, '401 body must be byte-identical to the fleet-tier 401');
+        assert.equal(res.headers['content-type'], ref.headers['content-type']);
+        assert.equal(res.headers['www-authenticate'], ref.headers['www-authenticate']);
+        assert.ok(!res.text.includes(sealedBox), '401 must not leak the ciphertext');
+        assert.ok(!res.text.includes(FLEET_TOK_1328), '401 must not echo the token');
+
+        // A wrong credential gets the same bytes.
+        const wrong = await request(app).get(`${CT_1328()}?machine_id=m-1328-a`)
+            .set('Authorization', 'Bearer wrong-token');
+        assert.equal(wrong.status, 401);
+        assert.equal(wrong.text, ref.text);
+    });
+});
+
+test('XACA-1328: ciphertext GET with the fleet token -> 200 (Bearer and X-API-Key)', async () => {
+    const sealedBox = await seed1328('m-1328-b');
+    await withTokens({ fleet: FLEET_TOK_1328 }, async () => {
+        const res = await request(app).get(`${CT_1328()}?machine_id=m-1328-b`)
+            .set('Authorization', `Bearer ${FLEET_TOK_1328}`);
+        assert.equal(res.status, 200);
+        assert.equal(res.body.machine_id, 'm-1328-b');
+        assert.equal(res.body.sealed, sealedBox);
+
+        const res2 = await request(app).get(`${CT_1328()}?machine_id=m-1328-b`)
+            .set('X-API-Key', FLEET_TOK_1328);
+        assert.equal(res2.status, 200);
+        assert.equal(res2.body.sealed, sealedBox);
+    });
+});
+
+test('XACA-1328: with the fleet token, 404/400 codes are unchanged (secret_not_found, no_ciphertext_for_machine, missing_machine_id)', async () => {
+    await seed1328('m-1328-c');
+    await withTokens({ fleet: FLEET_TOK_1328 }, async () => {
+        const auth = { Authorization: `Bearer ${FLEET_TOK_1328}` };
+        const a = await request(app).get('/api/vault/secrets/no-engine/no-account/ciphertext?machine_id=m-1328-c').set(auth);
+        assert.equal(a.status, 404);
+        assert.equal(a.body.code, 'secret_not_found');
+
+        const b = await request(app).get(`${CT_1328()}?machine_id=m-1328-nocopy`).set(auth);
+        assert.equal(b.status, 404);
+        assert.equal(b.body.code, 'no_ciphertext_for_machine');
+
+        const c = await request(app).get(CT_1328()).set(auth);
+        assert.equal(c.status, 400);
+        assert.equal(c.body.code, 'missing_machine_id');
+    });
+});
+
+test('XACA-1328: ciphertext GET with the admin token (superset) -> 200', async () => {
+    const sealedBox = await seed1328('m-1328-d');
+    await withTokens({ fleet: FLEET_TOK_1328, admin: ADMIN_TOK_1328 }, async () => {
+        const res = await request(app).get(`${CT_1328()}?machine_id=m-1328-d`)
+            .set('Authorization', `Bearer ${ADMIN_TOK_1328}`);
+        assert.equal(res.status, 200);
+        assert.equal(res.body.sealed, sealedBox);
+        const res2 = await request(app).get(`${CT_1328()}?machine_id=m-1328-d`)
+            .set('Authorization', `Bearer ${FLEET_TOK_1328}`);
+        assert.equal(res2.status, 200);
+    });
+});
+
+test('XACA-1328: gate OPEN posture (no FLEET_AUTH_TOKEN) -> unauthenticated ciphertext GET still 200', async () => {
+    const sealedBox = await seed1328('m-1328-e');
+    await withTokens({}, async () => {
+        const res = await request(app).get(`${CT_1328()}?machine_id=m-1328-e`);
+        assert.equal(res.status, 200);
+        assert.equal(res.body.sealed, sealedBox);
+    });
+    // A blank token is a config error that resolves to the open posture too.
+    await withTokens({ fleet: '   ' }, async () => {
+        const res = await request(app).get(`${CT_1328()}?machine_id=m-1328-e`);
+        assert.equal(res.status, 200);
+    });
+});
+
+test('XACA-1328: the 3 other vault GETs (mode, machines, secrets list) stay public while the fleet gate is closed', async () => {
+    await seed1328('m-1328-f');
+    await withTokens({ fleet: FLEET_TOK_1328 }, async () => {
+        for (const url of ['/api/vault/mode', '/api/vault/machines', '/api/vault/secrets']) {
+            const res = await request(app).get(url);
+            assert.equal(res.status, 200, `${url} must stay public (got ${res.status})`);
+        }
+        // Contrast in the same closed posture: the ciphertext route is gated.
+        const gated = await request(app).get(`${CT_1328()}?machine_id=m-1328-f`);
+        assert.equal(gated.status, 401);
+    });
 });

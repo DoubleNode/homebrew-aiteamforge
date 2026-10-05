@@ -604,12 +604,13 @@ const ADMIN_ROUTES = [
     { method: 'DELETE', path: '/api/vault/secrets/:engineSlug/:accountSlug',     file: 'lib/vault-routes.js' },
 ];
 
-// The 10 fleet-tier routes. 7 use requireApiKey middleware; the 3 msg-relay
+// The 11 fleet-tier routes (XACA-1328 added the vault ciphertext GET). 8 use requireApiKey middleware; the 3 msg-relay
 // routes use the checkApiKey guard form inside the handler.
 const FLEET_MIDDLEWARE_ROUTES = [
     'POST /api/status', 'POST /api/team-register', 'POST /api/kanban-push', 'POST /api/knowledge-push',
     'POST /api/token-reports', 'GET /api/token-reports',
     'POST /api/ci-runners-push',
+    'GET /api/vault/secrets/:engineSlug/:accountSlug/ciphertext', // XACA-1328
 ];
 const FLEET_GUARD_ROUTES = ['POST /api/msg', 'GET /api/msg', 'POST /api/msg/ack'];
 
@@ -659,7 +660,7 @@ describe('route inventory — every admin route is on the admin gate (static)', 
         });
     }
 
-    test('the requireApiKey (fleet middleware) set is exactly the 7 fleet middleware routes', () => {
+    test('the requireApiKey (fleet middleware) set is exactly the 8 fleet middleware routes', () => {
         const derived = regs.filter((r) => r.gate === 'requireApiKey').map(key).sort();
         assert.deepEqual(derived, [...FLEET_MIDDLEWARE_ROUTES].sort());
     });
@@ -672,11 +673,11 @@ describe('route inventory — every admin route is on the admin gate (static)', 
         assert.ok(!/checkAdminKey/.test(src));
     });
 
-    test('tier totals: 19 admin + 10 fleet = 29 guarded', () => {
+    test('tier totals: 19 admin + 11 fleet = 30 guarded', () => {
         const admin = regs.filter((r) => r.gate === 'requireAdminKey').length;
         const fleet = regs.filter((r) => r.gate === 'requireApiKey').length + FLEET_GUARD_ROUTES.length;
         assert.equal(admin, 19);
-        assert.equal(fleet, 10);
+        assert.equal(fleet, 11);
     });
 
     test('every mutating /api route in the server is gated by a tier or explicitly allowlisted', () => {
@@ -738,9 +739,13 @@ describe('vault + engines route modules — all 9 admin routes refuse the fleet 
         assert.notEqual(res.status, 401);
     });
 
-    test('the ungated ciphertext GET is untouched here (subitem 005 owns it)', async () => {
-        const res = await request(app).get('/api/vault/secrets/xaca-0398-e/xaca-0398-a/ciphertext');
-        assert.notEqual(res.status, 401);
+    test('the ciphertext GET is fleet-tier (XACA-1328): fleet token passes, no credential 401s', async () => {
+        const url = '/api/vault/secrets/xaca-0398-e/xaca-0398-a/ciphertext?machine_id=m';
+        const none = await request(app).get(url);
+        assert.equal(none.status, 401);
+        assert.equal(none.text, EXPECTED_401_TEXT);
+        const ok = await request(app).get(url).set('Authorization', `Bearer ${FLEET_TOKEN}`);
+        assert.notEqual(ok.status, 401);
     });
 });
 

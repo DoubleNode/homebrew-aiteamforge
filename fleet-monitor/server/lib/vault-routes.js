@@ -25,11 +25,12 @@
  * writing or deleting a seal, therefore needs FLEET_ADMIN_TOKEN (or the LCARS
  * unlock session), not merely a fleet machine's config.
  *
- * The 4 GET routes (mode, machine list, secret list, ciphertext delivery) are
- * UNGATED by a recorded decision (XACA-0398-005; contract §6 "Recorded
- * deviation"), not by oversight. See each route's own comment for what it
- * discloses and what would reverse the decision. Do not read "vault routes are
- * gated" as "all vault routes are gated."
+ * The 3 GET routes (mode, machine list, secret list) are UNGATED by a recorded
+ * decision (XACA-0398-005; contract §6 "Recorded deviation"), not by oversight.
+ * The 4th GET, ciphertext delivery, is gated at the FLEET tier with
+ * requireApiKey (XACA-1328, 2026-10-05, reversing XACA-0398-005 for that route
+ * only). See each route's own comment for what it discloses and why. Do not
+ * read "vault routes are gated" as "all vault routes are gated."
  *
  * PRODUCTION CAVEAT: every gate here is OPEN until FLEET_AUTH_TOKEN or
  * FLEET_ADMIN_TOKEN is set on the server (contract §7). Until the XACA-0398-006
@@ -46,7 +47,7 @@
 const vaultStore = require('./vault-store');
 const { ensureReady: vaultEnsureReady } = require('./vault-crypto');
 const enginesStore = require('./engines-store');
-const { requireAdminKey } = require('./auth-middleware');
+const { requireAdminKey, requireApiKey } = require('./auth-middleware');
 
 /**
  * Register all /api/vault/* routes on the given Express app (or router).
@@ -306,60 +307,38 @@ function registerVaultRoutes(app) {
      * locally using its private key (which never leaves the machine).
      * This is the endpoint cc-launch (A.4.3) calls at boot.
      *
-     * AUTH DECISION: UNGATED (XACA-0398-005, re-evaluated 2026-09-23). This is a
-     * recorded deviation from contract §6: the route returns ciphertext (fails
-     * R2), and its caller could present a credential (fails R3).
+     * AUTH DECISION: GATED, fleet tier (XACA-1328, 2026-10-05) — reverses
+     * XACA-0398-005. requireApiKey accepts the fleet token or the admin token
+     * (admin is a superset); it is OPEN when neither FLEET_AUTH_TOKEN nor
+     * FLEET_ADMIN_TOKEN is set (contract §7), so open-posture behavior is unchanged.
      *
-     *   Premise. The `sealed` blob is an anonymous libsodium sealed box. Only the
-     *   holder of the recipient's X25519 PRIVATE key can open it, and that key
-     *   never leaves the machine (Keychain, or a 0600 file). "Registered
-     *   recipient" is enforced by who the blob was sealed TO, not by an auth
-     *   check here. That holds only while an attacker cannot become a recipient.
-     *   Registration and rotation (POST/PUT /api/vault/machines) are now
-     *   ADMIN-tier (XACA-0398-003). Sealing is client-side and point-in-time: a
-     *   seal covers only the machines registered when it was made. A recipient
-     *   registered later gets no copy until an operator re-seals.
-     *   THE PREMISE DOES NOT HOLD IN PRODUCTION until XACA-0398-006 sets
-     *   FLEET_ADMIN_TOKEN (or at least FLEET_AUTH_TOKEN). Until then the gate is
-     *   open and anyone can register a recipient.
+     *   Premise (still applies). The `sealed` blob is an anonymous libsodium
+     *   sealed box; only the holder of the recipient's X25519 private key (which
+     *   never leaves the machine) can open it. "Registered recipient" is
+     *   enforced by who the blob was sealed TO. Registration/rotation are
+     *   ADMIN-tier (XACA-0398-003); seals are client-side and point-in-time.
      *
-     *   What this leaks to an uncredentialed caller: a blob that cannot be opened
-     *   without the private key, its sealed_at, and whether (engine, account,
-     *   machine) exists (the 404 codes). The last two are already public through
-     *   GET /api/vault/secrets. Nothing new.
+     *   Residual risk (still applies). A compromised ADMIN token can register an
+     *   attacker key that the next operator seal then includes; the gate does not
+     *   help against that. Mitigation: review the recipient list before sealing
+     *   and rotate the admin token. The fleet gate is defense in depth, not a
+     *   replacement for sealing-to-the-right-recipients.
      *
-     *   What a fleet-tier gate would buy: very little. Every party that could open
-     *   the blob already holds the private key on a fleet machine, and so can
-     *   read that machine's fleet-config.json (0600, same user). A stolen key
-     *   from a backup usually comes with that file too. The admin token passes
-     *   the fleet tier (admin is a superset), so the gate does not help against
-     *   admin compromise either.
-     *   What it would cost: vault-fetch.js sends NO credential today
-     *   (kg.fleetFetchInit() is { redirect: 'manual' } only). A 401 is treated
-     *   as unreachable (exit 4). cc-account-routing.sh then falls back to the
-     *   stale cache, then to the env var, and then REFUSES to launch a declared
-     *   team (XACA-1312). Gating before every consumer runs a vault-fetch that
-     *   sends the token is a fleet-wide launch outage.
+     *   Reversal conditions recorded in XACA-0398-005, with evidence:
+     *   (1) vault-fetch.js sends the fleet token from fleet-config.json authToken.
+     *       EVIDENCE: XACA-1326 merged 11df8415, shipped in tap v0.20.30 (tap 86d2f644).
+     *   (2) every consumer runs a tap release that includes (1).
+     *       EVIDENCE: 2026-10-05, M4Mini, M1Pro and M1Mini all report
+     *       `aiteamforge 0.20.30`; installed vault-fetch.js sha256 26374ee5...076500a
+     *       matches the v0.20.30 tap copy on all three (XACA-1328-001).
+     *   (3) production has FLEET_AUTH_TOKEN set.
+     *       EVIDENCE: 2026-10-05, `check-fleet-auth-posture --expect all-closed`
+     *       -> VERDICT: OK (XACA-1328-001).
      *
-     *   Residual risk if the ADMIN token is compromised: the attacker registers
-     *   their own public key. That recipient is visible in the public GET
-     *   /api/vault/machines. The next operator seal (LCARS vault-seal.js or
-     *   vault-migrate-env-keys.js, both of which seal to EVERY listed machine)
-     *   then includes the attacker, who fetches the blob here. With the admin
-     *   token they could do so even if this route were gated. The mitigation is
-     *   to review the recipient list before sealing and to rotate the admin
-     *   token. Gating this route is not the mitigation.
-     *
-     *   REVERSE THIS (gate with requireApiKey, the fleet tier) when ALL of these
-     *   hold: (1) vault-fetch.js sends the fleet token from fleet-config.json
-     *   authToken [DELIVERED by XACA-1326, 2026-10-04; it takes effect on a
-     *   consumer only once a tap release carrying it is installed there];
-     *   (2) every consumer runs a tap release that includes (1); (3)
-     *   production has FLEET_AUTH_TOKEN set. Reverse sooner if the sealed box
-     *   stops being sufficient on its own, for example a need for
-     *   harvest-now-decrypt-later resistance or a recipient private key found
-     *   stored anywhere except the machine. Do NOT add a per-recipient identity
-     *   check here: the server has no machine credential to check it against.
+     *   Rollback: remove requireApiKey from this route. Consumers on a vault-fetch
+     *   that sends no token get 401 -> exit 4 -> launch refusal (XACA-1312).
+     *   Do NOT add a per-recipient identity check: the server has no machine
+     *   credential to check it against.
      *
      * STRUCTURED ERROR `code` field (additive, machine-readable — XACA-0538-003):
      *   Each error carries a stable `code` so the A.4.2/A.4.3 vault-fetch client can
@@ -370,7 +349,7 @@ function registerVaultRoutes(app) {
      *                                          machine; re-seal client-side (§4.3).
      *     'internal_error'        (500) — unexpected server fault; details suppressed.
      */
-    app.get('/api/vault/secrets/:engineSlug/:accountSlug/ciphertext', (req, res) => {
+    app.get('/api/vault/secrets/:engineSlug/:accountSlug/ciphertext', requireApiKey, (req, res) => {
         try {
             const { engineSlug, accountSlug } = req.params;
             const { machine_id }              = req.query;
