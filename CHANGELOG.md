@@ -7,6 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [0.20.31] - 2026-10-05
+
 - **XACA-1435** (Fixed, mirror): `share/lcars-ui/server.py` `handle_promote_release` no longer holds the board write lock across the PLANNED->DEV release-branch cut (up to 5 network git calls, ~110s). The cut runs unlocked; the locked pass re-reads, re-validates (stage/target, cut-input fingerprint, branch, gate) and records `branch`/`branchBaseSha` atomically with the stage change, refusing 409 on any change. `share/kanban-hooks/release_branches.py` push is now create-only (`--force-with-lease=refs/heads/<branch>:`) so two concurrent unlocked cuts cannot fast-forward the branch past the recorded base.
 - **XACA-1435** (Fixed, mirror, round 3): `share/kanban-hooks/release_branches.py` raises `BranchCreateRace` when a rejected create-only push left the branch existing; `share/lcars-ui/server.py` refuses it with 409 in both gate modes (report mode would otherwise promote to DEV with the winner's branch unrecorded).
 - **XACA-1328** (Security, mirror): `fleet-monitor/server/lib/vault-routes.js` gates `GET /api/vault/secrets/:engine/:account/ciphertext` with `requireApiKey` (fleet tier; open posture unchanged; mode / machine list / secret list stay public). Reverses XACA-0398-005 after measuring all consumers on 0.20.30 with a token-sending `vault-fetch.js` and production posture all-closed. Server tests mirrored (`vault-routes.test.js`, `xaca-0395-005-auth-wiring.test.js`, `xaca-0398-003-admin-tier.test.js`); `share/scripts/package.json` registers the new client suite. No consumer-side behavior change: the gate lives on the Fly-hosted server.
@@ -7858,7 +7860,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.30...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.31...HEAD
+[0.20.31]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.30...v0.20.31
 [0.20.30]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.29...v0.20.30
 [0.20.29]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.28...v0.20.29
 [0.20.28]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.27...v0.20.28
