@@ -1696,9 +1696,10 @@ def _cut_release_branch(release, board, dry_run=False):
                (both non-empty strings), which handle_promote_release records in the SAME
                locked write that sets release.stage.
       raises:  ANY exception on failure. Nothing is then written to the release.
-    Called ONLY when the move would proceed and the release has no branch recorded yet,
-    under the board lock: keep it fast, idempotent (a retry after a failed board write must
-    find the branch it already cut), and never write the release record. XACA-1346 is the
+    Called ONLY when the move would proceed and the release has no branch recorded yet, and
+    (XACA-1435) with NO board lock held: it does network git. Idempotent (a retry after a failed
+    or refused board write must find and adopt the branch it already cut), and never writes the
+    release record; the locked promote re-validates before recording its result. XACA-1346 is the
     hook's sole caller; XACA-1352 never writes the release record.
     """
     if _release_branches is None:
@@ -1732,6 +1733,32 @@ def _validate_branch_cut(result):
         return {"branch": result['branch'].strip(), "branchBaseSha": result['branchBaseSha'].strip()}
     raise ValueError("_cut_release_branch must return {branch, branchBaseSha} as non-empty strings, got %r"
                      % (result,))
+
+
+def _cut_inputs_fp(release, board):
+    """Stable fingerprint of everything cut_release_branch derives the branch from (effective integration,
+    releasePrefix and mode, plus the release version). XACA-1435: compared between the unlocked cut and the locked
+    record so a config or version edit made while the network git ran refuses the promote instead of recording a
+    stale cut. Keys the cut never reads (e.g. `production`) are deliberately excluded: editing them stales nothing.
+    An unreadable input (invalid version/config) fingerprints as None, which never equals a successful cut's."""
+    try:
+        cfg = _release_branches.effective_branches((board or {}).get("releaseConfig"))
+        return json.dumps([[cfg.get(k) for k in ("integration", "releasePrefix", "mode")],
+                           _release_branches.release_version(release)], sort_keys=True, default=str)
+    except Exception:
+        return None
+
+
+class _CutNeeded(Exception):
+    """XACA-1435: raised by handle_promote_release's locked evaluation when a PLANNED->DEV promote would proceed
+    and needs the release branch cut. The cut does network git (up to ~110s), so it must NOT run under the board
+    lock: raising unwinds _board_write_transaction (lock released), the caller cuts with no lock held, then
+    re-runs the WHOLE locked evaluation with the result. Nothing has been written when this is raised."""
+
+    def __init__(self, release, board, move, fp, body, persisted_stamped):
+        super().__init__("branch cut needed outside the board lock")
+        self.release, self.board, self.move, self.fp = release, board, move, fp
+        self.body, self.persisted_stamped = body, persisted_stamped
 
 
 class _DeferredResponse(Exception):
@@ -9342,11 +9369,49 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         dryRun=true (the LCARS modal preview) runs the SAME evaluation and answers 200
         {allowed, dryRun, mode, from, to, next, reasons, error}: no write, no manifest mirror,
         no activity-log entry; `allowed` is what the real call would do.
+
+        XACA-1435 two phases, so the branch cut's network git never holds the board lock:
+          Phase A (NO lock): the first locked pass evaluates the whole promote (read-only) and, if a
+            PLANNED->DEV cut is needed, raises _CutNeeded; the lock is released and the cut (or its
+            dry-run) runs here with nothing held.
+          Phase B (lock): _promote_release_attempt re-runs the ENTIRE evaluation on a fresh read of the
+            board, re-validates (stage/target still the pre-cut move, branch still unset, cut inputs
+            unchanged, gate verdict) and only then records branch/branchBaseSha in the same save as the
+            stage change. A promote that lost a race, or whose release changed meanwhile, is refused
+            with 409 and records nothing. A remote branch already pushed is deliberately LEFT in place:
+            a retry's cut finds it at the expected base and adopts it (cut_release_branch idempotency).
         """
+        precut = None
         try:
-            if self._gate_unavailable():
-                return
-            body, err = self._read_release_json_body()
+            try:
+                return self._promote_release_attempt(release_id, None)
+            except _CutNeeded as need:
+                dry = need.body.get('dryRun') is True
+                precut = {"move": need.move, "fp": need.fp, "body": need.body,
+                          "persisted": need.persisted_stamped, "cut": None, "err": None}
+                try:  # decision -002: the gated promote is still the SOLE caller of the cut
+                    _rel_copy = copy.deepcopy(need.release)
+                    precut["cut"] = _validate_branch_cut(
+                        _cut_release_branch(_rel_copy, need.board, dry_run=True) if dry
+                        else _cut_release_branch(_rel_copy, need.board))
+                except NotImplementedError as e:
+                    precut["err"] = str(e)
+                except Exception as e:  # any failure: nothing was cut, never proceed as if it was
+                    precut["err"] = "branch cut failed: %s" % e
+            return self._promote_release_attempt(release_id, precut)
+        except Exception as e:
+            self.send_error(500, f"Error promoting release: {e}")
+
+    def _promote_release_attempt(self, release_id, precut):
+        """One locked evaluation of handle_promote_release (see its docstring). precut is None on the first
+        pass and the unlocked cut's outcome on the second; only the first may raise _CutNeeded."""
+        try:
+            if precut is None:
+                if self._gate_unavailable():
+                    return
+                body, err = self._read_release_json_body()
+            else:
+                body, err = precut["body"], None
             if err:
                 return self._send_json_response({"error": err}, status=400)
             target = body.get('targetStage')
@@ -9388,8 +9453,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             noop_log = None
             # XACA-1349-014: BEFORE the board lock (kb-cr takes it itself) let kb-cr durably stamp due
             # assumed approvals. dryRun: no shell-out, no writes. Failures are logged and ignored.
-            persisted_stamped = [] if dry_run else self._persist_assumed_approvals_before_promote(
-                release_id, LCARS_TEAM)
+            persisted_stamped = precut["persisted"] if precut is not None else (
+                [] if dry_run else self._persist_assumed_approvals_before_promote(release_id, LCARS_TEAM))
             feed_stamped = []
             with self._board_write_transaction():
                 data = self._load_releases_config(_lock_held=True)
@@ -9487,16 +9552,32 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 blocking = reasons.blocking()
                 proceed = (not hard) and (mode == 'report' or not blocking)
                 cut = None
+                if precut is not None:
+                    # XACA-1435 phase B: the cut ran unlocked, so everything it was decided on is re-checked
+                    # here against the fresh read. A promote that lost a race (stage moved: a no-target
+                    # promote would otherwise advance AGAIN) or a release edited meanwhile is refused.
+                    _left = (" (remote branch %r was already pushed and is left in place; a retry adopts it)"
+                             % precut["cut"]["branch"]) if precut["cut"] and not dry_run else ""
+                    _stale = None
+                    if precut["move"] != (cur, eff_target):
+                        _stale = "the release moved off %s while its branch was being cut" % precut["move"][0]
+                    elif precut["fp"] != _cut_inputs_fp(release, board_raw):
+                        _stale = "the release version or branch config changed while its branch was being cut"
+                    elif (precut["cut"] and release.get('branch')
+                          and release.get('branch') != precut["cut"]["branch"]):
+                        _stale = "the release was given branch %r while its branch was being cut" % release.get('branch')
+                    if _stale:
+                        reasons.append("PLANNED->DEV: %s; refusing (retry the promote)%s" % (_stale, _left))
+                        proceed = False
+                    elif not proceed and _left:  # gate verdict flipped mid-cut: still say what was pushed
+                        reasons.append("PLANNED->DEV: gate refused after the branch was cut%s" % _left)
                 if proceed and cur == 'PLANNED' and eff_target == 'DEV' and not release.get('branch'):
-                    try:  # decision -002: XACA-1346's gated write is the SOLE caller of the cut
-                        _rel_copy = copy.deepcopy(release)
-                        cut = _validate_branch_cut(
-                            _cut_release_branch(_rel_copy, board_raw, dry_run=True) if dry_run
-                            else _cut_release_branch(_rel_copy, board_raw))
-                    except NotImplementedError as e:
-                        reasons.append("PLANNED->DEV: %s" % e)
-                    except Exception as e:  # any failure: nothing was cut, never proceed as if it was
-                        reasons.append("PLANNED->DEV: branch cut failed: %s" % e)
+                    if precut is None:  # XACA-1435 phase A: release the lock, cut, then re-evaluate everything
+                        raise _CutNeeded(copy.deepcopy(release), copy.deepcopy(board_raw), (cur, eff_target),
+                                         _cut_inputs_fp(release, board_raw), body, persisted_stamped)
+                    cut = precut["cut"]
+                    if precut["err"]:
+                        reasons.append("PLANNED->DEV: %s" % precut["err"])
                     if cut is None and mode == 'enforce':
                         proceed = False
                 if proceed and not dry_run:
@@ -9606,8 +9687,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 self._log_release_activity(release_id, 'release_promote_noop', stage, stage, **noop_log)
             deferred.emit(self)
             return
-        except Exception as e:
-            self.send_error(500, f"Error promoting release: {e}")
+        except _CutNeeded:
+            raise  # XACA-1435: control flow for handle_promote_release, never a 500
 
     def _regress_release_core(self, release_id, to, reason, actor, reconcile_ok=False, reset_status=False):
         """Shared backward-move path for /regress and /plan. Regress rules are ALWAYS enforced

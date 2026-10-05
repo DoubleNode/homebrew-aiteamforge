@@ -29,7 +29,9 @@ MODES = ("release", "trunk")
 _SAFE_REF = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,127}")
 _SAFE_PREFIX = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,30}/")
 _SHA = re.compile(r"[0-9a-f]{40,64}")
-# XACA-1352 round 1 (-019): these run under the board write lock, so keep them short and never let git prompt.
+# XACA-1352 round 1 (-019): keep these short and never let git prompt. XACA-1435: they no longer run under the
+# board write lock (handle_promote_release cuts unlocked, then re-validates under the lock), which bounds how long a
+# promote takes, not how long other board writers wait.
 LOCAL_TIMEOUT = 10
 LS_REMOTE_TIMEOUT = 20
 FETCH_TIMEOUT = 20
@@ -187,7 +189,15 @@ def cut_release_branch(release, board, repo_root, *, dry_run=False, run=subproce
     if dry_run:
         return {"branch": branch, "branchBaseSha": integ_sha}
     git("fetch", "--", remote, integ)
-    git("push", "--", remote, "%s:refs/heads/%s" % (integ_sha, branch))
+    # XACA-1435: create-only. The cut runs with no board lock held, so two promotes can both find the branch
+    # absent; a plain push would let the second fast-forward it past the base the first records. An empty lease
+    # value means "the ref must not exist": the loser is rejected (fail closed) and its retry adopts the branch.
+    try:
+        git("push", "--force-with-lease=refs/heads/%s:" % branch, "--", remote,
+            "%s:refs/heads/%s" % (integ_sha, branch))
+    except RuntimeError as e:
+        raise RuntimeError("branch %r was not created by this cut (it may have been created concurrently; retry "
+                           "the promote to adopt it): %s" % (branch, e))
     if _remote_tip(git, remote, branch) != integ_sha:
         raise RuntimeError("pushed %r but the remote tip does not equal %s" % (branch, integ_sha))
     return {"branch": branch, "branchBaseSha": integ_sha}
