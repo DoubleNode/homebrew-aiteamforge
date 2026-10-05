@@ -752,6 +752,39 @@ def _managed_cli(args):
     return 0
 
 
+def _linked_crs_cli(args):
+    """`linked-crs --board B --release-id R` (XACA-1353-018): one line per CR linked to R under _linked_crs,
+    `<id>\t<crState>`, then `<id>\t<missing>` per linkedCRs id with no CR on the board. The shell close-out
+    (_kb_co_linked_crs: preflight + crClose) consumes THIS, so shell and server share one linkage implementation
+    (id strip/str normalisation, duplicate ids, listed-but-reassigned CRs) instead of a jq re-implementation that
+    drifted. Exit 0 ok; 2 on an unreadable board, a non-list releases/linkedCRs, or an id containing a tab/newline
+    (which would corrupt the line format) -- callers fail closed on any non-zero."""
+    try:
+        with open(args.board, encoding="utf-8") as fh:
+            board = json.load(fh)
+        releases = board.get("releases") if isinstance(board, dict) else None
+        if releases is None:
+            releases = []
+        if not isinstance(releases, list):
+            raise TypeError("releases is not a list")
+        release = next((r for r in releases if isinstance(r, dict) and r.get("id") == args.release_id),
+                       {"id": args.release_id})
+        crs, missing = _linked_crs(board, release)
+        lines = []
+        for cid, state in ([(c.get("id"), c.get("crState") or "") for c in crs]
+                           + [(m, "<missing>") for m in missing]):
+            cid = "" if cid is None else str(cid)
+            if any(ch in cid for ch in "\t\n\r") or any(ch in str(state) for ch in "\t\n\r"):
+                raise ValueError("CR id/state contains a tab or newline: %r" % cid)
+            lines.append("%s\t%s" % (cid, state))
+    except (OSError, ValueError, TypeError, AttributeError) as e:
+        sys.stderr.write("approval_providers linked-crs: %s\n" % e)
+        return 2
+    for ln in lines:
+        sys.stdout.write(ln + "\n")
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="approval_providers.py")
     sub = ap.add_subparsers(dest="mode", required=True)
@@ -776,6 +809,9 @@ def main(argv=None):
     e = sub.add_parser("set-expected")
     e.add_argument("--board", required=True)
     e.add_argument("--cr-id", required=True)
+    lk = sub.add_parser("linked-crs")   # XACA-1353-018: the shell close-out reads THE linkage from here
+    lk.add_argument("--board", required=True)
+    lk.add_argument("--release-id", required=True)
     r = sub.add_parser("is-engine-managed")
     r.add_argument("--board", required=True)
     g = r.add_mutually_exclusive_group(required=True)
@@ -783,6 +819,8 @@ def main(argv=None):
     g.add_argument("--cr-index", type=int)
     args = ap.parse_args(argv)
     try:
+        if args.mode == "linked-crs":
+            return _linked_crs_cli(args)
         if args.mode == "is-engine-managed":
             return _managed_cli(args)
         if args.mode in ("stamp-board", "set-expected"):

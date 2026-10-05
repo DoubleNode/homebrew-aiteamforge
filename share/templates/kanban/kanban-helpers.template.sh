@@ -1625,23 +1625,18 @@ _kb_co_delete_branch() {
     return 0
 }
 
-# _kb_co_linked_crs <board_file> <release_id>: "<cr-id> <crState>" per CR linked to the release, one per line,
-# using THE linkage predicate of approval_providers._cr_linked_to (XACA-1353-017 follow-up): a CR's own
-# releaseAssignment.releaseId wins; a CR with NO assignment is linked when the release's linkedCRs[] names it
-# ({crId: ..} objects or bare ids). A linkedCRs id with no CR on the board is emitted with state "<missing>" so
-# both callers fail closed on it; a non-list linkedCRs is a jq error (rc != 0) -> callers fail closed.
+# _kb_co_linked_crs <board_file> <release_id>: "<cr-id>\t<crState>" per CR linked to the release, one per line,
+# then "<id>\t<missing>" per release.linkedCRs[] id with no CR on the board. XACA-1353-018: this is NOT a shell
+# re-implementation -- it runs approval_providers.py linked-crs, i.e. _linked_crs/_cr_linked_to themselves (the
+# server preflight and the -016 gate use the same code), so id normalisation, duplicate ids and reassigned-but-listed
+# CRs cannot drift between shell and server. rc != 0 (unreadable board, non-list releases/linkedCRs, a tab/newline
+# in an id) -> both callers fail closed.
 _kb_co_linked_crs() {
-    _kb_jq_read "${1-}" '
-        ([.releases[]? | select(.id == $r) | (.linkedCRs // [])
-          | if type == "array" then . else error("linkedCRs is not a list") end
-          | .[] | (if type == "object" then .crId else . end) | strings] | unique) as $listed
-        | ([.crs[]? | .id]) as $ids
-        | ([.crs[]? | select(
-              ((.releaseAssignment.releaseId // "") as $a
-               | if ($a | type) == "string" and $a != "" then $a == $r else ((.id) as $i | $listed | index($i)) != null end))
-            | "\(.id) \(.crState // "")"]
-           + [$listed[] | select(. as $l | $ids | index($l) | not) | "\(.) <missing>"])
-        | .[]' -r --arg r "${2-}"
+    local _bs _ap
+    _bs=$(_kb_board_settings_script) || { echo "Error: cannot locate kanban-hooks/" >&2; return 1; }
+    _ap="$(dirname "$_bs")/approval_providers.py"
+    [[ -f "$_ap" ]] || { echo "Error: missing $_ap" >&2; return 1; }
+    python3 "$_ap" linked-crs --board "${1-}" --release-id "${2-}"
 }
 
 # XACA-1353-017: the START-of-close-out preflight for CR teams. Every CR assigned to the release must be one crClose can
@@ -1662,7 +1657,7 @@ _kb_co_cr_preflight() {
     fi
     while IFS= read -r line; do
         [[ -n "$line" ]] || continue
-        cid="${line%% *}"; cst="${line#* }"
+        cid="${line%%$'\t'*}"; cst="${line#*$'\t'}"
         case "$cst" in
             cr-completed|cr-rejected|cr-closed) ;;
             *)
@@ -1689,7 +1684,7 @@ _kb_co_close_crs() {
     typeset -f kb-cr >/dev/null 2>&1 || { _kb_co_fail "$release_id" crClose "kb-cr is not available in this shell"; return 1; }
     while IFS= read -r line; do
         [[ -n "$line" ]] || continue
-        cid="${line%% *}"; cst="${line#* }"
+        cid="${line%%$'\t'*}"; cst="${line#*$'\t'}"
         case "$cst" in
             cr-closed) echo "  crClose: $cid already closed"; continue ;;
             cr-completed) reason="release ${release_id} (v${version}) closed out" ;;
