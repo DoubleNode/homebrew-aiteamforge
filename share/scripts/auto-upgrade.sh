@@ -29,6 +29,10 @@
 #
 # XACA-0571
 
+# XACA-1240: main() exits itself, so shellcheck calls the final `exit $?` unreachable;
+# it is the deliberate same-line call+exit guard (see the last line). File-wide.
+# shellcheck disable=SC2317
+
 set -euo pipefail
 
 # ── Configuration ─────────────────────────────────────────────────────────────
@@ -197,203 +201,215 @@ _read_pin() {
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-_ensure_log_dir
-_rotate_log
+# XACA-1240: everything below runs inside main() so bash parses the WHOLE body
+# before executing any of it (see the final line). Variables stay global (no
+# `local`) because the EXIT-trap backstop reads $_AU_COMPLETE_LOGGED.
+main() {
+    _ensure_log_dir
+    _rotate_log
 
-log "===== auto-upgrade start ====="
+    log "===== auto-upgrade start ====="
 
-# XACA-1175: install the EXIT-trap backstop only AFTER the start marker is
-# logged — an exit before the start marker (e.g. during log-dir setup) must
-# not fabricate a completion marker for a run that never really started.
-trap _au_exit_backstop EXIT
-# XACA-1175-016: convert catchable termination signals into explicit exits so
-# the backstop above sees the conventional 128+N code (a launchd stop, logout
-# or reboot mid-`brew upgrade`) instead of a misleading 0. SIGKILL cannot be
-# trapped and still leaves an unmatched start marker — that IS a stall signal.
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
+    # XACA-1175: install the EXIT-trap backstop only AFTER the start marker is
+    # logged — an exit before the start marker (e.g. during log-dir setup) must
+    # not fabricate a completion marker for a run that never really started.
+    trap _au_exit_backstop EXIT
+    # XACA-1175-016: convert catchable termination signals into explicit exits so
+    # the backstop above sees the conventional 128+N code (a launchd stop, logout
+    # or reboot mid-`brew upgrade`) instead of a misleading 0. SIGKILL cannot be
+    # trapped and still leaves an unmatched start marker — that IS a stall signal.
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
 
-# XACA-0571-016: surface any deferred error from the env-source step now that
-# the log file exists.
-if [ -n "$_ENV_SOURCE_ERROR" ]; then
-    log "WARNING: $_ENV_SOURCE_ERROR — continuing with default settings"
-fi
+    # XACA-0571-016: surface any deferred error from the env-source step now that
+    # the log file exists.
+    if [ -n "$_ENV_SOURCE_ERROR" ]; then
+        log "WARNING: $_ENV_SOURCE_ERROR — continuing with default settings"
+    fi
 
-# Step 1: verify brew is installed
-if ! command -v brew &>/dev/null; then
-    log "ERROR: brew not found on PATH ($PATH) — cannot run auto-upgrade"
-    notify "Auto-upgrade FAILED — see $LOG_FILE"
-    # XACA-1175: every exit after the start marker must emit exactly one
-    # completion marker, or stall detectors (kb-spacedock CHECK 5) see a
-    # start with no matching complete and report a permanent false stall.
-    log "===== auto-upgrade complete (FAILED: brew not found) ====="
-    exit 1
-fi
+    # Step 1: verify brew is installed
+    if ! command -v brew &>/dev/null; then
+        log "ERROR: brew not found on PATH ($PATH) — cannot run auto-upgrade"
+        notify "Auto-upgrade FAILED — see $LOG_FILE"
+        # XACA-1175: every exit after the start marker must emit exactly one
+        # completion marker, or stall detectors (kb-spacedock CHECK 5) see a
+        # start with no matching complete and report a permanent false stall.
+        log "===== auto-upgrade complete (FAILED: brew not found) ====="
+        exit 1
+    fi
 
-BREW=$(command -v brew)
-log "brew: $BREW"
+    BREW=$(command -v brew)
+    log "brew: $BREW"
 
-# Step 2: verify aiteamforge tap is installed
-# XACA-1175-014: capture-then-match instead of piping into `grep -q`. Under
-# `set -o pipefail` (active via the script-level `set -euo pipefail`), `grep
-# -q` can exit (and SIGPIPE the writer) before brew finishes writing, making
-# the pipeline's exit status reflect the SIGPIPE rather than whether the tap
-# was actually present — a false "tap not found" that now silently routes to
-# the SKIPPED (exit 0) marker above instead of the real answer.
-_TAP_LIST=$("$BREW" tap 2>/dev/null || true)
-if ! grep -qi "doublenode/aiteamforge" <<<"$_TAP_LIST"; then
-    log "WARNING: doublenode/aiteamforge tap not found — skipping upgrade"
-    # XACA-1175: same rationale as the brew-not-found exit above — this is
-    # a normal skip (exit 0), not a failure, so it emits a SKIPPED marker
-    # rather than FAILED; without it the run looks stalled forever.
-    log "===== auto-upgrade complete (SKIPPED: tap not installed) ====="
-    exit 0
-fi
+    # Step 2: verify aiteamforge tap is installed
+    # XACA-1175-014: capture-then-match instead of piping into `grep -q`. Under
+    # `set -o pipefail` (active via the script-level `set -euo pipefail`), `grep
+    # -q` can exit (and SIGPIPE the writer) before brew finishes writing, making
+    # the pipeline's exit status reflect the SIGPIPE rather than whether the tap
+    # was actually present — a false "tap not found" that now silently routes to
+    # the SKIPPED (exit 0) marker above instead of the real answer.
+    _TAP_LIST=$("$BREW" tap 2>/dev/null || true)
+    if ! grep -qi "doublenode/aiteamforge" <<<"$_TAP_LIST"; then
+        log "WARNING: doublenode/aiteamforge tap not found — skipping upgrade"
+        # XACA-1175: same rationale as the brew-not-found exit above — this is
+        # a normal skip (exit 0), not a failure, so it emits a SKIPPED marker
+        # rather than FAILED; without it the run looks stalled forever.
+        log "===== auto-upgrade complete (SKIPPED: tap not installed) ====="
+        exit 0
+    fi
 
-# Step 2.5 (XACA-0676): trust the tap BEFORE any brew load. Recent Homebrew gates
-# formula loading behind tap-trust when $HOMEBREW_REQUIRE_TAP_TRUST is set; on a
-# gated box an UNTRUSTED tap makes `brew outdated`/`brew upgrade` silently no-op,
-# so this LaunchAgent would "succeed" forever while the box rots on an old version
-# (observed on M4Mini stuck at 0.13.4). `brew trust --tap` is idempotent.
-log "Running: brew trust --tap doublenode/aiteamforge (idempotent)"
-if ! log_cmd_output "$BREW" trust --tap doublenode/aiteamforge; then
-    log "WARNING: 'brew trust --tap doublenode/aiteamforge' failed (older Homebrew without trust gate?) — continuing"
-fi
+    # Step 2.5 (XACA-0676): trust the tap BEFORE any brew load. Recent Homebrew gates
+    # formula loading behind tap-trust when $HOMEBREW_REQUIRE_TAP_TRUST is set; on a
+    # gated box an UNTRUSTED tap makes `brew outdated`/`brew upgrade` silently no-op,
+    # so this LaunchAgent would "succeed" forever while the box rots on an old version
+    # (observed on M4Mini stuck at 0.13.4). `brew trust --tap` is idempotent.
+    log "Running: brew trust --tap doublenode/aiteamforge (idempotent)"
+    if ! log_cmd_output "$BREW" trust --tap doublenode/aiteamforge; then
+        log "WARNING: 'brew trust --tap doublenode/aiteamforge' failed (older Homebrew without trust gate?) — continuing"
+    fi
 
-# Detect: is the formula STILL refused after trusting? If so, warn LOUDLY and bail
-# with a non-zero exit + operator notification — never report a clean no-op while
-# upgrades are actually blocked.
-# XACA-1175-014: same capture-then-match fix as the tap-list check above —
-# piping `brew info` into `grep -q` under pipefail risks a SIGPIPE-induced
-# false negative that would skip the BLOCKED arm and fail open.
-_TAP_INFO=$("$BREW" info aiteamforge 2>&1 || true)
-if grep -qiE "untrusted tap|refus(e|ing) to load" <<<"$_TAP_INFO"; then
-    log "ERROR: doublenode/aiteamforge tap is UNTRUSTED — Homebrew is REFUSING to load the formula."
-    log "       Upgrades are BLOCKED; this box will stay on the OLD version."
-    log "       Remediation: brew trust --tap doublenode/aiteamforge"
-    notify "Auto-upgrade BLOCKED: tap untrusted — run 'brew trust --tap doublenode/aiteamforge'"
-    log "===== auto-upgrade complete (BLOCKED: untrusted tap) ====="
-    exit 1
-fi
+    # Detect: is the formula STILL refused after trusting? If so, warn LOUDLY and bail
+    # with a non-zero exit + operator notification — never report a clean no-op while
+    # upgrades are actually blocked.
+    # XACA-1175-014: same capture-then-match fix as the tap-list check above —
+    # piping `brew info` into `grep -q` under pipefail risks a SIGPIPE-induced
+    # false negative that would skip the BLOCKED arm and fail open.
+    _TAP_INFO=$("$BREW" info aiteamforge 2>&1 || true)
+    if grep -qiE "untrusted tap|refus(e|ing) to load" <<<"$_TAP_INFO"; then
+        log "ERROR: doublenode/aiteamforge tap is UNTRUSTED — Homebrew is REFUSING to load the formula."
+        log "       Upgrades are BLOCKED; this box will stay on the OLD version."
+        log "       Remediation: brew trust --tap doublenode/aiteamforge"
+        notify "Auto-upgrade BLOCKED: tap untrusted — run 'brew trust --tap doublenode/aiteamforge'"
+        log "===== auto-upgrade complete (BLOCKED: untrusted tap) ====="
+        exit 1
+    fi
 
-# Step 3: brew update
-log "Running: brew update"
-if ! log_cmd_output "$BREW" update; then
-    log "WARNING: brew update failed (continuing — may have stale index)"
-fi
+    # Step 3: brew update
+    log "Running: brew update"
+    if ! log_cmd_output "$BREW" update; then
+        log "WARNING: brew update failed (continuing — may have stale index)"
+    fi
 
-# Step 4: check if aiteamforge is outdated
-log "Running: brew outdated aiteamforge --quiet"
-OUTDATED_OUTPUT=$("$BREW" outdated aiteamforge --quiet 2>/dev/null || true)
+    # Step 4: check if aiteamforge is outdated
+    log "Running: brew outdated aiteamforge --quiet"
+    OUTDATED_OUTPUT=$("$BREW" outdated aiteamforge --quiet 2>/dev/null || true)
 
-if [ -z "$OUTDATED_OUTPUT" ]; then
-    log "aiteamforge is up-to-date — nothing to do"
-    log "===== auto-upgrade complete (no-op) ====="
-    exit 0
-fi
+    if [ -z "$OUTDATED_OUTPUT" ]; then
+        log "aiteamforge is up-to-date — nothing to do"
+        log "===== auto-upgrade complete (no-op) ====="
+        exit 0
+    fi
 
-log "aiteamforge is outdated: $OUTDATED_OUTPUT"
+    log "aiteamforge is outdated: $OUTDATED_OUTPUT"
 
-# Step 5: determine the available version for pin comparison
-AVAILABLE_VERSION=""
-if command -v jq &>/dev/null; then
-    AVAILABLE_VERSION=$("$BREW" info aiteamforge --json 2>/dev/null \
-        | jq -r '.[0].versions.stable // ""' 2>/dev/null || true)
-fi
+    # Step 5: determine the available version for pin comparison
+    AVAILABLE_VERSION=""
+    if command -v jq &>/dev/null; then
+        AVAILABLE_VERSION=$("$BREW" info aiteamforge --json 2>/dev/null \
+            | jq -r '.[0].versions.stable // ""' 2>/dev/null || true)
+    fi
 
-# Step 6: check version-pin sentinel
-# XACA-0571-012: fail-closed when a pin is set but the available version
-# cannot be determined. Previously a missing jq OR a failed `brew info` both
-# fell through to "ignoring pin and upgrading" — that's unsafe: the operator
-# explicitly held the upgrade at $PINNED_VERSION and a transient brew/jq
-# failure should not silently bypass that gate. New behavior: pin active +
-# unknown available version → HOLD (refuse upgrade), log the diagnostic.
-PINNED_VERSION=$(_read_pin)
+    # Step 6: check version-pin sentinel
+    # XACA-0571-012: fail-closed when a pin is set but the available version
+    # cannot be determined. Previously a missing jq OR a failed `brew info` both
+    # fell through to "ignoring pin and upgrading" — that's unsafe: the operator
+    # explicitly held the upgrade at $PINNED_VERSION and a transient brew/jq
+    # failure should not silently bypass that gate. New behavior: pin active +
+    # unknown available version → HOLD (refuse upgrade), log the diagnostic.
+    PINNED_VERSION=$(_read_pin)
 
-if [ -n "$PINNED_VERSION" ]; then
-    if [ -z "$AVAILABLE_VERSION" ]; then
-        if command -v jq &>/dev/null; then
-            log "HELD: pin=$PINNED_VERSION but 'brew info aiteamforge --json' returned no version — refusing upgrade (fail-closed under active pin)"
-        else
-            log "HELD: pin=$PINNED_VERSION but jq is not on PATH (cannot determine available version) — refusing upgrade (fail-closed under active pin)"
+    if [ -n "$PINNED_VERSION" ]; then
+        if [ -z "$AVAILABLE_VERSION" ]; then
+            if command -v jq &>/dev/null; then
+                log "HELD: pin=$PINNED_VERSION but 'brew info aiteamforge --json' returned no version — refusing upgrade (fail-closed under active pin)"
+            else
+                log "HELD: pin=$PINNED_VERSION but jq is not on PATH (cannot determine available version) — refusing upgrade (fail-closed under active pin)"
+            fi
+            notify "Upgrade held at pin v$PINNED_VERSION (available version unknown)"
+            log "===== auto-upgrade complete (held by pin, version unknown) ====="
+            exit 0
         fi
-        notify "Upgrade held at pin v$PINNED_VERSION (available version unknown)"
-        log "===== auto-upgrade complete (held by pin, version unknown) ====="
-        exit 0
+        log "Version-pin active: pinned=$PINNED_VERSION  available=$AVAILABLE_VERSION"
+        if _version_gt "$AVAILABLE_VERSION" "$PINNED_VERSION"; then
+            log "HELD: available version ($AVAILABLE_VERSION) > pin ($PINNED_VERSION) — refusing upgrade"
+            notify "Upgrade held at pin v$PINNED_VERSION (available: $AVAILABLE_VERSION)"
+            log "===== auto-upgrade complete (held by pin) ====="
+            exit 0
+        fi
+        log "Available version ($AVAILABLE_VERSION) does not exceed pin ($PINNED_VERSION) — proceeding"
     fi
-    log "Version-pin active: pinned=$PINNED_VERSION  available=$AVAILABLE_VERSION"
-    if _version_gt "$AVAILABLE_VERSION" "$PINNED_VERSION"; then
-        log "HELD: available version ($AVAILABLE_VERSION) > pin ($PINNED_VERSION) — refusing upgrade"
-        notify "Upgrade held at pin v$PINNED_VERSION (available: $AVAILABLE_VERSION)"
-        log "===== auto-upgrade complete (held by pin) ====="
-        exit 0
+
+    # Step 7: run the brew upgrade
+    log "Running: brew upgrade aiteamforge"
+    BREW_EXIT=0
+    log_cmd_output "$BREW" upgrade aiteamforge || BREW_EXIT=$?
+    if [ "$BREW_EXIT" -ne 0 ]; then
+        log "ERROR: brew upgrade aiteamforge failed (exit $BREW_EXIT)"
+        notify "Auto-upgrade FAILED — see $LOG_FILE"
+        log "===== auto-upgrade complete (FAILED) ====="
+        exit 1
     fi
-    log "Available version ($AVAILABLE_VERSION) does not exceed pin ($PINNED_VERSION) — proceeding"
-fi
 
-# Step 7: run the brew upgrade
-log "Running: brew upgrade aiteamforge"
-BREW_EXIT=0
-log_cmd_output "$BREW" upgrade aiteamforge || BREW_EXIT=$?
-if [ "$BREW_EXIT" -ne 0 ]; then
-    log "ERROR: brew upgrade aiteamforge failed (exit $BREW_EXIT)"
-    notify "Auto-upgrade FAILED — see $LOG_FILE"
-    log "===== auto-upgrade complete (FAILED) ====="
-    exit 1
-fi
+    NEW_VERSION=""
+    if command -v jq &>/dev/null; then
+        NEW_VERSION=$("$BREW" info aiteamforge --json 2>/dev/null \
+            | jq -r '.[0].installed[0].version // ""' 2>/dev/null || true)
+    fi
 
-NEW_VERSION=""
-if command -v jq &>/dev/null; then
-    NEW_VERSION=$("$BREW" info aiteamforge --json 2>/dev/null \
-        | jq -r '.[0].installed[0].version // ""' 2>/dev/null || true)
-fi
-
-# Step 8: refresh the working-dir copy of the framework so user-facing files
-# (lcars-ui, kanban-hooks, scripts) are replaced with the new versions. Without
-# this, `brew upgrade` only refreshes the Cellar — the LCARS watcher LaunchAgent
-# (WatchPaths on $AITEAMFORGE_DIR/lcars-ui) wouldn't see the file changes and
-# the running server would keep serving the OLD assets.
-# XACA-1028: track whether the working-dir refresh actually happened. Before
-# this, a failed refresh logged a WARNING and then fell through to the SUCCESS
-# block below, so the log's last word was "SUCCESS: upgraded aiteamforge to
-# <version>" and the exit code was 0 — while the installed files were untouched.
-# That is exactly what both consumers recorded: M4Mini's log ends
-# "SUCCESS: upgraded aiteamforge to 0.20.2" (2026-08-28) with its working dir
-# frozen at 0.20.0 and kanban-helpers.sh missing 46 kb-* commands. A log that
-# reports success over a failure is worse than no log: it is the reason nobody
-# looked for months.
-_ATF_REFRESH_FAILED=0
-if command -v aiteamforge &>/dev/null; then
-    log "Refreshing working-dir copy: aiteamforge upgrade --non-interactive"
-    if ! log_cmd_output aiteamforge upgrade --non-interactive; then
+    # Step 8: refresh the working-dir copy of the framework so user-facing files
+    # (lcars-ui, kanban-hooks, scripts) are replaced with the new versions. Without
+    # this, `brew upgrade` only refreshes the Cellar — the LCARS watcher LaunchAgent
+    # (WatchPaths on $AITEAMFORGE_DIR/lcars-ui) wouldn't see the file changes and
+    # the running server would keep serving the OLD assets.
+    # XACA-1028: track whether the working-dir refresh actually happened. Before
+    # this, a failed refresh logged a WARNING and then fell through to the SUCCESS
+    # block below, so the log's last word was "SUCCESS: upgraded aiteamforge to
+    # <version>" and the exit code was 0 — while the installed files were untouched.
+    # That is exactly what both consumers recorded: M4Mini's log ends
+    # "SUCCESS: upgraded aiteamforge to 0.20.2" (2026-08-28) with its working dir
+    # frozen at 0.20.0 and kanban-helpers.sh missing 46 kb-* commands. A log that
+    # reports success over a failure is worse than no log: it is the reason nobody
+    # looked for months.
+    _ATF_REFRESH_FAILED=0
+    if command -v aiteamforge &>/dev/null; then
+        log "Refreshing working-dir copy: aiteamforge upgrade --non-interactive"
+        if ! log_cmd_output aiteamforge upgrade --non-interactive; then
+            _ATF_REFRESH_FAILED=1
+            log "WARNING: 'aiteamforge upgrade --non-interactive' failed — brew upgrade succeeded but working-dir copy may be stale"
+            notify "Upgrade partial — see $LOG_FILE (brew succeeded, working-dir refresh failed)"
+        fi
+    else
         _ATF_REFRESH_FAILED=1
-        log "WARNING: 'aiteamforge upgrade --non-interactive' failed — brew upgrade succeeded but working-dir copy may be stale"
-        notify "Upgrade partial — see $LOG_FILE (brew succeeded, working-dir refresh failed)"
+        log "WARNING: 'aiteamforge' CLI not on PATH after brew upgrade — working-dir copy not refreshed"
     fi
-else
-    _ATF_REFRESH_FAILED=1
-    log "WARNING: 'aiteamforge' CLI not on PATH after brew upgrade — working-dir copy not refreshed"
-fi
 
-if [ "$_ATF_REFRESH_FAILED" -ne 0 ]; then
-    # Do NOT fall through to the SUCCESS block. The Cellar moved; the working
-    # directory did not. Say so, name the remediation, and exit non-zero so the
-    # scheduler records a failure instead of a clean run.
-    log "FAILED: brew advanced the Cellar${NEW_VERSION:+ to $NEW_VERSION}, but the working-dir refresh did NOT complete — installed files are STALE."
-    log "  Remediation: run 'aiteamforge upgrade --non-interactive' by hand and read its output; the failure is reported there, not here."
-    notify "aiteamforge upgrade INCOMPLETE — Cellar advanced, working dir stale (see $LOG_FILE)"
-    log "===== auto-upgrade complete (PARTIAL FAILURE — working dir NOT refreshed) ====="
-    exit 1
-fi
+    if [ "$_ATF_REFRESH_FAILED" -ne 0 ]; then
+        # Do NOT fall through to the SUCCESS block. The Cellar moved; the working
+        # directory did not. Say so, name the remediation, and exit non-zero so the
+        # scheduler records a failure instead of a clean run.
+        log "FAILED: brew advanced the Cellar${NEW_VERSION:+ to $NEW_VERSION}, but the working-dir refresh did NOT complete — installed files are STALE."
+        log "  Remediation: run 'aiteamforge upgrade --non-interactive' by hand and read its output; the failure is reported there, not here."
+        notify "aiteamforge upgrade INCOMPLETE — Cellar advanced, working dir stale (see $LOG_FILE)"
+        log "===== auto-upgrade complete (PARTIAL FAILURE — working dir NOT refreshed) ====="
+        exit 1
+    fi
 
-if [ -n "$NEW_VERSION" ]; then
-    log "SUCCESS: upgraded aiteamforge to $NEW_VERSION"
-    notify "Upgraded aiteamforge to $NEW_VERSION"
-else
-    log "SUCCESS: aiteamforge upgrade complete"
-    notify "aiteamforge upgraded successfully"
-fi
+    if [ -n "$NEW_VERSION" ]; then
+        log "SUCCESS: upgraded aiteamforge to $NEW_VERSION"
+        notify "Upgraded aiteamforge to $NEW_VERSION"
+    else
+        log "SUCCESS: aiteamforge upgrade complete"
+        notify "aiteamforge upgraded successfully"
+    fi
 
-log "===== auto-upgrade complete ====="
-exit 0
+    log "===== auto-upgrade complete ====="
+    exit 0
+}
+
+# XACA-1240: bash parses a whole command line before running it, so this call
+# line is already in memory when `aiteamforge upgrade` rewrites this file in
+# place (same inode) mid-run; nothing after main returns is ever re-read from
+# the new bytes. The `exit` MUST stay on this same line — a bare `main "$@"`
+# lets bash read on into the rewritten file after main returns.
+main "$@"; exit $?

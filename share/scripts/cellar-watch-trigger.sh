@@ -20,34 +20,44 @@ mkdir -p "$(dirname "$LOG_FILE")"
 
 log() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$LOG_FILE"; }
 
-log "===== cellar-watch trigger fired ====="
+# XACA-1240: the run logic lives in main() so bash parses it fully before
+# executing it; `aiteamforge upgrade` rewrites this file in place (see final line).
+main() {
+  log "===== cellar-watch trigger fired ====="
 
-# Guard 1: brew available?
-if ! command -v brew &>/dev/null; then
-  log "WARNING: brew not on PATH ($PATH) — skipping upgrade"
-  exit 0
-fi
+  # Guard 1: brew available?
+  if ! command -v brew &>/dev/null; then
+    log "WARNING: brew not on PATH ($PATH) — skipping upgrade"
+    exit 0
+  fi
 
-# Guard 2: formula installed? (catches uninstall events firing this watcher)
-if ! brew list aiteamforge &>/dev/null; then
-  log "INFO: aiteamforge formula not installed — likely an uninstall event, skipping upgrade"
-  exit 0
-fi
+  # Guard 2: formula installed? (catches uninstall events firing this watcher)
+  if ! brew list aiteamforge &>/dev/null; then
+    log "INFO: aiteamforge formula not installed — likely an uninstall event, skipping upgrade"
+    exit 0
+  fi
 
-# Guard 3: aiteamforge CLI reachable?
-if ! command -v aiteamforge &>/dev/null; then
-  log "WARNING: aiteamforge CLI not on PATH — Cellar may be mid-install, skipping"
-  exit 0
-fi
+  # Guard 3: aiteamforge CLI reachable?
+  if ! command -v aiteamforge &>/dev/null; then
+    log "WARNING: aiteamforge CLI not on PATH — Cellar may be mid-install, skipping"
+    exit 0
+  fi
 
-# Run the working-dir refresh
-log "Running: aiteamforge upgrade --non-interactive"
-if aiteamforge upgrade --non-interactive >> "$LOG_FILE" 2>&1; then
-  log "SUCCESS: working-dir refresh complete"
-else
-  rc=$?
-  log "ERROR: aiteamforge upgrade --non-interactive exited $rc"
-  exit "$rc"
-fi
+  # Run the working-dir refresh
+  log "Running: aiteamforge upgrade --non-interactive"
+  if aiteamforge upgrade --non-interactive >> "$LOG_FILE" 2>&1; then
+    log "SUCCESS: working-dir refresh complete"
+  else
+    rc=$?
+    log "ERROR: aiteamforge upgrade --non-interactive exited $rc"
+    exit "$rc"
+  fi
 
-log "===== cellar-watch trigger complete ====="
+  log "===== cellar-watch trigger complete ====="
+}
+
+# XACA-1240: bash parses a whole command line before running it, so this call
+# line is already in memory when `aiteamforge upgrade` rewrites this file in
+# place mid-run. The `exit` MUST stay on this same line — a bare `main "$@"`
+# lets bash read on into the rewritten bytes after main returns.
+main "$@"; exit $?
