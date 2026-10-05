@@ -97,6 +97,12 @@ def _clean_environ():
     return cleaned
 
 
+class BranchCreateRace(RuntimeError):
+    """XACA-1435: the create-only push was rejected because the branch now EXISTS (another unlocked cut created it).
+    Distinct from an ordinary push failure so the caller refuses (retry adopts) instead of treating it as "no branch":
+    in report mode a plain cut failure proceeds branchless, which here would strand the winner's branch unrecorded."""
+
+
 class _Git:
     def __init__(self, repo, run):
         self.repo, self.run = str(repo), run
@@ -196,8 +202,15 @@ def cut_release_branch(release, board, repo_root, *, dry_run=False, run=subproce
         git("push", "--force-with-lease=refs/heads/%s:" % branch, "--", remote,
             "%s:refs/heads/%s" % (integ_sha, branch))
     except RuntimeError as e:
-        raise RuntimeError("branch %r was not created by this cut (it may have been created concurrently; retry "
-                           "the promote to adopt it): %s" % (branch, e))
+        try:
+            raced = _remote_tip(git, remote, branch)
+        except RuntimeError:
+            raced = None   # cannot tell: an ordinary push failure (fail closed as before)
+        if raced:
+            raise BranchCreateRace("branch %r was not created by this cut: it was created concurrently at %s; "
+                                   "retry the promote to adopt it" % (branch, raced))
+        raise RuntimeError("branch %r was not created by this cut (push failed; retry the promote): %s"
+                           % (branch, e))
     if _remote_tip(git, remote, branch) != integ_sha:
         raise RuntimeError("pushed %r but the remote tip does not equal %s" % (branch, integ_sha))
     return {"branch": branch, "branchBaseSha": integ_sha}

@@ -9388,7 +9388,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             except _CutNeeded as need:
                 dry = need.body.get('dryRun') is True
                 precut = {"move": need.move, "fp": need.fp, "body": need.body,
-                          "persisted": need.persisted_stamped, "cut": None, "err": None}
+                          "persisted": need.persisted_stamped, "cut": None, "err": None, "race": None}
                 try:  # decision -002: the gated promote is still the SOLE caller of the cut
                     _rel_copy = copy.deepcopy(need.release)
                     precut["cut"] = _validate_branch_cut(
@@ -9396,6 +9396,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         else _cut_release_branch(_rel_copy, need.board))
                 except NotImplementedError as e:
                     precut["err"] = str(e)
+                except getattr(_release_branches, "BranchCreateRace", ()) as e:  # lost the create race: refuse
+                    precut["race"] = precut["err"] = str(e)
                 except Exception as e:  # any failure: nothing was cut, never proceed as if it was
                     precut["err"] = "branch cut failed: %s" % e
             return self._promote_release_attempt(release_id, precut)
@@ -9566,6 +9568,9 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     elif (precut["cut"] and release.get('branch')
                           and release.get('branch') != precut["cut"]["branch"]):
                         _stale = "the release was given branch %r while its branch was being cut" % release.get('branch')
+                    elif precut["race"]:
+                        # report mode would otherwise proceed branchless and strand the winner's branch unrecorded
+                        _stale = "another promote created the branch concurrently (%s)" % precut["race"]
                     if _stale:
                         reasons.append("PLANNED->DEV: %s; refusing (retry the promote)%s" % (_stale, _left))
                         proceed = False
