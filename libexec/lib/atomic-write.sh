@@ -40,6 +40,9 @@ _aitf_atomic_write_script() {
     done
     # Only follow a chain that ends at a real regular file (see SYMLINKS above).
     if [ "$dst" != "$orig" ] && [ ! -f "$dst" ]; then dst="$orig"; fi
+    # A directory (or a link to one) is never a script target: `mv -f` would move
+    # the temp INTO it and report success. Fail loudly, as the old `>` did.
+    if [ -d "$dst" ]; then return 1; fi
     tmp="$(mktemp "$(dirname "$dst")/.$(basename "$dst").XXXXXX" 2>/dev/null)" || return 1
     if ! "$@" > "$tmp"; then
         rm -f "$tmp"; return 1

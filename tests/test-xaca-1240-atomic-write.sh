@@ -145,6 +145,17 @@ if [ "$rc" -eq 0 ] && [ "$(cat "$D/r.sh")" = "new" ] && [ "$(_inode "$D/r.sh")" 
    && [ "$(_leftovers "$D")" = "0" ]; then test_pass
 else test_fail "rc=$rc"; fi
 
+# ── directory dst (and a link to one): fail loudly, write nothing (PR #1056 -017) ─
+_fresh; mkdir "$D/dir" "$D/real"
+ln -s real "$D/dlink"
+_aitf_atomic_write_script "$D/dir" printf 'x\n'; rc1=$?
+_aitf_atomic_write_script "$D/dlink" printf 'x\n'; rc2=$?
+test_start "directory dst / link to directory: rc != 0, nothing written inside, link kept"
+if [ "$rc1" -ne 0 ] && [ "$rc2" -ne 0 ] && [ -d "$D/dir" ] && [ -L "$D/dlink" ] \
+   && [ -z "$(ls -A "$D/dir")" ] && [ -z "$(ls -A "$D/real")" ] \
+   && [ "$(_leftovers "$D" "$D/dir" "$D/real")" = "0" ]; then test_pass
+else test_fail "rc1=$rc1 rc2=$rc2 dir=[$(ls -A "$D/dir")] real=[$(ls -A "$D/real")]"; fi
+
 if [ "$_STANDALONE" = true ]; then
     echo "Results: ${_PASS_COUNT} passed, ${_FAIL_COUNT} failed"
     [ "$_FAIL_COUNT" -eq 0 ]
