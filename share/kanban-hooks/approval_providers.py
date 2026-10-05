@@ -455,10 +455,13 @@ def is_engine_managed(cr):
         return True
 
 
-def _fail_closed_feed(reason, ids=(), stale=None):
+def _fail_closed_feed(reason, ids=(), stale=None, all_closed=False):
     # state None: release_gate reports "CR state is 'None', must be cr-approved" and refuses.
     # `stale` (XACA-1349 F1) carries the distinct stale-approval reason release_gate also prints.
-    return {"state": None, "approvedAt": None, "deployWindowPlanned": None, "crIds": list(ids),
+    # `allClosed` (XACA-1353-016): True ONLY when every CR linked to the release is cr-closed (and there is >= 1).
+    # It is a FACT about the board, never an approval: the gate lets it satisfy the GAMMA exit only together with a
+    # close-out bound to the current build whose crClose step is done (release_gate._cr_closed_by_close_out).
+    return {"allClosed": bool(all_closed), "state": None, "approvedAt": None, "deployWindowPlanned": None, "crIds": list(ids),
             "crStatus": None, "cr_approved_at": None, "cr_approval_expected_at": None,
             "stageSha": None, "approvalAssumed": False, "stamped": [], "refusals": [],
             "staleApproval": stale, "error": reason}
@@ -600,10 +603,12 @@ def release_cr_feed(board, release, now, actor="lcars-release-gate"):
             return _fail_closed_feed("no CR is linked to this release")
         # G8: a rejected CR is closed and a re-CR links a NEW one to the same release, so retired CRs
         # must not drag the minimum state down (or be read stale). None open = not approved.
+        all_linked = list(crs)
         crs = [c for c in crs if c.get("crState") not in _CR_RETIRED]
         ids = [c.get("id") for c in crs]
         if not crs:
-            return _fail_closed_feed("every CR linked to this release is closed or rejected", ids)
+            return _fail_closed_feed("every CR linked to this release is closed or rejected", ids,
+                                     all_closed=bool(all_linked) and all(c.get("crState") == "cr-closed" for c in all_linked))
         work = {"teamConfig": board.get("teamConfig"), "crs": copy.deepcopy(crs)}
         events, refusals = [], []
         stamped = stamp_assumed_approvals(work, now, actor=actor, cr_ids=ids, events=events,
@@ -648,7 +653,7 @@ def release_cr_feed(board, release, now, actor="lcars-release-gate"):
                            % (c.get("id"), (stamp[:12] if stamp else "<none stamped>"), str(sha)[:12], c.get("id"),
                               str(sha)[:12]))
                     return _fail_closed_feed(why, ids, stale=why)
-        return {"state": state, "approvedAt": approved, "deployWindowPlanned": window,
+        return {"allClosed": False, "state": state, "approvedAt": approved, "deployWindowPlanned": window,
                 "crIds": ids, "crStatus": state, "cr_approved_at": approved,
                 "cr_approval_expected_at": _latest(_ts("cr_approval_expected_at"), False),
                 "stageSha": sha or None, "staleApproval": None,

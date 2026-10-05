@@ -8881,7 +8881,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 # XACA-1346: mirror the release-level stage state (board is authoritative).
                 # tests[] is deliberately NOT mirrored (large, append-only, board-only).
                 for _k in ('stage', 'stages', 'stageSha', 'rollbackSha', 'rollbackShaSource',
-                           'rollbackShaOverride', 'rollbackShaOverrideUsed', 'branch', 'branchBaseSha', 'closeOut'):
+                           'rollbackShaOverride', 'rollbackShaOverrideUsed', 'branch', 'branchBaseSha', 'closeOut', 'closeOutHistory'):
                     if _k in release:
                         manifest[_k] = release[_k]
                     elif _k == 'rollbackShaOverride':
@@ -8967,7 +8967,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     # Fields the generic PUT /api/releases/<id> must never accept: each has ONE
     # sanctioned, gated writer.
     _RELEASE_STAGE_STATE_FIELDS = ('environment', 'stage', 'stages', 'stageSha', 'tests', 'pendingSha',
-                                   'waiverHistory', 'closeOut')
+                                   'waiverHistory', 'closeOut', 'closeOutHistory')
     _RELEASE_GATE_MODES = ('enforce', 'report')
     # Cap for the bulk release-state POSTs (/stages/<S>/tests, /new-sha), enforced from Content-Length
     # BEFORE the body is read (413). Measured 2026-09-30: a full per-file run of a 6,585-record suite
@@ -9225,6 +9225,45 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         except Exception as e:  # noqa: BLE001 - never fail a promote on the persist step
             print(f"[LCARS] WARNING: assumed-approval stamping skipped for {release_id}: {e}")
         return []
+
+    @staticmethod
+    def _archive_close_out_for_regress(release, frm, to, now):
+        """XACA-1353-014 (caller holds the board lock and saves): archive release.closeOut into closeOutHistory[]
+        for a regress frm -> to. Returns None, or the refusal text (production already ships the build, or the
+        close-out module is missing: fails closed). On refusal nothing is changed."""
+        if _release_closeout is None:
+            return "release_closeout module unavailable; cannot archive the close-out (fails closed)"
+        try:
+            _release_closeout.archive_close_out(release, "regress %s -> %s: the build the close-out belongs to "
+                                                "was abandoned" % (frm, to), now)
+        except _release_closeout.CloseOutError as ce:
+            return "regress %s -> %s %s" % (frm, to, ce)
+        return None
+
+    @staticmethod
+    def _reconcile_close_out(release, now):
+        """XACA-1353-014: archive a live closeOut that is no longer bound to stageSha.GAMMA. None or refusal text."""
+        if _release_closeout is None:
+            return "release_closeout module unavailable; cannot reconcile the close-out (fails closed)"
+        try:
+            _release_closeout.reconcile_close_out(release, now)
+        except _release_closeout.CloseOutError as ce:
+            return str(ce)
+        return None
+
+    def _close_out_unmet(self, release, release_id, board_raw, data):
+        """XACA-1353-014: reasons (not CLOSEOUT_INCOMPLETE) a release at GAMMA is NOT ready for close-out. THE
+        promote evaluator, asked about PROD: the same dry-run `kb-release close-out` makes before a fresh start,
+        so "GAMMA has passed" has one definition. Empty list = ready."""
+        cr_on = self._crsupport_enabled(board_raw)
+        ctx = self._build_gate_context(release, release_id, board_raw, data, LCARS_TEAM, False)
+        verdict = _release_gate.evaluate(self._gate_release_view(release, ctx), 'PROD', data.get('flowConfig') or {},
+                                         cr_support_enabled=cr_on, context=ctx)
+        unmet = [m for m, c in zip(verdict['reasons'], verdict['reasonCodes'])
+                 if c != _release_gate.CODE_CLOSEOUT_INCOMPLETE]
+        if self._crsupport_malformed(board_raw):
+            unmet.append("CR: teamConfig.crSupport is malformed (enabled must be true or false)")
+        return unmet
 
     def _apply_pending_sha(self, release, data, to, flow, cr_on, now, on_new_sha):
         """XACA-1347-006 (PR #1010 round 1): what a regress does with a recorded pendingSha (caller
@@ -9564,6 +9603,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         or _release_gate.CODE_MANDATORY_STAGE_SKIPPED in reasons.codes
                         or _release_gate.CODE_ROLLBACK_SHA_UNKNOWN in reasons.codes
                         or _release_gate.CODE_ROLLBACK_OVERRIDE_CONFLICT in reasons.codes
+                        or _release_gate.CODE_CLOSEOUT_INCOMPLETE in reasons.codes   # XACA-1353-013: PROD is the LAST act of close-out
                         or crsupport_malformed)
                 # XACA-1375: the informational CR_SUPPORT_DISABLED reason (release stranded at CR)
                 # never blocks: promote OUT of CR stays allowed in enforce mode too.
@@ -9629,6 +9669,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                             if not isinstance(release.get('stageSha'), dict):
                                 release['stageSha'] = {}
                             release['stageSha']['GAMMA'] = _src
+                        # XACA-1353-014: a close-out bound to another build must not survive the new one
+                        _co_err = self._reconcile_close_out(release, now)
+                        if _co_err:
+                            raise _DeferredResponse.json({"error": _co_err}, 409)
                     # XACA-1350-005 (spec 3.2 "Records stageSha.<STAGE>", 6.5 one SHA through every pre-CR stage):
                     # entering QA/ALPHA/BETA records the SHA the stage is graded and tested at, in the SAME locked
                     # write. Nothing else did, so `kb-release test` (and the /tests endpoint, which accepts only
@@ -9734,6 +9778,15 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 plats = release.get('platforms') if isinstance(release.get('platforms'), dict) else {}
                 if any(isinstance(p, dict) and p.get('environment') != 'PLANNED' for p in plats.values()):
                     reasons = []
+            co_archived = False
+            if not reasons and release.get('closeOut') is not None:
+                # XACA-1353-014: a backward move abandons the build the close-out belongs to. Archive the live
+                # record (append-only closeOutHistory), or REFUSE when production already ships the build.
+                _co_err = self._archive_close_out_for_regress(release, cur, to, self._get_timestamp())
+                if _co_err:
+                    reasons = [_co_err]
+                else:
+                    co_archived = True
             if not reasons:
                 now = self._get_timestamp()
                 self._apply_stage_move(release, data, cur, to, now, 'regress', cr_on)
@@ -9752,6 +9805,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             stranded = _release_gate.stranded_in_cr(release, cr_on)
             cr_warn = self._cr_config_warning(board_raw, flow)
         logctx = dict(actor=actor, reason=reason, reasons=reasons)
+        if written and co_archived:
+            logctx['closeOutArchived'] = True
         landed = to
         if written and applied_sha:
             # Round 3: applying pendingSha can restart EARLIER than requested (onNewSha); report and
@@ -10192,6 +10247,9 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         {"error": "refusing: append-only violation: %s" % violations[0]}, 500)
                 release.clear()
                 release.update(new_rel)
+                _co_err = self._reconcile_close_out(release, now)   # XACA-1353-014: a replaced GAMMA SHA
+                if _co_err:
+                    raise _DeferredResponse.json({"error": _co_err}, 409)
                 if summary['action'] == 'restart':
                     # legacy per-platform mirror + stages[to] bookkeeping, then the restart
                     # stage is RUNNING (spec 6.5), not the regress default 'pending'.
@@ -10317,6 +10375,17 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 if cur not in ('GAMMA', 'PROD'):
                     raise _DeferredResponse.json(
                         {"error": "close-out only runs once GAMMA has passed; release is at %s" % cur}, 409)
+                if body['op'] == 'init':
+                    # XACA-1353-014: close-out STARTS only at GAMMA, and only once GAMMA has passed. The client's
+                    # own pre-check is advisory; this is the enforcement (same evaluator as the promote dry-run).
+                    if cur != 'GAMMA':
+                        raise _DeferredResponse.json(
+                            {"error": "close-out can only start at GAMMA; release is at %s" % cur}, 409)
+                    unmet = self._close_out_unmet(release, release_id, self._read_board_raw_locked(), data)
+                    if unmet:
+                        raise _DeferredResponse.json(
+                            {"error": "close-out refused: GAMMA has not passed: " + "; ".join(unmet),
+                             "reasons": unmet}, 409)
                 try:
                     _release_closeout.apply_op(release, body, now=self._get_timestamp())
                 except _release_closeout.CloseOutError as ce:

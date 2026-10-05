@@ -1663,8 +1663,36 @@ _kb_release_close_out_promote() {
     local release_id="${1-}" payload
     payload=$(jq -nc --arg a "$(_kb_release_default_actor)" '{targetStage:"PROD", actor:$a}') || return 1
     _kb_release_api_post "${release_id}/promote" "$payload" || return 1
-    if [[ "$_KB_REL_CODE" != "200" ]] || [[ "$(printf '%s' "$_KB_REL_BODY" | jq -r '.allowed // true' 2>/dev/null)" == "false" ]]; then
+    # XACA-1353-015: `.allowed // true` read an explicit false as true (jq `//` treats false as absent), so that
+    # half of the check was dead. Explicit test instead: ONLY `allowed == true` is a success; absent/false/garbage
+    # all fail closed (the HTTP code check is kept: a 409 is a refusal whatever the body says).
+    if [[ "$_KB_REL_CODE" != "200" ]] || [[ "$(printf '%s' "$_KB_REL_BODY" | jq -r '.allowed == true' 2>/dev/null)" != "true" ]]; then
         echo "Error: close-out finished but the PROD promote was refused (HTTP ${_KB_REL_CODE}): $(printf '%s' "$_KB_REL_BODY" | jq -r '.error // empty' 2>/dev/null)" >&2
+        return 1
+    fi
+    return 0
+}
+
+# XACA-1353-014: rc 0 when the release's live closeOut is BOUND to its current build: closeOut.gammaSha is a SHA and
+# equals stageSha.GAMMA. A record with no gammaSha, or another build's, is stale (rc 1). $1 = the release JSON.
+_kb_release_close_out_bound() {
+    printf '%s' "${1-}" | jq -e '(.closeOut.gammaSha | strings) as $c | (.stageSha.GAMMA | strings) as $g
+        | ($c | test("^[0-9a-f]{40,64}$")) and (($c | ascii_downcase) == ($g | ascii_downcase))' >/dev/null 2>&1
+}
+
+# XACA-1353-014: has GAMMA PASSED? Asks the server's promote gate (a dry-run to PROD): ready when the ONLY unmet
+# reason, if any, is CLOSEOUT_INCOMPLETE. rc 0 ready | 1 not ready (reasons on stderr) or the gate is unreachable.
+# The server enforces the same predicate on op=init (handle_release_close_out); this is the early, friendly refusal.
+_kb_release_close_out_ready() {
+    local release_id="${1-}" codes
+    _kb_release_api_post "${release_id}/promote" "$(jq -nc '{targetStage:"PROD", dryRun:true}')" || return 1
+    if [[ "$_KB_REL_CODE" != "200" ]]; then
+        echo "Error: cannot ask the gate whether $release_id is ready (HTTP ${_KB_REL_CODE}); not starting close-out" >&2; return 1
+    fi
+    codes=$(printf '%s' "$_KB_REL_BODY" | jq -r '[.reasonCodes[]? | select(. != "CLOSEOUT_INCOMPLETE")] | length' 2>/dev/null)
+    if [[ "$codes" != "0" ]]; then
+        echo "Error: $release_id is not ready for close-out (GAMMA has not passed):" >&2
+        printf '%s' "$_KB_REL_BODY" | jq -r '.reasons[]? | "  - " + .' >&2 2>/dev/null
         return 1
     fi
     return 0
@@ -1672,13 +1700,16 @@ _kb_release_close_out_promote() {
 
 _kb_release_close_out_run() {
     local board_file="${1-}" release_id="${2-}" work="${3-}" dry_run="${4-}" repo="${5-}"
-    local rj rtype pfx branch gamma version mode prod integ tag_name rel_tip first cr targets step ex_tip tgt st
+    local rj rtype pfx branch gamma version mode prod integ tag_name rel_tip first cr targets step ex_tip tgt st archived msg
     rj=$(_kb_release_close_out_release_json "$board_file" "$release_id") || return 1
     [[ -n "$rj" ]] || { echo "Error: release '$release_id' not found in $board_file" >&2; return 1; }
     branch=$(printf '%s' "$rj" | jq -er '.branch | strings | select(length > 0)') \
         || { echo "Error: release $release_id has no recorded branch" >&2; return 1; }
     gamma=$(printf '%s' "$rj" | jq -er '.stageSha.GAMMA | strings | select(test("^[0-9a-f]{40,64}$"))') \
         || { echo "Error: release $release_id has no valid stageSha.GAMMA; refusing to close out" >&2; return 1; }
+    if printf '%s' "$rj" | jq -e '.closeOut | type == "object"' >/dev/null 2>&1 && ! _kb_release_close_out_bound "$rj"; then
+        echo "Error: $release_id has a close-out record that is not bound to its current build (gammaSha missing or != stageSha.GAMMA ${gamma:0:12}); refusing before any git action. It is a leftover of an abandoned GAMMA build" >&2; return 1
+    fi
     mode=$(_kb_get_release_branch_role "$board_file" mode) || { echo "Error: cannot read release branch config" >&2; return 1; }
     [[ "$mode" == "release" || "$mode" == "trunk" ]] || { echo "Error: unknown release branch mode '$mode'" >&2; return 1; }
     prod=$(_kb_get_release_branch_role "$board_file" production) || return 1
@@ -1747,8 +1778,15 @@ print(r.release_version(json.load(sys.stdin)))' "$(dirname "$(_kb_release_branch
                 || { _kb_co_fail "$release_id" tag "release branch '$branch' not found on the remote"; return 1; }
             ex_tip=$(_kb_co_git -C "$work" rev-parse -q --verify "refs/tags/${tag_name}^{commit}" 2>/dev/null)
             if [[ -n "$ex_tip" ]]; then
-                [[ "$ex_tip" == "$gamma" ]] \
-                    || { _kb_co_fail "$release_id" tag "tag ${tag_name} already exists at ${ex_tip:0:12}, not stageSha.GAMMA ${gamma:0:12}; refusing to move a tag"; return 1; }
+                if [[ "$ex_tip" != "$gamma" ]]; then
+                    # XACA-1353-014: a tag left by an ARCHIVED close-out (regressed out of GAMMA after `tag` was done) sits at the
+                    # abandoned build. Never moved: say whose it is and the deliberate remedy.
+                    archived=$(printf '%s' "$rj" | jq -r --arg t "$ex_tip" '[.closeOutHistory[]? | select((.gammaSha // "") == $t)] | last
+                        | select(. != null) | "\(.archivedAt // "?") (\(.reason // "no reason"))"' 2>/dev/null)
+                    msg="tag ${tag_name} already exists at ${ex_tip:0:12}, not stageSha.GAMMA ${gamma:0:12}; refusing to move a tag"
+                    [[ -z "$archived" ]] || msg="${msg}. That tag was left by an ARCHIVED close-out of an abandoned build, archived ${archived}. If that build is truly abandoned, delete the stale tag deliberately (git push origin :refs/tags/${tag_name}; git tag -d ${tag_name}) and re-run"
+                    _kb_co_fail "$release_id" tag "$msg"; return 1
+                fi
                 echo "  tag ${tag_name} already at GAMMA; resuming"
             else
                 if [[ "$mode" == "trunk" ]]; then
@@ -1832,6 +1870,12 @@ _kb_release_close_out() {
     [[ -n "$board_file" && -f "$board_file" && -n "$release_id" ]] || { echo "Usage: _kb_release_close_out <board_file> <release_id> [--repo <dir>] [--dry-run]" >&2; return 1; }
     [[ -n "$repo" ]] || repo="$PWD"
     repo=$(_kb_co_git -C "$repo" rev-parse --show-toplevel 2>/dev/null) || { echo "Error: $repo is not a git repository" >&2; return 1; }
+    # XACA-1353-014 (defence in depth, before the clone): a live record must be bound to the current build.
+    name=$(_kb_release_close_out_release_json "$board_file" "$release_id")
+    if printf '%s' "$name" | jq -e '.closeOut | type == "object"' >/dev/null 2>&1 && ! _kb_release_close_out_bound "$name"; then
+        echo "Error: $release_id has a close-out record that is not bound to its current build (gammaSha missing or != stageSha.GAMMA); refusing before any git action. It is a leftover of an abandoned GAMMA build" >&2; return 1
+    fi
+    name=""
     if [[ "$dry_run" == "1" ]]; then
         _kb_release_close_out_run "$board_file" "$release_id" "" 1 "$repo"; return $?
     fi
@@ -26976,16 +27020,7 @@ kb-release-close-out() {
     [[ -n "$rj" ]] || { echo "Error: release '$release_id' not found" >&2; return 1; }
     if (( ! opt_dry )) && ! printf '%s' "$rj" | jq -e '.closeOut | type == "object"' >/dev/null 2>&1; then
         # fresh start: the gate must agree the release is otherwise ready (GAMMA passed). Fail closed.
-        _kb_release_api_post "${release_id}/promote" "$(jq -nc '{targetStage:"PROD", dryRun:true}')" || return 1
-        if [[ "$_KB_REL_CODE" != "200" ]]; then
-            echo "Error: cannot ask the gate whether $release_id is ready (HTTP ${_KB_REL_CODE}); not starting close-out" >&2; return 1
-        fi
-        codes=$(printf '%s' "$_KB_REL_BODY" | jq -r '[.reasonCodes[]? | select(. != "CLOSEOUT_INCOMPLETE")] | length' 2>/dev/null)
-        if [[ "$codes" != "0" ]]; then
-            echo "Error: $release_id is not ready for close-out (GAMMA has not passed):" >&2
-            printf '%s' "$_KB_REL_BODY" | jq -r '.reasons[]? | "  - " + .' >&2 2>/dev/null
-            return 1
-        fi
+        _kb_release_close_out_ready "$release_id" || return 1
     fi
     local -a args=(--repo "$opt_repo")
     (( opt_dry )) && args+=(--dry-run)
@@ -27001,7 +27036,8 @@ kb-release-close-out() {
 #      record present) is resumed at its first incomplete step by _kb_release_close_out -- no session is launched;
 #      the release reaches PROD as that run's last act. A close-out is STARTED only by `kb-release close-out`.
 # Usage (via kb-run): kb-run <REL-ID> [--yes]
-# Exit: 0 ok | 1 error | 2 usage/not confirmed | 8 PROD close-out resumed but a step failed (release stays in GAMMA)
+# Exit: 0 ok | 1 error | 2 usage/not confirmed | 8 PROD close-out resumed but a step failed, OR refused as stale / GAMMA not
+#       passed (XACA-1353-014); the release stays in GAMMA either way
 _kb_release_run() {
     local release_id="${1-}" assume_yes="${2:-0}"
     if ! _kb_release_valid_token "$release_id"; then echo "Error: invalid release id: $release_id" >&2; return 2; fi
@@ -27020,6 +27056,16 @@ _kb_release_run() {
         local _co_bf _co_rj
         _co_bf=$(_kb_get_board_file "$team") && _co_rj=$(_kb_release_close_out_release_json "$_co_bf" "$release_id")
         if [[ -n "$_co_rj" ]] && printf '%s' "$_co_rj" | jq -e '.closeOut | type == "object"' >/dev/null 2>&1; then
+            # XACA-1353-014: resume ONLY a record bound to THIS build whose GAMMA has passed. A stale record (another
+            # build / no gammaSha) or an untested GAMMA must never be resumed: it would tag/merge the wrong build.
+            if ! _kb_release_close_out_bound "$_co_rj"; then
+                echo "✗ kb-run: $release_id has a close-out record that is not bound to its current GAMMA build (gammaSha missing or != stageSha.GAMMA); not resuming it. Regress out of GAMMA archives it" >&2
+                return 8
+            fi
+            if ! _kb_release_close_out_ready "$release_id"; then
+                echo "✗ kb-run: $release_id has a close-out record but GAMMA has not passed for this build; not resuming" >&2
+                return 8
+            fi
             echo "↻ $release_id: PROD close-out is in progress; resuming at its first incomplete step (spec 13.4)"
             if _kb_release_close_out "$_co_bf" "$release_id" --repo "$PWD"; then
                 echo "✓ kb-run: close-out complete; $release_id is at PROD."

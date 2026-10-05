@@ -11,6 +11,7 @@ Shape (fixed order = spec 13.4: tag -> mergeProduction -> mergeIntegration -> me
 
     release.closeOut = {
       "startedAt": "<iso>",
+      "gammaSha": "<stageSha.GAMMA at init>",     # the build this record belongs to (XACA-1353-014)
       "crTeam": true|false,                       # crClose is a step ONLY when true
       "steps": {
         "tag":                {"status": "pending|done|failed", "ts": "<iso>", "error": "<msg>"?},
@@ -32,16 +33,23 @@ Contract (enforced here, not by callers):
     resolved by a PR into THAT release's own branch and never blocks the closing release);
     `pending` and `failed` (e.g. push rejected) are retryable and block the step's `done`.
 
+  * (XACA-1353-014) The record is BOUND to the build it started on: `gammaSha` = stageSha.GAMMA, taken from the
+    board at init (never from the client). set/target are refused when it no longer equals stageSha.GAMMA.
+    A backward move out of GAMMA/PROD (or a replaced stageSha.GAMMA) archives the live record into the
+    append-only `closeOutHistory[]` (`archivedAt`, `reason`) and clears it -- but is REFUSED once production
+    already ships the build (mergeProduction or any later step `done`): that is fixed forward, never regressed.
+
 stdlib only, python 3.9 compatible.
 
 CLI (all read-only; JSON on stdout, rc 0 ok / 1 refused / 2 usage):
-    init             [--cr-team] [--targets a,b,c]          -> fresh closeOut
+    init             [--cr-team] [--targets a,b,c] [--gamma-sha SHA] -> fresh closeOut
     first-incomplete --release FILE|-                       -> step name, or "" when complete
     step-status      --release FILE|- --step NAME           -> pending|done|failed (or "n/a")
     can-delete       --release FILE|-                       -> exit 0 when deleteBranch may run
 """
 import argparse
 import json
+import re
 import sys
 from datetime import datetime, timezone
 
@@ -50,6 +58,9 @@ STATUSES = ("pending", "done", "failed")
 TARGET_STATUSES = ("pending", "done", "conflict", "failed")
 TERMINAL_TARGETS = ("done", "conflict")
 _DELETE_PREREQS = ("tag", "mergeProduction", "mergeIntegration")
+# Once ANY of these is done, production already ships the build: a regress can no longer undo it.
+_PRODUCTION_SHIPPED_STEPS = ("mergeProduction", "mergeIntegration", "mergeOtherReleases", "deleteBranch", "crClose")
+_SHA_RE = re.compile(r"^[0-9a-f]{40,64}$")
 
 
 class CloseOutError(ValueError):
@@ -66,9 +77,9 @@ def applicable_steps(close_out):
     return [s for s in STEPS if s in steps]
 
 
-def init_close_out(cr_team=False, targets=None, now=None):
+def init_close_out(cr_team=False, targets=None, now=None, gamma_sha=None):
     """Fresh record, every step pending. `targets` = the other open release branches at the time
-    close-out starts (one sub-entry each, all pending)."""
+    close-out starts (one sub-entry each, all pending). `gamma_sha` = stageSha.GAMMA the record is bound to."""
     ts = now or _now()
     steps = {s: {"status": "pending", "ts": ts} for s in STEPS if s != "crClose" or cr_team}
     tg = {}
@@ -77,7 +88,68 @@ def init_close_out(cr_team=False, targets=None, now=None):
             raise CloseOutError("mergeOtherReleases target must be a non-empty branch name")
         tg[t.strip()] = "pending"
     steps["mergeOtherReleases"]["targets"] = tg
-    return {"startedAt": ts, "crTeam": bool(cr_team), "steps": steps}
+    rec = {"startedAt": ts, "crTeam": bool(cr_team), "steps": steps}
+    if gamma_sha is not None:
+        rec["gammaSha"] = gamma_sha
+    return rec
+
+
+def release_gamma_sha(release):
+    """stageSha.GAMMA of a release as a valid lower-case SHA string, else None."""
+    ss = (release or {}).get("stageSha")
+    v = ss.get("GAMMA") if isinstance(ss, dict) else None
+    return v.lower() if isinstance(v, str) and _SHA_RE.match(v.lower()) else None
+
+
+def binding_gap(release):
+    """Why the live closeOut is not bound to the release's CURRENT GAMMA build, or None when it is. A record
+    with no `gammaSha` is malformed (a gap); so is a release with no valid stageSha.GAMMA."""
+    co = (release or {}).get("closeOut")
+    if not isinstance(co, dict):
+        return None
+    cur = release_gamma_sha(release)
+    rec = co.get("gammaSha")
+    if not isinstance(rec, str) or not _SHA_RE.match(rec.lower()):
+        return "close-out record is malformed (no gammaSha binding it to a build)"
+    if cur is None:
+        return "release has no valid stageSha.GAMMA to bind the close-out to"
+    if rec.lower() != cur:
+        return ("close-out belongs to a different GAMMA build (record %s, stageSha.GAMMA %s)"
+                % (rec[:12], cur[:12]))
+    return None
+
+
+def archive_close_out(release, reason, now=None):
+    """Move the live `closeOut` into the append-only `closeOutHistory[]` (flat copy + archivedAt + reason) and
+    clear it. No record = no-op (returns None). Raises CloseOutError, changing nothing, when production already
+    ships the build (mergeProduction or any later step is done): that is fixed forward with a hotfix release."""
+    co = release.get("closeOut")
+    if co is None:
+        return None
+    steps = co.get("steps") if isinstance(co, dict) else None
+    shipped = [s for s in _PRODUCTION_SHIPPED_STEPS if isinstance(steps, dict) and step_status(co, s) == "done"]
+    if shipped:
+        raise CloseOutError(
+            "refused: production already ships this build (close-out step '%s' is done) and cannot be un-shipped by "
+            "a regress. Fix forward: cut a hotfix release (kb-release create --type hotfix) for the correction"
+            % shipped[0])
+    hist = release.get("closeOutHistory")
+    hist = hist if isinstance(hist, list) else []
+    entry = dict(co) if isinstance(co, dict) else {"malformed": co}
+    entry["archivedAt"] = now or _now()
+    entry["reason"] = str(reason or "unspecified")
+    hist.append(entry)
+    release["closeOutHistory"] = hist
+    release.pop("closeOut", None)
+    return entry
+
+
+def reconcile_close_out(release, now=None):
+    """Archive the live closeOut when it no longer matches stageSha.GAMMA (a replaced build). Returns the archived
+    entry or None. Raises CloseOutError (nothing changed) when production already ships the record's build."""
+    if not isinstance(release.get("closeOut"), dict) or binding_gap(release) is None:
+        return None
+    return archive_close_out(release, "stageSha.GAMMA changed: close-out belonged to another build", now)
 
 
 def step_status(close_out, step):
@@ -187,11 +259,18 @@ def apply_op(release, op, now=None):
         tg = op.get("targets", [])
         if not isinstance(tg, list):
             raise CloseOutError("'targets' must be a list of branch names")
-        release["closeOut"] = init_close_out(cr, tg, now)
+        gamma = release_gamma_sha(release)
+        if gamma is None:
+            raise CloseOutError("close-out cannot start: the release has no valid stageSha.GAMMA to bind it to")
+        release["closeOut"] = init_close_out(cr, tg, now, gamma)
         return release["closeOut"]
     co = release.get("closeOut")
     if kind in ("set", "target") and not isinstance(co, dict):
         raise CloseOutError("close-out not started for this release (op=init first)")
+    if kind in ("set", "target"):
+        gap = binding_gap(release)
+        if gap:
+            raise CloseOutError("%s; archive it (regress out of GAMMA) and start a new close-out" % gap)
     if kind == "set":
         set_step(co, op.get("step"), op.get("status"), op.get("error"), now)
     elif kind == "target":
@@ -214,6 +293,7 @@ def main(argv=None):
     p = sub.add_parser("init")
     p.add_argument("--cr-team", action="store_true")
     p.add_argument("--targets", default="")
+    p.add_argument("--gamma-sha", default=None)
     for name in ("first-incomplete", "step-status", "can-delete"):
         p = sub.add_parser(name)
         p.add_argument("--release", required=True)
@@ -223,7 +303,7 @@ def main(argv=None):
     try:
         if a.cmd == "init":
             tg = [t for t in a.targets.split(",") if t.strip()]
-            print(json.dumps(init_close_out(a.cr_team, tg)))
+            print(json.dumps(init_close_out(a.cr_team, tg, gamma_sha=a.gamma_sha)))
             return 0
         co = _load_release(a.release).get("closeOut")
         if not isinstance(co, dict):

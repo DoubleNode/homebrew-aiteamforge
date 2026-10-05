@@ -38,7 +38,7 @@ whose data is absent is UNMET ("cannot verify"), never assumed satisfied.
 from datetime import datetime, timezone
 
 from release_schema import STAGES  # single source of truth (XACA-1346-003); re-exported here
-from release_closeout import first_incomplete as _closeout_first_incomplete  # pure stdlib (XACA-1353-004)
+from release_closeout import first_incomplete as _closeout_first_incomplete, binding_gap as _closeout_binding_gap  # pure stdlib (XACA-1353-004)
 
 # GAMMA is deliberately NOT here: it follows flowConfig, EXCEPT that it is forced on when crSupport is on
 # (enabled_stages, XACA-1375-017).
@@ -69,15 +69,18 @@ MANDATORY_STAGES = ("CR", "GAMMA")
 # XACA-1349-004 (spec 13.3): entering the production-deploy stage with no determinable rollback target.
 # Raised by the SERVER (it owns the git read); a HARD refusal in BOTH gate modes. The lead's remedy is
 # `kb-release rollback-override` (release.rollbackShaOverride).
-CODE_CLOSEOUT_INCOMPLETE = "CLOSEOUT_INCOMPLETE"            # XACA-1353-004: GAMMA -> PROD before the PROD close-out finished
 CODE_ROLLBACK_SHA_UNKNOWN = "ROLLBACK_SHA_UNKNOWN"
 # PR #1036 round 1: a lead override that disagrees with the resolvable production tag. Also raised by the
 # SERVER and HARD in both gate modes; the remedy is `kb-release rollback-override <id> --clear --by <lead>`.
 CODE_ROLLBACK_OVERRIDE_CONFLICT = "ROLLBACK_OVERRIDE_CONFLICT"
+# XACA-1353-004: GAMMA -> PROD before the PROD close-out finished. XACA-1353-013 (PR #1063 round 1): a HARD
+# refusal in BOTH gate modes (report mode used to land the release at PROD, untagged and unmerged).
+CODE_CLOSEOUT_INCOMPLETE = "CLOSEOUT_INCOMPLETE"
 REASON_CODES = (CODE_OTHER, CODE_GAMMA_CONFIRM_REQUIRED, CODE_GAMMA_ACTOR_NOT_LEAD, CODE_WAIVER_NEEDED,
                 CODE_TEST_MISSING, CODE_WAIVER_VOID_SHA, CODE_WAIVER_VOID_INVALID, CODE_WAIVER_NOT_LEAD,
                 CODE_NOT_IN_LEADS, CODE_LEADS_NOT_CONFIGURED, CODE_CR_SUPPORT_DISABLED,
-                CODE_MANDATORY_STAGE_SKIPPED, CODE_ROLLBACK_SHA_UNKNOWN, CODE_ROLLBACK_OVERRIDE_CONFLICT)
+                CODE_MANDATORY_STAGE_SKIPPED, CODE_ROLLBACK_SHA_UNKNOWN, CODE_ROLLBACK_OVERRIDE_CONFLICT,
+                CODE_CLOSEOUT_INCOMPLETE)
 INFORMATIONAL_CODES = frozenset((CODE_CR_SUPPORT_DISABLED,))
 CR_SUPPORT_DISABLED_MSG = "CR support disabled"
 
@@ -396,12 +399,30 @@ def closeout_gap(release):
     co = release.get("closeOut")
     if not isinstance(co, dict) or not isinstance(co.get("steps"), dict):
         return "close-out has not started"
+    bound = _closeout_binding_gap(release)   # XACA-1353-014: a record from another build / with no gammaSha is no record
+    if bound:
+        return bound
     need = _CLOSEOUT_BASE_STEPS + (("crClose",) if co.get("crTeam") is True else ())
     miss = [s for s in need if s not in co["steps"]]
     if miss:
         return "close-out record is malformed (missing step %s)" % miss[0]
     nxt = _closeout_first_incomplete(co)
     return "close-out is incomplete (next step: %s)" % nxt if nxt else None
+
+
+def _cr_closed_by_close_out(release, cr):
+    """XACA-1353-016: the GAMMA-exit CR condition for a release whose CRs were closed BY ITS OWN close-out. crClose
+    (spec 13.4, before the PROD promote) moves every linked CR to cr-closed, which release_cr_feed reads as "no open CR",
+    so `state == cr-completed` can never hold again at the terminal promote. Satisfied ONLY when ALL of: the feed says
+    every linked CR is cr-closed (a real linkage read, so a missing/unrelated CR cannot satisfy it), the closeOut is
+    bound to the CURRENT build (gammaSha == stageSha.GAMMA), and its crClose step is done. Anything less still refuses."""
+    co = release.get("closeOut")
+    if not (isinstance(cr, dict) and cr.get("allClosed") is True and isinstance(co, dict)):
+        return False
+    if _closeout_binding_gap(release) is not None:
+        return False
+    rec = (co.get("steps") or {}).get("crClose")
+    return isinstance(rec, dict) and rec.get("status") == "done"
 
 
 def _exit_conditions(release, cur, cr_on, ctx):
@@ -478,12 +499,14 @@ def _exit_conditions(release, cur, cr_on, ctx):
         if not head or head != sha:
             r.append("CR: release branch HEAD %s != stageSha.CR %s (branch moved or unknown)" % (head, sha))
     if cur == "GAMMA" and cr_on:
-        if (release.get("cr") or {}).get("state") != "cr-completed":
+        _cr = release.get("cr") or {}
+        if _cr.get("state") != "cr-completed" and not _cr_closed_by_close_out(release, _cr):
             r.append("GAMMA: CR must be cr-completed")
     if cur == "GAMMA":
         # XACA-1353-004 (spec 13.4): PROD entry is the LAST act of close-out. The release stays in GAMMA until the
         # tag, both merges, the other-release merges, the branch delete (and kb-cr close) are done, so a failed
-        # close-out can never leave a release at PROD with an undeleted branch / untagged production.
+        # close-out can never leave a release at PROD with an undeleted branch / untagged production. That is only
+        # true because the server treats CLOSEOUT_INCOMPLETE as a HARD refusal in BOTH gate modes (XACA-1353-013).
         _gap = closeout_gap(release)
         if _gap:
             r.append("PROD: %s; run `kb-release close-out %s` (kb-run resumes it)" % (_gap, release.get("id") or "<REL-ID>"),
