@@ -11118,8 +11118,8 @@ _kb_require_release() {
         if [[ "$release_exists" == "true" ]]; then
             # XACA-1352-013: the release exists -- it must also have a branch
             # (cut on promotion out of PLANNED). Mirrors server.py's gate-mode
-            # resolver: absent/"report" = report; "enforce" or any unrecognised
-            # value = enforce.
+            # resolver: explicit "report" = report; absent (since XACA-1352-014),
+            # "enforce" or any unrecognised value = enforce.
             local rel_branch rel_stage gate_mode
             rel_branch=$(_kb_jq_read "$board_file" \
                 '[.releases[]? | select(.id == $rid)][0].branch // empty' -r \
