@@ -78,11 +78,42 @@ function resolveAuthToken() {
     return kg.resolveFleetAuthToken() || '';
 }
 
-/** Build fetch headers, adding Bearer auth only when a token is configured. */
+/**
+ * Build fetch headers, adding Bearer auth only when a token is configured.
+ * TRANSPORT-UNAWARE: it cannot see the URL, so it attaches the token to any
+ * destination. Kept for its existing contract only — relay calls must use
+ * relayHeaders(url) (XACA-1326).
+ */
 function authHeaders(extra) {
     const h = Object.assign({ 'Content-Type': 'application/json' }, extra || {});
     const tok = resolveAuthToken();
     if (tok) h['Authorization'] = `Bearer ${tok}`;
+    return h;
+}
+
+/**
+ * Request headers for a relay call to `url` (XACA-1326-004). The fleet token is
+ * attached only over https or loopback http; otherwise it is omitted (never
+ * refuse) with a one-shot sanitized warning. Feature-detects the shared helper
+ * so a stale installed vault-keygen.js degrades to the same safe rule.
+ */
+let _relayWarned = false;
+async function relayHeaders(url, extra) {
+    const h = Object.assign({ 'Content-Type': 'application/json' }, extra || {});
+    if (typeof kg.fleetRequestHeaders === 'function') {
+        return Object.assign(h, await kg.fleetRequestHeaders(url));
+    }
+    const tok = resolveAuthToken();
+    if (!tok) return h;
+    let u = null;
+    try { u = new URL(url); } catch (_) { /* unparseable -> omit */ }
+    const loop = u && typeof kg.isLoopbackHost === 'function' && kg.isLoopbackHost(u.hostname);
+    if (u && (u.protocol === 'https:' || (u.protocol === 'http:' && loop))) {
+        h['Authorization'] = `Bearer ${tok}`;
+    } else if (!_relayWarned) {
+        _relayWarned = true;
+        process.stderr.write(`warning: fleet token NOT sent: ${u ? u.protocol + '//' + u.hostname : 'unparseable URL'} is not https or loopback\n`);
+    }
     return h;
 }
 
@@ -181,7 +212,7 @@ async function relayFetch(url, init) {
 
 /** Fetch a registered machine's public key from the vault machine registry. */
 async function fetchMachinePubKey(base, machineSlug) {
-    const res = await relayFetch(`${base}/api/vault/machines`, { headers: authHeaders() });
+    const res = await relayFetch(`${base}/api/vault/machines`, { headers: await relayHeaders(`${base}/api/vault/machines`) });
     if (!res.ok) {
         throw new Error(`vault machine registry returned HTTP ${res.status}`);
     }
@@ -243,7 +274,7 @@ async function cmdSend(opts) {
 
     const res = await relayFetch(`${base}/api/msg`, {
         method:  'POST',
-        headers: authHeaders(),
+        headers: await relayHeaders(`${base}/api/msg`),
         body:    JSON.stringify(envelope),
     });
     let body = null;
@@ -262,7 +293,7 @@ async function cmdPull(opts) {
     const slug = opts.machine || kg.defaultMachineSlug();
 
     const res = await relayFetch(`${base}/api/msg?machine=${encodeURIComponent(slug)}`, {
-        headers: authHeaders(),
+        headers: await relayHeaders(`${base}/api/msg`),
     });
     if (!res.ok) {
         process.stderr.write(`Relay pull failed: HTTP ${res.status}\n`);
@@ -293,7 +324,7 @@ async function cmdPull(opts) {
         try {
             await relayFetch(`${base}/api/msg/ack`, {
                 method:  'POST',
-                headers: authHeaders(),
+                headers: await relayHeaders(`${base}/api/msg/ack`),
                 body:    JSON.stringify({ machine: slug, ids: openedIds }),
             });
         } catch (_) { /* best-effort; will re-pull + re-ingest is idempotent */ }
@@ -383,6 +414,7 @@ module.exports = {
     fetchMachinePubKey,
     resolveAuthToken,
     authHeaders,
+    relayHeaders,
     parseArgs,
     cmdSend,
     cmdPull,

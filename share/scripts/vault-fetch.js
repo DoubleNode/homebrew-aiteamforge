@@ -364,7 +364,12 @@ async function fetchCiphertext(serverUrl, engineSlug, accountSlug, machineId, op
         // default OAuth. assertNoRedirect throws, so it lands in the same catch
         // as any other transport failure and is classified exit 4 (retryable,
         // fails closed), never exit 7.
-        res = kg.assertNoRedirect(await doFetch(url, { ...kg.fleetFetchInit(), signal: ac.signal }), url);
+        // XACA-1326: send the fleet token (URL-aware: https/loopback only).
+        // Feature-detected so a stale installed vault-keygen.js never throws.
+        const authHeaders = typeof kg.fleetRequestHeaders === 'function'
+            ? await kg.fleetRequestHeaders(url) : {};
+        res = kg.assertNoRedirect(await doFetch(url, {
+            ...kg.fleetFetchInit(), headers: authHeaders, signal: ac.signal }), url);
     } catch (fetchErr) {
         // A REFUSED REDIRECT is not a network error - relabelling it as one sends
         // the operator to check their connection when the fault is that the fleet

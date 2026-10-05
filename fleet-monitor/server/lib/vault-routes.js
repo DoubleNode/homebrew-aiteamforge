@@ -352,7 +352,9 @@ function registerVaultRoutes(app) {
      *
      *   REVERSE THIS (gate with requireApiKey, the fleet tier) when ALL of these
      *   hold: (1) vault-fetch.js sends the fleet token from fleet-config.json
-     *   authToken; (2) every consumer runs a tap release that includes (1); (3)
+     *   authToken [DELIVERED by XACA-1326, 2026-10-04; it takes effect on a
+     *   consumer only once a tap release carrying it is installed there];
+     *   (2) every consumer runs a tap release that includes (1); (3)
      *   production has FLEET_AUTH_TOKEN set. Reverse sooner if the sealed box
      *   stops being sufficient on its own, for example a need for
      *   harvest-now-decrypt-later resistance or a recipient private key found

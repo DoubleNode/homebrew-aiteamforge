@@ -676,6 +676,15 @@ function isLoopbackHost(hostname) {
  *          host only (never userinfo, path or query)
  */
 function adminTransportCheck(url) {
+    return transportCheck(url, 'admin');
+}
+
+/**
+ * Shared predicate behind adminTransportCheck() and fleetTransportCheck()
+ * (XACA-1326): https anywhere, or plain http to a loopback host. `tier` only
+ * words the reason; the verdict is identical for both tiers.
+ */
+function transportCheck(url, tier) {
     let parsed;
     try {
         parsed = new URL(String(url));
@@ -686,10 +695,20 @@ function adminTransportCheck(url) {
     if (parsed.protocol === 'http:' && isLoopbackHost(parsed.hostname)) return { ok: true };
     return {
         ok: false,
-        reason: `the fleet URL is ${parsed.protocol}//${parsed.hostname} — the admin credential ` +
+        reason: `the fleet URL is ${parsed.protocol}//${parsed.hostname} — the ${tier} credential ` +
                 `is only sent over https, or over plain http to a loopback host ` +
                 `(localhost, 127.0.0.0/8, ::1)`,
     };
+}
+
+/**
+ * May the FLEET-tier token be sent to this URL? (XACA-1326) Same rule as the
+ * admin tier; the caller decides what to do on `ok: false` (fleet callers
+ * omit the token, see fleetRequestHeaders()).
+ * @returns {{ ok: true }|{ ok: false, reason: string }}
+ */
+function fleetTransportCheck(url) {
+    return transportCheck(url, 'fleet');
 }
 
 /**
@@ -723,6 +742,33 @@ async function fleetAuthHeaders(tier, opts) {
         ? await resolveFleetAdminToken(opts)
         : resolveFleetAuthToken();
     return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+let _fleetTransportWarned = false;
+
+/** Test hook: re-arm the one-shot insecure-transport warning. */
+function _resetFleetTransportWarning() { _fleetTransportWarned = false; }
+
+/**
+ * Fleet-tier headers for a request to `url` (XACA-1326). Prefer this over
+ * fleetAuthHeaders('fleet') at any call site that knows its URL: the token is
+ * attached only when fleetTransportCheck(url) passes. On a failed check the
+ * token is OMITTED (never refuse the request -- unattended callers must not
+ * turn a misconfigured URL into an outage) and ONE stderr warning per process
+ * names scheme+host only. No token is ever logged.
+ * @param {string} url the absolute URL the headers are for
+ * @returns {Promise<{Authorization?: string}>}
+ */
+async function fleetRequestHeaders(url) {
+    const token = resolveFleetAuthToken();
+    if (!token) return {};
+    const check = fleetTransportCheck(url);
+    if (check.ok) return { Authorization: `Bearer ${token}` };
+    if (!_fleetTransportWarned) {
+        _fleetTransportWarned = true;
+        process.stderr.write(`warning: fleet token NOT sent: ${check.reason}\n`);
+    }
+    return {};
 }
 
 // Lazily-loaded sodium handle so the module is requireable without the dep present
@@ -1364,7 +1410,8 @@ async function isMachineRegistered(serverUrl, machineId, opts) {
     }
     const base = serverUrl.replace(/\/+$/, '');
     const url = `${base}/api/vault/machines`;
-    const res = assertNoRedirect(await doFetch(url, { ...fleetFetchInit() }), url);
+    const res = assertNoRedirect(
+        await doFetch(url, { ...fleetFetchInit(), headers: await fleetRequestHeaders(url) }), url);
     if (!res.ok) {
         const err = new Error(`GET /api/vault/machines returned HTTP ${res.status}`);
         err.httpStatus = res.status;
@@ -2123,6 +2170,9 @@ module.exports = {
     isLoopbackHost,
     adminTransportCheck,
     assertAdminTransport,
+    fleetTransportCheck,
+    fleetRequestHeaders,
+    _resetFleetTransportWarning,
     EXIT_ENROLLMENT_PENDING,
     EXIT_ROTATE_REFUSED,
     // slug/label
