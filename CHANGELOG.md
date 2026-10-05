@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+
+## [0.20.30] - 2026-10-05
 - **XACA-1326** (Test, PR #1055 CI): `share/scripts/package.json` test list gains `tests/xaca-1326-kb-msg-provision-registration.test.js` (the real `kb-msg-provision` registration lookup moved from pytest into the vault JS suite, which has node_modules).
 - **XACA-1352 PR B**: release gate ABSENT default `report` -> `enforce` (server.py mirror + `_kb_require_release` template port; unreadable mode fails closed).
 - **XACA-1326** (Security): mirror the fleet-tier transport rule — `share/scripts/vault-keygen.js` gains `fleetTransportCheck(url)` / `fleetRequestHeaders(url)` (fleet token only over https or loopback http; otherwise omitted with one sanitized stderr warning, never refused); `vault-fetch.js` sends the fleet token on the ciphertext GET (401 still exit 4); `msg-client.js` relay calls go through `relayHeaders(url)`; `kb-msg-provision`'s registration check and `isMachineRegistered()` authenticate `GET /api/vault/machines`; `package.json` test list; `fleet-monitor/server/lib/vault-routes.js` comment only. Callers feature-detect the helper, so a stale `vault-keygen.js` degrades to no token, never a crash. Requires a release containing XACA-1322 (v0.20.25+).
@@ -7844,7 +7846,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.29...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.30...HEAD
+[0.20.30]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.29...v0.20.30
 [0.20.29]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.28...v0.20.29
 [0.20.28]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.27...v0.20.28
 [0.20.27]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.26...v0.20.27
