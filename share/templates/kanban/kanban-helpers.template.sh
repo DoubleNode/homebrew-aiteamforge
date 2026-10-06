@@ -1799,6 +1799,12 @@ _kb_release_close_out_lead_ok() {
     local release_id="${1-}" rj="${2-}" n
     [[ "$(printf '%s' "$rj" | jq -r '.stage // ""' 2>/dev/null)" == "PROD" ]] && return 0
     _kb_release_close_out_gate_info "$release_id" || return 1
+    # Same scope as the server: the lead question exists only when PROD is the deploy-confirm stage (no GAMMA). A GAMMA
+    # flow was lead-confirmed on GAMMA entry; its dry-run may still carry LEADS_NOT_CONFIGURED for the PROD promote's
+    # own reasons, which must not block close-out. An unreported confirm stage cannot be graded: fail closed.
+    [[ -n "$_KB_CO_CONFIRM" ]] \
+        || { echo "Error: $release_id close-out: the gate reported no deploy-confirm stage; refusing before any git action" >&2; return 1; }
+    [[ "$_KB_CO_CONFIRM" == "PROD" ]] || return 0
     n=$(printf '%s' "$_KB_REL_BODY" | jq -r '[.reasonCodes[]? | select(IN("GAMMA_ACTOR_NOT_LEAD","LEADS_NOT_CONFIGURED"))] | length' 2>/dev/null)
     if [[ "$n" != "0" ]]; then
         echo "Error: $release_id close-out needs a configured lead (PROD is the deploy-confirm stage and close-out ships production):" >&2
