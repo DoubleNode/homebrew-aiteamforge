@@ -72,7 +72,7 @@ def resume_plan(release, *, flow_config, cr_support_enabled, items=None, other_r
 
     row = the spec 5.2 table row (planned | dev-items-open | dev-deploy-pending | tests-running | tests-failed |
     cr-draft-not-approved | cr-submitted | gamma-soak-pending) or one of the follow-on rows the table implies
-    (stage-passed, gamma-ready, gamma-passed, cr-stage-incomplete, cr-held, gamma-failed, stage-sha-missing, terminal).
+    (stage-passed, gamma-ready, gamma-passed, closeout-ready, cr-stage-incomplete, cr-held, gamma-failed, stage-sha-missing, terminal).
     action = what the session does next. `items` [{id,title,status,prMerged}], `scheduled` [{provider, schedule[],
     tests[]}], `cr` {id, crState, draftApproved, feed} (feed = approval_providers.release_cr_feed) are pre-resolved by
     the loader; None means "could not read" and fails closed."""
@@ -170,6 +170,22 @@ def resume_plan(release, *, flow_config, cr_support_enabled, items=None, other_r
     plan["edge"] = edge
     if edge:
         return done("stage-passed", "chain", "%s %s: the auto-promote chain continues into %s." % (cur, status, edge))
+    # XACA-1446-015: close-out guidance keys on S = closeout_stage(order), the last enabled stage before PROD (GAMMA
+    # with it, else BETA/ALPHA/QA/DEV), never on GAMMA alone. A GAMMA-off plan would otherwise say "GAMMA-ready" or
+    # offer a bare PROD promote the gate refuses until the close-out has run.
+    try:
+        s_stage = G.closeout_stage(G.enabled_stages(flow_config, cr_support_enabled=cr_support_enabled))
+    except ValueError:
+        s_stage = None
+    if cur != "GAMMA" and cur == s_stage:
+        return done("closeout-ready", "offer-closeout", "%s %s: PROD close-out is next (%s is the last stage before PROD)."
+                    % (cur, status, cur),
+                    ("Run `kb-release close-out %s` (tag, merges, branch delete, CR close, then the gated promote); PROD is "
+                     "the deploy-confirm stage, so only a lead (releaseConfig.leads) can run it; the gate refuses a bare "
+                     "promote until it is done." % rid)
+                    if release.get("branch") else
+                    "PROD is the deploy-confirm stage: the lead confirms the production deploy with the session promote.",
+                    offer=promote_offer("PROD") if nxt else None)
     if cur == "GAMMA":
         return done("gamma-passed", "offer-promote", "GAMMA %s: offer the PROD promote (session promote)." % status,
                     # XACA-1353-004: a branch-per-release release enters PROD only through the close-out

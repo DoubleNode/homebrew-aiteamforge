@@ -10427,6 +10427,25 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 if cur not in (run_stage, 'PROD'):
                     raise _DeferredResponse.json(
                         {"error": "close-out only runs once %s has passed; release is at %s" % (run_stage, cur)}, 409)
+                # XACA-1446 round 1 (PR #1071, tester B1): with GAMMA disabled PROD is the deploy-confirm stage, and
+                # close-out's steps (tag, merge to production, delete branch) ARE the production deploy. The lead
+                # check must therefore run BEFORE any of them, not at the final PROD promote. THE gate's own lead
+                # check and reason codes (release_gate.actor_is_lead / CODE_*), no second matcher. A release already
+                # at PROD was lead-confirmed by its promote, so finishing a shipped record is not re-gated.
+                _co_order = _release_gate.enabled_stages(
+                    data.get('flowConfig') or {}, cr_support_enabled=self._crsupport_enabled(board_raw))
+                if cur != 'PROD' and _release_gate.deploy_confirm_stage(_co_order) == 'PROD':
+                    _co_rcfg = self._release_cfg(board_raw)
+                    _co_actor = body.get('actor')
+                    _co_actor = _co_actor.strip() if isinstance(_co_actor, str) and _co_actor.strip() else None
+                    _co_lead, _co_why = self._actor_is_lead(_co_actor, _co_rcfg)
+                    if not _co_lead:
+                        _co_code = (_release_gate.CODE_GAMMA_ACTOR_NOT_LEAD if self._leads_configured(_co_rcfg)
+                                    else _release_gate.CODE_LEADS_NOT_CONFIGURED)
+                        raise _DeferredResponse.json(
+                            {"error": "close-out refused: PROD is the deploy-confirm stage and close-out "
+                                      "ships production; lead confirmation required: %s" % _co_why,
+                             "reasonCodes": [_co_code], "reasons": [_co_why]}, 409)
                 if body['op'] == 'init':
                     # XACA-1353-014: close-out STARTS only at S, and only once S has passed. The client's
                     # own pre-check is advisory; this is the enforcement (same evaluator as the promote dry-run).
@@ -10829,8 +10848,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     data.get('releases'), data['flowConfig'],
                     self._crsupport_enabled(self._read_board_raw_locked(team)))
                 if _cc:
-                    self.send_error(409, _cc)
-                    return
+                    # XACA-1446 round 1: decided under the lock, written after it is released (XACA-0890-022)
+                    raise _DeferredResponse.json({"error": _cc}, 409)
 
                 self._save_releases_config(data, team, _lock_held=True)
 
@@ -10840,6 +10859,9 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps(data['flowConfig'], indent=2).encode())
 
+        except _DeferredResponse as deferred:
+            deferred.emit(self)
+            return
         except Exception as e:
             self.send_error(500, f"Error updating flow config: {e}")
 
@@ -17122,6 +17144,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             # XACA-0333-004: skip the board.json lock+write entirely when payload has no crSupport
             # changes (copyright-only saves).  board_data stays None; subitem 005 handles response.
+            close_out_conflict = None
             if clean_team_config:
                 import fcntl
                 lock_file = board_file.with_suffix('.json.lock')
@@ -17147,17 +17170,21 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                                 board_data.get('releases'), _rc.get('flowConfig') or self.DEFAULT_RELEASE_CONFIG['flowConfig'],
                                 self._crsupport_enabled({'teamConfig': existing}))
                         if _cc:
-                            self._send_json_response({'success': False, 'error': _cc}, status=409)
-                            return
-                        board_data['teamConfig'] = existing
+                            # XACA-1446 round 1: answered AFTER the board lock is released (XACA-0890-022)
+                            close_out_conflict = _cc
+                        else:
+                            board_data['teamConfig'] = existing
 
-                        self._atomic_write_json(board_file, board_data)
-                        print(f"[LCARS] Team config updated for '{team}': {existing}")
+                            self._atomic_write_json(board_file, board_data)
+                            print(f"[LCARS] Team config updated for '{team}': {existing}")
                     finally:
                         fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
                         # XACA-0333-001: remove the advisory lock file after release — best-effort
                         try: lock_file.unlink(missing_ok=True)
                         except OSError: pass
+                if close_out_conflict:   # the lock was released by the `with` above
+                    self._send_json_response({'success': False, 'error': close_out_conflict}, status=409)
+                    return
             else:
                 board_data = None  # copyright-only save — board not touched
 

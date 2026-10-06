@@ -1371,8 +1371,9 @@ _kb_release_close_out_init() {
         esac
         shift
     done
-    payload=$(jq -nc --argjson cr "$cr" --arg t "$targets" \
-        '{op:"init", crTeam:$cr, targets:($t | split(",") | map(select(length>0)))}') || return 1
+    # XACA-1446 round 1: the actor travels on every close-out write; with GAMMA off the server refuses a non-lead
+    payload=$(jq -nc --argjson cr "$cr" --arg t "$targets" --arg a "$(_kb_release_default_actor)" \
+        '{op:"init", actor:$a, crTeam:$cr, targets:($t | split(",") | map(select(length>0)))}') || return 1
     _kb_release_close_out_post "$release_id" "$payload"
 }
 
@@ -1380,15 +1381,16 @@ _kb_release_close_out_set() {
     local release_id="${1-}" step="${2-}" new_status="${3-}" error="${4-}" payload
     # NB: never name a local `status` -- it is a read-only special parameter in zsh.
     [[ -n "$step" && -n "$new_status" ]] || { echo "Usage: _kb_release_close_out_set <rel> <step> <status> [error]" >&2; return 1; }
-    payload=$(jq -nc --arg s "$step" --arg st "$new_status" --arg e "$error" \
-        '{op:"set", step:$s, status:$st} + (if $e == "" then {} else {error:$e} end)') || return 1
+    payload=$(jq -nc --arg s "$step" --arg st "$new_status" --arg e "$error" --arg a "$(_kb_release_default_actor)" \
+        '{op:"set", actor:$a, step:$s, status:$st} + (if $e == "" then {} else {error:$e} end)') || return 1
     _kb_release_close_out_post "$release_id" "$payload"
 }
 
 _kb_release_close_out_set_target() {
     local release_id="${1-}" target="${2-}" new_status="${3-}" payload
     [[ -n "$target" && -n "$new_status" ]] || { echo "Usage: _kb_release_close_out_set_target <rel> <branch> <status>" >&2; return 1; }
-    payload=$(jq -nc --arg t "$target" --arg st "$new_status" '{op:"target", target:$t, status:$st}') || return 1
+    payload=$(jq -nc --arg t "$target" --arg st "$new_status" --arg a "$(_kb_release_default_actor)" \
+        '{op:"target", actor:$a, target:$t, status:$st}') || return 1
     _kb_release_close_out_post "$release_id" "$payload"
 }
 
@@ -1755,7 +1757,10 @@ _kb_release_close_out_bound() {
 _kb_release_close_out_gate_info() {
     local release_id="${1-}"
     _KB_CO_STAGE=""; _KB_CO_CONFIRM=""
-    _kb_release_api_post "${release_id}/promote" "$(jq -nc '{targetStage:"PROD", dryRun:true}')" || return 1
+    # XACA-1446 round 1: the dry-run carries the actor AND confirmDeploy so a non-lead (or a board with no leads) is
+    # answered with GAMMA_ACTOR_NOT_LEAD / LEADS_NOT_CONFIGURED BEFORE any irreversible step. Read-only (dryRun).
+    _kb_release_api_post "${release_id}/promote" "$(jq -nc --arg a "$(_kb_release_default_actor)" \
+        '{targetStage:"PROD", dryRun:true, actor:$a, confirmDeploy:true}')" || return 1
     if [[ "$_KB_REL_CODE" != "200" ]]; then
         echo "Error: cannot ask the gate about $release_id (HTTP ${_KB_REL_CODE}); not continuing close-out" >&2; return 1
     fi
@@ -1798,7 +1803,7 @@ _kb_release_close_out_run() {
     if [[ "$has_rec" == "yes" ]]; then
         # XACA-1446: a started record names its own stage S + build. Bound = the CLI agrees it matches the board.
         bind=$(_kb_release_close_out_binding "$rj") \
-            || { echo "Error: $release_id has a close-out record that is not bound to its current build ($(printf '%s' "$bind" | jq -r '.gap // "malformed binding"' 2>/dev/null)); refusing before any git action. It is a leftover of an abandoned build" >&2; return 1; }
+            || { echo "Error: $release_id has a close-out record that is not bound to its current build ($(printf '%s' "$bind" | jq -r '.gap // "malformed binding"' 2>/dev/null)); refusing before any git action. It is a leftover of an abandoned build. Regress out of $(printf '%s' "$rj" | jq -r '.stage // "its stage"') archives it" >&2; return 1; }
         bstage=$(printf '%s' "$bind" | jq -r '.stage // empty'); bsha=$(printf '%s' "$bind" | jq -r '.sha // empty')
         [[ -n "$bstage" && -n "$bsha" ]] || { echo "Error: $release_id has a close-out record that is not bound to its current build (malformed binding); refusing before any git action" >&2; return 1; }
         if [[ "$dry_run" != "1" ]]; then
@@ -1990,7 +1995,7 @@ _kb_release_close_out() {
     # XACA-1353-014 (defence in depth, before the clone): a live record must be bound to the current build.
     name=$(_kb_release_close_out_release_json "$board_file" "$release_id")
     if printf '%s' "$name" | jq -e '.closeOut | type == "object"' >/dev/null 2>&1 && ! _kb_release_close_out_bound "$name"; then
-        echo "Error: $release_id has a close-out record that is not bound to its current build (binding missing or != the build at its stage); refusing before any git action. It is a leftover of an abandoned build" >&2; return 1
+        echo "Error: $release_id has a close-out record that is not bound to its current build (binding missing or != the build at its stage); refusing before any git action. It is a leftover of an abandoned build. Regress out of $(printf '%s' "$name" | jq -r '.stage // "its stage"') archives it" >&2; return 1
     fi
     # XACA-1353-017: a FRESH start (no record) refuses before any git action when a linked CR is one crClose cannot handle.
     if ! printf '%s' "$name" | jq -e '.closeOut | type == "object"' >/dev/null 2>&1; then

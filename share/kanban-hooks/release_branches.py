@@ -195,8 +195,9 @@ def sha_reachable_from_tip(repo_root, branch, sha, *, run=subprocess.run):
     """XACA-1446-011: is `sha` an ancestor of (or equal to) `branch`'s REMOTE tip (the same remote-tip reading as
     branch_tip, XACA-1352-018)? True / False / None. None = cannot tell (bad input, no remote, unreachable remote,
     objects unavailable, any git error): callers fail closed. False only when git answered "not an ancestor"
-    (rc 1), i.e. history was rewritten or the build never landed on the branch. If the tip commit is not in the
-    local object store it is fetched (objects only, no ref is created or moved)."""
+    (rc 1), i.e. history was rewritten or the build never landed on the branch. Read-only on the local object
+    store: if the remote tip commit is not already local this returns None and NEVER fetches (XACA-1446-016: the
+    server calls it while holding the board lock; the ls-remote is the only network read)."""
     if not isinstance(branch, str) or not isinstance(sha, str) or not _SHA.fullmatch(sha):
         return None
     branch = branch.strip()
@@ -210,8 +211,7 @@ def sha_reachable_from_tip(repo_root, branch, sha, *, run=subprocess.run):
         if not tip:
             return None
         if git("cat-file", "-e", tip + "^{commit}", ok=(0, 1, 128)).returncode != 0:
-            git("fetch", "--quiet", "--no-tags", "--", remote, "refs/heads/" + branch)
-            git("cat-file", "-e", tip + "^{commit}")
+            return None   # XACA-1446-016: never fetch (this runs under the board lock); tip not local = cannot verify
         if git("cat-file", "-e", sha + "^{commit}", ok=(0, 1, 128)).returncode != 0:
             return None   # the DEV build is not in this repo at all: cannot verify
         rc = git("merge-base", "--is-ancestor", sha, tip, ok=(0, 1)).returncode

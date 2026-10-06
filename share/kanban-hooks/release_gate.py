@@ -515,7 +515,8 @@ def _exit_conditions(release, cur, cr_on, ctx):
                          "the build never landed on the branch)" % (sha, head))
             else:
                 r.append("DEV: cannot verify stageSha.DEV %s is an ancestor of trunk branch HEAD %s "
-                         "(context.dev_sha_reachable unknown)" % (sha, head))
+                         "(context.dev_sha_reachable unknown; if the remote tip is newer than this clone, run "
+                         "`git fetch` in the team repo and retry)" % (sha, head))
     if cur == "CR" and not cr_on:
         # XACA-1375: CR support was turned off while the release sat at CR. The CR exit conditions
         # (cr-approved, deploy window, stageSha.CR) describe a stage that no longer exists for this

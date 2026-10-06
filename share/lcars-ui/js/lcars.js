@@ -15055,7 +15055,14 @@ async function saveFlowConfig() {
 
         if (!response.ok) {
             const errorText = await response.text();
-            throw new Error(errorText || 'Failed to save flow config');
+            // XACA-1446-017: the server answers {"error": msg} (e.g. the 409 "close-out would be bound to the wrong
+            // stage"); show just the message, never the raw body. A non-JSON body (stdlib error page) falls back to text.
+            let message = errorText;
+            try {
+                const parsed = JSON.parse(errorText);
+                if (parsed && typeof parsed.error === 'string' && parsed.error) message = parsed.error;
+            } catch (_parseErr) { /* not JSON: keep the text */ }
+            throw new Error(message || 'Failed to save flow config');
         }
 
         // Update local state
@@ -21191,7 +21198,8 @@ async function saveTeamConfigCRSupport(checkbox, statusEl) {
         // Revert checkbox visual state
         checkbox.checked = !enabled;
         if (statusEl) {
-            statusEl.textContent = 'Save failed';
+            // XACA-1446-017: show the server's reason (e.g. the 409 close-out conflict), not a bare 'Save failed'
+            statusEl.textContent = (err && err.message) ? 'Save failed: ' + err.message : 'Save failed';
             statusEl.className = 'team-config-status error';
         }
     }
