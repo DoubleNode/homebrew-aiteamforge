@@ -11,7 +11,8 @@ Shape (fixed order = spec 13.4: tag -> mergeProduction -> mergeIntegration -> me
 
     release.closeOut = {
       "startedAt": "<iso>",
-      "gammaSha": "<stageSha.GAMMA at init>",     # the build this record belongs to (XACA-1353-014)
+      "stage": "<S>",                             # the bound stage: the last enabled stage before PROD (XACA-1446)
+      "sha": "<stageSha[S] at init>",             # the build this record belongs to (XACA-1353-014, XACA-1446)
       "crTeam": true|false,                       # crClose is a step ONLY when true
       "steps": {
         "tag":                {"status": "pending|done|failed", "ts": "<iso>", "error": "<msg>"?},
@@ -33,16 +34,26 @@ Contract (enforced here, not by callers):
     resolved by a PR into THAT release's own branch and never blocks the closing release);
     `pending` and `failed` (e.g. push rejected) are retryable and block the step's `done`.
 
-  * (XACA-1353-014) The record is BOUND to the build it started on: `gammaSha` = stageSha.GAMMA, taken from the
-    board at init (never from the client). set/target are refused when it no longer equals stageSha.GAMMA.
-    A backward move out of GAMMA/PROD (or a replaced stageSha.GAMMA) archives the live record into the
-    append-only `closeOutHistory[]` (`archivedAt`, `reason`) and clears it -- but is REFUSED once production
-    already ships the build (mergeProduction or any later step `done`): that is fixed forward, never regressed.
+  * (XACA-1353-014, generalised by XACA-1446) The record is BOUND to the build it started on: `stage` = S, the
+    last enabled stage before PROD (GAMMA when the team has it), and `sha` = stageSha[S], both taken from the
+    board at init (never from the client; the server resolves S via release_gate.closeout_stage). set/target are
+    refused when `sha` no longer equals stageSha[stage]. A backward move out of S/PROD (or a replaced
+    stageSha[S]) archives the live record into the append-only `closeOutHistory[]` (`archivedAt`, `reason`) and
+    clears it -- but is REFUSED once production already ships the build (mergeProduction or any later step
+    `done`): that is fixed forward, never regressed.
+  * close_out_binding() is the ONLY reader of the binding fields. Read-compat shim: a legacy record carrying
+    only `gammaSha` (XACA-1353, pre-XACA-1446) reads as ("GAMMA", gammaSha). Writers emit only `stage`/`sha`
+    (no dual-write); closeOutHistory[] entries keep whatever shape they had.
 
 stdlib only, python 3.9 compatible.
 
 CLI (all read-only; JSON on stdout, rc 0 ok / 1 refused / 2 usage):
-    init             [--cr-team] [--targets a,b,c] [--gamma-sha SHA] -> fresh closeOut
+    init             [--cr-team] [--targets a,b,c] [--stage S --sha X | --gamma-sha SHA (deprecated: GAMMA)]
+                                                            -> fresh closeOut
+    binding          --release FILE|-                       -> JSON {stage, sha, bound, gap}; rc 0 bound or no
+                                                               record, 1 stale/malformed
+    archived-for-sha --release FILE|- --sha X               -> the newest closeOutHistory entry bound to X
+                                                               (JSON), rc 1 when none
     first-incomplete --release FILE|-                       -> step name, or "" when complete
     step-status      --release FILE|- --step NAME           -> pending|done|failed (or "n/a")
     can-delete       --release FILE|-                       -> exit 0 when deleteBranch may run
@@ -61,6 +72,8 @@ _DELETE_PREREQS = ("tag", "mergeProduction", "mergeIntegration")
 # Once ANY of these is done, production already ships the build: a regress can no longer undo it.
 _PRODUCTION_SHIPPED_STEPS = ("mergeProduction", "mergeIntegration", "mergeOtherReleases", "deleteBranch", "crClose")
 _SHA_RE = re.compile(r"^[0-9a-f]{40,64}$")
+# Stages a close-out may be bound to: every enabled stage that precedes PROD (PLANNED and CR never hold a build).
+BINDABLE_STAGES = ("DEV", "QA", "ALPHA", "BETA", "GAMMA")
 
 
 class CloseOutError(ValueError):
@@ -77,9 +90,24 @@ def applicable_steps(close_out):
     return [s for s in STEPS if s in steps]
 
 
-def init_close_out(cr_team=False, targets=None, now=None, gamma_sha=None):
+def _valid_sha(v):
+    """`v` as a lower-case SHA string when valid, else None."""
+    return v.lower() if isinstance(v, str) and _SHA_RE.match(v.lower()) else None
+
+
+def init_close_out(cr_team=False, targets=None, now=None, stage=None, sha=None, gamma_sha=None):
     """Fresh record, every step pending. `targets` = the other open release branches at the time
-    close-out starts (one sub-entry each, all pending). `gamma_sha` = stageSha.GAMMA the record is bound to."""
+    close-out starts (one sub-entry each, all pending). `stage`/`sha` = the bound stage S and stageSha[S]
+    the record belongs to; `gamma_sha` is the deprecated spelling of stage="GAMMA", sha=gamma_sha.
+    Writes only `stage` and `sha` (never the legacy `gammaSha`)."""
+    if gamma_sha is not None:
+        if stage not in (None, "GAMMA") or (sha is not None and sha != gamma_sha):
+            raise CloseOutError("gamma_sha conflicts with stage/sha")
+        stage, sha = "GAMMA", gamma_sha
+    if (stage is None) != (sha is None):
+        raise CloseOutError("stage and sha must be given together")
+    if stage is not None and (stage not in BINDABLE_STAGES or _valid_sha(sha) is None):
+        raise CloseOutError("cannot bind close-out to stage %r / sha %r" % (stage, sha))
     ts = now or _now()
     steps = {s: {"status": "pending", "ts": ts} for s in STEPS if s != "crClose" or cr_team}
     tg = {}
@@ -89,33 +117,51 @@ def init_close_out(cr_team=False, targets=None, now=None, gamma_sha=None):
         tg[t.strip()] = "pending"
     steps["mergeOtherReleases"]["targets"] = tg
     rec = {"startedAt": ts, "crTeam": bool(cr_team), "steps": steps}
-    if gamma_sha is not None:
-        rec["gammaSha"] = gamma_sha
+    if stage is not None:
+        rec["stage"] = stage
+        rec["sha"] = _valid_sha(sha)
     return rec
 
 
-def release_gamma_sha(release):
-    """stageSha.GAMMA of a release as a valid lower-case SHA string, else None."""
+def close_out_binding(close_out):
+    """THE accessor for a record's binding: (stage, sha) with sha lower-cased, or None when the record is
+    malformed. A record with a valid `stage` + `sha` returns them; otherwise a legacy record (XACA-1353,
+    `gammaSha` only, no stage/sha keys) reads as ("GAMMA", gammaSha). Nothing else reads these fields."""
+    if not isinstance(close_out, dict):
+        return None
+    st, sha = close_out.get("stage"), _valid_sha(close_out.get("sha"))
+    if st in BINDABLE_STAGES and sha is not None:
+        return st, sha
+    legacy = _valid_sha(close_out.get("gammaSha"))
+    if legacy is not None and "stage" not in close_out and "sha" not in close_out:
+        return "GAMMA", legacy
+    return None
+
+
+def stage_sha(release, stage):
+    """stageSha[stage] of a release as a valid lower-case SHA string, else None."""
     ss = (release or {}).get("stageSha")
-    v = ss.get("GAMMA") if isinstance(ss, dict) else None
-    return v.lower() if isinstance(v, str) and _SHA_RE.match(v.lower()) else None
+    return _valid_sha(ss.get(stage)) if isinstance(ss, dict) else None
 
 
 def binding_gap(release):
-    """Why the live closeOut is not bound to the release's CURRENT GAMMA build, or None when it is. A record
-    with no `gammaSha` is malformed (a gap); so is a release with no valid stageSha.GAMMA."""
+    """Why the live closeOut is not bound to the CURRENT build of its OWN stage, or None when it is. Record-
+    intrinsic: compares close_out_binding(record) with stageSha[record.stage]; flow config plays no part (the
+    gate checks the stage itself, XACA-1446-003). A malformed record is a gap; so is a release with no valid
+    stageSha for the record's stage."""
     co = (release or {}).get("closeOut")
     if not isinstance(co, dict):
         return None
-    cur = release_gamma_sha(release)
-    rec = co.get("gammaSha")
-    if not isinstance(rec, str) or not _SHA_RE.match(rec.lower()):
-        return "close-out record is malformed (no gammaSha binding it to a build)"
+    bound = close_out_binding(co)
+    if bound is None:
+        return "close-out record is malformed (no stage/sha binding it to a build)"
+    stage, rec = bound
+    cur = stage_sha(release, stage)
     if cur is None:
-        return "release has no valid stageSha.GAMMA to bind the close-out to"
-    if rec.lower() != cur:
-        return ("close-out belongs to a different GAMMA build (record %s, stageSha.GAMMA %s)"
-                % (rec[:12], cur[:12]))
+        return "release has no valid stageSha.%s to bind the close-out to" % stage
+    if rec != cur:
+        return ("close-out belongs to a different %s build (record %s, stageSha.%s %s)"
+                % (stage, rec[:12], stage, cur[:12]))
     return None
 
 
@@ -145,11 +191,28 @@ def archive_close_out(release, reason, now=None):
 
 
 def reconcile_close_out(release, now=None):
-    """Archive the live closeOut when it no longer matches stageSha.GAMMA (a replaced build). Returns the archived
-    entry or None. Raises CloseOutError (nothing changed) when production already ships the record's build."""
+    """Archive the live closeOut when it no longer matches stageSha[its bound stage] (a replaced build). Returns the
+    archived entry or None. Raises CloseOutError (nothing changed) when production already ships the record's
+    build."""
     if not isinstance(release.get("closeOut"), dict) or binding_gap(release) is None:
         return None
-    return archive_close_out(release, "stageSha.GAMMA changed: close-out belonged to another build", now)
+    bound = close_out_binding(release["closeOut"])
+    return archive_close_out(release, "stageSha.%s changed: close-out belonged to another build"
+                             % (bound[0] if bound else "<unbound>"), now)
+
+
+def archived_for_sha(release, sha):
+    """The NEWEST closeOutHistory[] entry whose binding sha equals `sha` (legacy gammaSha entries included), or
+    None. Reads history entries through close_out_binding only."""
+    want = _valid_sha(sha)
+    hist = (release or {}).get("closeOutHistory")
+    if want is None or not isinstance(hist, list):
+        return None
+    for entry in reversed(hist):
+        b = close_out_binding(entry)
+        if b is not None and b[1] == want:
+            return entry
+    return None
 
 
 def step_status(close_out, step):
@@ -243,9 +306,12 @@ def set_target(close_out, target, status, now=None):
     return close_out
 
 
-def apply_op(release, op, now=None):
+def apply_op(release, op, now=None, stage=None, sha=None):
     """The server's single entry point. `op` is the POST body:
          {"op": "init", "crTeam": bool, "targets": [..]}      (idempotent: refused if a record exists)
+       `stage` is the bound stage S the SERVER resolved (release_gate.closeout_stage); init binds to it and to
+       stageSha[S] read from the board here. Both come from keyword arguments, never from the body (a client
+       `stage`/`sha`/`gammaSha` in the body is ignored). `sha`, when given, must equal stageSha[S].
          {"op": "set", "step": S, "status": X, "error": str?}
          {"op": "target", "target": branch, "status": X}
        Mutates release["closeOut"]; returns it. Raises CloseOutError when refused."""
@@ -259,10 +325,14 @@ def apply_op(release, op, now=None):
         tg = op.get("targets", [])
         if not isinstance(tg, list):
             raise CloseOutError("'targets' must be a list of branch names")
-        gamma = release_gamma_sha(release)
-        if gamma is None:
-            raise CloseOutError("close-out cannot start: the release has no valid stageSha.GAMMA to bind it to")
-        release["closeOut"] = init_close_out(cr, tg, now, gamma)
+        if stage not in BINDABLE_STAGES:
+            raise CloseOutError("close-out cannot start: no valid stage to bind it to (%r)" % (stage,))
+        bsha = stage_sha(release, stage)
+        if bsha is None:
+            raise CloseOutError("close-out cannot start: the release has no valid stageSha.%s to bind it to" % stage)
+        if sha is not None and _valid_sha(sha) != bsha:
+            raise CloseOutError("close-out cannot start: stageSha.%s is not the expected build" % stage)
+        release["closeOut"] = init_close_out(cr, tg, now, stage=stage, sha=bsha)
         return release["closeOut"]
     co = release.get("closeOut")
     if kind in ("set", "target") and not isinstance(co, dict):
@@ -270,7 +340,7 @@ def apply_op(release, op, now=None):
     if kind in ("set", "target"):
         gap = binding_gap(release)
         if gap:
-            raise CloseOutError("%s; archive it (regress out of GAMMA) and start a new close-out" % gap)
+            raise CloseOutError("%s; archive it (regress out of its stage) and start a new close-out" % gap)
     if kind == "set":
         set_step(co, op.get("step"), op.get("status"), op.get("error"), now)
     elif kind == "target":
@@ -284,7 +354,7 @@ def _load_release(path):
     raw = sys.stdin.read() if path == "-" else open(path, encoding="utf-8").read()
     doc = json.loads(raw)
     # Accept a bare release OR a bare closeOut (anything with `steps`).
-    return doc if "steps" not in doc else {"closeOut": doc}
+    return doc if "steps" not in doc else {"closeOut": doc, "_bare": True}
 
 
 def main(argv=None):
@@ -293,8 +363,13 @@ def main(argv=None):
     p = sub.add_parser("init")
     p.add_argument("--cr-team", action="store_true")
     p.add_argument("--targets", default="")
-    p.add_argument("--gamma-sha", default=None)
-    for name in ("first-incomplete", "step-status", "can-delete"):
+    p.add_argument("--gamma-sha", default=None)   # deprecated alias for --stage GAMMA --sha
+    p.add_argument("--stage", default=None)
+    p.add_argument("--sha", default=None)
+    p = sub.add_parser("archived-for-sha")
+    p.add_argument("--release", required=True)
+    p.add_argument("--sha", required=True)
+    for name in ("binding", "first-incomplete", "step-status", "can-delete"):
         p = sub.add_parser(name)
         p.add_argument("--release", required=True)
         if name == "step-status":
@@ -303,9 +378,26 @@ def main(argv=None):
     try:
         if a.cmd == "init":
             tg = [t for t in a.targets.split(",") if t.strip()]
-            print(json.dumps(init_close_out(a.cr_team, tg, gamma_sha=a.gamma_sha)))
+            print(json.dumps(init_close_out(a.cr_team, tg, stage=a.stage, sha=a.sha, gamma_sha=a.gamma_sha)))
             return 0
-        co = _load_release(a.release).get("closeOut")
+        rel = _load_release(a.release)
+        if a.cmd == "archived-for-sha":
+            hit = archived_for_sha(rel, a.sha)
+            if hit is None:
+                print("no archived close-out for that sha", file=sys.stderr)
+                return 1
+            print(json.dumps(hit))
+            return 0
+        co = rel.get("closeOut")
+        if a.cmd == "binding":
+            if not isinstance(co, dict):
+                print(json.dumps({"stage": None, "sha": None, "bound": None, "gap": None}))
+                return 0
+            b = close_out_binding(co)
+            gap = None if (b and rel.get("_bare")) else binding_gap(rel)   # a bare closeOut has no stageSha to compare
+            print(json.dumps({"stage": b[0] if b else None, "sha": b[1] if b else None,
+                              "bound": b is not None and gap is None, "gap": gap}))
+            return 0 if (b is not None and gap is None) else 1
         if not isinstance(co, dict):
             print("no closeOut record on this release", file=sys.stderr)
             return 1

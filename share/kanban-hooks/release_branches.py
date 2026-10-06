@@ -176,6 +176,50 @@ def branch_tip(repo_root, branch, *, run=subprocess.run):
         return None
 
 
+def is_trunk_release(release, release_config):
+    """XACA-1446-011: True only when this release's branch IS the trunk: mode "trunk", a non-hotfix release, and
+    release.branch == the integration branch. A hotfix is cut from production onto its own hotfix/ branch (not
+    trunk-moving), and a branch that is not the integration branch is not trunk either, so both keep exact-equality
+    gating. Any config/type error answers False (the strict path)."""
+    try:
+        cfg = effective_branches(release_config)
+        if cfg["mode"] != "trunk" or release_type(release) == "hotfix":
+            return False
+    except ValueError:
+        return False
+    b = release.get("branch") if isinstance(release, dict) else None
+    return isinstance(b, str) and b.strip() == cfg["integration"]
+
+
+def sha_reachable_from_tip(repo_root, branch, sha, *, run=subprocess.run):
+    """XACA-1446-011: is `sha` an ancestor of (or equal to) `branch`'s REMOTE tip (the same remote-tip reading as
+    branch_tip, XACA-1352-018)? True / False / None. None = cannot tell (bad input, no remote, unreachable remote,
+    objects unavailable, any git error): callers fail closed. False only when git answered "not an ancestor"
+    (rc 1), i.e. history was rewritten or the build never landed on the branch. If the tip commit is not in the
+    local object store it is fetched (objects only, no ref is created or moved)."""
+    if not isinstance(branch, str) or not isinstance(sha, str) or not _SHA.fullmatch(sha):
+        return None
+    branch = branch.strip()
+    if not branch or branch.startswith("-") or not _SAFE_REF.fullmatch(branch):
+        return None
+    try:
+        git = _Git(repo_root, run)
+        _check_ref(git, branch)
+        remote = _remote(git)
+        tip = _remote_tip(git, remote, branch)
+        if not tip:
+            return None
+        if git("cat-file", "-e", tip + "^{commit}", ok=(0, 1, 128)).returncode != 0:
+            git("fetch", "--quiet", "--no-tags", "--", remote, "refs/heads/" + branch)
+            git("cat-file", "-e", tip + "^{commit}")
+        if git("cat-file", "-e", sha + "^{commit}", ok=(0, 1, 128)).returncode != 0:
+            return None   # the DEV build is not in this repo at all: cannot verify
+        rc = git("merge-base", "--is-ancestor", sha, tip, ok=(0, 1)).returncode
+        return rc == 0
+    except (ValueError, RuntimeError, OSError):
+        return None
+
+
 def cut_release_branch(release, board, repo_root, *, dry_run=False, run=subprocess.run):
     """Cut (or, in trunk mode, resolve) the release branch. Returns {"branch","branchBaseSha"}.
 

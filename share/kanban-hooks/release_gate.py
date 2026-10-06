@@ -34,11 +34,17 @@ HEAD, lead deploy confirmation) arrives via the ``context`` dict. A condition
 whose data is absent is UNMET ("cannot verify"), never assumed satisfied.
   context = {items: [{id, status, prMerged}], other_releases: [release,...],
              now: ISO-8601, branch_head: sha, deploy_confirmed: bool}
+  Trunk mode (XACA-1446-011): the release branch IS the moving integration branch, so the DEV exit accepts a
+  HEAD that DESCENDS from stageSha.DEV. The server (which owns git) sets BOTH keys, only for a non-hotfix release
+  whose branch is the integration branch of a trunk-mode board: `branch_mode: "trunk"` and
+  `dev_sha_reachable: True|False|None` (stageSha.DEV is an ancestor of / equal to the remote tip; None = could not
+  verify). Absent / any other branch_mode = exact equality (release mode, hotfix: unchanged). Under trunk mode,
+  None or an absent key fails closed. The CR head check is unchanged (CR teams are release-mode).
 """
 from datetime import datetime, timezone
 
 from release_schema import STAGES  # single source of truth (XACA-1346-003); re-exported here
-from release_closeout import first_incomplete as _closeout_first_incomplete, binding_gap as _closeout_binding_gap  # pure stdlib (XACA-1353-004)
+from release_closeout import first_incomplete as _closeout_first_incomplete, binding_gap as _closeout_binding_gap, close_out_binding as _closeout_binding  # pure stdlib (XACA-1353-004)
 
 # GAMMA is deliberately NOT here: it follows flowConfig, EXCEPT that it is forced on when crSupport is on
 # (enabled_stages, XACA-1375-017).
@@ -125,6 +131,23 @@ def deploy_confirm_stage(order):
     GAMMA when the team has it (GAMMA is the live-prod soak stage), else PROD (the stage that
     actually enters production). `order` = enabled_stages(...)."""
     return "GAMMA" if "GAMMA" in order else "PROD"
+
+
+def closeout_stage(order):
+    """XACA-1446: S, the stage a PROD close-out binds to = the enabled stage immediately BEFORE PROD in
+    `order` (= enabled_stages(...)); GAMMA whenever the team has it. Fails closed (ValueError) when PROD is
+    absent or the stage before it is PLANNED or CR, neither of which holds a build (DEV is always enabled, so
+    neither can happen with a valid flow). The ONLY place S is computed."""
+    order = list(order or [])
+    if "PROD" not in order:
+        raise ValueError("close-out stage: PROD is not an enabled stage (%r)" % (order,))
+    i = order.index("PROD")
+    if i == 0:
+        raise ValueError("close-out stage: no enabled stage before PROD (%r)" % (order,))
+    s = order[i - 1]
+    if s in ("PLANNED", "CR"):
+        raise ValueError("close-out stage: the stage before PROD is %s, which holds no build (%r)" % (s, order))
+    return s
 
 
 def _cr_flag(v):
@@ -390,10 +413,12 @@ def _row_code(outcome, why):
 _CLOSEOUT_BASE_STEPS = ("tag", "mergeProduction", "mergeIntegration", "mergeOtherReleases", "deleteBranch")
 
 
-def closeout_gap(release):
+def closeout_gap(release, order):
     """Why the PROD close-out (spec 3.2 PROD / 13.4) is not finished, or None when it is. Only a release that
     HAS a branch is subject (a pre-branch-model release has nothing to close out). Fails closed: a missing or
-    malformed record is a gap, never 'complete' (first_incomplete({}) alone would read as complete)."""
+    malformed record is a gap, never 'complete' (first_incomplete({}) alone would read as complete).
+    XACA-1446-003: `order` (= enabled_stages(...)) is required, never defaulted. The record must be bound to
+    S = closeout_stage(order) AND to the release's current stage, else it is no record for THIS promote."""
     if not (isinstance(release.get("branch"), str) and release["branch"]):
         return None
     co = release.get("closeOut")
@@ -402,6 +427,16 @@ def closeout_gap(release):
     bound = _closeout_binding_gap(release)   # XACA-1353-014: a record from another build / with no gammaSha is no record
     if bound:
         return bound
+    try:
+        _s = closeout_stage(order)
+    except ValueError as e:
+        return "close-out stage cannot be resolved (%s)" % e
+    _rec_stage = (_closeout_binding(co) or (None, None))[0]
+    if _rec_stage != _s:
+        return "close-out was started at %s but the last pre-PROD stage is now %s; archive it and re-run close-out" % (_rec_stage, _s)
+    _cur = current_stage(release)
+    if _rec_stage != _cur:
+        return "close-out was started at %s but the release is at %s" % (_rec_stage, _cur)
     need = _CLOSEOUT_BASE_STEPS + (("crClose",) if co.get("crTeam") is True else ())
     miss = [s for s in need if s not in co["steps"]]
     if miss:
@@ -471,7 +506,16 @@ def _exit_conditions(release, cur, cr_on, ctx):
         if not head:
             r.append("DEV: cannot verify DEV deploy SHA == branch HEAD (context.branch_head absent)")
         elif sha != head:
-            r.append("DEV: stageSha.DEV %s != release branch HEAD %s" % (sha, head))
+            if ctx.get("branch_mode") != "trunk":
+                r.append("DEV: stageSha.DEV %s != release branch HEAD %s" % (sha, head))
+            elif ctx.get("dev_sha_reachable") is True:
+                pass   # XACA-1446-011: trunk moved past the DEV build, which is still in its history
+            elif ctx.get("dev_sha_reachable") is False:
+                r.append("DEV: stageSha.DEV %s is not an ancestor of trunk branch HEAD %s (history rewritten or "
+                         "the build never landed on the branch)" % (sha, head))
+            else:
+                r.append("DEV: cannot verify stageSha.DEV %s is an ancestor of trunk branch HEAD %s "
+                         "(context.dev_sha_reachable unknown)" % (sha, head))
     if cur == "CR" and not cr_on:
         # XACA-1375: CR support was turned off while the release sat at CR. The CR exit conditions
         # (cr-approved, deploy window, stageSha.CR) describe a stage that no longer exists for this
@@ -502,15 +546,6 @@ def _exit_conditions(release, cur, cr_on, ctx):
         _cr = release.get("cr") or {}
         if _cr.get("state") != "cr-completed" and not _cr_closed_by_close_out(release, _cr):
             r.append("GAMMA: CR must be cr-completed")
-    if cur == "GAMMA":
-        # XACA-1353-004 (spec 13.4): PROD entry is the LAST act of close-out. The release stays in GAMMA until the
-        # tag, both merges, the other-release merges, the branch delete (and kb-cr close) are done, so a failed
-        # close-out can never leave a release at PROD with an undeleted branch / untagged production. That is only
-        # true because the server treats CLOSEOUT_INCOMPLETE as a HARD refusal in BOTH gate modes (XACA-1353-013).
-        _gap = closeout_gap(release)
-        if _gap:
-            r.append("PROD: %s; run `kb-release close-out %s` (kb-run resumes it)" % (_gap, release.get("id") or "<REL-ID>"),
-                     CODE_CLOSEOUT_INCOMPLETE, {"releaseId": release.get("id")})
     if cur == "GAMMA" and release.get("gammaFailure") is not None:
         # XACA-1349-005 QA (spec 13.3): a build that failed in GAMMA and was rolled back is never promoted to PROD, even
         # when every expected test reads PASS (the lead may have declared the failure with no FAIL record, or waived
@@ -574,6 +609,17 @@ def evaluate(release, target_stage, flow_config, *, cr_support_enabled, actor=No
             reasons.append("%s: lead must explicitly confirm the production deploy" % _cs,
                            CODE_GAMMA_CONFIRM_REQUIRED, {"stage": _cs})
         reasons.extend(_exit_conditions(release, cur, cr_support_enabled, ctx))
+        if target_stage == "PROD":
+            # XACA-1353-004 (spec 13.4) + XACA-1446-003: PROD entry is the LAST act of close-out, from whichever
+            # stage S is last before PROD (GAMMA, or QA/BETA/... when GAMMA is off). Keyed on the TARGET, not the
+            # stage left. The release stays at S until the tag, merges and branch delete are done, so a failed
+            # close-out can never leave a release at PROD with an undeleted branch / untagged production. That is
+            # only true because the server treats CLOSEOUT_INCOMPLETE as a HARD refusal in BOTH gate modes
+            # (XACA-1353-013); never waivable, never a warning.
+            _gap = closeout_gap(release, order)
+            if _gap:
+                reasons.append("PROD: %s; run `kb-release close-out %s` (kb-run resumes it)" % (_gap, release.get("id") or "<REL-ID>"),
+                               CODE_CLOSEOUT_INCOMPLETE, {"releaseId": release.get("id")})
     rec = (release.get("stages") or {}).get(cur) or {}
     status = derive_stage_status(dict(rec, sha=_graded_sha(release, cur)), release.get("tests"), rec.get("expected"), cur) \
         if cur in TEST_STAGES else None

@@ -9103,6 +9103,15 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             return None
         return _release_branches.branch_tip(root, release.get('branch'))
 
+    def _dev_sha_reachable(self, release, team):
+        """XACA-1446-011: True/False/None, is stageSha.DEV an ancestor of (or equal to) the release branch's REMOTE
+        tip. None (unknown: no repo/remote/objects, any git error) fails the trunk DEV exit closed. Tests replace it."""
+        root = self._release_repo_root(team)
+        sha = _release_gate.graded_sha(release, 'DEV')
+        if root is None or not isinstance(sha, str):
+            return None
+        return _release_branches.sha_reachable_from_tip(root, release.get('branch'), sha)
+
     def _prod_tag_lookup(self, repo_root, branch, prefix, sort):
         """XACA-1349-004: the injectable production-tag lookup (tests replace it)."""
         return _release_rollback.git_prod_tag_lookup(repo_root, branch, prefix, sort)
@@ -9134,6 +9143,13 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         pend = release.get('pendingSha')
         if isinstance(pend, dict) and isinstance(pend.get('sha'), str) and pend['sha']:
             ctx["branch_head"] = pend['sha']
+        # XACA-1446-011: trunk mode only. Not applied when the head came from pendingSha (CR or later, never DEV).
+        # The server owns git: the pure gate gets the mode and a True/False/None ancestry answer (None = fail closed).
+        if (release.get('stage') == 'DEV' and head and ctx.get("branch_head") == head
+                and _release_branches is not None
+                and _release_branches.is_trunk_release(release, board_raw.get('releaseConfig'))):
+            ctx["branch_mode"] = "trunk"
+            ctx["dev_sha_reachable"] = self._dev_sha_reachable(release, team)
         # XACA-1349-014: the release.cr feed. release_gate reads release.cr (CR exit: cr-approved +
         # approval time + deploy window; GAMMA exit: cr-completed) but nothing persists it, so it is
         # built here from the board's CRs, with due assumed approvals stamped first by the SAME core
@@ -9242,7 +9258,9 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
     @staticmethod
     def _reconcile_close_out(release, now):
-        """XACA-1353-014: archive a live closeOut that is no longer bound to stageSha.GAMMA. None or refusal text."""
+        """XACA-1353-014 / XACA-1446: archive a live closeOut that is no longer bound to stageSha[its OWN bound
+        stage] (record-intrinsic, via release_closeout.binding_gap). None or refusal text. A flow-config mismatch
+        alone never archives (only a replaced build or a regress does)."""
         if _release_closeout is None:
             return "release_closeout module unavailable; cannot reconcile the close-out (fails closed)"
         try:
@@ -9261,11 +9279,13 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         return _approval_providers.close_out_cr_preflight(board_raw, release)
 
     def _close_out_unmet(self, release, release_id, board_raw, data):
-        """XACA-1353-014: reasons (not CLOSEOUT_INCOMPLETE) a release at GAMMA is NOT ready for close-out. THE
-        promote evaluator, asked about PROD: the same dry-run `kb-release close-out` makes before a fresh start,
-        so "GAMMA has passed" has one definition. Empty list = ready."""
+        """XACA-1353-014 / XACA-1446: reasons (not CLOSEOUT_INCOMPLETE) a release at S (the last enabled stage
+        before PROD) is NOT ready for close-out. THE promote evaluator, asked about PROD: the same dry-run
+        `kb-release close-out` makes before a fresh start, so "S has passed" has one definition. Empty = ready."""
         cr_on = self._crsupport_enabled(board_raw)
-        ctx = self._build_gate_context(release, release_id, board_raw, data, LCARS_TEAM, False)
+        # deploy_confirmed=True: with GAMMA disabled PROD is the deploy-confirm stage, and "S has passed" must not depend
+        # on the lead's confirmation (that is asked, and enforced, at the final PROD promote itself, XACA-1446)
+        ctx = self._build_gate_context(release, release_id, board_raw, data, LCARS_TEAM, True)
         verdict = _release_gate.evaluate(self._gate_release_view(release, ctx), 'PROD', data.get('flowConfig') or {},
                                          cr_support_enabled=cr_on, context=ctx)
         unmet = [m for m, c in zip(verdict['reasons'], verdict['reasonCodes'])
@@ -9570,6 +9590,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 reasons = _release_gate.Reasons(verdict['reasons'], verdict['reasonCodes'], verdict['reasonData'])
                 # XACA-1375-013: the confirm stage is GAMMA when the team has it, else PROD.
                 _confirm_stage = _release_gate.deploy_confirm_stage(order)
+                try:   # XACA-1446: S, the stage a PROD close-out binds to (None only for an invalid flow)
+                    _closeout_stage = _release_gate.closeout_stage(order)
+                except ValueError:
+                    _closeout_stage = None
                 if eff_target == _confirm_stage and confirm and not is_lead:
                     reasons.append("%s: deploy confirmation refused: %s" % (_confirm_stage, lead_reason),
                                    _release_gate.CODE_GAMMA_ACTOR_NOT_LEAD if self._leads_configured(rcfg)
@@ -9678,10 +9702,6 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                             if not isinstance(release.get('stageSha'), dict):
                                 release['stageSha'] = {}
                             release['stageSha']['GAMMA'] = _src
-                        # XACA-1353-014: a close-out bound to another build must not survive the new one
-                        _co_err = self._reconcile_close_out(release, now)
-                        if _co_err:
-                            raise _DeferredResponse.json({"error": _co_err}, 409)
                     # XACA-1350-005 (spec 3.2 "Records stageSha.<STAGE>", 6.5 one SHA through every pre-CR stage):
                     # entering QA/ALPHA/BETA records the SHA the stage is graded and tested at, in the SAME locked
                     # write. Nothing else did, so `kb-release test` (and the /tests endpoint, which accepts only
@@ -9698,6 +9718,14 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                             if not isinstance(release.get('stageSha'), dict):
                                 release['stageSha'] = {}
                             release['stageSha'].setdefault(eff_target, _src)
+                    # XACA-1353-014 / XACA-1446: a close-out bound to another build must not survive a promote that
+                    # (re)writes stageSha: entering GAMMA replaces stageSha.GAMMA; entering QA/ALPHA/BETA only fills
+                    # (setdefault) but reconciling is a no-op unless the record's own stage has a changed SHA.
+                    # Never on a promote to PROD (the gate decides that one).
+                    if eff_target in ('QA', 'ALPHA', 'BETA', 'GAMMA') and cur != 'PROD':
+                        _co_err = self._reconcile_close_out(release, now)
+                        if _co_err:
+                            raise _DeferredResponse.json({"error": _co_err}, 409)
                     if cut:  # same locked write as the stage change
                         release['branch'] = cut['branch']
                         release['branchBaseSha'] = cut['branchBaseSha']
@@ -9718,6 +9746,9 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     # XACA-1375-016: the stage whose ENTRY needs the lead's deploy confirmation (the UI
                     # keys its up-front warning off this, not a hardcoded GAMMA)
                     "confirmStage": _confirm_stage,
+                    # XACA-1446: the stage close-out binds to (the last enabled stage before PROD); the shell
+                    # reads it from the dry-run it already makes rather than recomputing it
+                    "closeOutStage": _closeout_stage,
                     # XACA-1349-004: the resolved rollback target (None unless entering the deploy stage)
                     "rollbackSha": rollback['sha'] if rollback and rollback['ok'] else None,
                     "rollbackShaSource": rollback['source'] if rollback and rollback['ok'] else None,
@@ -10362,9 +10393,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         release.closeOut, the ordered resumable PROD close-out step-state. Body is one of
         {"op":"init","crTeam":bool,"targets":[branch,..]} | {"op":"set","step":S,"status":X,"error":str?} |
         {"op":"target","target":branch,"status":X}; release_closeout.apply_op decides (ordering, sticky
-        `done`, deleteBranch gate). 400 bad body, 404 unknown release, 409 refused (or release not at
-        GAMMA/PROD: close-out only exists once GAMMA has passed), 200 {"closeOut"}. Logged as
-        release_close_out_<op>."""
+        `done`, deleteBranch gate). XACA-1446: the record binds to S = release_gate.closeout_stage(enabled
+        stages), the last enabled stage before PROD (GAMMA when the team has it); init only at S, set/target at
+        the record's own stage or PROD. 400 bad body, 404 unknown release, 409 refused (or release not at S/PROD:
+        close-out only exists once S has passed), 200 {"closeOut"}. Logged as release_close_out_<op>."""
         try:
             if self._gate_unavailable():
                 return
@@ -10381,28 +10413,47 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 if not release:
                     raise _DeferredResponse.json({"error": "Release not found: %s" % release_id}, 404)
                 cur = _release_gate.current_stage(release)
-                if cur not in ('GAMMA', 'PROD'):
+                board_raw = self._read_board_raw_locked()
+                try:   # XACA-1446: S, resolved here from the flow; fails closed on an invalid flow
+                    s_stage = _release_gate.closeout_stage(_release_gate.enabled_stages(
+                        data.get('flowConfig') or {}, cr_support_enabled=self._crsupport_enabled(board_raw)))
+                except ValueError as ve:
+                    raise _DeferredResponse.json({"error": "close-out refused: %s" % ve}, 409)
+                _co = release.get('closeOut')
+                _bound = _release_closeout.close_out_binding(_co) if isinstance(_co, dict) else None
+                # set/target run against the RECORD's own stage (a shipped record must finish even if the flow was
+                # edited behind our back); a malformed record falls back to S and apply_op refuses it.
+                run_stage = _bound[0] if (_bound and body['op'] != 'init') else s_stage
+                if cur not in (run_stage, 'PROD'):
                     raise _DeferredResponse.json(
-                        {"error": "close-out only runs once GAMMA has passed; release is at %s" % cur}, 409)
+                        {"error": "close-out only runs once %s has passed; release is at %s" % (run_stage, cur)}, 409)
                 if body['op'] == 'init':
-                    # XACA-1353-014: close-out STARTS only at GAMMA, and only once GAMMA has passed. The client's
+                    # XACA-1353-014: close-out STARTS only at S, and only once S has passed. The client's
                     # own pre-check is advisory; this is the enforcement (same evaluator as the promote dry-run).
-                    if cur != 'GAMMA':
+                    if cur != s_stage:
                         raise _DeferredResponse.json(
-                            {"error": "close-out can only start at GAMMA; release is at %s" % cur}, 409)
-                    board_raw = self._read_board_raw_locked()
+                            {"error": "close-out can only start at %s; release is at %s" % (s_stage, cur)}, 409)
                     unmet = self._close_out_unmet(release, release_id, board_raw, data)
                     # XACA-1353-017: a CR team's linked CRs must all be ones crClose can handle, or the failure
                     # would surface only AFTER production shipped. Named per CR, in the same refusal.
                     cr_pre = self._close_out_cr_preflight(release, board_raw)
                     if unmet or cr_pre:
-                        parts = (["GAMMA has not passed: " + "; ".join(unmet)] if unmet else []) + \
+                        parts = (["%s has not passed: " % s_stage + "; ".join(unmet)] if unmet else []) + \
                                 (["linked CR preflight: " + "; ".join(cr_pre)] if cr_pre else [])
                         raise _DeferredResponse.json(
                             {"error": "close-out refused: " + " | ".join(parts),
                              "reasons": unmet + cr_pre}, 409)
+                if body['op'] == 'init':
+                    # XACA-1446 4a: nothing writes stageSha.DEV on promote, so a DEV-bound close-out would have no SHA.
+                    # Fill it (never overwrite) from the SHA the gate just verified, same locked write as the bind.
+                    _g = _release_gate.graded_sha(release, s_stage)
+                    if isinstance(_g, str) and _g:
+                        if not isinstance(release.get('stageSha'), dict):
+                            release['stageSha'] = {}
+                        release['stageSha'].setdefault(s_stage, _g)
                 try:
-                    _release_closeout.apply_op(release, body, now=self._get_timestamp())
+                    _release_closeout.apply_op(release, body, now=self._get_timestamp(),
+                                               stage=s_stage if body['op'] == 'init' else None)
                 except _release_closeout.CloseOutError as ce:
                     raise _DeferredResponse.json({"error": str(ce)}, 409)
                 if not self._save_releases_config(data, _lock_held=True):
@@ -10694,6 +10745,30 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         except Exception as e:
             self.send_error(500, f"Error updating release: {e}")
 
+    @staticmethod
+    def _close_out_config_conflict(releases, flow, cr_on):
+        """XACA-1446 4b: refusal text when a flow/CR config change would move S (the stage a close-out binds to)
+        away from the stage a LIVE closeOut record is bound to, else None. A live record = present and not yet
+        complete (a finished record has no step left to run). Fails closed: an unavailable module, a malformed
+        record, or an invalid new flow all count as a conflict."""
+        live = [r for r in (releases or []) if isinstance(r, dict) and r.get('closeOut') is not None]
+        if _release_closeout is not None:
+            live = [r for r in live if not (isinstance(r['closeOut'], dict) and r['closeOut'].get('steps')
+                                            and _release_closeout.first_incomplete(r['closeOut']) is None)]
+        if not live:
+            return None
+        try:
+            new_s = _release_gate.closeout_stage(_release_gate.enabled_stages(flow or {}, cr_support_enabled=cr_on))
+        except (ValueError, AttributeError):
+            new_s = None
+        for r in live:
+            b = _release_closeout.close_out_binding(r['closeOut']) if _release_closeout is not None else None
+            if b is None or b[0] != new_s:
+                return ("release %s has a live close-out bound to %s; this change would make the close-out stage "
+                        "%s. Finish or archive the close-out first"
+                        % (r.get('id'), b[0] if b else 'an unknown stage', new_s or 'invalid'))
+        return None
+
     def handle_update_flow_config(self):
         """POST /api/releases/flow-config - Update flow configuration"""
         try:
@@ -10748,6 +10823,14 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         # Only allow changing enabled for non-required stages
                         if not data['flowConfig']['stages'][stage_name].get('required', False):
                             data['flowConfig']['stages'][stage_name]['enabled'] = stage_config.get('enabled', True)
+
+                # XACA-1446 4b: refuse while a live close-out would end up bound to the wrong stage (nothing saved)
+                _cc = self._close_out_config_conflict(
+                    data.get('releases'), data['flowConfig'],
+                    self._crsupport_enabled(self._read_board_raw_locked(team)))
+                if _cc:
+                    self.send_error(409, _cc)
+                    return
 
                 self._save_releases_config(data, team, _lock_held=True)
 
@@ -17055,6 +17138,17 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                                 existing[key].update(val)
                             else:
                                 existing[key] = val
+                        # XACA-1446 4b: a crSupport change moves GAMMA in/out of the flow, hence S. Refused (nothing
+                        # written) while a live close-out would end up bound to the wrong stage.
+                        _cc = None
+                        if 'crSupport' in clean_team_config:
+                            _rc = board_data.get('releaseConfig') if isinstance(board_data.get('releaseConfig'), dict) else {}
+                            _cc = self._close_out_config_conflict(
+                                board_data.get('releases'), _rc.get('flowConfig') or self.DEFAULT_RELEASE_CONFIG['flowConfig'],
+                                self._crsupport_enabled({'teamConfig': existing}))
+                        if _cc:
+                            self._send_json_response({'success': False, 'error': _cc}, status=409)
+                            return
                         board_data['teamConfig'] = existing
 
                         self._atomic_write_json(board_file, board_data)
