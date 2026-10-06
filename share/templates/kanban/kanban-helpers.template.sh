@@ -1804,7 +1804,13 @@ _kb_release_close_out_lead_ok() {
     # own reasons, which must not block close-out. An unreported confirm stage cannot be graded: fail closed.
     [[ -n "$_KB_CO_CONFIRM" ]] \
         || { echo "Error: $release_id close-out: the gate reported no deploy-confirm stage; refusing before any git action" >&2; return 1; }
-    [[ "$_KB_CO_CONFIRM" == "PROD" ]] || return 0
+    # XACA-1446-022: allowlist, not "anything but PROD". GAMMA is the only other deploy-confirm stage the gate knows
+    # (lead-confirmed on GAMMA entry); an unknown value means server/shell version skew -> fail closed.
+    case "$_KB_CO_CONFIRM" in
+        PROD) ;;
+        GAMMA) return 0 ;;
+        *) echo "Error: $release_id close-out: unrecognised deploy-confirm stage '$_KB_CO_CONFIRM' from the gate; refusing before any git action" >&2; return 1 ;;
+    esac
     n=$(printf '%s' "$_KB_REL_BODY" | jq -r '[.reasonCodes[]? | select(IN("GAMMA_ACTOR_NOT_LEAD","LEADS_NOT_CONFIGURED"))] | length' 2>/dev/null)
     if [[ "$n" != "0" ]]; then
         echo "Error: $release_id close-out needs a configured lead (PROD is the deploy-confirm stage and close-out ships production):" >&2
