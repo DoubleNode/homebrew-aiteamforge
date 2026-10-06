@@ -141,12 +141,20 @@ def _meta_shape_ok(meta: dict) -> bool:
             # Stored ids become path components (ancestors are re-read by id),
             # so a hand-edited "../../x" must be corrupt metadata, never a
             # path (XACA-1448-012). parent_id is only compared, but it feeds
-            # the same lineage, so it is held to the same rule.
-            and all(isinstance(a, dict) and isinstance(a.get("id"), str)
-                    and _ID.fullmatch(a["id"]) for a in meta.get("ancestors", []))
+            # the same lineage, so it is held to the same rule. Canonical form
+            # only (what _id() writes): "01000" stays inside the tree but would
+            # copy a second spelling of page 1000 into every child
+            # (XACA-1448-013).
+            and all(isinstance(a, dict) and _is_canonical_id(a.get("id"))
+                    for a in meta.get("ancestors", []))
             # Root-level items store parent_id "" (absent on older pages).
             and (meta.get("parent_id") in (None, "")
-                 or (isinstance(meta["parent_id"], str) and bool(_ID.fullmatch(meta["parent_id"])))))
+                 or _is_canonical_id(meta["parent_id"])))
+
+
+def _is_canonical_id(value) -> bool:
+    return (isinstance(value, str) and bool(_ID.fullmatch(value))
+            and value == str(int(value)))
 
 
 def _now() -> str:
