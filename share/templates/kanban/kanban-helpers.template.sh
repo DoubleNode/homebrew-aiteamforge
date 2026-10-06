@@ -1791,6 +1791,23 @@ _kb_release_close_out_ready() {
     return 0
 }
 
+# XACA-1446 round 2 (-019): the lead question alone, asked of the promote dry-run (actor + confirmDeploy), BEFORE a
+# git action. $2 = the release JSON as the caller last read it. rc 1 (reasons on stderr) when the dry-run carries
+# GAMMA_ACTOR_NOT_LEAD or LEADS_NOT_CONFIGURED, or when the gate cannot be asked (fails closed). A release already AT PROD
+# is skipped: its promote was lead-confirmed and finishing a shipped record is not re-gated (same as the server).
+_kb_release_close_out_lead_ok() {
+    local release_id="${1-}" rj="${2-}" n
+    [[ "$(printf '%s' "$rj" | jq -r '.stage // ""' 2>/dev/null)" == "PROD" ]] && return 0
+    _kb_release_close_out_gate_info "$release_id" || return 1
+    n=$(printf '%s' "$_KB_REL_BODY" | jq -r '[.reasonCodes[]? | select(IN("GAMMA_ACTOR_NOT_LEAD","LEADS_NOT_CONFIGURED"))] | length' 2>/dev/null)
+    if [[ "$n" != "0" ]]; then
+        echo "Error: $release_id close-out needs a configured lead (PROD is the deploy-confirm stage and close-out ships production):" >&2
+        printf '%s' "$_KB_REL_BODY" | jq -r '.reasons[]? | "  - " + .' >&2 2>/dev/null
+        return 1
+    fi
+    return 0
+}
+
 _kb_release_close_out_run() {
     local board_file="${1-}" release_id="${2-}" work="${3-}" dry_run="${4-}" repo="${5-}"
     local rj rtype pfx branch bsha bstage bind version mode prod integ tag_name rel_tip first cr targets step ex_tip tgt st archived msg has_rec confirm=""
@@ -1820,6 +1837,15 @@ _kb_release_close_out_run() {
         bsha=$(printf '%s' "$rj" | jq -er --arg s "$bstage" '(.stageSha[$s] | strings | select(test("^[0-9a-f]{40,64}$")))
             // (if $s == "DEV" then (.stages.DEV.sha | strings | select(test("^[0-9a-f]{40,64}$"))) else empty end)') \
             || { echo "Error: release $release_id has no valid stageSha.${bstage}; refusing to close out" >&2; return 1; }
+    fi
+    # XACA-1446 round 2 (-019): a REAL run asks the lead question BEFORE any git action, for EVERY caller and whether or
+    # not a record exists (a lead may have started it and a non-lead resumes it). Same dry-run and same two refusal
+    # codes _ready refuses on (GAMMA_ACTOR_NOT_LEAD / LEADS_NOT_CONFIGURED), but ONLY those: a resume must not trip on
+    # the not-ready reasons that are normal mid-close-out (CLOSEOUT_INCOMPLETE, a release already at PROD). The server's set/target 409 arrives AFTER the
+    # git act, so it is never the guard. Re-asked before each irreversible step below.
+    if [[ "$dry_run" != "1" ]]; then
+        _kb_release_close_out_lead_ok "$release_id" "$rj" \
+            || { echo "Error: close-out of $release_id refused before any git action" >&2; return 1; }
     fi
     [[ "$dry_run" != "1" && "$_KB_CO_CONFIRM" == "PROD" ]] && confirm=yes   # PROD is the deploy-confirm stage (no GAMMA)
     mode=$(_kb_get_release_branch_role "$board_file" mode) || { echo "Error: cannot read release branch config" >&2; return 1; }
@@ -1893,6 +1919,12 @@ print(r.release_version(json.load(sys.stdin)))' "$(dirname "$(_kb_release_branch
         st=$(printf '%s' "$rj" | _kb_release_close_out_step_status - "$step")
         [[ "$st" == "n/a" ]] && continue          # crClose exists only for CR teams
         if [[ "$st" == "done" ]]; then echo "  $step: already done"; continue; fi
+        # XACA-1446 round 2 (-019): re-ask right before each irreversible step (a lead list changed mid-run is caught)
+        case "$step" in
+        tag|mergeProduction|mergeIntegration|mergeOtherReleases|deleteBranch)
+            _kb_release_close_out_lead_ok "$release_id" "$rj" \
+                || { echo "Error: close-out of $release_id refused before step '$step'; no further git action taken" >&2; return 1; } ;;
+        esac
         case "$step" in
         tag)
             rel_tip=$(_kb_co_git -C "$work" rev-parse --verify "refs/remotes/origin/${branch}^{commit}" 2>/dev/null) \

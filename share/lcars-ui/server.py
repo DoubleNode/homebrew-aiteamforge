@@ -10432,6 +10432,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 # check must therefore run BEFORE any of them, not at the final PROD promote. THE gate's own lead
                 # check and reason codes (release_gate.actor_is_lead / CODE_*), no second matcher. A release already
                 # at PROD was lead-confirmed by its promote, so finishing a shipped record is not re-gated.
+                _co_authorized = None   # XACA-1446-020: the actor the lead check validated (None when no check ran)
                 _co_order = _release_gate.enabled_stages(
                     data.get('flowConfig') or {}, cr_support_enabled=self._crsupport_enabled(board_raw))
                 if cur != 'PROD' and _release_gate.deploy_confirm_stage(_co_order) == 'PROD':
@@ -10446,6 +10447,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                             {"error": "close-out refused: PROD is the deploy-confirm stage and close-out "
                                       "ships production; lead confirmation required: %s" % _co_why,
                              "reasonCodes": [_co_code], "reasons": [_co_why]}, 409)
+                    _co_authorized = _co_actor
                 if body['op'] == 'init':
                     # XACA-1353-014: close-out STARTS only at S, and only once S has passed. The client's
                     # own pre-check is advisory; this is the enforcement (same evaluator as the promote dry-run).
@@ -10480,7 +10482,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 snapshot = copy.deepcopy(release)
             self._mirror_release_manifest(snapshot)
             self._log_release_activity(release_id, 'release_close_out_' + body['op'], cur, cur,
-                                       actor=str(body.get('by') or 'close-out'), step=body.get('step'),
+                                       actor=str(_co_authorized or body.get('by') or 'close-out'),
+                                       by=str(body.get('by') or 'close-out'), step=body.get('step'),
                                        status=body.get('status'), target=body.get('target'))
             return self._send_json_response({"closeOut": snapshot.get('closeOut')})
         except _DeferredResponse as deferred:
