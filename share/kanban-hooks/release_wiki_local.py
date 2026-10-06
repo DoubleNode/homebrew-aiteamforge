@@ -38,6 +38,12 @@ Semantics matched to the Confluence provider / the in-memory fake:
   * Writes are atomic (temp file in the same dir, fsync, os.replace, dir fsync)
     and the whole read-modify-write runs under fcntl.flock(LOCK_EX); reads take
     LOCK_SH so they never see a half-applied update.
+  * Symlinks are refused BELOW the root (XACA-1448). The root is resolved once
+    (realpath) at construction, so a symlinked kanban dir keeps working; every
+    path beneath it is lstat-walked from the root and any symlink component is
+    WikiError, and every file open adds O_NOFOLLOW. Titles alone never made a
+    path, but a planted symlink (pages/<id>, meta.json, versions/, .lock, ...)
+    would otherwise let kb-wiki read or overwrite files outside the root.
 """
 from __future__ import annotations
 
@@ -45,6 +51,7 @@ import fcntl
 import json
 import os
 import re
+import stat
 import sys
 import tempfile
 import time
@@ -86,7 +93,7 @@ _FILE_MODE = 0o666 & ~_read_umask()
 
 def _fsync_dir(path: Path) -> None:
     try:
-        fd = os.open(str(path), os.O_RDONLY)
+        fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW)
     except OSError:
         return
     try:
@@ -99,7 +106,9 @@ def _fsync_dir(path: Path) -> None:
 
 def _atomic_write(path: Path, data: bytes) -> None:
     """Temp file in the SAME directory + fsync + os.replace. On any failure the
-    temp file is removed and `path` keeps its previous content (or stays absent)."""
+    temp file is removed and `path` keeps its previous content (or stays absent).
+    Call through LocalProvider._write, which refuses symlinks first; mkstemp
+    itself opens O_CREAT|O_EXCL, so it never follows a planted temp name."""
     fd, tmp = tempfile.mkstemp(prefix=".tmp-", dir=str(path.parent))
     try:
         with os.fdopen(fd, "wb") as fh:
@@ -161,7 +170,89 @@ def _clean_space(space) -> str:
 
 class LocalProvider(WikiProvider):
     def __init__(self, root):
-        self.root = Path(os.path.abspath(os.path.expanduser(str(root))))
+        # Resolved ONCE: the root itself may legitimately be (or sit under) a
+        # symlink, e.g. a symlinked kanban dir. Everything BELOW it may not.
+        self.root = Path(os.path.realpath(os.path.expanduser(str(root))))
+
+    # -- symlink containment (XACA-1448)
+    def _rel(self, path: Path) -> str:
+        try:
+            return str(path.relative_to(self.root)) or "."
+        except ValueError:
+            return str(path)
+
+    def _check(self, path: Path, kind: Optional[str] = None) -> bool:
+        """lstat-walk from the root down to `path`; True when `path` exists.
+
+        Any existing component that is a symlink is WikiError, and so is a
+        non-directory in the middle of the walk. `kind` ("dir"/"file") also
+        type-checks `path` itself when it exists. The root is included: it was
+        realpath'd at construction, so it is never a symlink unless swapped
+        since. Opens add O_NOFOLLOW on top, so a leaf swapped to a symlink
+        after this check still fails closed (ELOOP). Swapping an INTERMEDIATE
+        directory inside that window needs write access to the tree already."""
+        try:
+            parts = path.relative_to(self.root).parts
+        except ValueError:
+            raise WikiError(f"local wiki path escapes the root: {path}") from None
+        cur = self.root
+        for i, part in enumerate(("",) + parts):
+            cur = cur / part if part else cur
+            try:
+                st = os.lstat(str(cur))
+            except FileNotFoundError:
+                return False
+            except OSError as exc:
+                raise WikiError(f"cannot stat local wiki path {self._rel(cur)}: "
+                                f"{exc.strerror or type(exc).__name__}") from exc
+            if stat.S_ISLNK(st.st_mode):
+                raise WikiError(f"refusing symlink inside the local wiki: {self._rel(cur)}")
+            last = i == len(parts)
+            if (not last or kind == "dir") and not stat.S_ISDIR(st.st_mode):
+                raise WikiError(f"not a directory in the local wiki: {self._rel(cur)}")
+            if last and kind == "file" and not stat.S_ISREG(st.st_mode):
+                raise WikiError(f"not a regular file in the local wiki: {self._rel(cur)}")
+        return True
+
+    def _read_text(self, path: Path) -> str:
+        """Symlink-refusing read_text. Missing -> FileNotFoundError (callers map
+        that to their own 'absent' meaning); a symlink -> WikiError."""
+        if not self._check(path, "file"):
+            raise FileNotFoundError(2, "No such file or directory", str(path))
+        try:
+            fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            raise
+        except OSError as exc:  # ELOOP: swapped to a symlink after the check
+            raise WikiError(f"cannot open local wiki file {self._rel(path)}: "
+                            f"{exc.strerror or type(exc).__name__}") from exc
+        with os.fdopen(fd, "rb") as fh:
+            if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+                raise WikiError(f"not a regular file in the local wiki: {self._rel(path)}")
+            return fh.read().decode("utf-8")
+
+    def _mkdirs(self, path: Path) -> None:
+        """Component-wise mkdir -p that refuses symlinks (Path.mkdir with
+        exist_ok=True silently accepts a symlink-to-dir at any level). Missing
+        ancestors ABOVE the root are created plainly: they are outside the tree."""
+        if not os.path.lexists(str(self.root)):
+            os.makedirs(str(self.root.parent), exist_ok=True)
+        cur = self.root
+        for part in ("",) + path.relative_to(self.root).parts:
+            cur = cur / part if part else cur
+            try:
+                os.mkdir(str(cur))
+            except FileExistsError:
+                pass
+            self._check(cur, "dir")  # refuses a symlink / non-dir at this level
+
+    def _write(self, path: Path, data: bytes) -> None:
+        """_atomic_write behind the containment check. os.replace would REPLACE
+        a symlinked destination rather than write through it, but a symlink
+        there means tampering: refuse loudly instead of silently clobbering it."""
+        self._check(path.parent, "dir")
+        self._check(path, "file")
+        _atomic_write(path, data)
 
     # -- locking / paths
     @contextmanager
@@ -169,14 +260,16 @@ class LocalProvider(WikiProvider):
         lock = self.root / ".lock"
         if create:
             try:
-                (self.root / "pages").mkdir(parents=True, exist_ok=True)
+                self._mkdirs(self.root / "pages")
             except OSError as exc:
                 raise WikiError(f"cannot create wiki root: {exc.strerror or type(exc).__name__}") from exc
-        elif not lock.exists():
+        elif not self._check(lock, "file"):  # lstat: a dangling symlink is refused, not "absent"
             yield  # nothing was ever written: reads see an empty wiki
             return
+        self._check(lock, "file")
+        flags = (os.O_RDWR | os.O_CREAT) if exclusive else os.O_RDONLY
         try:
-            fd = os.open(str(lock), (os.O_RDWR | os.O_CREAT) if exclusive else os.O_RDONLY, 0o666)  # kernel applies the umask
+            fd = os.open(str(lock), flags | os.O_NOFOLLOW, 0o666)  # kernel applies the umask
         except OSError as exc:
             raise WikiError(f"cannot open wiki lock: {exc.strerror or type(exc).__name__}") from exc
         try:
@@ -191,7 +284,7 @@ class LocalProvider(WikiProvider):
     def _read_meta(self, pid: str) -> Optional[dict]:
         path = self._dir(pid) / "meta.json"
         try:
-            raw = path.read_text(encoding="utf-8")
+            raw = self._read_text(path)
         except FileNotFoundError:
             return None
         except OSError as exc:
@@ -205,18 +298,33 @@ class LocalProvider(WikiProvider):
             raise WikiError(f"corrupt metadata for page {pid}") from exc
 
     def _all_ids(self) -> List[str]:
+        pages = self.root / "pages"
+        if not self._check(pages, "dir"):
+            return []
         try:
-            names = os.listdir(str(self.root / "pages"))
+            names = os.listdir(str(pages))
         except FileNotFoundError:
             return []
-        return sorted((n for n in names if _ID.fullmatch(n)), key=int)
+        except OSError as exc:
+            raise WikiError(f"cannot list local wiki pages: {exc.strerror or type(exc).__name__}") from exc
+        ids = sorted((n for n in names if _ID.fullmatch(n)), key=int)
+        # A symlinked (or non-directory) NUMERIC entry RAISES rather than being
+        # skipped. Skipping is silent: the page would vanish from find_by_title,
+        # the orchestration layer would then create a duplicate, and _next_id
+        # would still count it. Nothing in this module ever creates a symlink,
+        # so one here is tampering or a botched copy; refusing the listing until
+        # a human removes it is the fail-closed outcome, and the message names
+        # the entry. Non-numeric names were never pages and stay ignored.
+        for n in ids:
+            self._check(pages / n, "dir")
+        return ids
 
     def _body(self, meta: dict) -> str:
         if meta["kind"] == "folder":
             return ""
         path = self._dir(meta["id"]) / "versions" / f"{meta['version']}.html"
         try:
-            return path.read_text(encoding="utf-8")
+            return self._read_text(path)
         except OSError as exc:
             raise WikiError(f"missing body for page {meta['id']} v{meta['version']}") from exc
 
@@ -244,7 +352,7 @@ class LocalProvider(WikiProvider):
     def _next_id(self) -> str:
         path = self.root / ".next-id"
         try:
-            last = int(path.read_text().strip())
+            last = int(self._read_text(path).strip())
         except (FileNotFoundError, ValueError):
             last = FIRST_ID - 1
         # A numeric but out-of-range counter (negative, or so large the next id
@@ -261,19 +369,19 @@ class LocalProvider(WikiProvider):
         nxt = last + 1
         if nxt > 10 ** 18 - 1:  # refuse BEFORE writing anything (see above)
             raise WikiError("local wiki id space exhausted")
-        _atomic_write(path, str(nxt).encode("ascii"))
+        self._write(path, str(nxt).encode("ascii"))
         return str(nxt)
 
     def _write_meta(self, meta: dict) -> None:
-        _atomic_write(self._dir(meta["id"]) / "meta.json",
+        self._write(self._dir(meta["id"]) / "meta.json",
                       (json.dumps(meta, indent=2, sort_keys=True) + "\n").encode("utf-8"))
 
     def _write_version(self, meta: dict, body: str) -> None:
         d = self._dir(meta["id"])
         v = meta["version"]
-        (d / "versions").mkdir(parents=True, exist_ok=True)
-        _atomic_write(d / "versions" / f"{v}.html", body.encode("utf-8"))
-        _atomic_write(d / "versions" / f"{v}.json", (json.dumps(
+        self._mkdirs(d / "versions")
+        self._write(d / "versions" / f"{v}.html", body.encode("utf-8"))
+        self._write(d / "versions" / f"{v}.json", (json.dumps(
             {"version": v, "title": meta["title"], "updated": meta["updated"]},
             sort_keys=True) + "\n").encode("utf-8"))
 
@@ -301,10 +409,10 @@ class LocalProvider(WikiProvider):
                     "ancestors": list(parent.get("ancestors", []))
                     + [{"id": parent["id"], "title": parent["title"]}],
                     "labels": [], "created": now, "updated": now}
-            self._dir(pid).mkdir(parents=True, exist_ok=True)
+            self._mkdirs(self._dir(pid))
             self._write_version(meta, body)
             self._write_meta(meta)  # commit point
-            _atomic_write(self._dir(pid) / "body.html", body.encode("utf-8"))
+            self._write(self._dir(pid) / "body.html", body.encode("utf-8"))
             return self._page(meta)
 
     def update_page(self, page_id, title, body, current_version):
@@ -319,7 +427,7 @@ class LocalProvider(WikiProvider):
             meta.update(title=title, version=meta["version"] + 1, updated=_now())
             self._write_version(meta, body)
             self._write_meta(meta)  # commit point
-            _atomic_write(self._dir(meta["id"]) / "body.html", body.encode("utf-8"))
+            self._write(self._dir(meta["id"]) / "body.html", body.encode("utf-8"))
             return self._page(meta)
 
     def find_by_title(self, space, title, parent_id=None):
@@ -375,13 +483,15 @@ class LocalProvider(WikiProvider):
         """Writable-directory check, never writes. The wiki root need not exist
         yet: the nearest existing ancestor must be writable instead."""
         probe = self.root
-        while not probe.exists():
+        while not os.path.lexists(str(probe)):  # lstat: a dangling symlink is not "absent"
             if probe.parent == probe:
                 return False
             probe = probe.parent
+        if probe == self.root:
+            self._check(self.root, "dir")  # a root swapped to a symlink is refused
         if not (probe.is_dir() and os.access(str(probe), os.W_OK | os.X_OK)):
             return False
-        if parent_id is not None and (self.root / "pages").exists():
+        if parent_id is not None and self._check(self.root / "pages", "dir"):
             try:
                 with self._locked(False, False):
                     self._get(parent_id, parent_type, "parent")
@@ -406,7 +516,7 @@ class LocalProvider(WikiProvider):
         meta = {"id": fid, "kind": "folder", "title": title, "space": space, "version": 0,
                 "parent_type": ptype, "parent_id": pid_parent, "ancestors": anc,
                 "labels": [], "created": now, "updated": now}
-        self._dir(fid).mkdir(parents=True, exist_ok=True)
+        self._mkdirs(self._dir(fid))
         self._write_meta(meta)
         return self._page(meta)
 
@@ -445,8 +555,8 @@ class LocalProvider(WikiProvider):
             out = []
             for v in range(1, meta["version"] + 1):
                 try:
-                    out.append(json.loads((self._dir(meta["id"]) / "versions" / f"{v}.json")
-                                          .read_text(encoding="utf-8")))
+                    out.append(json.loads(self._read_text(
+                        self._dir(meta["id"]) / "versions" / f"{v}.json")))
                 except (OSError, ValueError) as exc:
                     raise WikiError(f"missing history for page {meta['id']} v{v}") from exc
             return out
@@ -458,6 +568,6 @@ class LocalProvider(WikiProvider):
                     or not 1 <= version <= meta["version"]):
                 raise WikiNotFoundError(f"no version {version} of page {meta['id']}")
             try:
-                return (self._dir(meta["id"]) / "versions" / f"{version}.html").read_text(encoding="utf-8")
+                return self._read_text(self._dir(meta["id"]) / "versions" / f"{version}.html")
             except OSError as exc:
                 raise WikiError(f"missing body for page {meta['id']} v{version}") from exc
