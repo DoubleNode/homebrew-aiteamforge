@@ -256,7 +256,38 @@ def validate_notify_config(config: dict) -> list[str]:
 
 def validate_wiki_config(config: dict) -> list[str]:
     """Validate a wiki.json dict against release-wiki/v1. § 11.5."""
-    return _validate_against_schema(config, _load_schema("wiki.schema.json"))
+    errors = _validate_against_schema(config, _load_schema("wiki.schema.json"))
+    if not (isinstance(config, dict) and config.get("provider") == "local"):
+        return errors
+    # XACA-1370-015: the local branch forbids Confluence-only fields with
+    # `false` subschemas. jsonschema reports those with validator None, drops
+    # the property from the path and puts the VALUE in its message, so the
+    # generic formatter can only say "schema validation failed (None)". Name
+    # the forbidden fields here instead. The names are schema constants and
+    # docType keys (already printed in paths); values are never echoed.
+    named = []
+    for field in _LOCAL_FORBIDDEN_TOP:
+        if field in config:
+            named.append(f"{_format_path([field])}: not permitted for provider 'local'")
+    doc_types = config.get("docTypes")
+    if isinstance(doc_types, dict):
+        for key, entry in doc_types.items():
+            if isinstance(entry, dict):
+                for field in _LOCAL_FORBIDDEN_DOCTYPE:
+                    if field in entry:
+                        named.append(f"{_format_path(['docTypes', key, field])}: "
+                                     "not permitted for provider 'local'")
+    if not named:
+        return errors
+    vague = [e for e in errors if e.endswith("schema validation failed (None)")
+             or e.endswith("literal value not permitted") and e.startswith("$.credential")]
+    return [e for e in errors if e not in vague] + named
+
+
+# Fields the wiki schema's provider=local branch forbids (kept in step with
+# release_config_schemas/wiki.schema.json allOf[1].then).
+_LOCAL_FORBIDDEN_TOP = ("credential", "baseUrl")
+_LOCAL_FORBIDDEN_DOCTYPE = ("space", "parent")
 
 
 def validate_profile_config(config: dict) -> list[str]:

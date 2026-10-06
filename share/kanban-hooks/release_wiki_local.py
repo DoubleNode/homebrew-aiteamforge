@@ -117,6 +117,20 @@ def _atomic_write(path: Path, data: bytes) -> None:
     _fsync_dir(path.parent)
 
 
+def _meta_shape_ok(meta: dict) -> bool:
+    """Every field the verbs index directly must be present and well-typed, so
+    a hand-edited or truncated meta.json surfaces as WikiError("corrupt
+    metadata") instead of a raw KeyError/TypeError deep inside a scan
+    (XACA-1370-014)."""
+    version = meta.get("version")
+    return (meta.get("kind") in ("page", "folder")
+            and isinstance(meta.get("title"), str)
+            and isinstance(meta.get("space"), str)
+            and isinstance(version, int) and not isinstance(version, bool) and version >= 0
+            and isinstance(meta.get("labels", []), list)
+            and isinstance(meta.get("ancestors", []), list))
+
+
 def _now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
@@ -184,7 +198,7 @@ class LocalProvider(WikiProvider):
             raise WikiError(f"cannot read page {pid}: {exc.strerror or type(exc).__name__}") from exc
         try:
             meta = json.loads(raw)
-            if not isinstance(meta, dict) or meta.get("id") != pid:
+            if not isinstance(meta, dict) or meta.get("id") != pid or not _meta_shape_ok(meta):
                 raise ValueError("shape")
             return meta
         except ValueError as exc:
@@ -443,4 +457,7 @@ class LocalProvider(WikiProvider):
             if (isinstance(version, bool) or not isinstance(version, int)
                     or not 1 <= version <= meta["version"]):
                 raise WikiNotFoundError(f"no version {version} of page {meta['id']}")
-            return (self._dir(meta["id"]) / "versions" / f"{version}.html").read_text(encoding="utf-8")
+            try:
+                return (self._dir(meta["id"]) / "versions" / f"{version}.html").read_text(encoding="utf-8")
+            except OSError as exc:
+                raise WikiError(f"missing body for page {meta['id']} v{version}") from exc
