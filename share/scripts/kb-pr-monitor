@@ -1764,7 +1764,14 @@ CHECKS_EOF
             printf '%s\n' "  Files touched on this PR (conflict is most likely among these):"
             printf '%s\n' "$CONFLICT_FILES" | sed 's/^/    /'
         fi
-        printf '%s\n' "  Resolve manually: checkout the branch, merge/rebase develop, resolve, push. CHANGELOG [Unreleased] collisions are union-resolved — keep BOTH blocks, then de-duplicate."
+        # XACA-1354-004: name the PR's REAL base, not a hardcoded `develop` (a PR
+        # may target a release branch). Fetched only on this halt path, so the
+        # normal poll pays no extra API call. An unreadable base degrades to a
+        # generic phrase — never an empty name. The staleness arm below keeps its
+        # own fetch and its own fail-closed handling of an empty BASE_REF.
+        CONFLICT_BASE=$(gh pr view "$PR_NUM" --repo "$REPO" --json baseRefName --jq '.baseRefName' 2>/dev/null)
+        [ -n "$CONFLICT_BASE" ] && [ "$CONFLICT_BASE" != "null" ] || CONFLICT_BASE="the PR's base branch"
+        printf '%s\n' "  Resolve manually: checkout the branch, merge/rebase $CONFLICT_BASE, resolve, push. CHANGELOG [Unreleased] collisions are union-resolved — keep BOTH blocks, then de-duplicate."
         verdict CONFLICT "mergeable=$MERGEABLE mergeStateStatus=$MERGE_STATE"
     fi
 

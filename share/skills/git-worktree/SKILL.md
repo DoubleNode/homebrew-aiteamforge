@@ -441,6 +441,17 @@ Total worktrees: 4 across 3 projects
 
 ## Trigger Phrases & Commands
 
+### Base Branch Resolution (branch-per-release)
+
+A new worktree branch is cut from, and its PR targets, the **base branch**:
+
+1. **The item's release branch**, when the kanban item is assigned to a release (`releaseAssignment.releaseId`) whose `branch` is recorded.
+2. **Otherwise the integration branch**: `releaseConfig.branches.integration` on the team board (default `develop`).
+
+In trunk mode (`releaseConfig.branches.mode = "trunk"`) the release branch *is* the integration branch. A hotfix release's branch (`hotfix/<version>`) is cut from the production branch, so items assigned to it are based on that. `kb-run`/`kb-pick` resolve this for you (`_kb_get_item_release_branch` in `kanban-helpers.sh`; an assigned item whose lookup errors aborts rather than guessing). Without a kanban item, use the integration branch. In this document, "develop" in examples means the default integration branch.
+
+To see what an item resolves to: `python3 kanban-hooks/release_branches.py item-branch --board <board.json> --item <ITEM-ID>` (prints nothing when the item has no release branch yet) and `... branches --board <board.json>` for the branch roles.
+
 ### Worktree Creation
 
 **Pattern:** `"Create worktree for [context] [optional: with branch name]"`
@@ -453,7 +464,7 @@ Total worktrees: 4 across 3 projects
 "Create worktree for feature"
 → Detects iOS project from terminal name
 → Creates <ios-repo>/worktrees/feature/
-→ Checks out develop branch initially
+→ Checks out the integration branch initially (default develop)
 → Ready for new feature branch creation
 ```
 
@@ -461,7 +472,7 @@ Total worktrees: 4 across 3 projects
 ```
 "Create Android worktree for feature"
 → Creates <android-repo>/worktrees/feature/
-→ Checks out develop branch
+→ Checks out the integration branch (default develop)
 → Ready for Android feature work
 ```
 
@@ -472,7 +483,7 @@ Total worktrees: 4 across 3 projects
 → Detects iOS project
 → Creates <ios-repo>/worktrees/feature-my-feature/
 → Creates new branch: feature/my-feature
-→ Based on current develop branch
+→ Based on the base branch (release branch if assigned, else integration)
 ```
 
 **Hotfix worktree:**
@@ -481,7 +492,7 @@ Total worktrees: 4 across 3 projects
 "Create worktree for hotfix"
 → Detects Android project
 → Creates <android-repo>/worktrees/hotfix/
-→ Checks out develop branch
+→ Checks out the integration branch (default develop)
 → Ready for hotfix branch creation
 ```
 
@@ -492,7 +503,7 @@ Total worktrees: 4 across 3 projects
 → Detects iOS project
 → Creates <ios-repo>/worktrees/hotfix-crash-3455/
 → Creates branch: hotfix/crash-3455
-→ Based on develop branch
+→ Based on the base branch (release branch if assigned, else integration)
 ```
 
 **Refactor worktree:**
@@ -502,7 +513,7 @@ Total worktrees: 4 across 3 projects
 → Detects Firebase project
 → Creates <firebase-repo>/worktrees/refactor-query-optimization/
 → Creates branch: refactor/query-optimization
-→ Based on develop branch
+→ Based on the base branch (release branch if assigned, else integration)
 ```
 
 **Release worktree:**
@@ -512,7 +523,7 @@ Total worktrees: 4 across 3 projects
 → Detects Android project
 → Creates <android-repo>/worktrees/release/
 → Creates branch: release/1.6.0
-→ Based on develop branch
+→ Based on the integration branch (default develop)
 ```
 
 **Context-aware creation (uses current terminal and detects project):**
@@ -563,7 +574,7 @@ Total worktrees: 4 across 3 projects
 → Shows detailed status for all worktrees:
   - Uncommitted changes
   - Unpushed commits
-  - Branch ahead/behind develop
+  - Branch ahead/behind its base branch
 ```
 
 **Find worktree by branch:**
@@ -761,8 +772,8 @@ All Fun Card widget worktrees cleaned up!
 
 2. **Verify base repository exists**
    - Confirm we're in a Git repository
-   - Identify develop repository location
-   - Check that develop repo is in good state
+   - Identify main repository location
+   - Check that the main repo is in good state
 
 3. **Validate branch name**
    - Check branch naming convention matches context
@@ -857,13 +868,13 @@ All Fun Card widget worktrees cleaned up!
    cd [worktree-path]
    git status --porcelain  # Check for uncommitted changes
    git log -1 --oneline    # Get last commit
-   git rev-list --left-right --count develop...HEAD  # Check ahead/behind
+   git rev-list --left-right --count <base>...HEAD  # Check ahead/behind (<base> per Base Branch Resolution)
    ```
 
 4. **Format output**
    - Group by context (feature, hotfix, refactor, etc.)
    - Highlight dirty worktrees (uncommitted changes)
-   - Show branch relationship to develop
+   - Show branch relationship to its base branch (release or integration)
 
 **Example Output Format:**
 
@@ -923,7 +934,7 @@ Main Repository:
 
 3. **Check if branch is merged**
    ```bash
-   git branch --merged develop [branch-name]
+   git branch --merged <base> [branch-name]   # <base> = the branch its PR targets
    ```
    - If not merged: Strong warning
    - Suggest merging or creating backup branch
@@ -1065,7 +1076,7 @@ I recommend setting up a feature worktree:
 
   Directory: <ios-repo>/worktrees/feature-my-feature/
   Branch: feature/PROJ-445-my-feature
-  Based on: develop
+  Based on: develop (or the item's release branch, if assigned)
 
 Would you like me to create this worktree? (yes/no)"
 
@@ -1178,7 +1189,7 @@ Pre-configured worktree setups for common scenarios:
 ```
 "Create emergency hotfix worktree for crash"
 → Creates worktree with:
-  - Hotfix branch from develop
+  - Hotfix branch from the item's release branch (hotfix/<version>, cut from production) if assigned, else the integration branch
   - Links to crash logs location
   - Hotfix checklist
   - Faster review settings
@@ -1186,13 +1197,13 @@ Pre-configured worktree setups for common scenarios:
 
 ### 2. Worktree Synchronization
 
-Keep worktrees in sync with develop branch:
+Keep worktrees in sync with their base branch (release or integration):
 
 ```
-"Sync all worktrees with develop"
+"Sync all worktrees with their base branch"
 → For each worktree:
   1. Fetch latest from origin
-  2. Rebase onto develop (if safe)
+  2. Rebase onto the base branch (if safe)
   3. Report any conflicts
   4. Suggest resolution steps
 ```
@@ -1223,7 +1234,7 @@ Move worktrees to different locations:
 
 ### 5. Worktree Health Check
 
-Regular developtenance and diagnostics:
+Regular maintenance and diagnostics:
 
 ```
 "Check worktree health"
@@ -1325,7 +1336,7 @@ What would you like to do?
 **1. Creation:**
 - Create worktrees as needed, not preemptively
 - Use descriptive names that match the task
-- Base on correct branch (usually develop)
+- Base on the correct branch: the item's release branch if assigned, else the integration branch (usually develop)
 
 **2. Active Use:**
 - Keep worktrees focused on single tasks
@@ -1428,7 +1439,7 @@ No branch switching, no stashing, no conflicts.
 
 **2. Protect production branches:**
 - Don't create worktrees from production branches casually
-- Create hotfix branches from develop, not production
+- Don't hand-cut hotfix branches from production; a hotfix release's `hotfix/<version>` branch is cut from production by the release engine. Otherwise base hotfix work on the item's base branch
 - Use branch protection rules on remote
 
 **3. Clean up thoroughly:**
@@ -1680,7 +1691,7 @@ You: "Create worktree for release/2.9.0"
 Skill:
 ✅ Release worktree created!
    Directory: <ios-repo>/worktrees/release/
-   Branch: release/2.9.0 (new, based on develop)
+   Branch: release/2.9.0 (new, based on the integration branch)
    
 Release management ready, Commander La Forge.
 All systems nominal!
