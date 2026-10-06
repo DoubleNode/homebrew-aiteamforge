@@ -2,20 +2,20 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "release-wiki/v1",
   "title": "Release Wiki Config (release-wiki/v1)",
-  "description": "XACA-1342 / spec docs/release-workflow/RELEASE-LIFECYCLE.md § 11.5. credential.secretRef is never a literal value (§ 2.2, § 11.4-11.5).",
+  "description": "XACA-1342 / spec docs/release-workflow/RELEASE-LIFECYCLE.md § 11.5. credential.secretRef is never a literal value (§ 2.2, § 11.4-11.5). XACA-1370: provider 'local' is file-backed (storage dir resolved by the provider, default <team-kanban>/wiki/); it takes no credential, no baseUrl and no space/parent -- stray Confluence fields on a local config are rejected.",
   "type": "object",
-  "required": ["$schema", "provider", "credential", "baseUrl", "docTypes"],
+  "required": ["$schema", "provider", "docTypes"],
   "additionalProperties": false,
   "properties": {
     "$schema": { "const": "release-wiki/v1" },
     "provider": {
       "type": "string",
-      "description": "§ 10.2: confluence first; GitHub wiki or repo docs later.",
-      "enum": ["confluence"]
+      "description": "§ 10.2: confluence first; XACA-1370 adds 'local' (file-backed, no network). GitHub wiki or repo docs later.",
+      "enum": ["confluence", "local"]
     },
     "credential": {
       "type": "object",
-      "description": "Never a literal token -- always a secretRef (§ 2.2, § 11.5).",
+      "description": "Required for provider=confluence, forbidden for local. Never a literal token -- always a secretRef (§ 2.2, § 11.5).",
       "required": ["secretRef"],
       "additionalProperties": false,
       "properties": {
@@ -28,17 +28,16 @@
     },
     "baseUrl": {
       "type": "string",
-      "description": "Wiki tenant base URL, e.g. https://<tenant>.example.net/wiki. This is a public tenant address, not a secret.",
+      "description": "Required for provider=confluence, forbidden for local. Wiki tenant base URL, e.g. https://<tenant>.example.net/wiki. This is a public tenant address, not a secret.",
       "pattern": "^https://[^\\s]+(?![\\s\\S])"
     },
     "docTypes": {
       "type": "object",
-      "description": "§ 12: cr, testing-log, cr-record. Each maps to a space + parent location.",
+      "description": "§ 12: cr, testing-log, cr-record. confluence: each maps to a space + parent location (enforced by the provider conditional below). local: each is an empty object (the doc type is enabled; storage is file-backed).",
       "minProperties": 1,
       "propertyNames": { "enum": ["cr", "testing-log", "cr-record"] },
       "additionalProperties": {
         "type": "object",
-        "required": ["space", "parent"],
         "additionalProperties": false,
         "properties": {
           "space": { "type": "string", "minLength": 1 },
@@ -63,5 +62,38 @@
       "type": "string",
       "description": "Display name of the team's platform. Fallback source for the `release.platform` fact when the release record carries no platform (see docs/release-workflow/FACT-DICTIONARY.md). Templates use `{{release.platform}}`; `{{platform.name}}` is a deprecated alias."
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "provider": { "const": "confluence" } },
+        "required": ["provider"]
+      },
+      "then": {
+        "required": ["credential", "baseUrl"],
+        "properties": {
+          "docTypes": {
+            "additionalProperties": { "required": ["space", "parent"] }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "provider": { "const": "local" } },
+        "required": ["provider"]
+      },
+      "then": {
+        "properties": {
+          "credential": false,
+          "baseUrl": false,
+          "docTypes": {
+            "additionalProperties": {
+              "properties": { "space": false, "parent": false }
+            }
+          }
+        }
+      }
+    }
+  ]
 }

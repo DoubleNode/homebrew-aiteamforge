@@ -9,6 +9,21 @@ change. All seven subcommands are real (XACA-1344 PR 3/3); none is a stub.
 kb-wiki does NOT write the release/CR record. The caller passes the stored
 state in (--page-id, --stored-version) and stores the printed record itself.
 
+PROVIDERS (wiki.json "provider"; XACA-1370)
+  confluence  Confluence Cloud; needs credential, baseUrl and a space + parent
+              per doc type. For Main Event teams only (see host guard).
+  local       File-backed, no network, no credential. Pages live under
+              <team-kanban>/wiki/ (pages/<id>/meta.json + body.html + versions/),
+              written atomically under a file lock with full version history.
+              The team id is the space; each doc type gets its own top-level
+              folder (the parent). docTypes entries are empty objects.
+              The kanban tree is covered by kanban-backup. Write verbs create
+              the tree; read verbs and doctor never do.
+  Host guard: mainevent.atlassian.net (and subdomains) is refused unless the
+  team's board organization is MAIN EVENT (alias-aware, fail-closed). Only
+  Main Event / D&B content is ever created there. Other teams use `local`.
+  See docs/release-workflow/kb-wiki-providers.md.
+
 Every subcommand takes --team T (default $KB_TEAM) and --json. Without --json
 the output is for humans and NOT stable. With --json stdout is exactly one JSON
 document and nothing else (diagnostics go to stderr) on exit 0 and exit 4; on
@@ -102,6 +117,7 @@ import json
 import os
 import re
 import sys
+import urllib.parse
 from pathlib import Path
 
 EXIT_OK, EXIT_WIKI_ERROR, EXIT_USAGE, EXIT_VERSION_GUARD = 0, 1, 2, 4  # 3 is retired
@@ -275,22 +291,197 @@ def _doc_mapping(config, doc):
     return space, ptype, str(pid)
 
 
-def _load_wiki_config(team, doc, override):
+PROVIDERS = ("confluence", "local")
+
+# XACA-1370-013. User rule (2026-09-30): ONLY Main Event / D&B content is ever
+# created in this Atlassian tenant. A Confluence wiki.json (or a credentials-file
+# site) that resolves to it is refused unless the team is a Main Event team.
+PROTECTED_CONFLUENCE_HOST = "mainevent.atlassian.net"
+# A board's `organization`, compared after whitespace-normalising and casefolding.
+# Deliberately ONLY "main event": the measured boards say 'MAIN EVENT', and the
+# squashed 'MAINEVENT' is NOT accepted -- a spelling variant is not evidence of
+# membership, and this guard fails closed.
+MAIN_EVENT_ORGANIZATION = "main event"
+_MAX_ALIAS_HOPS = 5
+
+
+def _base_url_host(value):
+    """Real hostname of a baseUrl, lowercased, no port, one trailing dot dropped;
+    None when it does not parse to a hostname. Mirrors release_wiki_confluence's
+    scheme-less handling ('x.atlassian.net' means https://x.atlassian.net), and
+    uses urlsplit().hostname so userinfo/lookalike tricks resolve to the host a
+    client would really connect to."""
+    if not isinstance(value, str):
+        return None
+    raw = value.strip()
+    if not raw or any(c.isspace() for c in raw):
+        return None
+    if "://" not in raw:
+        raw = "https://" + raw
+    try:
+        u = urllib.parse.urlsplit(raw)
+        u.port  # validates the port
+        host = u.hostname
+    except ValueError:
+        return None
+    if not host:
+        return None
+    host = host.lower()
+    if not host.isascii():
+        # The socket layer IDNA-encodes a non-ASCII host (NFKC: fullwidth letters
+        # and U+3002 become ASCII), so 'ｍainevent.atlassian.net' connects to the
+        # protected tenant. Compare what would be CONNECTED to; undecodable = None.
+        try:
+            host = host.encode("idna").decode("ascii").lower()
+        except UnicodeError:
+            return None
+    host = host.rstrip(".")  # every trailing dot, not just one
+    return host or None
+
+
+def _is_protected_host(host):
+    return host == PROTECTED_CONFLUENCE_HOST or host.endswith("." + PROTECTED_CONFLUENCE_HOST)
+
+
+def _board_organization(kanban_dir):
+    """The single `organization` declared by the *-board.json file(s) in a kanban
+    dir. Raises ValueError (reason text only) on any doubt."""
+    boards = sorted(Path(kanban_dir).glob("*-board.json"))
+    if not boards:
+        raise ValueError("no *-board.json in its kanban dir")
+    found = set()
+    for b in boards:
+        try:
+            data = json.loads(b.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            raise ValueError(f"board {b.name} is unreadable or not valid JSON") from None
+        org = data.get("organization") if isinstance(data, dict) else None
+        if not isinstance(org, str) or not org.strip():
+            raise ValueError(f"board {b.name} has no string 'organization'")
+        found.add(" ".join(org.split()).casefold())
+    if len(found) > 1:
+        raise ValueError("its boards disagree on 'organization'")
+    return found.pop()
+
+
+def _is_main_event_team(team):
+    """(True, "") when the team's board organization is MAIN EVENT, else
+    (False, reason). Source of truth: registry kanban_dir(team) -> *-board.json
+    -> `organization`; a board-less alias is resolved through alias_of() (up to
+    _MAX_ALIAS_HOPS, cycle-safe). Every doubt is a refusal."""
+    import aiteamforge_registry as reg
+    current, seen = team, set()
+    for _ in range(_MAX_ALIAS_HOPS + 1):
+        if current in seen:
+            return False, "alias cycle"
+        seen.add(current)
+        try:
+            kdir = reg.kanban_dir(current)
+        except reg.BoardLessTeamError:
+            alias = reg.alias_of(current)
+            if not alias:
+                return False, f"'{current}' is board-less with no alias"
+            current = alias
+            continue
+        except KeyError:
+            return False, f"'{current}' is not a registered team"
+        except Exception as exc:
+            return False, f"registry lookup failed ({type(exc).__name__})"
+        try:
+            org = _board_organization(kdir)
+        except ValueError as exc:
+            return False, str(exc)
+        if org == MAIN_EVENT_ORGANIZATION:
+            return True, ""
+        return False, "its board organization is not MAIN EVENT"
+    return False, "alias chain too long"
+
+
+def _guard_host(team, host):
+    """Refuse (_ConfigError) a protected-host target for a non-Main-Event team."""
+    if host is None or not _is_protected_host(host):
+        return
+    ok, why = _is_main_event_team(team)
+    if not ok:
+        raise _ConfigError(
+            f"refusing: {PROTECTED_CONFLUENCE_HOST} is reserved for Main Event teams; "
+            f"team '{team}' is not one ({why}). Use provider 'local' for this team.")
+
+
+def _guard_confluence_config(team, config):
+    """Guard the wiki.json baseUrl. An absent/empty baseUrl is checked later, on
+    the credential's resolved site (credentials-file fallback), in _make_provider.
+    A present baseUrl that has no hostname fails closed."""
+    if config.get("provider") != "confluence":
+        return
+    base = config.get("baseUrl")
+    if base is None or base == "":
+        return
+    host = _base_url_host(base)
+    if host is None:
+        raise _ConfigError(f"refusing: wiki.json baseUrl has no usable hostname "
+                           f"(team '{team}'); cannot prove it is not "
+                           f"{PROTECTED_CONFLUENCE_HOST}")
+    _guard_host(team, host)
+
+
+def _local_root(team, override):
+    """<team kanban>/wiki/ -- through the SAME resolution every other kb-wiki path
+    uses (_resolve_config_dir: team registry, or --config-dir for tests). A
+    board-less team has no kanban dir; that surfaces as _Usage (exit 2) with the
+    registry's own explanatory message, never a traceback."""
+    return _resolve_config_dir(team, override).parent / "wiki"
+
+
+def _local_mapping(team, doc, override, create):
+    """(space, parent_type, parent_id) for a LOCAL doc type.
+
+    A local docType carries no space/parent (the schema forbids them), but the
+    orchestration layer (publish, check_location, find_by_title, ...) needs both,
+    so they are synthesised here and nowhere else:
+      * space      = the team id (valid space key, one wiki per team kanban tree);
+      * parent     = a top-level FOLDER titled with the doc type ("cr",
+                     "testing-log", "cr-record") in that space, so the wiki tree
+                     is wiki/pages/<folder>/<page> and `children --doc D` lists
+                     exactly that doc type's pages.
+    Write verbs (create=True) ensure the folder exists (idempotent, one lock).
+    Read verbs never write: a folder that does not exist yet yields the id "0",
+    which is never allocated (ids start at 1000), so find/children are simply
+    empty and read/url of a numeric page id behave normally."""
+    if os.environ.get(TEST_PROVIDER_VAR):  # a test provider owns the data; touch no disk
+        return team, "folder", "0"
+    from release_wiki_local import LocalProvider
+    provider = LocalProvider(_local_root(team, override))
+    if create:
+        return team, "folder", provider.ensure_folder(team, doc).id
+    folder = provider.find_folder(team, doc)
+    if folder is not None:
+        return team, "folder", folder.id
+    return team, "folder", "0"
+
+
+def _load_wiki_config(team, doc, override, create=False):
     """Returns (config, space, parent_type, parent_id). Missing/invalid wiki.json
-    is _ConfigError (exit 1); an unmapped --doc is _Usage (exit 2)."""
+    is _ConfigError (exit 1); an unmapped --doc is _Usage (exit 2). `create` is
+    True only for write verbs and only matters for the local provider."""
     config = _read_wiki_json(team, override)
     _full_validate(config)
-    if config.get("provider") != "confluence":
-        raise _ConfigError("wiki.json provider must be 'confluence'")
+    provider = config.get("provider")
+    if provider not in PROVIDERS:
+        raise _ConfigError("wiki.json provider must be 'confluence' or 'local'")
     doc_types = config.get("docTypes")
     if not isinstance(doc_types, dict):
         raise _ConfigError("wiki.json docTypes must be an object")
     if doc_types.get(doc) is None:
         raise _Usage(f"doc type '{doc}' is not mapped in wiki.json docTypes")
+    if provider == "local":
+        return (config,) + _local_mapping(team, doc, override, create)
+    _guard_confluence_config(team, config)
     return (config,) + _doc_mapping(config, doc)
 
 
-def _make_provider(team, config):
+def _make_provider(team, config, config_dir=None):
+    _guard_confluence_config(team, config)  # before ANY credential or transport work
     hook = os.environ.get(TEST_PROVIDER_VAR)
     if hook:
         _err(f"WARNING: {TEST_PROVIDER_VAR} is set; using a test provider")
@@ -298,9 +489,18 @@ def _make_provider(team, config):
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         return mod.make_provider()
+    if config.get("provider") == "local":
+        from release_wiki_local import LocalProvider
+        return LocalProvider(_local_root(team, config_dir))  # never touches disk here
     from release_wiki_confluence import ConfluenceProvider, load_credential
     ref = (config.get("credential") or {}).get("secretRef")
-    return ConfluenceProvider(load_credential(team, secret_ref=ref, base_url=config.get("baseUrl")))
+    cred = load_credential(team, secret_ref=ref, base_url=config.get("baseUrl"))
+    # The credentials file can supply the site when wiki.json has no baseUrl.
+    chost = _base_url_host(getattr(cred, "base_url", None))
+    if chost is None:
+        raise _ConfigError(f"refusing: resolved Confluence site has no usable hostname (team '{team}')")
+    _guard_host(team, chost)
+    return ConfluenceProvider(cred)
 
 
 def _read_body(path):
@@ -341,8 +541,8 @@ def _run(args):
     if not is_patch and args.adopt and args.page_id is None:
         raise _Usage("--adopt only applies with --page-id")
     label = rw.identity_label(args.doc, args.key)
-    config, space, ptype, pid = _load_wiki_config(team, args.doc, args.config_dir)
-    provider = _make_provider(team, config)
+    config, space, ptype, pid = _load_wiki_config(team, args.doc, args.config_dir, create=True)
+    provider = _make_provider(team, config, args.config_dir)
     if is_patch:
         res = rw.patch_section(provider, args.page_id, args.heading, body,
                                args.stored_version, args.expect_version,
@@ -371,7 +571,7 @@ def _run_read(args):
     team = _team_of(args)
     _check_page_id(args)
     config, space, ptype, pid = _load_wiki_config(team, args.doc, args.config_dir)
-    provider = _make_provider(team, config)
+    provider = _make_provider(team, config, args.config_dir)
     cmd, doc, key = args.command, args.doc, getattr(args, "key", None)
     if cmd == "read":
         rec = rw.read_page(provider, args.page_id)
@@ -495,6 +695,33 @@ def _profile_checks(rw, team, doc, kanban_dir, out):
     out.append(rw.Check("profile-chain", rw.INFO, text or "no profile files found", doc, chain))
 
 
+def _local_checks(rw, team, config, selected, override):
+    """Doctor for provider=local: no credential, no network. -> [Check]"""
+    from release_wiki_local import LocalProvider
+    root = _local_root(team, override)
+    provider = LocalProvider(root)
+    out = [rw.Check("credentials", rw.PASS, "no credential needed (local provider)")]
+    try:
+        writable = provider.can_write(team, "folder", None)  # never creates anything
+    except rw.WikiError as exc:
+        out.append(rw.Check("wiki-dir", rw.FAIL, f"cannot check {root} ({type(exc).__name__}): "
+                                                 f"{rw._one_line(exc)}"))
+        return out
+    if writable is True:
+        state = "exists" if root.is_dir() else "will be created on first publish"
+        out.append(rw.Check("wiki-dir", rw.PASS, f"{root} is writable ({state})"))
+    else:
+        out.append(rw.Check("wiki-dir", rw.FAIL, f"{root} is not writable (or cannot be created)"))
+    for doc in selected:
+        _, _, pid = _local_mapping(team, doc, override, create=False)
+        if pid == "0":
+            out.append(rw.Check("parent-read", rw.INFO,
+                                "folder is created on first publish", doc))
+        else:
+            out.append(rw.check_parent(provider, doc, "folder", pid))
+    return out
+
+
 def _credential_checks(rw, team, config):
     """-> (provider or None, [Check])."""
     name = "credentials"
@@ -502,6 +729,8 @@ def _credential_checks(rw, team, config):
     ref = cred.get("secretRef") if isinstance(cred, dict) else None
     try:
         provider = _make_provider(team, config)
+    except _ConfigError as exc:
+        return None, [rw.Check("host-guard", rw.FAIL, rw._one_line(exc))]
     except rw.WikiResolverUnavailableError:
         return None, [rw.Check(name, rw.WARN, f"secret resolver: {NEEDS_JSONSCHEMA}")]
     except rw.WikiCredentialError as exc:
@@ -532,8 +761,8 @@ def _doctor(args):
     try:
         config = _read_wiki_json(team, args.config_dir)
         validated = _full_validate(config, quiet=True)
-        if config.get("provider") != "confluence":
-            raise _ConfigError("wiki.json provider must be 'confluence'")
+        if config.get("provider") not in PROVIDERS:
+            raise _ConfigError("wiki.json provider must be 'confluence' or 'local'")
         if not isinstance(config.get("docTypes"), dict):
             raise _ConfigError("wiki.json docTypes must be an object")
     except _ConfigError as exc:
@@ -551,9 +780,19 @@ def _doctor(args):
     selected = [d for d in DOC_TYPES if d in docs and args.doc in (None, d)]
     if not selected:
         checks.append(rw.Check("wiki-json", rw.WARN, "no known doc types are mapped"))
+    kanban_dir = _resolve_config_dir(team, args.config_dir).parent
+    if config.get("provider") == "local":
+        checks.extend(_local_checks(rw, team, config, selected, args.config_dir))
+        for doc in selected:
+            _profile_checks(rw, team, doc, kanban_dir, checks)
+        return checks
+    try:
+        _guard_confluence_config(team, config)
+    except _ConfigError as exc:
+        checks.append(rw.Check("host-guard", rw.FAIL, rw._one_line(exc)))
+        return checks  # no credential resolution, no provider, no network
     provider, cred = _credential_checks(rw, team, config)
     checks.extend(cred)
-    kanban_dir = _resolve_config_dir(team, args.config_dir).parent
     for doc in selected:
         try:
             space, ptype, pid = _doc_mapping(config, doc)
@@ -611,7 +850,9 @@ def main(argv=None):
             sys.stdout.write(diff)
         return EXIT_VERSION_GUARD
     except rw.WikiError as exc:
-        _err(f"{type(exc).__name__}: {exc}")
+        # Message first (what a human reads), error class last as a grep-able tag.
+        # Every WikiError subclass prints this way; existing suites pin the tag.
+        _err(f"{exc} ({type(exc).__name__})")
         return EXIT_WIKI_ERROR
     except Exception as exc:  # never a traceback, never a secret
         _err(f"unexpected {type(exc).__name__}")
