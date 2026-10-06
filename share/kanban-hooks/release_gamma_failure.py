@@ -40,7 +40,7 @@ Superseded-by (spec 13.3 step 4 / G9): the held CR carries `gammaFailure`; `kb-r
 (release_cr_stage.CrStage._close_superseded).
 
 Exit codes (same table as cr-stage): 0 complete | 1 a tool failed or the rollback FAILED (re-run) | 2 usage /
-config | 3 refused (not GAMMA, not a lead, no rollbackSha, ...) | 5 STOPPED for the lead (redeploy / smoke result).
+config | 3 refused (not GAMMA, not a lead, no rollbackSha, regressed off GAMMA before the rollback records, ...) | 5 STOPPED for the lead (redeploy / smoke result).
 """
 from __future__ import annotations
 
@@ -434,6 +434,23 @@ class GammaFailure:
 
     def _rollback_step(self, test: str, result: Optional[str], user_notes: str, flag: str, what: str) -> Tuple[str, str]:
         board, rel = self._load()
+        step = "rollback-deploy" if test == T_DEPLOY else "rollback-smoke"
+        stage = self._stage(rel)
+        if stage != "GAMMA":
+            # XACA-1432 (XACA-1349-024): the lead regressed the release by hand BEFORE this record existed. The GAMMA
+            # /tests endpoint 409s off GAMMA, so recording would fail forever as "re-run". Refuse BEFORE pinning
+            # anything: the refused attempt must leave the marker untouched. (A record made before the regress is
+            # skipped by _is_done and never reaches here.)
+            raise CrStageError(
+                "release %s is at stage %s, no longer at GAMMA, so the %s result cannot be recorded. The GAMMA tests "
+                "endpoint only accepts records while the release is at GAMMA; re-running this command cannot succeed, "
+                "so nothing was posted and nothing on the failure marker was changed.\n"
+                "No sanctioned command re-enters GAMMA on the failed build: a forward `kb-release promote` is refused "
+                "for it, and the fix re-enters GAMMA under a new SHA and a new CR. This engine has no off-GAMMA "
+                "record path. The hold, notify and record steps did not run. Check where the failure stands with:\n"
+                "    kb-release gamma-fail %s --status\n"
+                "and ask the release lead to settle the remaining steps (CR hold, notice, Testing Log) by hand."
+                % (self.rel_id, stage, test, self.rel_id), rcs.RC_REFUSED, step)
         rsha = self._pin_rollback_sha(rel)
         board, rel = self._load()
         if test == T_SMOKE and not self._rollback_done(rel, T_DEPLOY):
@@ -444,7 +461,7 @@ class GammaFailure:
                 "STOPPED for the lead: %s. Then re-run:\n    kb-release gamma-fail %s --by %s %s PASS|FAIL [--%s-notes \"...\"]\n"
                 "The engine records the %r test; it does not deploy (no deploy provider exists)."
                 % (what % rsha, self.rel_id, self.by, flag, "rollback" if test == T_DEPLOY else "smoke", test),
-                RC_NEEDS_LEAD, "rollback-deploy" if test == T_DEPLOY else "rollback-smoke")
+                RC_NEEDS_LEAD, step)
         latest = self._fresh_record(self._latest(rel, test, rel["gammaFailure"]["gammaSha"]), rel["gammaFailure"])
         same = (latest is not None and latest.get("result") == result
                 and ("rollbackSha=%s" % rsha) in str(latest.get("notes", "")))
