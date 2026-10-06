@@ -30,7 +30,10 @@ document and nothing else (diagnostics go to stderr) on exit 0 and exit 4; on
 exit 1 or 2 stdout is EMPTY (the reason is on stderr) -- check the exit code
 before parsing. --doc is one of cr,
 testing-log, cr-record and must be mapped in the team's wiki.json docTypes.
---key is REL-... or CR-... (echoed back, never used to look anything up).
+--key is REL-... or CR-... (never used to LOOK UP a page). read and url do
+report whether the fetched page carries its identity label (identityMatches)
+and sits under the configured parent/space (underConfiguredParent); a consumer
+must require BOTH before trusting the echoed doc/key. A mismatch is still exit 0.
 --page-id is numeric.
 
 WRITE VERBS
@@ -60,7 +63,9 @@ WRITE VERBS
 READ VERBS (provider-generic: no Confluence-only field at the top level)
   read          --doc D --key K --page-id ID [--json]
       JSON: {"doc","key","pageId","title","version":int,"url","kind":"page",
-             "labels":[str],"ancestors":[{"id","title"}],"body"}
+             "labels":[str],"ancestors":[{"id","title"}],"body",
+             "identityLabel":str,"identityMatches":bool,
+             "underConfiguredParent":bool}
       Exit 1 if the page does not exist.
   find          --doc D --key K --title T [--json]
       Exact-title search in the doc type's mapped space. ZERO MATCHES IS AN
@@ -75,7 +80,9 @@ READ VERBS (provider-generic: no Confluence-only field at the top level)
       JSON: {"doc","parentType","parentId","children":[<match record above>]}
   url           --doc D --key K --page-id ID [--json]
       Prints the page URL after confirming the page exists (exit 1 if not).
-      JSON: {"doc","key","pageId","url"}
+      JSON: {"doc","key","pageId","url","identityLabel","identityMatches",
+             "underConfiguredParent"}
+      stdout stays the bare url; an unverified identity warns on stderr.
 
   doctor        [--doc D] [--json]
       Runs, in order: wiki-json (loads + validates), credentials (reports the
@@ -565,6 +572,10 @@ def _fmt_page(rec):
             f"title={rec['title']!r} url={rec['url']} ancestors={anc}")
 
 
+def _yn(flag):
+    return "yes" if flag else "no"
+
+
 def _run_read(args):
     """read / find / children / url."""
     import release_wiki as rw
@@ -574,12 +585,17 @@ def _run_read(args):
     provider = _make_provider(team, config, args.config_dir)
     cmd, doc, key = args.command, args.doc, getattr(args, "key", None)
     if cmd == "read":
-        rec = rw.read_page(provider, args.page_id)
+        page = provider.get_page(args.page_id)  # one fetch feeds both record and identity
+        rec = rw.page_record(page, body=True)
+        ident = rw.identity_fields(page, doc, key, space, pid)
         if args.json:
-            print(json.dumps({"doc": doc, "key": key, **rec}))
+            print(json.dumps({"doc": doc, "key": key, **rec, **ident}))
         else:
             print(f"kb-wiki: {_fmt_page(rec)}")
             print(f"labels: {', '.join(rec['labels']) or '-'}")
+            print(f"identity: label={ident['identityLabel']} "
+                  f"matches={_yn(ident['identityMatches'])} "
+                  f"under-configured-parent={_yn(ident['underConfiguredParent'])}")
             print()
             print(rec["body"])
     elif cmd == "find":
@@ -604,11 +620,18 @@ def _run_read(args):
             for k in kids:
                 print(f"  {_fmt_page(k)}")
     else:  # url
-        url = rw.confirmed_url(provider, args.page_id)
+        page = provider.get_page(args.page_id)  # exactly one fetch
+        url = rw.confirmed_url_from(page, provider)
+        ident = rw.identity_fields(page, doc, key, space, pid)
         if args.json:
-            print(json.dumps({"doc": doc, "key": key, "pageId": args.page_id, "url": url}))
+            print(json.dumps({"doc": doc, "key": key, "pageId": args.page_id, "url": url, **ident}))
         else:
-            print(url)
+            print(url)  # stdout is the bare url: scripts consume it
+            if not (ident["identityMatches"] and ident["underConfiguredParent"]):
+                print(f"kb-wiki: warning: page {args.page_id} is not verified as {doc} {key} "
+                      f"(identityMatches={str(ident['identityMatches']).lower()} "
+                      f"underConfiguredParent={str(ident['underConfiguredParent']).lower()})",
+                      file=sys.stderr)
     return EXIT_OK
 
 

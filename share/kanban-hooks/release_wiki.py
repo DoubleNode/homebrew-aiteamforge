@@ -299,38 +299,77 @@ def _kbwiki_labels(page: WikiPage) -> List[str]:
     return [l for l in page.labels if l.startswith(LABEL_PREFIX)]
 
 
+def _location_problem(live: WikiPage, space: str, parent_id) -> Optional[str]:
+    """The ONE location rule: why `live` is not the doc type's configured
+    page (None = fine). check_location raises it; under_configured_parent
+    reports it as a bool."""
+    parent_id = str(parent_id)
+    if live.id == parent_id:
+        return f"page {live.id} IS the configured parent; refusing to overwrite it"
+    if live.space and live.space != space:
+        return f"page {live.id} is in space {live.space!r}, not the configured {space!r}"
+    if not any(a.id == parent_id for a in live.ancestors):
+        return (f"page {live.id} is not under the configured parent {parent_id}; "
+                "it belongs to a different doc type, tree or space")
+    return None
+
+
 def check_location(live: WikiPage, space: str, parent_id) -> None:
     """Refuse (WikiLocationError, before ANY write) unless `live` sits under the
     doc type's configured parent, is not that parent itself, and (when the
     provider exposes it) is in the configured space."""
-    parent_id = str(parent_id)
-    if live.id == parent_id:
-        raise WikiLocationError(f"page {live.id} IS the configured parent; refusing to overwrite it")
-    if live.space and live.space != space:
-        raise WikiLocationError(
-            f"page {live.id} is in space {live.space!r}, not the configured {space!r}")
-    if not any(a.id == parent_id for a in live.ancestors):
-        raise WikiLocationError(
-            f"page {live.id} is not under the configured parent {parent_id}; "
-            "it belongs to a different doc type, tree or space")
+    problem = _location_problem(live, space, parent_id)
+    if problem:
+        raise WikiLocationError(problem)
+
+
+def _identity_problem(live: WikiPage, label: str) -> Optional[str]:
+    """The ONE identity rule (adopt=False verdict): why `live` is not the page
+    for `label` (None = it is). Any OTHER kb-wiki label disqualifies it, even
+    when `label` is present too."""
+    others = [l for l in _kbwiki_labels(live) if l != label]
+    if others:
+        return f"page {live.id} belongs to {_owner_of(others[0])}, not this record; refusing"
+    if label not in live.labels:
+        return (f"page {live.id} carries no {label!r} label (legacy or hand-made page); refusing. "
+                "Only if you are certain it is this record's page, re-run with --adopt "
+                "(this OVERWRITES its title and body)")
+    return None
 
 
 def check_identity(live: WikiPage, label: str, adopt: bool = False) -> bool:
     """The live page must carry THIS (doc, key) label. Returns True when the
     label still has to be applied (an unlabelled page with adopt=True). A page
     labelled for any other identity is refused even with adopt."""
-    others = [l for l in _kbwiki_labels(live) if l != label]
-    if others:
-        raise WikiIdentityError(
-            f"page {live.id} belongs to {_owner_of(others[0])}, not this record; refusing")
-    if label in live.labels:
+    problem = _identity_problem(live, label)
+    if problem is None:
         return False
-    if adopt:
+    if adopt and not _kbwiki_labels(live):
         return True
-    raise WikiIdentityError(
-        f"page {live.id} carries no {label!r} label (legacy or hand-made page); refusing. "
-        "Only if you are certain it is this record's page, re-run with --adopt "
-        "(this OVERWRITES its title and body)")
+    raise WikiIdentityError(problem)
+
+
+def identity_matches(page: WikiPage, label: str) -> bool:
+    """True only when `page` carries `label` and no other kb-wiki label."""
+    return _identity_problem(page, label) is None
+
+
+def under_configured_parent(page: WikiPage, space: str, parent_id) -> bool:
+    """True when `page` is a descendant of `parent_id` (not the parent itself)
+    and, when the provider exposes a space, in `space`."""
+    return _location_problem(page, space, parent_id) is None
+
+
+def identity_fields(page: WikiPage, doc: str, key: str, space: str, parent_id) -> dict:
+    """Verdict on an ALREADY-FETCHED page (no provider call): does it look like
+    the (doc, key) record? Checks identity (carries exactly this kb-wiki label,
+    no other) and location (under the configured parent, not the parent, right
+    space). Both `identityMatches` and `underConfiguredParent` must be True
+    before a caller treats the record as the (doc, key) page."""
+    label = identity_label(doc, key)
+    return {"identityLabel": label,
+            "identityMatches": identity_matches(page, label),
+            "underConfiguredParent": under_configured_parent(page, space, parent_id)}
 
 
 def _refuse_if_label_owned_elsewhere(provider: WikiProvider, space: str, label: str,
@@ -645,7 +684,11 @@ def child_records(provider: WikiProvider, parent_type: str, parent_id: str) -> L
 
 def confirmed_url(provider: WikiProvider, page_id: str) -> str:
     """The page URL, but only for a page that exists (a real read, not a format)."""
-    page = provider.get_page(page_id)
+    return confirmed_url_from(provider.get_page(page_id), provider)
+
+
+def confirmed_url_from(page: WikiPage, provider: WikiProvider) -> str:
+    """confirmed_url for a page the caller already fetched (one read, not two)."""
     return page.url or provider.page_url(page.id)
 
 
