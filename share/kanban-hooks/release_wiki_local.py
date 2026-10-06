@@ -137,7 +137,16 @@ def _meta_shape_ok(meta: dict) -> bool:
             and isinstance(meta.get("space"), str)
             and isinstance(version, int) and not isinstance(version, bool) and version >= 0
             and isinstance(meta.get("labels", []), list)
-            and isinstance(meta.get("ancestors", []), list))
+            and isinstance(meta.get("ancestors", []), list)
+            # Stored ids become path components (ancestors are re-read by id),
+            # so a hand-edited "../../x" must be corrupt metadata, never a
+            # path (XACA-1448-012). parent_id is only compared, but it feeds
+            # the same lineage, so it is held to the same rule.
+            and all(isinstance(a, dict) and isinstance(a.get("id"), str)
+                    and _ID.fullmatch(a["id"]) for a in meta.get("ancestors", []))
+            # Root-level items store parent_id "" (absent on older pages).
+            and (meta.get("parent_id") in (None, "")
+                 or (isinstance(meta["parent_id"], str) and bool(_ID.fullmatch(meta["parent_id"])))))
 
 
 def _now() -> str:
@@ -195,6 +204,11 @@ class LocalProvider(WikiProvider):
             parts = path.relative_to(self.root).parts
         except ValueError:
             raise WikiError(f"local wiki path escapes the root: {path}") from None
+        # relative_to() is lexical: "pages/../../x" is "under" the root on paper
+        # and the walk would lstat real directories all the way out. Refuse the
+        # parts outright rather than normalising them (XACA-1448-012).
+        if any(part in (".", "..") for part in parts):
+            raise WikiError(f"local wiki path escapes the root: {path}")
         cur = self.root
         for i, part in enumerate(("",) + parts):
             cur = cur / part if part else cur
@@ -282,6 +296,8 @@ class LocalProvider(WikiProvider):
         return self.root / "pages" / pid
 
     def _read_meta(self, pid: str) -> Optional[dict]:
+        if not isinstance(pid, str) or not _ID.fullmatch(pid):
+            raise WikiError(f"corrupt metadata: invalid page id {pid!r}")
         path = self._dir(pid) / "meta.json"
         try:
             raw = self._read_text(path)
