@@ -311,13 +311,23 @@ while IFS= read -r exc; do
         *$'\n'"$exc"$'\n'*) _parity_ok=false; echo "     STALE-EXCEPTION: '$exc' is now covered by a mandatory set — remove it from PARITY_KNOWN_EXCEPTIONS" >&2 ;;
     esac
 done <<< "$PARITY_KNOWN_EXCEPTIONS"
+# The guard predicate, shared with TEST 8 (XACA-1460-013) so the adversarial
+# table exercises THIS code, not a re-implementation: prints each referenced
+# name ($1, newline list) that is absent from the covered set ($2).
+_parity_offenders() {
+    local _refs="$1" _cover="$2" _mod
+    while IFS= read -r _mod; do
+        [ -n "$_mod" ] || continue
+        case $'\n'"$_cover"$'\n' in
+            *$'\n'"$_mod"$'\n'*) : ;;
+            *) printf '%s\n' "$_mod" ;;
+        esac
+    done <<< "$_refs"
+}
 while IFS= read -r mod; do
     [ -n "$mod" ] || continue
-    case $'\n'"$MANDATORY_SET"$'\n' in
-        *$'\n'"$mod"$'\n'*) : ;;
-        *) _parity_ok=false; echo "     DRIFT: '$mod' is imported by a shipped script but missing from the mandatory set" >&2 ;;
-    esac
-done <<< "$MISSING"
+    _parity_ok=false; echo "     DRIFT: '$mod' is imported by a shipped script but missing from the mandatory set" >&2
+done <<< "$(_parity_offenders "$MISSING" "$MANDATORY_SET")"
 if [ "$_parity_ok" = true ]; then
     test_pass
 else
@@ -402,11 +412,13 @@ while IFS=$'\t' read -r _lbl _sb _body _sib _exp _cons; do
     elif [ "$_exp" = miss ] && [ "$_hit" = yes ]; then
         _adv_ok=false; echo "     ADV[$_lbl]: '$_sib' detected but must not be (false positive)" >&2
     fi
-    # Predicate check: offender iff referenced AND not in the mandatory set.
+    # Guard check via the REAL TEST 6 predicate (_parity_offenders): the sibling
+    # must be an offender while uncovered and must clear once made mandatory.
     if [ "$_hit" = yes ]; then
         for _cover in no yes; do
             _m="$_mset"; [ "$_cover" = yes ] && _m="$_m"$'\n'"$_sib"
-            case $'\n'"$_m"$'\n' in *$'\n'"$_sib"$'\n'*) _off=no ;; *) _off=yes ;; esac
+            _off=no
+            case $'\n'"$(_parity_offenders "$_found" "$_m")"$'\n' in *$'\n'"$_sib"$'\n'*) _off=yes ;; esac
             if [ "$_cover" = no ] && [ "$_off" != yes ]; then _adv_ok=false; echo "     ADV[$_lbl]: uncovered '$_sib' not an offender" >&2; fi
             if [ "$_cover" = yes ] && [ "$_off" != no ]; then _adv_ok=false; echo "     ADV[$_lbl]: mandatory '$_sib' still an offender" >&2; fi
         done
