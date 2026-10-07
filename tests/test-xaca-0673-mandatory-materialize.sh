@@ -38,7 +38,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TAP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # XACA-1240: extracted upgrade/install functions call the shared atomic-write helper.
 source "$TAP_ROOT/libexec/lib/atomic-write.sh"
-UPGRADE_SH="$TAP_ROOT/libexec/commands/aiteamforge-upgrade.sh"
+# XACA-1460-004: test-only overrides so the guard can be mutation-proved against a
+# COPY of the upgrade script / share tree. Defaults are the real files.
+UPGRADE_SH="${XACA0673_UPGRADE_SH:-$TAP_ROOT/libexec/commands/aiteamforge-upgrade.sh}"
+GUARD_SHARE="${XACA0673_SHARE_DIR:-$TAP_ROOT/share}"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Standalone framework (works sourced by test-runner.sh OR invoked directly).
@@ -94,6 +97,7 @@ _extract_fn() {
 }
 for _fn in _xaca0608_render_team_script _xaca0608_aux_script_map \
            _xaca0608_aux_scriptdir_basenames _xaca0673_mandatory_materialize_basenames \
+           _xaca1143_aux_mandatory_materialize_basenames \
            update_runtime_helpers; do
     _src="$(_extract_fn "$_fn")"
     if [ -z "$_src" ]; then echo "FATAL: could not extract $_fn from upgrade.sh"; exit 1; fi
@@ -185,34 +189,84 @@ assert_contains $'\n'"$MANDATORY_SET"$'\n' $'\n'"$MANDATORY_NAME"$'\n' \
 # another shipped script but not added to the mandatory set, this FAILS.
 # ═══════════════════════════════════════════════════════════════════════════
 test_start "PARITY: every sibling-imported share/scripts module is in the mandatory set"
-MISSING="$(
-python3 - "$TAP_ROOT/share" <<'PY'
-import os, re, glob, sys
+# XACA-1460-004 widening: importers now include extensionless python-shebang files,
+# and references include dynamic loads (quoted exact basename / .py stem literals,
+# which catch _find_script("kb-wiki"), _load_script_module("x"),
+# spec_from_file_location(..., "x.py"), importlib and subprocess-by-name) in the
+# shipped kanban-hooks/ and lcars-ui/ trees. Narrowing (to avoid false positives):
+# tests/ dirs and test_* files are skipped; a file never counts as referencing
+# itself; dynamic refs are matched only against top-level regular files of
+# share/scripts. Static `import X` is matched only for .py stems (a hyphenated
+# extensionless script cannot be imported).
+# (Python body is written to a file first: bash 3.2 mis-scans quotes/parens inside a
+# heredoc nested in $( ), so it must not live inside the command substitution.)
+_SCAN_PY="$TEST_TMP_DIR/xaca0673-scan.py"
+cat > "$_SCAN_PY" <<'PY'
+import os, re, sys
 share = sys.argv[1]
-mods = {os.path.splitext(os.path.basename(p))[0]: os.path.normpath(p)
-        for p in glob.glob(os.path.join(share, "scripts", "*.py"))}
+sdir = os.path.normpath(os.path.join(share, "scripts"))
+files = [f for f in sorted(os.listdir(sdir)) if os.path.isfile(os.path.join(sdir, f))]
+names = {}                      # lookup token -> required basename
+for f in files:
+    names[f] = f
+    if f.endswith(".py"):
+        names[f[:-3]] = f
+def is_py_shebang(path):
+    try:
+        with open(path, "rb") as fh:
+            first = fh.readline(200)
+        return first.startswith(b"#!") and b"python" in first
+    except Exception:
+        return False
 imported = set()
-for root, _, files in os.walk(share):
-    for fn in files:
-        if not fn.endswith(".py"):
-            continue
+for root, dirs, fnames in os.walk(share):
+    if "tests" in os.path.normpath(root).split(os.sep):
+        continue
+    for fn in fnames:
         path = os.path.normpath(os.path.join(root, fn))
+        if fn.startswith("test_"):
+            continue
+        py = fn.endswith(".py")
+        xpy = ("." not in fn) and is_py_shebang(path)
+        dyn_tree = any(("/" + t + "/") in path.replace(os.sep, "/") for t in ("kanban-hooks", "lcars-ui"))
+        if not (py or xpy):
+            continue
         try:
             txt = open(path, encoding="utf-8", errors="ignore").read()
         except Exception:
             continue
-        for stem, modpath in mods.items():
-            if path == modpath:
+        for tok, base in names.items():
+            if os.path.normpath(os.path.join(sdir, base)) == path:
                 continue
-            if re.search(rf'(?m)^\s*(import\s+{re.escape(stem)}\b|from\s+{re.escape(stem)}\s+import)', txt):
-                imported.add(stem + ".py")
-# Print the sibling-imported module basenames (one per line).
+            if base.endswith(".py") and tok == base[:-3] and re.search(
+                    rf'(?m)^\s*(import\s+{re.escape(tok)}\b|from\s+{re.escape(tok)}\s+import)', txt):
+                imported.add(base)
+            if (dyn_tree or xpy) and re.search(r"""["']""" + re.escape(tok) + r"""["']""", txt):
+                imported.add(base)
 for name in sorted(imported):
     print(name)
 PY
-)"
+MISSING="$(python3 "$_SCAN_PY" "$GUARD_SHARE")"
 MANDATORY_SET="$(_xaca0673_mandatory_materialize_basenames)"
+# Known exceptions (documented follow-ups, NOT silently weakened):
+#   kb-cr.sh - referenced by server.py; aux-map-owned (refreshed if present) but not
+#   aux-mandatory. Always laid down by install-kanban.sh. XACA-1460 disposition
+#   follow-up 3: confirm whether it should be aux-mandatory.
+#   register-claude-hook.py - located by kb-msg-provision (extensionless python) via
+#   os.path.join; it is a *.py (refreshed if present) and kb-msg-provision degrades
+#   to a 'no-registrar' outcome when absent. Surfaced by the XACA-1460-004 widening;
+#   follow-up: decide whether it should be 0673-mandatory.
+PARITY_KNOWN_EXCEPTIONS=$'kb-cr.sh\nregister-claude-hook.py'
+# Consumer datafiles (msg-client.js, vault-keygen.js, ...) have their own refresh
+# path (_aitf_consumer_datafiles in libexec/lib/msg-client-deps.sh); extract by text.
+_DATAFILES="$(awk '/^_aitf_consumer_datafiles\(\) \{/{f=1;next} f&&/^EOF$/{exit} f&&!/cat <</{print}' "$TAP_ROOT/libexec/lib/msg-client-deps.sh")"
+[ -n "$_DATAFILES" ] || { _parity_ok_pre=false; echo "     FAIL-CLOSED: could not extract _aitf_consumer_datafiles" >&2; }
+# A reference is covered by 0673 OR the aux-mandatory set (XACA-1143) OR a known exception.
+MANDATORY_SET="$MANDATORY_SET"$'\n'"$(_xaca1143_aux_mandatory_materialize_basenames)"$'\n'"$PARITY_KNOWN_EXCEPTIONS"$'\n'"$_DATAFILES"
 _parity_ok=true
+[ "${_parity_ok_pre:-true}" = true ] || _parity_ok=false
+# Fail-closed: an empty scan (parse failure) must never pass.
+[ -n "$MISSING" ] || { _parity_ok=false; echo "     FAIL-CLOSED: importer/reference scan found nothing (expected many)" >&2; }
 while IFS= read -r mod; do
     [ -n "$mod" ] || continue
     case $'\n'"$MANDATORY_SET"$'\n' in
@@ -225,6 +279,55 @@ if [ "$_parity_ok" = true ]; then
 else
     test_fail "Sibling-imported shipped module(s) missing from _xaca0673_mandatory_materialize_basenames — add them"
 fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TEST 7 (XACA-1460): EXTENSIONLESS COVERAGE GUARD.
+# The sweep globs only *.sh / *.py plus an explicit name list, so a shipped
+# extensionless share/scripts file with no upgrade path is NEVER refreshed.
+# 0673 membership alone reaches nothing for such a file; it must be BOTH an
+# explicit sweep token AND in 0673 (precedent XACA-1300 / 1449 / 1460).
+# Parsed by text/awk; upgrade.sh is never sourced.
+# ═══════════════════════════════════════════════════════════════════════════
+# Allowlist: shipped, extensionless, deliberately NOT refreshed on consumers.
+#   kb-tap-release - dev-only: needs an outer dev-team checkout + scripts/kb-tap-lock.sh
+ALLOW_X="kb-tap-release"
+_sorted() { sort -u | sed '/^$/d'; }
+SHIPPED_X="$(find "$GUARD_SHARE/scripts" -maxdepth 1 -type f ! -name '*.*' -exec basename {} \; | _sorted)"
+_for_line="$(_extract_fn update_runtime_helpers | grep -m1 -E '^[[:space:]]*for src in ')"
+SWEEP_X="$(printf '%s\n' "$_for_line" | grep -oE '"\$scripts_source"/[A-Za-z0-9_.-]+' | sed 's#.*/##' | _sorted)"
+M0673="$(_xaca0673_mandatory_materialize_basenames | _sorted)"
+AUX_X="$(WORKING_DIR=/x _xaca0608_aux_script_map | cut -d'|' -f1 | _sorted)"
+_cnt() { if [ -n "$1" ]; then printf '%s\n' "$1" | wc -l | tr -d ' '; else echo 0; fi; }
+_in() { case $'\n'"$2"$'\n' in *$'\n'"$1"$'\n'*) return 0 ;; esac; return 1; }
+
+test_start "GUARD: shipped extensionless share/scripts files have an upgrade path (sweep+0673, aux, or allowlist)"
+_g_ok=true
+# fail-closed non-vacuity (floors, not equality; |SHIPPED_X| was 16 at time of writing)
+[ -n "$_for_line" ] || { _g_ok=false; echo "     FAIL-CLOSED: no 'for src in' line found in update_runtime_helpers" >&2; }
+[ "$(_cnt "$SHIPPED_X")" -ge 16 ] || { _g_ok=false; echo "     FAIL-CLOSED: |SHIPPED_X|=$(_cnt "$SHIPPED_X") < 16" >&2; }
+[ "$(_cnt "$SWEEP_X")" -ge 7 ]    || { _g_ok=false; echo "     FAIL-CLOSED: |SWEEP_X|=$(_cnt "$SWEEP_X") < 7 (unparseable sweep line?)" >&2; }
+[ "$(_cnt "$M0673")" -ge 1 ]      || { _g_ok=false; echo "     FAIL-CLOSED: 0673 set empty" >&2; }
+[ "$(_cnt "$AUX_X")" -ge 1 ]      || { _g_ok=false; echo "     FAIL-CLOSED: aux map empty" >&2; }
+if [ "$_g_ok" = true ]; then
+    # 1. coverage
+    while IFS= read -r n; do
+        [ -n "$n" ] || continue
+        if ! _in "$n" "$SWEEP_X" && ! _in "$n" "$AUX_X" && ! _in "$n" "$ALLOW_X"; then
+            _g_ok=false; echo "     UNCOVERED: share/scripts/$n is shipped but never refreshed on upgrade — add it to the update_runtime_helpers 'for src in' line AND _xaca0673_mandatory_materialize_basenames, or allowlist it in this test with a reason" >&2
+        fi
+    done <<< "$SHIPPED_X"
+    # 2. sweep entries must be mandatory-materialised
+    while IFS= read -r n; do
+        [ -n "$n" ] || continue
+        _in "$n" "$M0673" || { _g_ok=false; echo "     SWEEP-NOT-MANDATORY: '$n' is in the sweep line but not in _xaca0673_mandatory_materialize_basenames (never reaches pre-existing boxes)" >&2; }
+    done <<< "$SWEEP_X"
+    # 3. allowlist hygiene
+    for n in $ALLOW_X; do
+        _in "$n" "$SHIPPED_X" || { _g_ok=false; echo "     STALE-ALLOWLIST: '$n' is no longer shipped" >&2; }
+        if _in "$n" "$SWEEP_X" || _in "$n" "$AUX_X"; then _g_ok=false; echo "     STALE-ALLOWLIST: '$n' is now covered by sweep/aux — remove it from the allowlist" >&2; fi
+    done
+fi
+if [ "$_g_ok" = true ]; then test_pass; else test_fail "extensionless upgrade-path coverage guard failed (see messages above)"; fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Summary (standalone only).

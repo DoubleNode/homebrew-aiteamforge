@@ -3246,9 +3246,18 @@ PYEOF
 # rsyncs on every upgrade -- so an upgraded consumer gets the importers and
 # none of the modules (measured: release_cr_facts / release_cr_stage raise
 # ModuleNotFoundError: release_fact_dictionary). share/scripts/kb-wiki also
-# imports two of them, but kb-wiki itself is extensionless and not in the
-# sweep, so it is not refreshed on upgrade (separate gap). All four are .py,
-# so the glob sweep reaches them once listed.
+# imports two of them. All four are .py, so the glob sweep reaches them once
+# listed. (kb-wiki itself was extensionless and not in the sweep, so it was not
+# refreshed on upgrade -- that gap is closed by XACA-1460 below.)
+# XACA-1460: six more extensionless shipped scripts that no sweep reached:
+# aiteamforge-paths, kb-notify, kb-release-push-promote, kb-release-version-bump,
+# kb-release-version-gate and kb-wiki. The *.sh/*.py globs cannot match an
+# extensionless name, so an upgraded consumer never received them (fresh installs
+# were fine: aiteamforge-setup.sh bulk-copies share/scripts/) and a stale copy was
+# never refreshed. Each needs BOTH this entry (materialise when absent) and an
+# explicit entry in update_runtime_helpers' sweep loop -- the kb-pr-base
+# (XACA-1449) / kb-token-report (XACA-1300) shape. kb-tap-release is deliberately
+# NOT listed or swept: dev-only, needs an outer dev-team checkout + kb-tap-lock.sh.
 _xaca0673_mandatory_materialize_basenames() {
   cat <<'EOF'
 iterm2_venv_bootstrap.py
@@ -3287,6 +3296,12 @@ release_fact_dictionary.py
 release_profile_resolver.py
 release_profile_validate.py
 release_template_render.py
+aiteamforge-paths
+kb-notify
+kb-release-push-promote
+kb-release-version-bump
+kb-release-version-gate
+kb-wiki
 EOF
 }
 
@@ -3313,12 +3328,15 @@ update_runtime_helpers() {
   local updated=0
   local src name target
   # Sweep shipped helpers. kb-init-team, kb-api-key, kb-msg-provision,
-  # kb-spacedock (XACA-1071), kb-pr-monitor (XACA-1275), kb-pr-base (XACA-1449) and kb-token-report
-  # (XACA-1300) are
+  # kb-spacedock (XACA-1071), kb-pr-monitor (XACA-1275), kb-pr-base (XACA-1449), kb-token-report
+  # (XACA-1300) and aiteamforge-paths, kb-notify, kb-release-push-promote,
+  # kb-release-version-bump, kb-release-version-gate, kb-wiki (XACA-1460) are
   # extensionless, so each is listed explicitly alongside the *.sh / *.py
   # globs (XACA-0395: same gap class as kb-init-team — the glob cannot match
   # an extensionless name; kb-msg-provision added under XACA-1078-004).
-  for src in "$scripts_source"/*.sh "$scripts_source"/*.py "$scripts_source"/kb-init-team "$scripts_source"/kb-api-key "$scripts_source"/kb-msg-provision "$scripts_source"/kb-spacedock "$scripts_source"/kb-pr-monitor "$scripts_source"/kb-pr-base "$scripts_source"/kb-token-report; do
+  # kb-tap-release is deliberately NOT swept (dev-only: needs an outer dev-team
+  # checkout + kb-tap-lock.sh); the XACA-0673 guard allowlists it.
+  for src in "$scripts_source"/*.sh "$scripts_source"/*.py "$scripts_source"/kb-init-team "$scripts_source"/kb-api-key "$scripts_source"/kb-msg-provision "$scripts_source"/kb-spacedock "$scripts_source"/kb-pr-monitor "$scripts_source"/kb-pr-base "$scripts_source"/kb-token-report "$scripts_source"/aiteamforge-paths "$scripts_source"/kb-notify "$scripts_source"/kb-release-push-promote "$scripts_source"/kb-release-version-bump "$scripts_source"/kb-release-version-gate "$scripts_source"/kb-wiki; do
     [ -f "$src" ] || continue
     name="$(basename "$src")"
     target="${scripts_dest}/${name}"
