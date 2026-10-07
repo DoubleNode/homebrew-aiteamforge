@@ -268,7 +268,7 @@ CI_RUNNER_STATE="unknown"; CI_RUNNER_REASONS=""; CI_RUNNER_INFO=""
 _cirv_note() { CI_RUNNER_REASONS="${CI_RUNNER_REASONS:+${CI_RUNNER_REASONS}
 }$1"; }
 ci_runner_assess() {
-    local host="${1:-}" bundle="${2:-}" pin rc=0 warn=0 unk=0 regmin pv maxd now ts then age_s age_d
+    local host="${1:-}" bundle="${2:-}" pin rc=0 warn=0 unk=0 regmin pv maxd now ts age_s age_d
     local os rec v sha src c line
     CI_RUNNER_STATE="unknown"; CI_RUNNER_REASONS=""; CI_RUNNER_INFO=""
     pin="${bundle}/runner-pin.conf"
