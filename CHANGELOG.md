@@ -6,6 +6,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1432-008** (Fixed): `share/kanban-hooks/release_gamma_failure.py` re-mirrored. The off-GAMMA refusal no longer claims a forward promote is refused for the failed build; it names the failed build and gives the tested remedy (return to GAMMA on that build and re-run, else settle hold/notice/Testing Log by hand). Verbatim copy of canonical.
 - **XACA-1448-013** (Fixed, PR #1074 review advisory): `share/kanban-hooks/release_wiki_local.py` requires stored ancestor and parent ids in canonical form, so `01000` is corrupt metadata rather than a second spelling of page 1000 copied into children.
 - **XACA-1448-012** (Fixed/Security, PR #1074 review round 3): `share/kanban-hooks/release_wiki_local.py` refuses `..` path parts in its containment walk and requires every stored `ancestors[].id` and non-empty `parent_id` to be numeric, so a planted `../../outside/x` ancestor id is corrupt metadata instead of a read outside `<team-kanban>/wiki/`.
 - **XACA-1432** (Fixed): `share/kanban-hooks/release_gamma_failure.py` mirrored. `kb-release gamma-fail` refuses (rc 3) with an actionable message when the release was regressed off GAMMA by hand before the rollback-deploy / rollback-smoke records existed, instead of looping on a 409 from the GAMMA tests endpoint. The refused attempt writes nothing. Verbatim copy of canonical.

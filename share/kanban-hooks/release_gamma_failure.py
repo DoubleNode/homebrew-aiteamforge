@@ -441,16 +441,21 @@ class GammaFailure:
             # /tests endpoint 409s off GAMMA, so recording would fail forever as "re-run". Refuse BEFORE pinning
             # anything: the refused attempt must leave the marker untouched. (A record made before the regress is
             # skipped by _is_done and never reaches here.)
+            # The remedy below is the tested one (test_by_hand_regress_then_back_at_gamma_on_the_failed_build_completes):
+            # a by-hand regress never stamps regressedAt, so back at GAMMA on the same build the marker governs again.
             raise CrStageError(
                 "release %s is at stage %s, no longer at GAMMA, so the %s result cannot be recorded. The GAMMA tests "
-                "endpoint only accepts records while the release is at GAMMA; re-running this command cannot succeed, "
-                "so nothing was posted and nothing on the failure marker was changed.\n"
-                "No sanctioned command re-enters GAMMA on the failed build: a forward `kb-release promote` is refused "
-                "for it, and the fix re-enters GAMMA under a new SHA and a new CR. This engine has no off-GAMMA "
-                "record path. The hold, notify and record steps did not run. Check where the failure stands with:\n"
-                "    kb-release gamma-fail %s --status\n"
-                "and ask the release lead to settle the remaining steps (CR hold, notice, Testing Log) by hand."
-                % (self.rel_id, stage, test, self.rel_id), rcs.RC_REFUSED, step)
+                "endpoint only accepts records while the release is at GAMMA; re-running this command as-is cannot "
+                "succeed, so nothing was posted and nothing on the failure marker was changed. The hold, notify and "
+                "record steps did not run.\n"
+                "The rollback records are bound to the failed build (stageSha.GAMMA %s). Either:\n"
+                "  - return the release to GAMMA on that same build, then re-run this command; or\n"
+                "  - if it cannot return to GAMMA on that build, settle the remaining steps (CR hold, notice, Testing "
+                "Log) by hand; this engine has no off-GAMMA record path.\n"
+                "Check where the failure stands with:\n"
+                "    kb-release gamma-fail %s --status"
+                % (self.rel_id, stage, test, str(rel["gammaFailure"].get("gammaSha", "?"))[:12], self.rel_id),
+                rcs.RC_REFUSED, step)
         rsha = self._pin_rollback_sha(rel)
         board, rel = self._load()
         if test == T_SMOKE and not self._rollback_done(rel, T_DEPLOY):
