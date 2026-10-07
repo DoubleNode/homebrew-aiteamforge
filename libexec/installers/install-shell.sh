@@ -13,6 +13,9 @@ source "$SCRIPT_DIR/../lib/imgcat-provision.sh"
 # shared verbatim with aiteamforge-upgrade.sh — see that file for the sourcing
 # and libexec/lib/msg-client-deps.sh for the full root-cause writeup.
 source "$SCRIPT_DIR/../lib/msg-client-deps.sh"
+# XACA-1443-001: DORMANT Fleet CI Pool bundle placement (files only; nothing is
+# executed or activated). Shared verbatim with aiteamforge-upgrade.sh.
+source "$SCRIPT_DIR/../lib/ci-runner-bundle.sh"
 
 #──────────────────────────────────────────────────────────────────────────────
 # Constants
@@ -330,6 +333,12 @@ install_helper_scripts() {
             chmod 644 "$scripts_dest/$datafile"
         fi
     done
+
+    # XACA-1443-001: dormant CI-runner provisioning bundle -> scripts/ci-runner/.
+    # Files only: no user, no launchd job, no VM, no runner registration. It lives
+    # in a SUBDIRECTORY, so the flat helper loops above and setup's bulk
+    # `find -maxdepth 1` copy never reach it. `aiteamforge ci enable` activates it.
+    _aitf_install_ci_runner_bundle "$scripts_src" "$scripts_dest"
 
     success "Installed helper scripts"
 }

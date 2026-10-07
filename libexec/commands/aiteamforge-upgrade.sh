@@ -29,6 +29,9 @@ source "${LIBEXEC_DIR}/lib/launchagents.sh"
 # libexec/lib/msg-client-deps.sh for the sourcing on that side and the full
 # root-cause writeup.
 source "${LIBEXEC_DIR}/lib/msg-client-deps.sh"
+# XACA-1443-001: DORMANT Fleet CI Pool bundle placement, shared verbatim with
+# install-shell.sh (fresh installs). Files only -- see lib/ci-runner-bundle.sh.
+source "${LIBEXEC_DIR}/lib/ci-runner-bundle.sh"
 # XACA-0931: shared nested-project persona deploy-target enumerator — the
 # SAME enumerator aiteamforge-persona-parity-check.sh's S3 surface uses
 # (XACA-0931-003), so the upgrade-path fixer and the drift detector can never
@@ -3448,6 +3451,15 @@ update_runtime_helpers() {
       updated=$((updated + 1))
     done
   fi
+
+  # XACA-1443-001: dormant CI-runner provisioning bundle (scripts/ci-runner/). A
+  # subdirectory, so neither the flat *.sh/*.py sweep nor the datafile loop above
+  # reaches it -- without this step upgraded boxes would never receive it (the
+  # XACA-1449 install-vs-upgrade asymmetry). Always (re)written, materialised when
+  # absent. Files only: this NEVER runs provision-host.sh, creates a user, loads a
+  # plist or registers a runner; `aiteamforge ci enable` is the only activation.
+  _aitf_install_ci_runner_bundle "$scripts_source" "$scripts_dest" "$([ "$DRY_RUN" = true ] && echo dry)"
+  updated=$((updated + AITF_CI_BUNDLE_COUNT))
 
   if [ $updated -eq 0 ]; then
     print_success "All runtime helper scripts up to date"
