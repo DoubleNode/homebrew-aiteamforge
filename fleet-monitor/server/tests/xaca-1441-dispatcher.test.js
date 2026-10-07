@@ -539,6 +539,43 @@ describe('ghost demand is bounded end to end (PR #1083)', () => {
         assert.ok(s.auditRows.some((r) => r.event === 'expire' && /tracked over 1 h/.test(r.reason)));
     });
 
+    test('unpicked runners accumulate across ticks: pruned terminal records do not reset the count (PR #1086 advisory)', async () => {
+        const s = setup({ machines: ['m4mini'], maxMintsPerJob: 3 });
+        s.d.onJob(rec(101), 'queued'); // tracked; no machine reports, so nothing is minted
+        const unbound = (id) => ({ id, state: 'expired', boundJob: null, reason: 'timeout', intendedJob: { id: 101 }, machine: 'm4mini', os: 'Linux' });
+        const real = s.assignments.snapshot.bind(s.assignments);
+        // tick 1 sees two expired-unpicked runners; by tick 2 they were pruned and only a third remains
+        const views = [[unbound('a_1'), unbound('a_2')], [unbound('a_3')]];
+        let n = 0;
+        s.assignments.snapshot = () => real().concat(views[Math.min(n, views.length - 1)]);
+        await s.d.tick(); n++;
+        assert.equal(s.d.queue().some((q) => q.jobId === 101), true, 'two unpicked: still tracked');
+        await s.d.tick();
+        assert.equal(s.d.queue().some((q) => q.jobId === 101), false, 'three distinct unpicked across ticks: retired');
+        assert.ok(s.auditRows.some((r) => r.event === 'expire' && r.jobId === 101 && /3 runners expired unpicked/.test(r.reason)));
+    });
+
+    test('allowlist remove + re-add within retention: the still-queued job is tracked and dispatched again (PR #1086)', async () => {
+        const world = fakeWorld();
+        world.queued = [ghRun(7)]; world.jobs[7] = [ghJob(101)];
+        let list = [REPO];
+        const s = setup({
+            machines: ['m4mini'],
+            makeWatcher: ({ now, onJob }) => createWatcher({ github: world.github, getAllowlist: () => list, now, onJob, log: () => {} }),
+        });
+        const step = async () => { s.clock.t += 30 * 1000; s.report('m4mini', {}, 2); await s.d.tick(); };
+        await step();
+        assert.equal(s.d.queue().some((q) => q.jobId === 101) || s.auditRows.some((r) => r.event === 'assign' && r.jobId === 101), true, 'fixture: job 101 is demand');
+        list = [];
+        await step();
+        assert.equal(s.d.queue().some((q) => q.jobId === 101), false, 'removed repo: no longer demand');
+        list = [REPO];
+        const mintedBefore = s.auditRows.filter((r) => r.event === 'assign' && r.jobId === 101 && r.state !== 'mint-failed').length;
+        await step();
+        const mintedAfter = s.auditRows.filter((r) => r.event === 'assign' && r.jobId === 101 && r.state !== 'mint-failed').length;
+        assert.ok(s.d.queue().some((q) => q.jobId === 101) || mintedAfter > mintedBefore, 're-added repo: job 101 is demand again');
+    });
+
     test('control: a live, listed, still-queued job keeps being dispatched (no false retirement)', async () => {
         const g = build();
         await g.step();

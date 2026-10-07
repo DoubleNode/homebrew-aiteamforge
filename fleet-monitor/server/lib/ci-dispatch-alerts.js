@@ -20,8 +20,9 @@
  *   - A throwing emitter never propagates: the alert falls back to the log path.
  *
  * Types in use: ci-no-capacity (high), ci-dispatcher-degraded (warning),
- * ci-fork-job-on-pool (warning). The first two must be added to the XACA-1399 notice-type
- * catalog (noted on that dependency, not done here).
+ * ci-fork-job-on-pool (warning), ci-job-misconfigured (warning; XACA-1441-031: a pool job
+ * whose labels are ambiguous, deduped per repo). All but ci-fork-job-on-pool must be added
+ * to the XACA-1399 notice-type catalog (noted on that dependency, not done here).
  *
  * Alert text must never carry secrets: callers pass reasons/counters only; text is
  * control-stripped and length-capped here as a last line of defence.

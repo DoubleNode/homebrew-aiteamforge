@@ -471,9 +471,9 @@ describe('vanished jobs end in a terminal event (PR #1083)', () => {
  * world.jobs[runId] = [...]. A page whose body equals the previous body for the same path answers 304.
  */
 function makePagedWorld() {
-    const world = { queued: [], in_progress: [], jobs: {}, calls: [], seen: new Map() };
+    const world = { queued: [], in_progress: [], jobs: {}, calls: [], seen: new Map(), rate: { mode: 'normal', resumeAt: null } };
     world.github = {
-        getRateState: () => ({ mode: 'normal', resumeAt: null }),
+        getRateState: () => ({ ...world.rate }),
         async conditionalGet({ owner, repo, path }) {
             world.calls.push({ owner, repo, path });
             const page = Number((/[?&]page=(\d+)/.exec(path) || [null, 1])[1]);
@@ -496,11 +496,12 @@ const pagedSetup = (over = {}) => {
     const world = makePagedWorld();
     const events = [];
     const logs = [];
+    const clock = { t: T0 };
     const w = createWatcher({
-        github: world.github, allowlist: [REPO], now: () => T0,
+        github: world.github, allowlist: [REPO], now: () => clock.t,
         onJob: (rec, change) => events.push({ change, rec }), log: (l, m) => logs.push([l, m]), ...over,
     });
-    return { world, events, logs, w };
+    return { world, events, logs, w, clock };
 };
 const pagesOf = (world, re) => world.calls.filter((c) => re.test(c.path)).map((c) => Number((/[?&]page=(\d+)/.exec(c.path) || [null, 1])[1]));
 
@@ -659,6 +660,75 @@ describe('live allowlist (029)', () => {
         assert.equal(done.length, 1);
         assert.equal(done[0].rec.conclusion, 'vanished');
         assert.equal(done[0].rec.jobId, 11);
+    });
+
+    // PR #1086 review BLOCKING: a removal-vanish poisoned the terminal dedupe, so a repo re-added within
+    // the retention window had its still-live jobs ignored as "already terminal": never re-emitted, never
+    // tracked, no alert. Rows: [name, job status while removed, cycle between remove and re-add, re-add delay].
+    const READD_ROWS = [
+        ['queued job, cycle between, re-added within retention', 'queued', true, 60 * 1000],
+        ['in_progress job, cycle between, re-added within retention', 'in_progress', true, 60 * 1000],
+        ['queued job, NO cycle between remove and re-add', 'queued', false, 0],
+        ['queued job, cycle between, re-added past retention', 'queued', true, 2 * 3600 * 1000],
+        ['in_progress job, cycle between, re-added past retention', 'in_progress', true, 2 * 3600 * 1000],
+    ];
+    for (const [name, status, cycleBetween, delayMs] of READD_ROWS) {
+        test(`allowlist remove + re-add: ${name} is seen again`, async () => {
+            let list = [REPO];
+            const { world, clock, events, w } = pagedSetup({ allowlist: undefined, getAllowlist: () => list });
+            const runner = status === 'in_progress' ? { runner_name: 'fcp-x-1' } : {};
+            world.queued = status === 'queued' ? [run(1)] : [];
+            world.in_progress = status === 'in_progress' ? [run(1)] : [];
+            world.jobs[1] = [job(11, { status, ...runner })];
+            await w.runCycle();
+            list = [];
+            if (cycleBetween) await w.runCycle();
+            clock.t += delayMs;
+            list = [REPO];
+            const before = events.length;
+            await w.runCycle();
+            const after = events.slice(before).filter((e) => e.rec.jobId === 11).map((e) => e.change);
+            if (cycleBetween) {
+                // seen afresh: first sighting again, never silently ignored
+                assert.ok(after.includes(status === 'queued' ? 'queued' : 'seen'), `${name}: got [${after}]`);
+            } else {
+                // nothing changed from the watcher's point of view: no vanish was emitted at all
+                assert.equal(events.filter((e) => e.change === 'completed' && e.rec.jobId === 11).length, 0);
+            }
+            // and the job's REAL completion is still observed afterwards
+            world.queued = []; world.in_progress = [];
+            world.jobs[1] = [job(11, { status: 'completed', conclusion: 'success', ...runner })];
+            await w.runCycle();
+            const real = events.filter((e) => e.change === 'completed' && e.rec.jobId === 11 && e.rec.conclusion === 'success');
+            assert.equal(real.length, 1, `${name}: real completion observed`);
+        });
+    }
+
+    test('allowlist remove during a rate-suspended cycle (no prune runs) + re-add: the unchanged run is re-fetched', async () => {
+        // A suspended cycle returns before prune(), so only refreshRepos can forget the removed repo's
+        // run entries. If it kept them, the re-added run would look unchanged and never be re-fetched.
+        let list = [REPO];
+        const { world, events, w } = pagedSetup({ allowlist: undefined, getAllowlist: () => list });
+        world.queued = [run(1)];
+        world.jobs[1] = [job(11)];
+        await w.runCycle();
+        world.rate = { mode: 'suspended', resumeAt: null };
+        list = [];
+        await w.runCycle();           // removal applied; cycle returns early, no prune
+        world.rate = { mode: 'normal', resumeAt: null };
+        list = [REPO];
+        const before = events.length;
+        await w.runCycle();
+        const after = events.slice(before).filter((e) => e.rec.jobId === 11).map((e) => e.change);
+        assert.ok(after.includes('queued'), `job 11 seen again after re-add, got [${after}]`);
+    });
+
+    test('boot with a getter: an invalid entry is warned about once and no "allowlist now" line is logged (PR #1086 advisory)', async () => {
+        const { logs, w } = pagedSetup({ allowlist: [REPO, 'not a repo'], getAllowlist: () => [REPO, 'not a repo'] });
+        await w.runCycle();
+        await w.runCycle();
+        assert.equal(logs.filter(([, m]) => /invalid allowlist entry/.test(m)).length, 1, 'one warning for the invalid entry');
+        assert.equal(logs.filter(([, m]) => /allowlist now/.test(m)).length, 0, 'no change line at boot');
     });
 
     test('the getter is read every cycle, but an unchanged list is parsed (and an invalid entry warned about) once', async () => {

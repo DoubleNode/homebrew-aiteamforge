@@ -296,13 +296,20 @@ function createDispatcher(deps) {
             }
             if ((a.state === 'expired' || a.state === 'cancelled' || a.state === 'failed') && !a.boundJob &&
                 a.reason !== 'restart' && a.intendedJob && a.intendedJob.id !== null) {
-                unpicked.set(a.intendedJob.id, (unpicked.get(a.intendedJob.id) || 0) + 1);
+                if (!unpicked.has(a.intendedJob.id)) unpicked.set(a.intendedJob.id, []);
+                unpicked.get(a.intendedJob.id).push(a.id);
             }
         }
 
         // Ghost backstop: retire tracked jobs that can no longer be real demand.
+        // The unpicked runners are ACCUMULATED on the tracked entry (by assignment id), not re-derived
+        // from the snapshot each tick: terminal assignment records are pruned (24 h / 500), so under
+        // churn a snapshot-only count could fall back below the bound and never retire a ghost
+        // (PR #1086 review advisory).
         for (const [key, t] of tracked) {
-            const n = unpicked.get(t.rec.jobId) || 0;
+            if (!t.unpickedIds) t.unpickedIds = new Set();
+            for (const id of unpicked.get(t.rec.jobId) || []) t.unpickedIds.add(id);
+            const n = t.unpickedIds.size;
             const why = n >= maxMintsPerJob ? `${n} runners expired unpicked`
                 : (nowMs - t.trackedAt > maxTrackedMs ? `tracked over ${Math.round(maxTrackedMs / 3600000)} h` : null);
             if (!why) continue;

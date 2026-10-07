@@ -94,7 +94,9 @@ function createWatcher(opts = {}) {
     const log = typeof opts.log === 'function' ? opts.log : () => {};
     const onJob = opts.onJob;
     const getAllowlist = typeof opts.getAllowlist === 'function' ? opts.getAllowlist : null;
-    let repos = parseAllowlist(opts.allowlist, log);
+    // With a live getter the first cycle's read is the source; parsing the static list too would warn
+    // about an invalid entry twice at boot (PR #1086 advisory).
+    let repos = getAllowlist ? [] : parseAllowlist(opts.allowlist, log);
     let allowlistKey = getAllowlist ? null : JSON.stringify(opts.allowlist === undefined ? null : opts.allowlist);
     const retentionMs = opts.completedRetentionMs ?? COMPLETED_RETENTION_MS;
     const maxJobs = opts.maxTrackedJobs ?? MAX_TRACKED_JOBS;
@@ -360,13 +362,24 @@ function createWatcher(opts = {}) {
         }
         const key = JSON.stringify(raw === undefined ? null : raw);
         if (key === allowlistKey) return;
+        const firstRead = allowlistKey === null;
         allowlistKey = key;
         repos = parseAllowlist(raw, log);
         const keep = new Set(repos.map((r) => r.slug.toLowerCase()));
-        for (const e of jobs.values()) {
-            if (e.rec.status !== 'completed' && !keep.has(`${e.rec.owner}/${e.rec.repo}`.toLowerCase())) vanish(e, nowMs, 'repo removed from the allowlist');
+        // A removal is NOT a terminal sighting (PR #1086 review). Emit `completed` so consumers stop
+        // treating the open jobs as demand, then FORGET the repo entirely: its job entries (else a
+        // re-add within the dedupe retention ignores the still-queued job as already terminal) and its
+        // run entries (else an unchanged run is never re-fetched). A re-add then sees every job afresh.
+        for (const [jk, e] of jobs) {
+            if (keep.has(`${e.rec.owner}/${e.rec.repo}`.toLowerCase())) continue;
+            if (e.rec.status !== 'completed') vanish(e, nowMs, 'repo removed from the allowlist');
+            jobs.delete(jk);
         }
-        log('log', `watcher: allowlist now ${repos.length} repo(s)`);
+        for (const rk of runs.keys()) {
+            const slug = rk.slice(0, rk.lastIndexOf('#')).toLowerCase();
+            if (!keep.has(slug)) runs.delete(rk);
+        }
+        if (!firstRead) log('log', `watcher: allowlist now ${repos.length} repo(s)`);
     }
 
     /** One polling cycle; resolves to the delay (ms) before the next one. Never throws. */
