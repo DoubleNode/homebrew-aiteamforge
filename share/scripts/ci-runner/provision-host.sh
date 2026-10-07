@@ -120,11 +120,17 @@
 set -euo pipefail
 
 # ── Constants ─────────────────────────────────────────────────────────────
-CI_USER="ci-runner"
+# Root-owned locations. Each can be redirected with the SAME env names teardown-host.sh uses (XACA-1443-015),
+# so the idempotency / manifest tests can run this script for real in a sandbox. A sudo'd script does not
+# inherit the caller's environment (env_reset), so these are not an injection route; unset = the real paths.
+CI_USER="${CI_RUNNER_USER:-ci-runner}"
 CI_GROUP="ci-runner"
-CI_HOME="/Users/${CI_USER}"
+CI_HOME="${CI_RUNNER_HOME:-/Users/${CI_USER}}"
 CI_PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-LIMACTL="/opt/homebrew/bin/limactl"
+LIMACTL="${CI_LIMACTL_PATH:-/opt/homebrew/bin/limactl}"
+LD_DIR="${CI_LAUNCHDAEMONS_DIR:-/Library/LaunchDaemons}"
+LIBEXEC_DIR="${CI_LIBEXEC_DIR:-/usr/local/libexec}"
+MANIFEST_DIR="${CIH_STATE_DIR:-/usr/local/etc/ci-runner}"   # XACA-1440 pause markers live here too
 
 # Host-shaped values: set from flags, names derived in derive_names() after
 # parsing. Defaults reproduce the M1Mini shape.
@@ -158,7 +164,7 @@ GUEST_SCRIPT="/usr/local/sbin/ci-runner-install.sh"
 # Reporter (XACA-1387-004)
 LABEL_REPORTER=""        # derived
 PLIST_REPORTER=""
-REPORTER_DEST="/usr/local/libexec/ci-runner-reporter.sh"
+REPORTER_DEST="${LIBEXEC_DIR}/ci-runner-reporter.sh"
 REPORTER_MACHINE=""      # derived: <host>
 REPORTER_INTERVAL=60
 REPORTER_CFG_DIR="${CI_HOME}/.aiteamforge"
@@ -179,25 +185,26 @@ FLEET_CONFIG_SRC="${FLEET_CONFIG_SRC:-}"   # --fleet-config / env; default resol
 # Fleet CI Pool agent (XACA-1442). Only used under --with-agent.
 WITH_AGENT=0
 NO_REGISTER=0
+REFUSE_IF_BUSY=0         # XACA-1443-015: `ci refresh` re-provisions an ENABLED host; refuse (rc 3) while a pool job runs
 AGENT_KEY_FILE=""
 TELEMETRY_KEY_FILE=""    # XACA-1422: per-host fct_ key for the reporter
 SERVER_URL=""
 LABEL_AGENT=""           # derived
 PLIST_AGENT=""
-AGENT_DEST="/usr/local/libexec/ci-pool-agent.py"
-AGENT_CFG_DIR="/usr/local/etc/ci-pool-agent"
+AGENT_DEST="${LIBEXEC_DIR}/ci-pool-agent.py"
+AGENT_CFG_DIR="${CI_AGENT_CFG_DIR:-/usr/local/etc/ci-pool-agent}"
 AGENT_CFG="${AGENT_CFG_DIR}/agent.json"
 AGENT_KEY="${AGENT_CFG_DIR}/agent.key"
-AGENT_STATE_DIR="/usr/local/var/ci-pool-agent"
-AGENT_LOG_DIR="/Library/Logs/ci-pool-agent"
+AGENT_STATE_DIR="${CI_AGENT_STATE_DIR:-/usr/local/var/ci-pool-agent}"
+AGENT_LOG_DIR="${CI_AGENT_LOG_DIR:-/Library/Logs/ci-pool-agent}"
 AGENT_SRC="${_PH_CLIENT}/ci-pool-agent.py"
 GUEST_JIT_SRC="${_PH_CLIENT}/ci-runner-jit-guest.sh"
 MAC_JIT_SRC="${_PH_CLIENT}/ci-runner-jit-macos.sh"
 JOB_STARTED_SRC="${_PH_CLIENT}/ci-runner-job-started.sh"
 GUEST_JIT_DEST="/usr/local/sbin/ci-runner-jit.sh"
 GUEST_JOB_STARTED_DEST="/usr/local/sbin/ci-runner-job-started.sh"
-MAC_JIT_DEST="/usr/local/libexec/ci-runner-jit-macos.sh"
-MAC_JOB_STARTED_DEST="/usr/local/libexec/ci-runner-job-started.sh"
+MAC_JIT_DEST="${LIBEXEC_DIR}/ci-runner-jit-macos.sh"
+MAC_JOB_STARTED_DEST="${LIBEXEC_DIR}/ci-runner-job-started.sh"
 
 # ── Args ──────────────────────────────────────────────────────────────────
 MODE="provision"      # provision | dry-run | status | baseline-only
@@ -230,6 +237,8 @@ Host shape (all optional except --host):
   --legacy-names       unsuffixed VM/daemon names (M1Mini wrapper only)
   --no-register        register no GitHub runner (VM + baseline + cache + reporter only);
                        no token needed; not combinable with --token-file
+  --refuse-if-busy     exit 3, changing nothing, while the agent's slots.json shows a pool job
+                       starting/busy/cleaning (or cannot be read). `aiteamforge ci refresh` passes it.
 
 Fleet CI Pool agent (XACA-1442, opt-in; nothing is installed without --with-agent):
   --with-agent         install the agent daemon (runs as root) + JIT scripts
@@ -274,6 +283,7 @@ while [ $# -gt 0 ]; do
     --legacy-names) LEGACY_NAMES=1; shift ;;
     --no-register) NO_REGISTER=1; shift ;;
     --with-agent) WITH_AGENT=1; shift ;;
+    --refuse-if-busy) REFUSE_IF_BUSY=1; shift ;;
     --agent-key-file) [ $# -ge 2 ] || { usage >&2; exit 2; }; [ -n "$2" ] || { echo "provision-host.sh: --agent-key-file needs a path, got ''" >&2; exit 2; }; AGENT_KEY_FILE="$2"; shift 2 ;;
     --telemetry-key-file) [ $# -ge 2 ] || { usage >&2; exit 2; }; [ -n "$2" ] || { echo "provision-host.sh: --telemetry-key-file needs a path, got ''" >&2; exit 2; }; TELEMETRY_KEY_FILE="$2"; shift 2 ;;
     --server-url) [ $# -ge 2 ] || { usage >&2; exit 2; }; [ -n "$2" ] || { echo "provision-host.sh: --server-url needs a URL, got ''" >&2; exit 2; }; SERVER_URL="$2"; shift 2 ;;
@@ -424,10 +434,10 @@ derive_names() {
   LABEL_MAC="com.doublenode.ci-runner${sfx}.macos"
   LABEL_REPORTER="com.doublenode.ci-runner${sfx}.reporter"
   LABEL_AGENT="com.doublenode.ci-runner${sfx}.agent"
-  PLIST_VM="/Library/LaunchDaemons/${LABEL_VM}.plist"
-  PLIST_MAC="/Library/LaunchDaemons/${LABEL_MAC}.plist"
-  PLIST_REPORTER="/Library/LaunchDaemons/${LABEL_REPORTER}.plist"
-  PLIST_AGENT="/Library/LaunchDaemons/${LABEL_AGENT}.plist"
+  PLIST_VM="${LD_DIR}/${LABEL_VM}.plist"
+  PLIST_MAC="${LD_DIR}/${LABEL_MAC}.plist"
+  PLIST_REPORTER="${LD_DIR}/${LABEL_REPORTER}.plist"
+  PLIST_AGENT="${LD_DIR}/${LABEL_AGENT}.plist"
 }
 derive_names
 
@@ -1327,6 +1337,52 @@ do_dry_run() {
   plan "finish: print status; delete ${TOKEN_FILE:-<token file>}"
 }
 
+# ── Provision manifest (XACA-1443-013/-015) ───────────────────────────────
+# After a COMPLETE provision, record what was installed from which bundle file (sha256) in a root-owned,
+# world-readable manifest next to the pause markers. `aiteamforge ci` (a plain user, no sudo) compares it with
+# the keg to tell an enabled host that `brew upgrade` left behind. The format and the comparison live in
+# lib/ci-provision-version.sh (one copy, shared with the CLI). A manifest is all-or-nothing: if any entry
+# cannot be hashed, none is written (a partial one would hide drift), and the host keeps reading as behind.
+_PH_SELF="${BASH_SOURCE[0]:-$0}"
+write_provision_manifest() {
+  local lib="${_PH_DIR}/lib/ci-provision-version.sh" tmp ok=1 ts
+  if [ ! -r "$lib" ]; then
+    warn "provision manifest NOT written: ${lib} is missing; 'aiteamforge ci' will keep reporting this host as behind"
+    return 0
+  fi
+  # shellcheck source=/dev/null
+  . "$lib"
+  ci_provision_entry_reset
+  ci_provision_entry step provision-host.sh - "$_PH_SELF" || ok=0
+  if [ -f "${_PH_DIR}/create-ci-runner-user.sh" ]; then
+    ci_provision_entry step create-ci-runner-user.sh - "${_PH_DIR}/create-ci-runner-user.sh" || ok=0
+  fi
+  ci_provision_entry libexec client/ci-runner-reporter.sh "$REPORTER_DEST" "$REPORTER_SRC" || ok=0
+  if [ "$WITH_AGENT" = "1" ]; then
+    ci_provision_entry libexec client/ci-pool-agent.py "$AGENT_DEST" "$AGENT_SRC" || ok=0
+    ci_provision_entry guest client/ci-runner-jit-guest.sh "$GUEST_JIT_DEST" "$GUEST_JIT_SRC" || ok=0
+    ci_provision_entry guest client/ci-runner-job-started.sh "$GUEST_JOB_STARTED_DEST" "$JOB_STARTED_SRC" || ok=0
+    if [ "$NO_MACOS" != "1" ]; then
+      ci_provision_entry libexec client/ci-runner-jit-macos.sh "$MAC_JIT_DEST" "$MAC_JIT_SRC" || ok=0
+      ci_provision_entry libexec client/ci-runner-job-started.sh "$MAC_JOB_STARTED_DEST" "$JOB_STARTED_SRC" || ok=0
+    fi
+  fi
+  if [ "$ok" != "1" ]; then
+    warn "provision manifest NOT written: a bundle file could not be hashed; 'aiteamforge ci' will keep reporting this host as behind"
+    return 0
+  fi
+  # The dir is shared with the XACA-1440 pause markers, whose writer (ci-host.sh) expects root:admin 0775.
+  [ -d "$MANIFEST_DIR" ] || install -d -m 0775 -o root -g admin "$MANIFEST_DIR"
+  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  tmp=$(mktemp /tmp/ci-provision-manifest.XXXXXX)
+  if ! ci_provision_manifest_render "$HOST" "$ts" >"$tmp"; then
+    command rm -f "$tmp"; warn "provision manifest NOT written (render failed)"; return 0
+  fi
+  install -m 644 -o root -g wheel "$tmp" "$(ci_provision_manifest_path "$HOST")"
+  command rm -f "$tmp"
+  log "recorded provision version $(awk -F= '$1=="provision_version"{print $2;exit}' "$(ci_provision_manifest_path "$HOST")") in $(ci_provision_manifest_path "$HOST")"
+}
+
 # ── Main ──────────────────────────────────────────────────────────────────
 # Test seam: `PROVISION_SOURCE_ONLY=1 source provision-host.sh --host <h>`
 # defines the functions/constants without running anything.
@@ -1347,6 +1403,20 @@ if [ "$MODE" = "baseline-only" ]; then
   REGISTER=0
 else
   [ "$(id -u)" -eq 0 ] || die "run under sudo"
+  # XACA-1443-015: `ci refresh` re-provisions an ENABLED host. A running pool job must not be disturbed
+  # (a changed plist boots the daemon out and back in), so refuse BEFORE anything is touched, and before
+  # the key-file trap below is armed (a refused run leaves its key files alone). Same test and the same
+  # fail-closed reading as teardown-host.sh: an unreadable slots.json counts as busy.
+  if [ "$REFUSE_IF_BUSY" = "1" ] && [ -e "${AGENT_STATE_DIR}/slots.json" ]; then
+    _busy=0
+    if [ ! -r "${AGENT_STATE_DIR}/slots.json" ]; then _busy=1
+    elif grep -Eq '"state": ?"(starting|busy|cleaning)"' "${AGENT_STATE_DIR}/slots.json" 2>/dev/null; then _busy=1; fi
+    if [ "$_busy" = "1" ]; then
+      echo "provision-host.sh: a pool job is running (or ${AGENT_STATE_DIR}/slots.json is unreadable). Nothing was changed." >&2
+      echo "Wait for it to finish, or run without --refuse-if-busy (a changed daemon plist restarts that daemon)." >&2
+      exit 3
+    fi
+  fi
   # Shape of the agent / telemetry key files already enforced (rc 2) at flag
   # validation, before anything ran. Resolve before cd /; delete on ANY exit
   # from here on, like --token-file. A REFUSED file never gets this far.
@@ -1398,5 +1468,6 @@ if [ "$MODE" != "baseline-only" ]; then
   fi
   log "provisioning complete; status:"
   do_status || warn "status reports something not up — see above"
+  write_provision_manifest
 fi
 log "done"

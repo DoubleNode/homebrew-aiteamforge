@@ -27,10 +27,13 @@
 
 set -euo pipefail
 
-CI_USER="ci-runner"
+# CI_RUNNER_USER / CI_RUNNER_HOME: the same test overrides teardown-host.sh and provision-host.sh honour
+# (XACA-1443-015: the refresh idempotency test runs this script for real, in a sandbox). sudo's env_reset
+# drops them for a real run, so unset = /Users/ci-runner.
+CI_USER="${CI_RUNNER_USER:-ci-runner}"
 CI_GROUP="ci-runner"
 CI_FULLNAME="CI Runner"
-CI_HOME="/Users/${CI_USER}"
+CI_HOME="${CI_RUNNER_HOME:-/Users/${CI_USER}}"
 GID_RANGE_START=600
 GID_RANGE_END=699
 

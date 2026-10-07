@@ -3469,6 +3469,20 @@ update_runtime_helpers() {
     print_success "Updated ${updated} runtime helper script(s)"
   fi
 
+  # XACA-1443-013/-015: an ENABLED CI host keeps root-owned copies (/usr/local/libexec), guest scripts in
+  # the VM and plists that THIS upgrade just made stale. Print one notice naming `aiteamforge ci refresh`.
+  # Read-only and advisory: it never runs sudo, never touches the host, never fails or blocks the
+  # upgrade (subshell + `|| true`), and says nothing on a dormant machine (no state file / not enabled).
+  if [ "$DRY_RUN" != true ]; then
+    (
+      _aitf_pv_lib="${scripts_dest}/ci-runner/lib/ci-provision-version.sh"
+      [ -r "$_aitf_pv_lib" ] || exit 0
+      # shellcheck source=/dev/null
+      . "$_aitf_pv_lib" || exit 0
+      ci_provision_upgrade_notice "${WORKING_DIR}" "${scripts_dest}/ci-runner"
+    ) 2>/dev/null || true
+  fi
+
   # XACA-0677: Refresh the root-level iterm2_window_manager.py copy.
   # open_lcars_tab (lcars-launch-helpers.sh) invokes ${WORKING_DIR}/iterm2_window_manager.py
   # directly — NOT the scripts/ copy. install_iterm2_window_manager() lays this down via plain

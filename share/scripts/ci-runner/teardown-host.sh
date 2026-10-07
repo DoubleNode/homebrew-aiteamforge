@@ -17,7 +17,7 @@
 #      `aiteamforge ci disable --confirm` reads, so a half teardown can never read as done.
 #   5. remove the secrets and config: agent key + agent.json + slots.json + agent log dir,
 #      the reporter's fleet-config.json (holds the fct_ telemetry key), the XACA-1440 pause
-#      marker `<host>.pause.json` and its lock dir
+#      marker `<host>.pause.json` and its lock dir, and the provision manifest `<host>.provision-manifest`
 #   6. remove the root-owned copies in /usr/local/libexec (agent, reporter, JIT scripts)
 #   7. remove the four LaunchDaemon plists  (com.doublenode.ci-runner.<host>.{agent,reporter,macos,lima-vm})
 #   8. (--remove-user) delete the ci-runner user, its group and its home. DEFAULT: KEEP the user.
@@ -230,6 +230,7 @@ rm_dir() { # path (a dedicated directory this installer created)
   run "remove directory $1" rm -rf "$1"
 }
 rm_file "$PAUSE_DIR/${HOST}.pause.json"
+rm_file "$PAUSE_DIR/${HOST}.provision-manifest"   # XACA-1443-015: the record provision-host.sh made of this host
 rm_dir  "$PAUSE_DIR/.${HOST}.lock"
 if [ "$DRY" = 0 ]; then rmdir "$PAUSE_DIR" 2>/dev/null || true; fi
 if [ "$OTHERS" -eq 0 ]; then

@@ -4,6 +4,8 @@
 #
 #   aiteamforge ci enable [flags]    XACA-1443-002 (this file)
 #   aiteamforge ci disable           XACA-1443-003 (this file; root half: bundle teardown-host.sh)
+#   aiteamforge ci refresh           XACA-1443-013/-015 (this file; root half: bundle provision-host.sh again;
+#                                    skew logic: bundle lib/ci-provision-version.sh, sourceable by 004)
 #   aiteamforge ci status            XACA-1443-004 (stub: rc 2)
 #
 # `ci enable` runs as the INVOKING USER and NEVER runs sudo, launchctl, dscl, limactl, curl or
@@ -31,6 +33,7 @@ CIH_STATE_DIR="${CIH_STATE_DIR:-/usr/local/etc/ci-runner}"
 RC_OK=0 RC_ENV=1 RC_USAGE=2
 RC_HEADROOM=12 RC_NO_FIT=13 RC_NO_LIMA=14 RC_PROBE=16 RC_STATE=17 RC_NOT_PROVISIONED=18
 RC_LEFTOVERS=19   # disable --confirm: teardown artefacts remain
+RC_REFRESH_PENDING=20   # refresh --confirm: the host does not match the keg yet (or cannot be verified)
 # 10 / 11 are ci_enable_guard's own codes, passed through unchanged.
 
 _err()  { echo "ERROR: $*" >&2; }
@@ -39,14 +42,15 @@ _now()  { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
 usage() {
   cat <<'EOF'
-Usage: aiteamforge ci <enable|disable|status> [options]
+Usage: aiteamforge ci <enable|disable|refresh|status> [options]
 
   enable     Check this machine, record the CI configuration, print ONE sudo command
   disable    Tear CI down: print ONE sudo teardown command, then verify with --confirm
+  refresh    Bring an ENABLED host up to date after an upgrade: print ONE sudo command, then --confirm
   status     Report dormant|enabled|paused|...   (not yet implemented)
 
 CI is dormant on every install until you run `aiteamforge ci enable`.
-For details: aiteamforge ci enable --help | aiteamforge ci disable --help
+For details: aiteamforge ci enable --help | aiteamforge ci disable --help | aiteamforge ci refresh --help
 EOF
 }
 
@@ -160,6 +164,35 @@ _state_get() { # key -> value of the first matching line, else empty
 
 _gib() { awk -v b="$1" 'BEGIN { printf "%.2f", b / 1073741824 }'; }
 _sha256() { shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'; }
+
+# Load the provision-version / skew library (XACA-1443-013) from the bundle. rc 0 | RC_ENV.
+_load_pv_lib() {
+  local l="$CI_BUNDLE_DIR/lib/ci-provision-version.sh"
+  if [ ! -r "$l" ]; then _err "CI bundle incomplete ($l missing). Run: aiteamforge upgrade"; return $RC_ENV; fi
+  # shellcheck source=/dev/null
+  . "$l" || { _err "cannot load $l"; return $RC_ENV; }
+}
+
+# Rewrite the state file atomically: each `key=value` argument REPLACES the key's line(s) in place, or is
+# appended when the key is absent; every other line (unknown keys, comments) is kept. Mode 600.
+_ci_state_set() {
+  local tmp old_umask pairs=""
+  while [ $# -gt 0 ]; do pairs="${pairs}${1}
+"; shift; done
+  old_umask="$(umask)"; umask 077
+  tmp="$(mktemp "${CI_STATE_FILE}.XXXXXX")" || { umask "$old_umask"; _err "cannot create a temp file next to $CI_STATE_FILE"; return $RC_ENV; }
+  PAIRS="$pairs" awk '
+    BEGIN { n = split(ENVIRON["PAIRS"], a, "\n")
+            for (i = 1; i <= n; i++) { if (a[i] == "") continue; e = index(a[i], "="); k = substr(a[i], 1, e - 1); v[k] = substr(a[i], e + 1); order[++m] = k } }
+    { k = $0; sub(/=.*/, "", k)
+      if ($0 !~ /^#/ && (k in v)) { print k "=" v[k]; seen[k] = 1; next }
+      print }
+    END { for (i = 1; i <= m; i++) if (!(order[i] in seen)) print order[i] "=" v[order[i]] }' "$CI_STATE_FILE" >"$tmp" \
+    && chmod 600 "$tmp" && mv -f "$tmp" "$CI_STATE_FILE" \
+    || { umask "$old_umask"; rm -f "$tmp"; _err "cannot update $CI_STATE_FILE"; return $RC_ENV; }
+  umask "$old_umask"
+  return 0
+}
 
 _prompt() { # varname label  (terminal only; the answers are ids/paths/URLs, never secrets)
   local ans=""
@@ -385,6 +418,7 @@ cmd_enable() {
   echo "Before you run it, inspect what will run as root (sha256):"
   echo "  $(_sha256 "$create_sh")  $create_sh"
   echo "  $(_sha256 "$prov_sh")  $prov_sh"
+  echo "  $(_sha256 "$CI_BUNDLE_DIR/lib/ci-provision-version.sh")  $CI_BUNDLE_DIR/lib/ci-provision-version.sh   (sourced by provision-host.sh to write the provision manifest)"
   echo
   echo "Preview, no root, changes nothing:"
   echo "$dry_line"
@@ -398,7 +432,7 @@ cmd_enable() {
 
 # `ci enable --confirm`: user-level, read-only probes; promotes enabled-pending -> enabled.
 cmd_enable_confirm() {
-  local st host plist ts tmp old_umask
+  local st host plist ts pv=""
   st="$(_state_get state)"
   case "$st" in
     enabled) echo "CI is already enabled (host $(_state_get host))."; return $RC_OK ;;
@@ -413,16 +447,16 @@ cmd_enable_confirm() {
     return $RC_NOT_PROVISIONED
   fi
   ts="$(_now)"
-  old_umask="$(umask)"; umask 077
-  tmp="$(mktemp "${CI_STATE_FILE}.XXXXXX")" || { umask "$old_umask"; return $RC_ENV; }
-  awk -v ts="$ts" '
-    /^state=/      { print "state=enabled"; next }
-    /^updated_at=/ { print "updated_at=" ts; next }
-    /^enabled_at=/ { print "enabled_at=" ts; next }
-    { print }' "$CI_STATE_FILE" >"$tmp" && chmod 600 "$tmp" && mv -f "$tmp" "$CI_STATE_FILE" \
-    || { umask "$old_umask"; rm -f "$tmp"; _err "cannot update $CI_STATE_FILE"; return $RC_ENV; }
-  umask "$old_umask"
-  echo "CI enabled on ${host} (state=enabled, ${ts})."
+  # XACA-1443-015: record the provision version the root script wrote. A host provisioned by an older
+  # provision-host.sh has no manifest: that must not block going live, but it is reported, never hidden.
+  if _load_pv_lib 2>/dev/null; then
+    if ci_provision_manifest_load "$host"; then pv="$CI_PM_VERSION"
+    else _warn "no usable provision manifest for ${host} (${CI_PM_WHY:-absent}); provision_version left empty. Run: aiteamforge ci refresh"; fi
+  else
+    _warn "provision-version library missing; provision_version left empty"
+  fi
+  _ci_state_set state=enabled updated_at="$ts" enabled_at="$ts" provision_version="$pv" || return $?
+  echo "CI enabled on ${host} (state=enabled, ${ts}${pv:+, provision version ${pv}})."
   return $RC_OK
 }
 
@@ -514,6 +548,7 @@ _ci_leftovers() {
 $(_ci_host_plists "$host")
 EOF_PL
   [ ! -e "$CIH_STATE_DIR/${host}.pause.json" ] || echo "pause marker: $CIH_STATE_DIR/${host}.pause.json"
+  [ ! -e "$CIH_STATE_DIR/${host}.provision-manifest" ] || echo "provision manifest: $CIH_STATE_DIR/${host}.provision-manifest"
   others="$(_ci_other_plists "$host")"
   if [ "$others" = 0 ]; then
     for f in "$CI_AGENT_CFG_DIR/agent.key" "$CI_AGENT_CFG_DIR/agent.json" \
@@ -729,11 +764,210 @@ cmd_disable_confirm() { # host rm_user healthy st force dry
   return $RC_OK
 }
 
+# ---------------------------------------------------------------- refresh (XACA-1443-013/-015)
+
+refresh_usage() {
+  cat <<'EOF'
+Usage: aiteamforge ci refresh [--force] [--allow-busy] [--dry-run]
+       aiteamforge ci refresh --confirm [--dry-run]
+       aiteamforge ci refresh --help
+
+For a host that is already ENABLED. `brew upgrade` replaces the keg but not what provisioning put on this
+machine: the root-owned copies in /usr/local/libexec, the guest scripts inside the VM, and (when
+provision-host.sh itself changed) the plists, VM config and user setup. `ci refresh` compares the host with
+the keg (read-only, no sudo) and, when it is behind, records nothing and prints ONE sudo command that
+re-runs the bundle's provisioning with the SAME flags `ci enable` used (read from the state file). The run
+is idempotent: it keeps the ci-runner user, the VM and the keys, replaces changed copies and plists, and
+pushes the current guest scripts. Then `ci refresh --confirm` re-reads the host's provision manifest and
+records the new provision_version in the state file.
+
+  --force        print the sudo command even when the host reads as in sync (re-apply anyway)
+  --allow-busy   do not pass --refuse-if-busy: by default the root script exits 3, changing nothing, while a
+                 pool job is starting/busy/cleaning (or its slot file cannot be read)
+  --dry-run      do every check and print the plan and the commands; with --confirm, show what would be
+                 recorded. Writes nothing (refresh itself writes nothing before --confirm)
+  --confirm      AFTER you ran the sudo command: verify the host now matches the keg and record
+                 provision_version. rc 20 (state untouched) while it does not, or cannot be verified
+
+Refuses (rc 17) from dormant, enabled-pending and disable-pending, and on a corrupt state file. Refuses on
+the dev-team source machine / a git work-tree exactly like `ci enable` (rc 10/11).
+
+What it can and cannot see without sudo: the host's provision manifest and the root-owned copies in
+/usr/local/libexec (world-readable), and the keg. NOT the VM or ci-runner's 700 home: the guest scripts are
+judged from the manifest's record of what was pushed, so a guest script edited by hand inside the VM is not
+detected. Anything it cannot read is reported as unknown, never as in sync.
+
+Not done by refresh: the VM's size (a VM that exists keeps its CPU/RAM; change it with `ci disable` then
+`ci enable`), key rotation (provision-host.sh keeps the installed keys; rotate with --agent-key-file by hand
+or re-enable), the actions/runner binaries (XACA-1443-014).
+
+Exit codes: 0 ok / in sync / dry-run | 1 environment (bundle, library or state unreadable)
+  2 usage | 10 dev-team source machine | 11 git work-tree install
+  17 state conflict (dormant, enabled-pending, disable-pending, corrupt state)
+  20 --confirm: the host does not match the keg yet, or could not be verified
+The root script's own codes (run it by hand): 0 ok, 1 a step failed, 2 usage, 3 refused (a pool job is running).
+EOF
+}
+
+# True when every reason line is a `record:` line (the host itself matches; only the state file is stale).
+_ci_skew_only_record() {
+  [ -n "$CI_SKEW_REASONS" ] || return 1
+  [ -z "$(printf '%s\n' "$CI_SKEW_REASONS" | grep -v '^record:')" ]
+}
+
+_ci_print_skew() { # host
+  echo "Provision status of host ${1}: ${CI_SKEW_STATE}"
+  [ -z "$CI_SKEW_REASONS" ] || printf '%s\n' "$CI_SKEW_REASONS" | sed 's/^/  - /'
+  [ -z "$CI_SKEW_UNSEEN" ] || printf '%s\n' "$CI_SKEW_UNSEEN" | sed 's/^/  - (not seen) /'
+}
+
+cmd_refresh() {
+  local a
+  for a in "$@"; do
+    case "$a" in -h|--help) refresh_usage; return $RC_OK ;; esac
+  done
+
+  # ---- 1. GUARD FIRST: the printed sudo line would act on THIS machine
+  _run_guard || return $?
+
+  local dry=0 confirm=0 force=0 busy_ok=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --dry-run)    dry=1; shift ;;
+      --confirm)    confirm=1; shift ;;
+      --force)      force=1; shift ;;
+      --allow-busy) busy_ok=1; shift ;;
+      *) _err "unknown option: $1"; refresh_usage >&2; return $RC_USAGE ;;
+    esac
+  done
+  if [ "$confirm" = 1 ] && { [ "$force" = 1 ] || [ "$busy_ok" = 1 ]; }; then
+    _err "--confirm takes only --dry-run"; return $RC_USAGE
+  fi
+  if [ ! -f "$AITEAMFORGE_DIR/.aiteamforge-config" ]; then
+    _err "AITeamForge is not configured ($AITEAMFORGE_DIR/.aiteamforge-config missing). Run: aiteamforge setup"
+    return $RC_ENV
+  fi
+
+  # ---- 2. only an ENABLED host with a healthy state file
+  if [ ! -f "$CI_STATE_FILE" ]; then
+    _err "CI is dormant on this machine (no state file); nothing to refresh. To turn it on: aiteamforge ci enable ..."
+    return $RC_STATE
+  fi
+  if ! _ci_state_healthy; then
+    _err "state file $CI_STATE_FILE is unreadable or has an unknown schema/state/host. Not guessing."
+    return $RC_STATE
+  fi
+  local st host vcpu vmem slots wmac surl
+  st="$(_state_get state)"; host="$(_state_get host)"
+  case "$st" in
+    enabled) ;;
+    enabled-pending) _err "CI is 'enabled-pending': finish the enable first (run the sudo command it printed, then: aiteamforge ci enable --confirm)."; return $RC_STATE ;;
+    disable-pending) _err "CI is 'disable-pending': a teardown is in progress. Finish it (aiteamforge ci disable --confirm) before anything else."; return $RC_STATE ;;
+    *) _err "CI state is '${st}', not enabled."; return $RC_STATE ;;
+  esac
+  # The flags `ci enable` recorded. A value that no longer validates means the file was edited or damaged:
+  # refuse rather than print a root command built from it.
+  vcpu="$(_state_get vm_cpus)"; vmem="$(_state_get vm_memory_gib)"; slots="$(_state_get linux_slots)"
+  wmac="$(_state_get with_macos)"; surl="$(_state_get server_url)"
+  local bad=0
+  _is_uint "$vcpu" && [ "$vcpu" -ge 1 ] || { _err "state file: vm_cpus='${vcpu}' is not a positive integer"; bad=1; }
+  _is_uint "$vmem" && [ "$vmem" -ge 1 ] || { _err "state file: vm_memory_gib='${vmem}' is not a positive integer"; bad=1; }
+  _is_uint "$slots" && [ "$slots" -ge 1 ] || { _err "state file: linux_slots='${slots}' is not a positive integer"; bad=1; }
+  case "$wmac" in 0|1) ;; *) _err "state file: with_macos='${wmac}' is not 0 or 1"; bad=1 ;; esac
+  if [ -n "$surl" ] && ! _valid_url "$surl"; then _err "state file: server_url is not an acceptable https URL"; bad=1; fi
+  [ "$bad" = 0 ] || { _err "Not guessing the flags. Fix the state file, or: aiteamforge ci disable && aiteamforge ci enable ..."; return $RC_STATE; }
+
+  # ---- 3. skew (read-only)
+  _load_pv_lib || return $?
+  local src=0
+  ci_provision_skew "$host" "$CI_BUNDLE_DIR" "$(_state_get provision_version)" || src=$?
+
+  if [ "$confirm" = 1 ]; then
+    cmd_refresh_confirm "$host" "$src" "$dry"
+    return $?
+  fi
+
+  _ci_print_skew "$host"
+  if [ "$src" = 0 ] && [ "$force" = 0 ]; then
+    echo "Host ${host} matches this release (provision version ${CI_SKEW_RECORDED_VERSION}). Nothing to do. (--force re-applies anyway.)"
+    return $RC_OK
+  fi
+  if [ "$src" = 1 ] && _ci_skew_only_record && [ "$force" = 0 ]; then
+    echo "The host itself matches this release; only the state file's provision_version is stale. Run: aiteamforge ci refresh --confirm"
+    return $RC_OK
+  fi
+
+  # ---- 4. the ONE sudo command: the enable line minus the key files, plus the busy guard
+  local create_sh="$CI_BUNDLE_DIR/create-ci-runner-user.sh" prov_sh="$CI_BUNDLE_DIR/provision-host.sh" pv_lib="$CI_BUNDLE_DIR/lib/ci-provision-version.sh"
+  if [ ! -r "$create_sh" ] || [ ! -r "$prov_sh" ]; then
+    _err "provisioning scripts missing from $CI_BUNDLE_DIR. Run: aiteamforge upgrade"
+    return $RC_ENV
+  fi
+  local pargs=(--host "$host" --no-register --vm-cpus "$vcpu" --vm-memory "$vmem" --linux-count "$slots")
+  [ "$wmac" = 1 ] || pargs=("${pargs[@]}" --no-macos)
+  pargs=("${pargs[@]}" --with-agent)
+  [ -z "$surl" ] || pargs=("${pargs[@]}" --server-url "$surl")
+  [ "$busy_ok" = 1 ] || pargs=("${pargs[@]}" --refuse-if-busy)
+  local sudo_line="sudo /bin/bash -c 'bash \"\$1\" && shift && exec bash \"\$@\"' _ $(printf '%q' "$create_sh") $(printf '%q' "$prov_sh")"
+  local dry_line="bash $(printf '%q' "$prov_sh")" p
+  for p in "${pargs[@]}"; do
+    sudo_line="$sudo_line $(printf '%q' "$p")"; dry_line="$dry_line $(printf '%q' "$p")"
+  done
+  dry_line="$dry_line --dry-run"
+
+  [ "$dry" = 0 ] || echo "[dry-run] nothing is written by 'ci refresh' (it writes only on --confirm)."
+  echo
+  echo "Host ${host}: this re-runs the provisioning with the flags 'ci enable' recorded. It is idempotent: the"
+  echo "  ci-runner user, the VM and the installed keys are kept; changed root-owned copies, plists and guest"
+  echo "  scripts are replaced; a changed daemon plist restarts that daemon."
+  if [ "$busy_ok" = 1 ]; then
+    echo "  --allow-busy: it will NOT refuse while a pool job is running."
+  else
+    echo "  It refuses (exit 3, nothing changed) while a pool job is starting/busy/cleaning."
+  fi
+  echo "  NOT changed: the VM's size, the keys, the actions/runner binaries."
+  echo
+  echo "Before you run it, inspect what will run as root (sha256):"
+  echo "  $(_sha256 "$create_sh")  $create_sh"
+  echo "  $(_sha256 "$prov_sh")  $prov_sh"
+  echo "  $(_sha256 "$pv_lib")  $pv_lib   (sourced by provision-host.sh to write the provision manifest)"
+  echo
+  echo "Preview, no root, changes nothing:"
+  echo "$dry_line"
+  echo
+  echo "Then run this ONE command yourself:"
+  echo "$sudo_line"
+  echo
+  echo "Afterwards run: aiteamforge ci refresh --confirm"
+  return $RC_OK
+}
+
+# `ci refresh --confirm`: user-level, read-only probes; records provision_version when the host matches.
+cmd_refresh_confirm() { # host skew_rc dry
+  local host="$1" src="$2" dry="$3" ts pv
+  _ci_print_skew "$host"
+  if [ "$src" != 0 ] && ! { [ "$src" = 1 ] && _ci_skew_only_record; }; then
+    if [ "$src" = 2 ]; then _err "cannot verify that host ${host} matches this release; refusing to record a version (state kept)."
+    else _err "host ${host} does not match this release yet (state kept). Run the sudo command 'ci refresh' printed, then --confirm again."; fi
+    return $RC_REFRESH_PENDING
+  fi
+  pv="$CI_SKEW_RECORDED_VERSION"
+  if [ "$dry" = 1 ]; then
+    echo "[dry-run] host ${host} matches this release: would record provision_version=${pv}. Nothing was written."
+    return $RC_OK
+  fi
+  ts="$(_now)"
+  _ci_state_set provision_version="$pv" updated_at="$ts" provision_refreshed_at="$ts" || return $?
+  echo "Host ${host} matches this release; recorded provision_version=${pv} (${ts})."
+  return $RC_OK
+}
+
 # ---------------------------------------------------------------- dispatch
 
 case "${1:-}" in
   enable)  shift; cmd_enable "$@"; exit $? ;;
   disable) shift; cmd_disable "$@"; exit $? ;;
+  refresh) shift; cmd_refresh "$@"; exit $? ;;
   status)  echo "aiteamforge ci status: not yet implemented (XACA-1443-004)." >&2; exit 2 ;;
   -h|--help|help|"") usage; exit 0 ;;
   *) _err "unknown ci subcommand: $1"; usage >&2; exit 2 ;;
