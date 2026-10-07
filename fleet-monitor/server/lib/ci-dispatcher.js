@@ -48,8 +48,16 @@ const MINT_FAIL_ALERT_AFTER = 3;
 // Backstop against ghost demand (XACA-1441 PR #1083 review): a tracked job whose runners keep
 // expiring unpicked, or that has been tracked longer than GitHub keeps a job queued, stops being
 // demand. The watcher's `vanished` completions are the primary fix; these bound whatever is left.
+// XACA-1441-033: the count is runners minted FOR the job that EXPIRED WITHOUT EVER BINDING a job,
+// not mints made. Under label contention GitHub may hand job A's runner to job B; that runner did
+// pick work up, so it says nothing about whether job A is a ghost. (Name kept: it is the same cap.)
 const MAX_MINTS_PER_JOB = 5;
 const MAX_TRACKED_MS = 24 * 60 * 60 * 1000;
+// XACA-1441-029: still-queued jobs rejected for a reason a config PUT can change are remembered
+// (bounded) so onConfigChanged() can re-evaluate them. Fork reasons are never in this set: a fork
+// job is never made acceptable by editing config.
+const CONFIG_DEPENDENT_REASONS = Object.freeze(['not-allowlisted', 'label:unknown', 'label:not-pool', 'label:ambiguous']);
+const MAX_CONFIG_REJECTED = 500;
 
 const clean = (v) => (v === undefined || v === null ? '' : String(v).trim());
 
@@ -76,11 +84,11 @@ function dormantReason(env) {
  * @param {object}   [deps.audit]      {append}
  * @param {object}   [deps.github]     only checked for presence; the dispatcher itself makes no direct GitHub call
  * @param {object}   [deps.watcher]    {runCycle(), stop?()}   (tests)
- * @param {Function} [deps.createWatcher] ({allowlist, onJob, log}) => watcher   (production: built at start() so the allowlist is current)
+ * @param {Function} [deps.createWatcher] ({allowlist, getAllowlist, onJob, log}) => watcher   (production: built at start(); getAllowlist is read every cycle)
  * @param {object}   [deps.policy]     defaults to ci-dispatch-policy
  * @param {object}   [deps.placement]  defaults to ci-dispatch-placement
  * @param {Map}      [deps.reports]    machine -> report; shared with the routes
- * @param {number}   [deps.maxMintsPerJob]  ghost backstop (default MAX_MINTS_PER_JOB)
+ * @param {number}   [deps.maxMintsPerJob]  ghost backstop: runners that expired unpicked for one job (default MAX_MINTS_PER_JOB)
  * @param {number}   [deps.maxTrackedMs]    ghost backstop (default MAX_TRACKED_MS)
  * @param {Function} [deps.now]
  * @param {Function} [deps.setTimer]   (fn, ms) => handle
@@ -125,8 +133,10 @@ function createDispatcher(deps) {
     let lastTickAt = null;
     let notPoolSkipped = 0;
 
-    /** key -> {rec, noCapSince|null, mints, trackedAt}: policy-accepted, still-queued, unbound jobs. */
+    /** key -> {rec, noCapSince|null, trackedAt}: policy-accepted, still-queued, unbound jobs. */
     const tracked = new Map();
+    /** key -> rec: still-queued jobs rejected for a config-dependent reason (bounded; insertion order = age). */
+    const configRejected = new Map();
     /** keys already audited as rejected (one row per job, not per tick). */
     const rejected = new Set();
 
@@ -138,10 +148,22 @@ function createDispatcher(deps) {
         const machines = store.listMachines();
         const hostLabels = Object.keys(machines).map((id) => plc.hostLabelOf(Object.assign({ id }, machines[id]))).filter(Boolean);
         const v = pol.evaluateJob(rec, { allowlist: cfg.allowlist, poolLabel: cfg.poolLabel, hostLabels });
-        if (v.accept) { if (!tracked.has(rec.key)) tracked.set(rec.key, { rec, noCapSince: null, mints: 0, trackedAt: now() }); return; }
+        if (v.accept) {
+            configRejected.delete(rec.key);
+            rejected.delete(rec.key); // a later re-rejection is a new decision and is audited again
+            if (!tracked.has(rec.key)) tracked.set(rec.key, { rec, noCapSince: null, trackedAt: now() });
+            return;
+        }
 
         tracked.delete(rec.key);
-        if (v.reason === 'label:not-pool') { notPoolSkipped++; return; } // not addressed to the pool: not ours, not audit noise
+        if (CONFIG_DEPENDENT_REASONS.includes(v.reason)) {
+            configRejected.delete(rec.key); // refresh its age
+            configRejected.set(rec.key, rec);
+            while (configRejected.size > MAX_CONFIG_REJECTED) configRejected.delete(configRejected.keys().next().value);
+        } else {
+            configRejected.delete(rec.key);
+        }
+        if (v.reason === 'label:not-pool') { if (!rejected.has(rec.key)) { rejected.add(rec.key); notPoolSkipped++; } return; } // not addressed to the pool: not ours, not audit noise (counted once per job)
         if (!rejected.has(rec.key)) {
             rejected.add(rec.key);
             writeAudit('reject', {
@@ -157,6 +179,41 @@ function createDispatcher(deps) {
                 ref: `${rec.owner}/${rec.repo}`,
             });
         }
+        if (v.reason === 'label:ambiguous') {
+            // XACA-1441-031: a pool job no single runner can satisfy. A misconfiguration to fix in the
+            // workflow, not a capacity outage: it never reaches the no-capacity timer.
+            alerts.raise('ci-job-misconfigured', {
+                severity: 'warning',
+                title: `CI pool job has ambiguous runner labels in ${rec.owner}/${rec.repo}`,
+                body: `Job "${clean(rec.name).slice(0, 80)}" targets the pool but must carry exactly one OS label (Linux or macOS) and at most one host label. Its labels: ${rec.labels.map((l) => clean(l).slice(0, 40)).join(', ').slice(0, 300)}. It will not be dispatched until the workflow is fixed.`,
+                ref: `${rec.owner}/${rec.repo}`,
+            });
+        }
+    }
+
+    /**
+     * XACA-1441-029: the operator changed the allowlist, pool label or a host label. Re-run policy on
+     * every remembered config-rejected job (one that now passes becomes tracked demand) and on every
+     * tracked job (one that no longer passes, e.g. its repo was removed, stops being dispatched).
+     * Never throws. Fork-rejected jobs are not remembered, so they can never be promoted here.
+     * @returns {{promoted:number, dropped:number}}
+     */
+    function onConfigChanged() {
+        const out = { promoted: 0, dropped: 0 };
+        try {
+            for (const rec of [...configRejected.values()]) {
+                evaluate(rec);
+                if (tracked.has(rec.key)) out.promoted++;
+            }
+            for (const t of [...tracked.values()]) {
+                evaluate(t.rec);
+                if (!tracked.has(t.rec.key)) out.dropped++;
+            }
+        } catch (e) {
+            say('error', `onConfigChanged failed (${clean(e && e.message).slice(0, 120)})`);
+        }
+        if (out.promoted || out.dropped) say('log', `config change: ${out.promoted} job(s) now eligible, ${out.dropped} no longer eligible`);
+        return out;
     }
 
     /** Watcher callback. Must never throw into the watcher. */
@@ -167,9 +224,11 @@ function createDispatcher(deps) {
                 if (rec.status === 'queued' && !rec.runnerName) evaluate(rec);
             } else if (change === 'pickup' || change === 'in_progress') {
                 tracked.delete(rec.key);
+                configRejected.delete(rec.key);
                 assignments.bindJob(rec, change);
             } else if (change === 'completed') {
                 tracked.delete(rec.key);
+                configRejected.delete(rec.key);
                 rejected.delete(rec.key);
             }
         } catch (e) {
@@ -226,16 +285,25 @@ function createDispatcher(deps) {
 
         // Slots promised to runners whose listener has not started yet.
         const reserved = new Map();
+        // XACA-1441-033: per job id, runners minted FOR it that ended without ever binding a job.
+        // A runner that bound a different job (label contention) did work, so it is not counted;
+        // a restart-expiry says nothing about the job either.
+        const unpicked = new Map();
         for (const a of assignments.snapshot()) {
             if (a.state === 'pending' || a.state === 'delivered') {
                 const k = `${a.machine}|${a.os}`;
                 reserved.set(k, (reserved.get(k) || 0) + 1);
             }
+            if ((a.state === 'expired' || a.state === 'cancelled' || a.state === 'failed') && !a.boundJob &&
+                a.reason !== 'restart' && a.intendedJob && a.intendedJob.id !== null) {
+                unpicked.set(a.intendedJob.id, (unpicked.get(a.intendedJob.id) || 0) + 1);
+            }
         }
 
         // Ghost backstop: retire tracked jobs that can no longer be real demand.
         for (const [key, t] of tracked) {
-            const why = t.mints >= maxMintsPerJob ? `minted ${t.mints} runners, none picked up`
+            const n = unpicked.get(t.rec.jobId) || 0;
+            const why = n >= maxMintsPerJob ? `${n} runners expired unpicked`
                 : (nowMs - t.trackedAt > maxTrackedMs ? `tracked over ${Math.round(maxTrackedMs / 3600000)} h` : null);
             if (!why) continue;
             tracked.delete(key);
@@ -304,7 +372,6 @@ function createDispatcher(deps) {
                 const r = await assignments.mint({ job, machine: id, labels, os });
                 if (r && r.ok) {
                     stats.minted++; mintFailures = 0;
-                    const t = tracked.get(job.key); if (t) t.mints++;
                     reserved.set(`${id}|${os}`, (reserved.get(`${id}|${os}`) || 0) + 1);
                 } else {
                     stats.failed++; mintFailures++;
@@ -371,11 +438,12 @@ function createDispatcher(deps) {
         if (!watcher) {
             watcher = d.createWatcher({
                 allowlist: store.getConfig().allowlist,
+                getAllowlist: () => store.getConfig().allowlist,
                 onJob,
                 log: (level, msg) => say(level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'log', msg),
             });
         }
-        say('log', `dispatcher ENABLED (single instance; fly machine ${clean(env.FLY_MACHINE_ID) || 'n/a'}; allowlist changes need a restart)`);
+        say('log', `dispatcher ENABLED (single instance; fly machine ${clean(env.FLY_MACHINE_ID) || 'n/a'}; allowlist changes apply live)`);
         schedule(0);
         return true;
     }
@@ -401,9 +469,9 @@ function createDispatcher(deps) {
         }));
     }
 
-    const status = () => ({ enabled: isEnabled(), running: started, lastTickAt, tracked: tracked.size, notPoolSkipped });
+    const status = () => ({ enabled: isEnabled(), running: started, lastTickAt, tracked: tracked.size, notPoolSkipped, configRejected: configRejected.size });
 
-    return { start, stop, tick, isEnabled, alerts: () => alerts.list(), queue, status, onJob, onDegraded };
+    return { start, stop, tick, isEnabled, alerts: () => alerts.list(), queue, status, onJob, onDegraded, onConfigChanged };
 }
 
 // ============================================================================
@@ -456,7 +524,7 @@ function wireCiPool(app, opts) {
 
     dispatcher = createDispatcher({
         env, store, assignments, alerts, audit, github, reports, now: o.now, logger,
-        createWatcher: ({ allowlist, onJob, log }) => createWatcher({ github, allowlist, onJob, log, now: o.now }),
+        createWatcher: ({ allowlist, getAllowlist, onJob, log }) => createWatcher({ github, allowlist, getAllowlist, onJob, log, now: o.now }),
     });
     registerCiPoolRoutes(app, { store, assignments, dispatcher, audit, reports, now: o.now, logger });
 
@@ -470,5 +538,5 @@ function wireCiPool(app, opts) {
 
 module.exports = {
     createDispatcher, wireCiPool, hasCredentials, dormantReason,
-    NO_CAPACITY_AFTER_MS, FALLBACK_DELAY_MS, MAX_MINTS_PER_JOB, MAX_TRACKED_MS,
+    NO_CAPACITY_AFTER_MS, FALLBACK_DELAY_MS, MAX_MINTS_PER_JOB, MAX_TRACKED_MS, MAX_CONFIG_REJECTED,
 };

@@ -28,6 +28,15 @@
  * status:"in_progress". GitHub's started_at is populated on queued jobs and is
  * never read here.
  *
+ * Pagination (XACA-1441-032): runs lists and job lists are fetched page by page (`&page=N`) while a
+ * page holds exactly PAGE_SIZE items, up to MAX_PAGES (a warning is logged at the cap). Every page is
+ * its own conditional GET. "Absent from a finished run" may only vanish a job when EVERY page of that
+ * run's job list was a fresh 200 and the cap was not hit; a 304 page is a replay, never proof.
+ *
+ * Live allowlist (XACA-1441-029): `opts.getAllowlist` is read at the start of every cycle, so an added
+ * repo is polled and a removed one is dropped (its open jobs are completed as `vanished`) without a
+ * restart. The static `opts.allowlist` still works when no getter is given.
+ *
  * Errors are logged by code/message only. The client's errors are already
  * secret-free; this module never touches a token.
  */
@@ -38,6 +47,8 @@ const MIN_RESUME_DELAY_MS = 1000;
 const COMPLETED_RETENTION_MS = 60 * 60 * 1000;   // keep finished jobs this long for dedupe
 const OPEN_JOB_MAX_AGE_MS = 24 * 60 * 60 * 1000; // an "open" job unseen this long is dropped
 const MAX_TRACKED_JOBS = 5000;                   // hard cap; oldest completed evicted first
+const PAGE_SIZE = 100;                           // per_page on every list call
+const MAX_PAGES = 10;                            // XACA-1441-032: pagination cap per list (1000 items)
 
 const SLUG_RE = /^([A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))\/([A-Za-z0-9._-]{1,100})$/;
 
@@ -61,7 +72,8 @@ function parseAllowlist(allowlist, log) {
 /**
  * @param {object} opts
  * @param {object}   opts.github     createGithubClient() result (conditionalGet, getRateState)
- * @param {string[]} opts.allowlist  'owner/repo' strings
+ * @param {string[]} [opts.allowlist]   'owner/repo' strings (static; used when no getAllowlist)
+ * @param {Function} [opts.getAllowlist] () => 'owner/repo' strings, read every cycle (live config)
  * @param {Function} [opts.now]        ms clock
  * @param {Function} [opts.setTimer]   (fn, ms) => handle
  * @param {Function} [opts.clearTimer] (handle) => void
@@ -81,7 +93,9 @@ function createWatcher(opts = {}) {
     const clearTimer = opts.clearTimer || clearTimeout;
     const log = typeof opts.log === 'function' ? opts.log : () => {};
     const onJob = opts.onJob;
-    const repos = parseAllowlist(opts.allowlist, log);
+    const getAllowlist = typeof opts.getAllowlist === 'function' ? opts.getAllowlist : null;
+    let repos = parseAllowlist(opts.allowlist, log);
+    let allowlistKey = getAllowlist ? null : JSON.stringify(opts.allowlist === undefined ? null : opts.allowlist);
     const retentionMs = opts.completedRetentionMs ?? COMPLETED_RETENTION_MS;
     const maxJobs = opts.maxTrackedJobs ?? MAX_TRACKED_JOBS;
 
@@ -194,20 +208,46 @@ function createWatcher(opts = {}) {
     }
 
     /**
+     * GET a list endpoint page by page (XACA-1441-032). Page 1 is `basePath`; later pages append
+     * `&page=N`. Continues while a page holds exactly PAGE_SIZE items, up to MAX_PAGES. Each page is
+     * its own conditional GET (a 304 replays the cached body, so its length still steers paging).
+     * @returns {{items: object[], allFresh: boolean, capped: boolean}} allFresh: every page was a 200
+     */
+    async function getPaged(r, basePath, itemsKey) {
+        const items = [];
+        let allFresh = true;
+        let capped = false;
+        for (let page = 1; page <= MAX_PAGES; page++) {
+            const res = await github.conditionalGet({
+                owner: r.owner, repo: r.repo, purpose: 'watcher',
+                path: page === 1 ? basePath : `${basePath}&page=${page}`,
+            });
+            last.calls++;
+            const list = res && res.data && Array.isArray(res.data[itemsKey]) ? res.data[itemsKey] : null;
+            if (!(res && res.status === 200 && list)) allFresh = false;
+            const n = list ? list.length : 0;
+            if (list) for (const it of list) items.push(it);
+            if (n !== PAGE_SIZE) break;
+            if (page === MAX_PAGES) {
+                capped = true;
+                log('warn', `watcher: ${r.slug} ${itemsKey} list hit the ${MAX_PAGES}-page cap (${PAGE_SIZE * MAX_PAGES}+ items); later pages are not read`);
+            }
+        }
+        return { items, allFresh, capped };
+    }
+
+    /**
      * Fetch one run's latest-attempt jobs and fold them in.
      * `gone` = the run has left the queued/in_progress lists, so its job list is final: an open
-     * job of ours that a fresh (200) response does not contain has vanished. For a still-listed
-     * run a missing job may just be past the first page (per_page=100), so it is left alone.
-     * A 304 replays the cached body, which already held our jobs, so it never vanishes anything.
+     * job of ours that a fresh response does not contain has vanished. Fresh means EVERY page was a
+     * 200 and the page cap was not hit (XACA-1441-032). For a still-listed run a missing job may just
+     * be past the pages we read, so it is left alone. A 304 page replays a cached body, so it never
+     * vanishes anything.
      */
     async function fetchJobs(r, run, nowMs, gone) {
-        const res = await github.conditionalGet({
-            owner: r.owner, repo: r.repo, purpose: 'watcher',
-            path: `/repos/${r.owner}/${r.repo}/actions/runs/${run.id}/jobs?filter=latest&per_page=100`,
-        });
-        last.calls++;
-        const fresh = !!(res && res.status === 200 && res.data && Array.isArray(res.data.jobs));
-        const list = res && res.data && Array.isArray(res.data.jobs) ? res.data.jobs : [];
+        const { items: list, allFresh, capped } = await getPaged(r, `/repos/${r.owner}/${r.repo}/actions/runs/${run.id}/jobs?filter=latest&per_page=${PAGE_SIZE}`, 'jobs');
+        // Fresh = every page was a 200 (a 304 page is a replay). A capped list may be missing jobs.
+        const fresh = allFresh && !capped;
         const seen = new Set();
         for (const j of list) {
             observeJob(r.owner, r.repo, run, j, nowMs, fresh || !gone);
@@ -236,13 +276,8 @@ function createWatcher(opts = {}) {
     async function pollRepo(r, nowMs) {
         const listed = new Map();
         for (const status of ['queued', 'in_progress']) {
-            const res = await github.conditionalGet({
-                owner: r.owner, repo: r.repo, purpose: 'watcher',
-                path: `/repos/${r.owner}/${r.repo}/actions/runs?status=${status}&per_page=100`,
-            });
-            last.calls++;
-            const list = res && res.data && Array.isArray(res.data.workflow_runs) ? res.data.workflow_runs : [];
-            for (const wr of list) if (wr && Number.isInteger(wr.id)) listed.set(wr.id, wr);
+            const { items } = await getPaged(r, `/repos/${r.owner}/${r.repo}/actions/runs?status=${status}&per_page=${PAGE_SIZE}`, 'workflow_runs');
+            for (const wr of items) if (wr && Number.isInteger(wr.id)) listed.set(wr.id, wr);
         }
 
         let active = listed.size > 0;
@@ -310,10 +345,35 @@ function createWatcher(opts = {}) {
         return false;
     }
 
+    /**
+     * XACA-1441-029: re-read the allowlist (when a getter was given). Re-parsed only when it changed,
+     * so an invalid entry is warned about once, not every cycle. A repo that left the list has its
+     * open jobs completed as `vanished` so no consumer keeps them as demand. A throwing getter keeps
+     * the previous list.
+     */
+    function refreshRepos(nowMs) {
+        if (!getAllowlist) return;
+        let raw;
+        try { raw = getAllowlist(); } catch (e) {
+            log('warn', `watcher: allowlist getter threw (${(e && e.message) || 'error'}); keeping the previous list`);
+            return;
+        }
+        const key = JSON.stringify(raw === undefined ? null : raw);
+        if (key === allowlistKey) return;
+        allowlistKey = key;
+        repos = parseAllowlist(raw, log);
+        const keep = new Set(repos.map((r) => r.slug.toLowerCase()));
+        for (const e of jobs.values()) {
+            if (e.rec.status !== 'completed' && !keep.has(`${e.rec.owner}/${e.rec.repo}`.toLowerCase())) vanish(e, nowMs, 'repo removed from the allowlist');
+        }
+        log('log', `watcher: allowlist now ${repos.length} repo(s)`);
+    }
+
     /** One polling cycle; resolves to the delay (ms) before the next one. Never throws. */
     async function runCycle() {
         const nowMs = now();
         cycle++;
+        refreshRepos(nowMs);
         last.at = iso(nowMs); last.calls = 0; last.error = null;
         const rate = github.getRateState();
         last.mode = rate.mode;

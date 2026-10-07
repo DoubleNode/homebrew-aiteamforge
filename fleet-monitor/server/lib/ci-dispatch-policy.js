@@ -32,6 +32,10 @@
  *      (a fork-origin job aimed at the pool = workflow misconfiguration).
  *   5. label:not-pool   must include `self-hosted` and the pool label
  *   6. label:unknown    labels must be a subset of {self-hosted, OS, ARM64, pool, <host>}
+ *   7. label:ambiguous  a pool job must carry EXACTLY ONE OS label (linux|macos) and AT MOST ONE
+ *                       host label (XACA-1441-031). Zero or two OS labels, or two host labels,
+ *                       can never be satisfied by a single minted runner: that is a workflow
+ *                       misconfiguration to alert on, not a capacity outage to wait out.
  *
  * DECISION (D7): `issue_comment` and other events that run the BASE repo's default-branch
  * code report head == base and are accepted. That is the same posture as the XACA-1442
@@ -45,7 +49,7 @@
 
 const REASONS = Object.freeze([
   'ok', 'not-allowlisted', 'reject:fork-unverifiable', 'reject:fork', 'label:not-pool',
-  'label:unknown', 'malformed'
+  'label:unknown', 'label:ambiguous', 'malformed'
 ]);
 
 /** Events whose run-level head repo cannot show a fork origin (step 3). Canonical form. */
@@ -130,6 +134,12 @@ function evaluateJob(record, ctx) {
   if (labels.indexOf('self-hosted') === -1 || !hasPool) return verdict(false, 'label:not-pool');
   const allowed = allowedLabelSet(poolLabel, hostLabels);
   if (!labels.every(function (l) { return allowed.has(l); })) return verdict(false, 'label:unknown');
+
+  // 7. ambiguity (XACA-1441-031). Distinct canonical labels, so `Linux` + `linux` is one OS label.
+  const osCount = new Set(labels.filter(function (l) { return OS_LABELS.indexOf(l) !== -1; })).size;
+  const hostSet = new Set(hostLabels.map(canonical));
+  const hostCount = new Set(labels.filter(function (l) { return hostSet.has(l); })).size;
+  if (osCount !== 1 || hostCount > 1) return verdict(false, 'label:ambiguous');
 
   return verdict(true, 'ok');
 }

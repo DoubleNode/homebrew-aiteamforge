@@ -320,6 +320,65 @@ describe('registration cleanup', () => {
         assert.equal(h.gh.deletes.length, 1, 'no second DELETE');
     });
 
+    // XACA-1441-026: a runner that died (reason `runner-lost`) leaves a registration GitHub only auto-removes
+    // after about a day (documentation-sourced), so the DELETE is owed even when a job was bound.
+    const LOST_TABLE = [
+        // [description, job bound, reason, DELETE owed]
+        ['runner-lost, no job bound', false, 'runner-lost', true],
+        ['runner-lost, job bound', true, 'runner-lost', true],
+        ['other failure, no job bound (A4)', false, 'listener would not start', true],
+        ['other failure, job bound: GitHub already consumed the runner', true, 'job-failed', false],
+        ['no reason, job bound', true, undefined, false],
+        ['runner-lost lookalike, job bound', true, 'runner-lost-ish', false],
+    ];
+    async function failedRunner(h, bound, reason) {
+        const jobId = 300 + h.gh.mints.length;
+        const v = await mintOn(h, 'm4mini', jobRec({ jobId }));
+        h.a.takeForMachine('m4mini');
+        h.a.report(v.id, 'm4mini', { state: 'started' });
+        if (bound) h.a.bindJob({ ...jobRec({ jobId }), runnerName: v.runnerName }, 'pickup');
+        const body = { state: 'failed' };
+        if (reason !== undefined) body.reason = reason;
+        assert.equal(h.a.report(v.id, 'm4mini', body).status, 'ok');
+        return v;
+    }
+    for (const [name, bound, reason, owed] of LOST_TABLE) {
+        test(`failed report: ${name} -> DELETE ${owed ? 'queued' : 'not queued'}`, async () => {
+            const h = harness();
+            const v = await failedRunner(h, bound, reason);
+            assert.equal((h.a.get(v.id).boundJob !== null), bound, 'fixture: bound as intended');
+            await h.a.sweep();
+            assert.equal(h.gh.deletes.length, owed ? 1 : 0);
+            if (owed) assert.equal(h.gh.deletes[0].runnerId, 7001);
+        });
+    }
+
+    test('runner-lost with a bound job: a 404 counts as success and is not repeated', async () => {
+        const h = harness();
+        await failedRunner(h, true, 'runner-lost');
+        h.gh.deleteMode = 404;
+        const s = await h.a.sweep();
+        assert.equal(s.deleted, 1);
+        await h.a.sweep();
+        assert.equal(h.gh.deletes.length, 1);
+        assert.equal(h.auditRows().filter((r) => r.event === 'deregister').pop().httpStatus, 404);
+    });
+
+    test('runner-lost with a bound job: a 422 (still busy) is retried every sweep, never forced, and capped', async () => {
+        const h = harness({ timeouts: { maxCleanupAttempts: 3 } });
+        await failedRunner(h, true, 'runner-lost');
+        h.gh.deleteMode = 422;
+        let s = await h.a.sweep();
+        assert.deepEqual([s.deleted, s.retry], [0, 1]);
+        s = await h.a.sweep();
+        assert.equal(s.retry, 1);
+        s = await h.a.sweep();
+        assert.equal(s.failed, 1, 'attempt cap reached');
+        await h.a.sweep();
+        assert.equal(h.gh.deletes.length, 3, 'no fourth attempt');
+        assert.ok(h.gh.deletes.every((d) => d.force === undefined), 'never forced');
+    });
+
     test('concurrent sweeps share one run (no double DELETE)', async () => {
         const h = harness();
         await mintOn(h);

@@ -404,7 +404,14 @@ function createAssignments(opts) {
             const legal = to === 'completed' ? (cur === 'started' || cur === 'running')
                 : (cur === 'delivered' || cur === 'started' || cur === 'running');
             if (legal) {
-                if (!rec.boundJob && rec.cleanup === 'none') { rec.cleanup = 'needed'; rec.cleanupAttempts = 0; }
+                // XACA-1441-026: an agent `failed` report with reason `runner-lost` means the listener died
+                // (VM reboot, SIGTERM). Its registration must be DELETEd even when a job WAS bound: per
+                // GitHub's documentation an ephemeral self-hosted runner that stops connecting is only
+                // auto-removed after about 1 day, so a lost JIT runner's registration would linger.
+                // DOCUMENTATION-SOURCED, not measured by our spike. A 422 (runner still busy) retries on the
+                // next sweep and is never forced; a 404 counts as success; attempts are capped.
+                const runnerLost = to === 'failed' && extra.reason === 'runner-lost';
+                if ((!rec.boundJob || runnerLost) && rec.cleanup === 'none') { rec.cleanup = 'needed'; rec.cleanupAttempts = 0; }
                 move(rec, to, now, extra);
                 persist();
                 return ok(true);

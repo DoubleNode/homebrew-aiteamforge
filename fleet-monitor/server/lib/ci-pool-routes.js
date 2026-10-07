@@ -61,6 +61,8 @@ const SLOT_STATES = ['idle', 'starting', 'busy', 'cleaning', 'broken'];
 const VM_STATES = ['running', 'stopped', 'broken', 'unknown', 'none'];
 const OS_VALUES = ['Linux', 'macOS'];
 const REPORT_STATES = ['started', 'completed', 'failed', 'cancelled'];
+// XACA-1441-025: the XACA-1440 pause marker as the agent read it (optional field of the poll).
+const PAUSE_MARKERS = ['absent', 'draining', 'paused', 'resuming', 'corrupt'];
 const MAX_SLOTS = 32;
 
 // Same byte-identical body as auth-middleware's UNAUTHORIZED_BODY (contract §4: no reason leaks).
@@ -105,7 +107,7 @@ const CAPACITY_SPEC = {
 /** Allowlist-copy (validatePush style): returns a fresh object holding only known, valid fields. */
 function validatePoll(body) {
     if (!isPlainObject(body)) bad('body must be a JSON object');
-    noUnknown(body, ['schemaVersion', 'agentVersion', 'capacity', 'slots'], 'poll');
+    noUnknown(body, ['schemaVersion', 'agentVersion', 'capacity', 'slots', 'pauseMarker'], 'poll');
     if (body.schemaVersion !== SCHEMA_VERSION) {
         throw new PollValidationError('unsupported schemaVersion', { expected: SCHEMA_VERSION });
     }
@@ -141,7 +143,29 @@ function validatePoll(body) {
         seen.add(k);
         return { os: s.os, index: s.index, state: s.state, assignmentId: s.assignmentId };
     });
-    return { agentVersion: body.agentVersion, capacity, slots };
+    const out = { agentVersion: body.agentVersion, capacity, slots };
+    if (has(body, 'pauseMarker')) {
+        if (typeof body.pauseMarker !== 'string' || !PAUSE_MARKERS.includes(body.pauseMarker)) {
+            bad(`pauseMarker: must be one of ${PAUSE_MARKERS.join('|')}`);
+        }
+        out.pauseMarker = body.pauseMarker;
+    }
+    return out;
+}
+
+/**
+ * XACA-1441-025: does the host's local pause marker disagree with the server's `machines[m].paused`?
+ * The server's field stays the only truth (C7); this only REPORTS the disagreement.
+ *   draining/paused  with paused === false -> drift
+ *   absent/resuming  with paused === true  -> drift
+ *   corrupt, or no marker sent, or no boolean paused -> no verdict from the pair (null only when no marker)
+ * @returns {boolean|null} null when the agent sent no marker
+ */
+function pauseDrift(marker, paused) {
+    if (marker === undefined || marker === null) return null;
+    if (marker === 'paused' || marker === 'draining') return paused === false;
+    if (marker === 'absent' || marker === 'resuming') return paused === true;
+    return false;
 }
 
 /** Assignment state report body. Allowlist-copy; unknown field -> error. */
@@ -240,7 +264,7 @@ const iso = (ms) => (Number.isFinite(ms) ? new Date(ms).toISOString() : null);
  * @param {object}   [deps.dispatcher] {isEnabled(), alerts?(), queue?()}; absent => FLEET_CI_DISPATCHER==='1'
  * @param {object}   [deps.audit]      {append}
  * @param {Function} [deps.now]        () => epoch ms
- * @param {Map}      [deps.reports]    machine -> {receivedAt, capacity, slots, agentVersion}; shared with the dispatcher
+ * @param {Map}      [deps.reports]    machine -> {receivedAt, capacity, slots, agentVersion, pauseMarker?}; shared with the dispatcher
  * @param {Function} [deps.hostAuth]   middleware override (tests only: proves the auth matrix catches a weaker gate)
  * @param {object}   [deps.logger]
  *
@@ -258,6 +282,15 @@ function registerCiPoolRoutes(app, deps) {
     const reports = d.reports || new Map();
     const log = d.logger || console;
     const ciHostKey = d.hostAuth || requireCiHostKey(store);
+    /** machine -> last drift verdict, so a warning is logged once per transition INTO drift. */
+    const driftState = new Map();
+
+    /** XACA-1441-029: tell the dispatcher the policy inputs changed. Null-safe (dormant / absent dispatcher). */
+    function configChanged() {
+        if (d.dispatcher && typeof d.dispatcher.onConfigChanged === 'function') {
+            try { d.dispatcher.onConfigChanged(); } catch (e) { log.error('[CI-POOL] onConfigChanged failed:', e && e.message); }
+        }
+    }
 
     function dispatcherOn() {
         if (d.dispatcher && typeof d.dispatcher.isEnabled === 'function') return d.dispatcher.isEnabled() === true;
@@ -283,10 +316,17 @@ function registerCiPoolRoutes(app, deps) {
             }
             const machineId = req.ciMachine;
             const now = clock();
-            reports.set(machineId, { receivedAt: now, capacity: parsed.capacity, slots: parsed.slots, agentVersion: parsed.agentVersion });
+            const rep = { receivedAt: now, capacity: parsed.capacity, slots: parsed.slots, agentVersion: parsed.agentVersion };
+            if (parsed.pauseMarker !== undefined) rep.pauseMarker = parsed.pauseMarker;
+            reports.set(machineId, rep);
 
             const on = dispatcherOn();
             const m = store.getMachine(machineId);
+            const drift = pauseDrift(rep.pauseMarker, m ? m.paused : undefined);
+            if (drift === true && driftState.get(machineId) !== true) {
+                (log.warn || log.log || (() => {})).call(log, `[CI-POOL] pause drift on ${machineId}: host marker is "${rep.pauseMarker}" but the server record has paused=${m.paused}`);
+            }
+            if (drift !== null) driftState.set(machineId, drift); else driftState.delete(machineId);
             const enabled = on && !!m && m.enabled === true;
             const paused = !m || m.paused !== false;
             const out = {
@@ -350,6 +390,8 @@ function registerCiPoolRoutes(app, deps) {
                     hasTelemetryKey: m.telemetryKeyHash !== null,
                     lastPollAt: r ? iso(r.receivedAt) : null,
                     agentVersion: r ? r.agentVersion : null,
+                    pauseMarker: r && r.pauseMarker !== undefined ? r.pauseMarker : null,
+                    pauseDrift: r ? pauseDrift(r.pauseMarker, m.paused) : null,
                     capacity: r ? r.capacity : null,
                     slots: r ? r.slots : null,
                 };
@@ -402,6 +444,7 @@ function registerCiPoolRoutes(app, deps) {
                 audit('pause', { machine: id, paused: after.paused, by: 'operator', reason: after.pauseReason });
             }
             const m = after;
+            configChanged();   // hostLabels feed label:unknown / label:ambiguous
             return res.status(200).json({
                 success: true, machine: id,
                 record: { enabled: m.enabled, paused: m.paused, pausedBy: m.pausedBy, pausedAt: m.pausedAt, pauseReason: m.pauseReason, prefers: m.prefers, thresholds: m.thresholds, hasKey: m.keyHash !== null, hasTelemetryKey: m.telemetryKeyHash !== null },
@@ -417,6 +460,7 @@ function registerCiPoolRoutes(app, deps) {
             if (!isPlainObject(req.body)) return res.status(400).json({ error: 'body must be a JSON object' });
             const result = store.updateConfig(req.body);
             if (!result.ok) return storeFailure(res, result);
+            configChanged();   // allowlist / poolLabel changed: re-evaluate jobs rejected under the old config
             return res.status(200).json({ success: true, config: store.getConfig() });
         } catch (error) {
             log.error('[CI-POOL] error updating config:', error && error.message);
@@ -478,7 +522,7 @@ function registerCiPoolRoutes(app, deps) {
 }
 
 module.exports = {
-    registerCiPoolRoutes, requireCiHostKey, requireCiTelemetryKey, validatePoll, validateStateReport, PollValidationError,
+    registerCiPoolRoutes, requireCiHostKey, requireCiTelemetryKey, validatePoll, validateStateReport, pauseDrift, PollValidationError, PAUSE_MARKERS,
     SCHEMA_VERSION, MAX_POLL_BYTES, MAX_STATE_BYTES, POLL_AFTER_SECONDS, POLL_AFTER_DORMANT_SECONDS,
     HOST_KEY_RE, TELEMETRY_KEY_RE,
 };

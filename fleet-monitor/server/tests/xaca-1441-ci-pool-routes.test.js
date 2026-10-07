@@ -33,7 +33,7 @@ const { requireApiKey } = require('../lib/auth-middleware');
 const { createPoolStore } = require('../lib/ci-pool-store');
 const { createAssignments } = require('../lib/ci-dispatch-assignments');
 const { createAudit } = require('../lib/ci-dispatch-audit');
-const { registerCiPoolRoutes, validatePoll, MAX_POLL_BYTES } = require('../lib/ci-pool-routes');
+const { registerCiPoolRoutes, validatePoll, pauseDrift, PAUSE_MARKERS, MAX_POLL_BYTES } = require('../lib/ci-pool-routes');
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'xaca1441-005-routes-'));
 after(() => {
@@ -341,6 +341,135 @@ describe('poll validation (C3/C8)', () => {
     });
 });
 
+// XACA-1441-025: the optional `pauseMarker` field and the drift verdict it feeds.
+describe('pauseMarker (025)', () => {
+    for (const marker of PAUSE_MARKERS) {
+        test(`"${marker}" is accepted, stored on the report and exposed by GET /api/ci-pool`, async () => {
+            const s = setup();
+            const r = await poll(s, KEY_A, validPoll({ pauseMarker: marker }));
+            assert.equal(r.status, 200, r.text);
+            assert.equal(s.reg.reports.get('m4mini').pauseMarker, marker);
+            const g = await request(s.app).get('/api/ci-pool');
+            assert.equal(g.body.machines.m4mini.pauseMarker, marker);
+        });
+    }
+
+    test('no marker sent: pauseMarker and pauseDrift are null, and a later poll without one clears a stale marker', async () => {
+        const s = setup();
+        await poll(s, KEY_A, validPoll({ pauseMarker: 'paused' }));
+        await poll(s, KEY_A);
+        const g = await request(s.app).get('/api/ci-pool');
+        assert.deepEqual([g.body.machines.m4mini.pauseMarker, g.body.machines.m4mini.pauseDrift], [null, null]);
+        assert.deepEqual([g.body.machines.m1mini.pauseMarker, g.body.machines.m1mini.pauseDrift], [null, null], 'never polled');
+    });
+
+    for (const [label, value] of [['unlisted string', 'frozen'], ['wrong case', 'Paused'], ['empty string', ''], ['null', null], ['number', 1], ['boolean', true], ['object', {}], ['array', ['paused']]]) {
+        test(`400: pauseMarker ${label}; nothing recorded`, async () => {
+            const s = setup();
+            const r = await poll(s, KEY_A, validPoll({ pauseMarker: value }));
+            assert.equal(r.status, 400, r.text);
+            assert.match(r.body.error, /pauseMarker/);
+            assert.equal(s.reg.reports.has('m4mini'), false);
+        });
+    }
+
+    test('unknown fields stay 400 next to a valid pauseMarker', async () => {
+        const s = setup();
+        assert.equal((await poll(s, KEY_A, validPoll({ pauseMarker: 'paused', pauseState: 'x' }))).status, 400);
+    });
+
+    // marker x server `paused` (true / false / absent: no machine record or a non-boolean)
+    const DRIFT_TABLE = [
+        // [marker, paused=true, paused=false, paused=absent]
+        ['paused',   false, true,  false],
+        ['draining', false, true,  false],
+        ['absent',   true,  false, false],
+        ['resuming', true,  false, false],
+        ['corrupt',  false, false, false],
+    ];
+    for (const [marker, whenTrue, whenFalse, whenAbsent] of DRIFT_TABLE) {
+        test(`pauseDrift truth table: marker "${marker}"`, () => {
+            assert.equal(pauseDrift(marker, true), whenTrue, 'paused=true');
+            assert.equal(pauseDrift(marker, false), whenFalse, 'paused=false');
+            assert.equal(pauseDrift(marker, undefined), whenAbsent, 'paused absent');
+        });
+    }
+    test('pauseDrift is null whenever the agent sent no marker', () => {
+        for (const paused of [true, false, undefined, null]) {
+            assert.equal(pauseDrift(undefined, paused), null);
+            assert.equal(pauseDrift(null, paused), null);
+        }
+    });
+
+    test('GET shows the drift verdict end to end for every marker x paused state', async () => {
+        for (const [marker, whenTrue, whenFalse] of DRIFT_TABLE) {
+            const s = setup();
+            await bearer(request(s.app).put('/api/ci-pool/machines/m4mini'), ADMIN).send({ paused: true, reason: 'r' });
+            await poll(s, KEY_A, validPoll({ pauseMarker: marker }));
+            let g = await request(s.app).get('/api/ci-pool');
+            assert.equal(g.body.machines.m4mini.pauseDrift, whenTrue, `${marker} vs paused=true`);
+            await bearer(request(s.app).put('/api/ci-pool/machines/m4mini'), ADMIN).send({ paused: false });
+            g = await request(s.app).get('/api/ci-pool');
+            assert.equal(g.body.machines.m4mini.pauseDrift, whenFalse, `${marker} vs paused=false`);
+        }
+    });
+
+    test('a warning is logged once per transition into drift, not on every poll', async () => {
+        const lines = [];
+        const s = setup({ deps: { logger: { error() {}, warn: (m) => lines.push(m) } } });
+        const drifted = () => lines.filter((l) => /pause drift on m4mini/.test(l)).length;
+        await poll(s, KEY_A, validPoll({ pauseMarker: 'paused' }));   // server says un-paused: drift begins
+        await poll(s, KEY_A, validPoll({ pauseMarker: 'paused' }));
+        await poll(s, KEY_A, validPoll({ pauseMarker: 'draining' }));
+        assert.equal(drifted(), 1);
+        await poll(s, KEY_A, validPoll({ pauseMarker: 'absent' }));   // agrees with paused=false: drift ends
+        await poll(s, KEY_A, validPoll({ pauseMarker: 'paused' }));   // second transition
+        assert.equal(drifted(), 2);
+        await poll(s, KEY_A);                                         // no marker resets the state, logs nothing
+        await poll(s, KEY_A, validPoll({ pauseMarker: 'paused' }));
+        assert.equal(drifted(), 3);
+        assert.equal(lines.some((l) => /fcp_|keyHash/.test(l)), false);
+    });
+
+    test('the marker never changes what the poll response says: the server record stays the single truth (C7)', async () => {
+        const s = setup();
+        const r = await poll(s, KEY_A, validPoll({ pauseMarker: 'paused' }));
+        assert.equal(r.body.paused, false);
+        assert.equal(s.store.getMachine('m4mini').paused, false);
+    });
+});
+
+describe('config writes notify the dispatcher (029)', () => {
+    const put = (s, url, body) => bearer(request(s.app).put(url), ADMIN).send(body);
+
+    test('PUT /config and PUT /machines/:machine each call dispatcher.onConfigChanged once after a successful write', async () => {
+        let calls = 0;
+        const dispatcher = { isEnabled: () => true, alerts: () => [], queue: () => [], onConfigChanged: () => { calls++; } };
+        const s = setup({ deps: { dispatcher } });
+        assert.equal((await put(s, '/api/ci-pool/config', { allowlist: ['acme/widgets'] })).status, 200);
+        assert.equal(calls, 1);
+        assert.equal((await put(s, '/api/ci-pool/machines/m4mini', { prefers: 'long' })).status, 200);
+        assert.equal(calls, 2);
+    });
+
+    test('a rejected write (400) does not notify', async () => {
+        let calls = 0;
+        const dispatcher = { isEnabled: () => true, onConfigChanged: () => { calls++; } };
+        const s = setup({ deps: { dispatcher } });
+        assert.equal((await put(s, '/api/ci-pool/config', { nope: 1 })).status, 400);
+        assert.equal((await put(s, '/api/ci-pool/machines/m4mini', { prefers: 'medium' })).status, 400);
+        assert.equal(calls, 0);
+    });
+
+    test('null-safe: no dispatcher, a dispatcher without the hook, or a throwing hook never fails the write', async () => {
+        for (const dispatcher of [undefined, { isEnabled: () => false }, { isEnabled: () => true, onConfigChanged: () => { throw new Error('boom'); } }]) {
+            const s = setup({ noDispatcher: dispatcher === undefined, deps: dispatcher ? { dispatcher } : {} });
+            assert.equal((await put(s, '/api/ci-pool/config', { allowlist: ['acme/widgets'] })).status, 200);
+            assert.equal((await put(s, '/api/ci-pool/machines/m4mini', { enabled: true })).status, 200);
+        }
+    });
+});
+
 describe('assignment state route (C5)', () => {
     test('idempotent repeat is 200; illegal is 409; the response never carries the config', async () => {
         const s = setup();
@@ -405,7 +534,7 @@ describe('GET /api/ci-pool redaction', () => {
         assert.equal(r.body.machines.m1mini.lastPollAt, null);
         assert.equal(r.body.dispatcherEnabled, true);
         assert.equal(r.body.assignments.length, 2);
-        assert.deepEqual(Object.keys(r.body.machines.m4mini).sort(), ['agentVersion', 'capacity', 'enabled', 'hasKey', 'hasTelemetryKey', 'lastPollAt', 'pauseReason', 'pausedAt', 'pausedBy', 'paused', 'prefers', 'slots', 'thresholds'].sort());
+        assert.deepEqual(Object.keys(r.body.machines.m4mini).sort(), ['agentVersion', 'capacity', 'enabled', 'hasKey', 'hasTelemetryKey', 'lastPollAt', 'pauseDrift', 'pauseMarker', 'pauseReason', 'pausedAt', 'pausedBy', 'paused', 'prefers', 'slots', 'thresholds'].sort());
     });
 });
 

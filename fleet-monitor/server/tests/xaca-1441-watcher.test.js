@@ -461,3 +461,228 @@ describe('vanished jobs end in a terminal event (PR #1083)', () => {
         assert.equal(terminal(events, 11)[0].rec.conclusion, 'success');
     });
 });
+
+// ---------------------------------------------------------------------------
+// XACA-1441-032 pagination and XACA-1441-029 live allowlist
+// ---------------------------------------------------------------------------
+
+/**
+ * Fake github that honours `page` and `per_page`. world.runs = {queued:[...], in_progress:[...]},
+ * world.jobs[runId] = [...]. A page whose body equals the previous body for the same path answers 304.
+ */
+function makePagedWorld() {
+    const world = { queued: [], in_progress: [], jobs: {}, calls: [], seen: new Map() };
+    world.github = {
+        getRateState: () => ({ mode: 'normal', resumeAt: null }),
+        async conditionalGet({ owner, repo, path }) {
+            world.calls.push({ owner, repo, path });
+            const page = Number((/[?&]page=(\d+)/.exec(path) || [null, 1])[1]);
+            const per = Number((/per_page=(\d+)/.exec(path) || [null, 30])[1]);
+            let all; let key; let m;
+            if ((m = /\/actions\/runs\?status=(\w+)/.exec(path))) { all = world[m[1]]; key = 'workflow_runs'; }
+            else if ((m = /\/actions\/runs\/(\d+)\/jobs/.exec(path))) { all = world.jobs[m[1]] || []; key = 'jobs'; }
+            else throw new Error(`unexpected path ${path}`);
+            const data = { [key]: all.slice((page - 1) * per, page * per) };
+            const body = JSON.stringify(data);
+            const notModified = world.seen.get(path) === body;
+            world.seen.set(path, body);
+            return { status: notModified ? 304 : 200, notModified, data, etag: 'x' };
+        },
+    };
+    return world;
+}
+const many = (n, make, from = 1) => Array.from({ length: n }, (_, i) => make(from + i));
+const pagedSetup = (over = {}) => {
+    const world = makePagedWorld();
+    const events = [];
+    const logs = [];
+    const w = createWatcher({
+        github: world.github, allowlist: [REPO], now: () => T0,
+        onJob: (rec, change) => events.push({ change, rec }), log: (l, m) => logs.push([l, m]), ...over,
+    });
+    return { world, events, logs, w };
+};
+const pagesOf = (world, re) => world.calls.filter((c) => re.test(c.path)).map((c) => Number((/[?&]page=(\d+)/.exec(c.path) || [null, 1])[1]));
+
+describe('pagination (032)', () => {
+    test('a job list of 100/100/37 is read in full: 237 jobs observed, pages 1-3 requested, no page 4', async () => {
+        const { world, events, w } = pagedSetup();
+        world.queued = [run(1)];
+        world.jobs[1] = many(237, (id) => job(id));
+        await w.runCycle();
+        assert.equal(events.filter((e) => e.change === 'queued').length, 237);
+        assert.deepEqual(pagesOf(world, /runs\/1\/jobs/), [1, 2, 3]);
+        assert.equal(world.calls.filter((c) => /runs\/1\/jobs/.test(c.path)).every((c) => /per_page=100/.test(c.path)), true);
+        assert.match(world.calls.find((c) => /page=2/.test(c.path)).path, /jobs\?filter=latest&per_page=100&page=2$/);
+    });
+
+    test('a run list of 100/100/37 is read in full: every run reaches its job fetch', async () => {
+        const { world, events, w } = pagedSetup();
+        world.queued = many(237, (id) => run(id));
+        for (const r of world.queued) world.jobs[r.id] = [job(r.id * 1000)];
+        await w.runCycle();
+        assert.deepEqual(pagesOf(world, /actions\/runs\?status=queued/), [1, 2, 3]);
+        assert.deepEqual(pagesOf(world, /actions\/runs\?status=in_progress/), [1], 'an empty list is one call');
+        assert.equal(events.filter((e) => e.change === 'queued').length, 237);
+        assert.ok(events.some((e) => e.rec.jobId === 237000), 'a job from the last page of runs');
+    });
+
+    test('an exact multiple of the page size costs one extra, empty page and stops there', async () => {
+        const { world, events, w } = pagedSetup();
+        world.queued = [run(1)];
+        world.jobs[1] = many(200, (id) => job(id));
+        await w.runCycle();
+        assert.equal(events.length, 200);
+        assert.deepEqual(pagesOf(world, /runs\/1\/jobs/), [1, 2, 3]);
+    });
+
+    test('the cap stops at 10 pages and logs a warning (jobs list)', async () => {
+        const { world, events, logs, w } = pagedSetup();
+        world.queued = [run(1)];
+        world.jobs[1] = many(1500, (id) => job(id));
+        await w.runCycle();
+        assert.deepEqual(pagesOf(world, /runs\/1\/jobs/), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+        assert.equal(events.length, 1000);
+        const warns = logs.filter(([l, m]) => l === 'warn' && /10-page cap/.test(m));
+        assert.equal(warns.length, 1);
+        assert.match(warns[0][1], /jobs list/);
+    });
+
+    test('the cap stops at 10 pages and logs a warning (runs list)', async () => {
+        const { world, logs, w } = pagedSetup();
+        world.queued = many(1100, (id) => run(id));
+        for (const r of world.queued) world.jobs[r.id] = [];
+        await w.runCycle();
+        assert.deepEqual(pagesOf(world, /actions\/runs\?status=queued/), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+        assert.equal(logs.filter(([l, m]) => l === 'warn' && /workflow_runs list hit the 10-page cap/.test(m)).length, 1);
+    });
+
+    test('under the cap there is no warning', async () => {
+        const { world, logs, w } = pagedSetup();
+        world.queued = [run(1)];
+        world.jobs[1] = many(150, (id) => job(id));
+        await w.runCycle();
+        assert.equal(logs.filter(([l]) => l === 'warn').length, 0);
+    });
+
+    describe('vanish needs every page fresh', () => {
+        async function twoPageRun() {
+            const x = pagedSetup();
+            x.world.queued = [run(1)];
+            x.world.jobs[1] = many(150, (id) => job(id));
+            await x.w.runCycle();
+            assert.equal(x.events.filter((e) => e.change === 'queued').length, 150);
+            x.world.queued = [];                       // the run finished: it leaves the lists
+            x.events.length = 0;
+            return x;
+        }
+        const vanished = (events) => events.filter((e) => e.change === 'completed' && e.rec.conclusion === 'vanished').map((e) => e.rec.jobId);
+
+        test('every page a fresh 200 (the list shifted): the job that is gone vanishes', async () => {
+            const x = await twoPageRun();
+            x.world.jobs[1] = x.world.jobs[1].filter((j) => j.id !== 1);   // removes the first job: page 1 AND page 2 change
+            await x.w.runCycle();
+            assert.deepEqual(vanished(x.events), [1]);
+        });
+
+        test('one page answers 304 (only the last job is gone): NOTHING vanishes', async () => {
+            const x = await twoPageRun();
+            x.world.jobs[1] = x.world.jobs[1].filter((j) => j.id !== 150); // page 2 changes, page 1 replays as 304
+            await x.w.runCycle();
+            assert.deepEqual(vanished(x.events), []);
+            assert.deepEqual(pagesOf(x.world, /runs\/1\/jobs/).slice(-2), [1, 2]);
+        });
+
+        test('all pages 304 (nothing changed): nothing vanishes', async () => {
+            const x = await twoPageRun();
+            await x.w.runCycle();
+            assert.deepEqual(vanished(x.events), []);
+        });
+
+        test('a capped job list never vanishes anything, even when every page is fresh', async () => {
+            const x = pagedSetup();
+            x.world.queued = [run(1)];
+            x.world.jobs[1] = many(1200, (id) => job(id));
+            await x.w.runCycle();
+            x.world.queued = [];
+            x.events.length = 0;
+            x.world.jobs[1] = x.world.jobs[1].filter((j) => j.id !== 1);   // shifts every page: all 200, but capped
+            await x.w.runCycle();
+            assert.deepEqual(vanished(x.events), []);
+        });
+
+        test('a single-page list keeps the old behaviour (a fresh 200 without the job vanishes it)', async () => {
+            const x = pagedSetup();
+            x.world.queued = [run(1)];
+            x.world.jobs[1] = [job(11), job(12)];
+            await x.w.runCycle();
+            x.world.queued = [];
+            x.events.length = 0;
+            x.world.jobs[1] = [job(11)];
+            await x.w.runCycle();
+            assert.deepEqual(vanished(x.events), [12]);
+        });
+    });
+});
+
+describe('live allowlist (029)', () => {
+    const OTHER = 'acme/gadgets';
+    const reposCalled = (world) => [...new Set(world.calls.map((c) => `${c.owner}/${c.repo}`))].sort();
+
+    test('an added repo is polled on the next cycle, and a removed one is no longer polled, with no restart', async () => {
+        let list = [REPO];
+        const { world, w } = pagedSetup({ allowlist: undefined, getAllowlist: () => list });
+        await w.runCycle();
+        assert.deepEqual(reposCalled(world), [REPO]);
+        world.calls.length = 0;
+        list = [REPO, OTHER];
+        await w.runCycle();
+        assert.deepEqual(reposCalled(world), [OTHER, REPO].sort());
+        assert.deepEqual(w.snapshot().repos, [REPO, OTHER]);
+        world.calls.length = 0;
+        list = [OTHER];
+        await w.runCycle();
+        assert.deepEqual(reposCalled(world), [OTHER]);
+        assert.deepEqual(w.snapshot().repos, [OTHER]);
+    });
+
+    test('a removed repo\'s open jobs are completed as vanished so no consumer keeps them as demand', async () => {
+        let list = [REPO];
+        const { world, events, w } = pagedSetup({ allowlist: undefined, getAllowlist: () => list });
+        world.queued = [run(1)];
+        world.jobs[1] = [job(11)];
+        await w.runCycle();
+        assert.equal(events.filter((e) => e.change === 'queued').length, 1);
+        list = [];
+        await w.runCycle();
+        const done = events.filter((e) => e.change === 'completed');
+        assert.equal(done.length, 1);
+        assert.equal(done[0].rec.conclusion, 'vanished');
+        assert.equal(done[0].rec.jobId, 11);
+    });
+
+    test('the getter is read every cycle, but an unchanged list is parsed (and an invalid entry warned about) once', async () => {
+        let reads = 0;
+        const { logs, w } = pagedSetup({ allowlist: undefined, getAllowlist: () => { reads++; return [REPO, 'not a repo']; } });
+        await w.runCycle(); await w.runCycle(); await w.runCycle();
+        assert.equal(reads, 3);
+        assert.equal(logs.filter(([, m]) => /invalid allowlist entry/.test(m)).length, 1);
+    });
+
+    test('a throwing getter keeps the previous list and the cycle still runs', async () => {
+        let boom = false;
+        const { world, logs, w } = pagedSetup({ allowlist: undefined, getAllowlist: () => { if (boom) throw new Error('store gone'); return [REPO]; } });
+        await w.runCycle();
+        boom = true;
+        world.calls.length = 0;
+        await w.runCycle();
+        assert.deepEqual(reposCalled(world), [REPO]);
+        assert.ok(logs.some(([l, m]) => l === 'warn' && /getter threw/.test(m)));
+    });
+
+    test('backward compatible: with no getter the static allowlist is used exactly as before', async () => {
+        const { world, w } = pagedSetup({ allowlist: [REPO, OTHER] });
+        await w.runCycle();
+        assert.deepEqual(reposCalled(world), [OTHER, REPO].sort());
+    });
+});

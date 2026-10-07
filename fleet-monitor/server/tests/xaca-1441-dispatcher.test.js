@@ -548,3 +548,349 @@ describe('ghost demand is bounded end to end (PR #1083)', () => {
         assert.equal(g.s.auditRows.filter((r) => r.event === 'expire' && /ghost-bound/.test(r.reason || '')).length, 0);
     });
 });
+
+// XACA-1441-031: a pool job that no single runner can satisfy is a workflow misconfiguration, never a
+// capacity outage. It is audited, raises ci-job-misconfigured (deduped per repo) and never waits on the
+// no-capacity timer.
+describe('ambiguous pool jobs are misconfigurations (031)', () => {
+    const OTHER = 'DoubleNode/other';
+    const LABEL_TABLE = [
+        // [description, labels, expected audit reason or null when accepted]
+        ['one OS label', ['self-hosted', 'Linux', 'ARM64', 'fleet-pool'], null],
+        ['one OS label + one host label', ['self-hosted', 'Linux', 'ARM64', 'fleet-pool', 'm4mini'], null],
+        ['two OS labels', ['self-hosted', 'Linux', 'macOS', 'fleet-pool'], 'label:ambiguous'],
+        ['no OS label', ['self-hosted', 'ARM64', 'fleet-pool'], 'label:ambiguous'],
+        ['two host labels', ['self-hosted', 'Linux', 'fleet-pool', 'm4mini', 'm1mini'], 'label:ambiguous'],
+    ];
+    for (const [name, labels, reason] of LABEL_TABLE) {
+        test(`${name}: ${reason ? 'rejected as label:ambiguous with a ci-job-misconfigured alert' : 'accepted and tracked'}`, () => {
+            const s = setup();
+            s.d.onJob(rec(1, { labels }), 'queued');
+            const rows = s.auditRows.filter((r) => r.event === 'reject');
+            if (reason === null) {
+                assert.equal(rows.length, 0);
+                assert.equal(s.d.queue().length, 1);
+                assert.equal(s.alerts.list().length, 0);
+                return;
+            }
+            assert.equal(rows.length, 1);
+            assert.equal(rows[0].reason, 'label:ambiguous');
+            assert.equal(s.d.queue().length, 0);
+            const a = s.alerts.list();
+            assert.equal(a.length, 1);
+            assert.equal(a[0].type, 'ci-job-misconfigured');
+            assert.equal(a[0].severity, 'warning');
+            assert.equal(a[0].ref, REPO);
+            assert.match(a[0].body, /exactly one OS label/);
+        });
+    }
+
+    test('never a ci-no-capacity alert, however long it waits, and never minted', async () => {
+        const s = setup();
+        s.report('m4mini', {}, 2);
+        s.d.onJob(rec(1, { labels: ['self-hosted', 'Linux', 'macOS', 'fleet-pool'] }), 'queued');
+        for (let i = 0; i < 8; i++) { s.clock.t += NO_CAPACITY_AFTER_MS; s.report('m4mini', {}, 2); await s.d.tick(); }
+        assert.equal(mints(s).length, 0);
+        assert.deepEqual([...new Set(s.alerts.list().map((a) => a.type))], ['ci-job-misconfigured']);
+    });
+
+    test('control: a REAL capacity outage (valid labels, no machine) still raises ci-no-capacity, not ci-job-misconfigured', async () => {
+        const s = setup();
+        s.d.onJob(rec(2), 'queued');
+        await s.d.tick();
+        s.clock.t += NO_CAPACITY_AFTER_MS + 1000;
+        await s.d.tick();
+        assert.deepEqual([...new Set(s.alerts.list().map((a) => a.type))], ['ci-no-capacity']);
+    });
+
+    test('deduped per repo: two ambiguous jobs in one repo raise once; a second repo raises its own', () => {
+        const s = setup();
+        s.store.updateConfig({ allowlist: [REPO, OTHER] });
+        const amb = ['self-hosted', 'fleet-pool'];
+        s.d.onJob(rec(1, { labels: amb }), 'queued');
+        s.d.onJob(rec(2, { labels: amb }), 'queued');
+        assert.equal(s.alerts.list().length, 1);
+        s.d.onJob(rec(3, { owner: 'DoubleNode', repo: 'other', key: `${OTHER}#3#1`, labels: amb, run: { event: 'push', repoFullName: OTHER, headRepoFullName: OTHER } }), 'queued');
+        assert.deepEqual(s.alerts.list().map((a) => a.ref).sort(), [OTHER, REPO].sort());
+        assert.equal(s.auditRows.filter((r) => r.reason === 'label:ambiguous').length, 3, 'each job is audited once');
+    });
+
+    test('a host label appearing in config turns label:unknown into accepted without touching ambiguity', () => {
+        const s = setup({ machines: ['m4mini'] });
+        s.d.onJob(rec(1, { labels: ['self-hosted', 'Linux', 'fleet-pool', 'm9mini'] }), 'queued');
+        assert.equal(s.auditRows.at(-1).reason, 'label:unknown');
+    });
+});
+
+// XACA-1441-029: a config change must reach jobs that were rejected under the old config, and the
+// watcher's allowlist must be live.
+describe('config changes re-evaluate rejected jobs (029)', () => {
+    const FORK_RUN = { event: 'pull_request', repoFullName: REPO, headRepoFullName: 'evil/dev-team' };
+
+    test('a job rejected not-allowlisted becomes tracked demand and is minted once its repo is added', async () => {
+        const s = setup();
+        s.report('m4mini', {}, 2);
+        s.store.updateConfig({ allowlist: ['DoubleNode/other'] });
+        s.d.onJob(rec(10), 'queued');
+        assert.equal(s.auditRows[0].reason, 'not-allowlisted');
+        await s.d.tick();
+        assert.equal(mints(s).length, 0);
+        s.store.updateConfig({ allowlist: ['DoubleNode/other', REPO] });
+        assert.deepEqual(s.d.onConfigChanged(), { promoted: 1, dropped: 0 });
+        assert.equal(s.d.queue().length, 1);
+        await s.d.tick();
+        assert.equal(mints(s).length, 1);
+        assert.equal(s.auditRows.filter((r) => r.event === 'reject').length, 1, 'one reject row, not re-audited by the re-check');
+    });
+
+    const CONFIG_ROWS = [
+        ['label:not-pool, then the pool label is renamed to match the job', () => ({ labels: ['self-hosted', 'Linux', 'ARM64', 'new-pool'] }),
+            (s) => s.store.updateConfig({ poolLabel: 'new-pool' })],
+        ['label:unknown, then the host label is registered', () => ({ labels: [...POOL, 'm9mini'] }),
+            (s) => s.store.upsertMachine('m9mini', { enabled: true })],
+    ];
+    for (const [name, over, change] of CONFIG_ROWS) {
+        test(`${name}: promoted`, () => {
+            const s = setup();
+            s.d.onJob(rec(1, over()), 'queued');
+            assert.equal(s.d.queue().length, 0);
+            assert.equal(change(s).ok, true);
+            assert.equal(s.d.onConfigChanged().promoted, 1);
+            assert.equal(s.d.queue().length, 1);
+        });
+    }
+
+    test('label:ambiguous is remembered too, and still ambiguous after an unrelated config change', () => {
+        const s = setup();
+        s.d.onJob(rec(1, { labels: ['self-hosted', 'fleet-pool'] }), 'queued');
+        assert.equal(s.d.status().configRejected, 1);
+        s.store.updateConfig({ jobClasses: { x: 'long' } });
+        assert.equal(s.d.onConfigChanged().promoted, 0);
+        assert.equal(s.d.queue().length, 0);
+        assert.equal(s.auditRows.filter((r) => r.event === 'reject').length, 1);
+    });
+
+    test('a fork-rejected job is NEVER promoted by a config change (not even one that allowlists its repo)', async () => {
+        const s = setup();
+        s.report('m4mini', {}, 2);
+        s.d.onJob(rec(7, { run: FORK_RUN }), 'queued');
+        s.d.onJob(rec(8, { run: { event: 'workflow_run', repoFullName: REPO, headRepoFullName: REPO } }), 'queued');
+        assert.equal(s.d.status().configRejected, 0, 'fork reasons are not remembered');
+        for (const change of [{ allowlist: [REPO, 'DoubleNode/other'] }, { poolLabel: 'fleet-pool' }, { jobClasses: { unit: 'long' } }]) {
+            s.store.updateConfig(change);
+            assert.deepEqual(s.d.onConfigChanged(), { promoted: 0, dropped: 0 });
+        }
+        s.store.upsertMachine('m9mini', { enabled: true });
+        s.d.onConfigChanged();
+        await s.d.tick();
+        assert.equal(s.d.queue().length, 0);
+        assert.equal(mints(s).length, 0);
+    });
+
+    test('a job that was not-allowlisted AND from a fork is rejected as not-allowlisted, then as FORK once its repo is allowlisted (never accepted)', async () => {
+        const s = setup();
+        s.report('m4mini', {}, 2);
+        s.store.updateConfig({ allowlist: ['DoubleNode/other'] });
+        s.d.onJob(rec(7, { run: FORK_RUN }), 'queued');
+        assert.equal(s.auditRows.at(-1).reason, 'not-allowlisted');
+        s.store.updateConfig({ allowlist: ['DoubleNode/other', REPO] });
+        assert.deepEqual(s.d.onConfigChanged(), { promoted: 0, dropped: 0 });
+        assert.equal(s.d.queue().length, 0);
+        assert.equal(s.d.status().configRejected, 0, 'now a fork reason: forgotten');
+        await s.d.tick();
+        assert.equal(mints(s).length, 0);
+        assert.ok(s.alerts.list().some((a) => a.type === 'ci-fork-job-on-pool'));
+    });
+
+    test('entries are dropped on pickup, in_progress and completed, so they are never re-evaluated', () => {
+        const s = setup();
+        s.store.updateConfig({ allowlist: ['DoubleNode/other'] });
+        for (const [id, change] of [[1, 'pickup'], [2, 'in_progress'], [3, 'completed']]) {
+            s.d.onJob(rec(id), 'queued');
+            assert.equal(s.d.status().configRejected, 1, 'remembered while queued');
+            s.d.onJob(rec(id, { status: change === 'completed' ? 'completed' : 'in_progress', runnerName: 'fcp-x' }), change);
+            assert.equal(s.d.status().configRejected, 0, change);
+        }
+        s.store.updateConfig({ allowlist: [REPO] });
+        assert.equal(s.d.onConfigChanged().promoted, 0);
+        assert.equal(s.d.queue().length, 0);
+    });
+
+    test('the memory is bounded at MAX_CONFIG_REJECTED: the oldest are evicted, the newest survive', () => {
+        const { MAX_CONFIG_REJECTED } = require('../lib/ci-dispatcher');
+        assert.equal(MAX_CONFIG_REJECTED, 500);
+        const s = setup();
+        s.store.updateConfig({ allowlist: ['DoubleNode/other'] });
+        for (let i = 1; i <= MAX_CONFIG_REJECTED + 25; i++) s.d.onJob(rec(i), 'queued');
+        assert.equal(s.d.status().configRejected, MAX_CONFIG_REJECTED);
+        s.store.updateConfig({ allowlist: [REPO] });
+        assert.equal(s.d.onConfigChanged().promoted, MAX_CONFIG_REJECTED);
+        const ids = new Set(s.d.queue().map((q) => q.jobId));
+        assert.equal(ids.has(1), false, 'oldest evicted');
+        assert.equal(ids.has(25), false);
+        assert.equal(ids.has(26), true);
+        assert.equal(ids.has(MAX_CONFIG_REJECTED + 25), true, 'newest kept');
+    });
+
+    test('removing a repo from the allowlist stops dispatching its already-tracked jobs', async () => {
+        const s = setup();
+        s.report('m4mini', {}, 2);
+        s.d.onJob(rec(1), 'queued');
+        assert.equal(s.d.queue().length, 1);
+        s.store.updateConfig({ allowlist: ['DoubleNode/other'] });
+        assert.deepEqual(s.d.onConfigChanged(), { promoted: 0, dropped: 1 });
+        await s.d.tick();
+        assert.equal(s.d.queue().length, 0);
+        assert.equal(mints(s).length, 0);
+    });
+
+    test('a ghost-retired job is not resurrected by a config change', async () => {
+        const s = setup({ maxTrackedMs: 60 * 60 * 1000 });
+        s.d.onJob(rec(1), 'queued');
+        s.clock.t += 61 * 60 * 1000;
+        await s.d.tick();
+        assert.equal(s.d.queue().length, 0);
+        s.d.onConfigChanged();
+        assert.equal(s.d.queue().length, 0);
+    });
+
+    test('onConfigChanged is safe on a dormant dispatcher and never throws', () => {
+        const s = setup({ env: {} });
+        assert.deepEqual(s.d.onConfigChanged(), { promoted: 0, dropped: 0 });
+    });
+
+    test('start() hands the watcher a LIVE allowlist getter that tracks the store', () => {
+        const dir = path.join(TMP, `s${++seq}`);
+        fs.mkdirSync(dir, { recursive: true });
+        const store = createPoolStore({ file: path.join(dir, 'ci-pool.json'), logger: { error() {} } });
+        store.load();
+        store.updateConfig({ allowlist: [REPO] });
+        const gh = { async generateJitConfig() { throw new Error('no'); }, async deleteRunner() { return {}; } };
+        const assignments = createAssignments({ file: path.join(dir, 's.json'), github: gh, now: () => T0, logger: { error() {}, warn() {} } });
+        let args = null;
+        const d = createDispatcher({
+            env: ENV_ON, store, assignments, alerts: createAlerts({ now: () => T0, logger: { warn() {} }, getEmitter: () => null }),
+            createWatcher: (a) => { args = a; return { async runCycle() { return 15000; }, stop() {} }; },
+            setTimer: () => ({}), clearTimer() {}, logger: { log() {}, warn() {}, error() {} },
+        });
+        d.start();
+        assert.equal(typeof args.getAllowlist, 'function');
+        assert.deepEqual(args.getAllowlist(), [REPO]);
+        store.updateConfig({ allowlist: ['DoubleNode/other'] });
+        assert.deepEqual(args.getAllowlist(), ['DoubleNode/other']);
+        d.stop();
+    });
+});
+
+// XACA-1441-033: the ghost backstop counts runners minted FOR a job that expired without ever binding
+// a job. Under label contention GitHub may hand job A's runner to job B; that must not retire a real job A.
+describe('ghost backstop counts unpicked runners, not mints (033)', () => {
+    const A = 101;
+    const isRetired = (s) => s.auditRows.some((r) => r.event === 'expire' && r.jobId === A && /^ghost-bound: \d+ runners expired unpicked$/.test(r.reason));
+
+    /** One more runner for job A that is never delivered: it expires `pending` after 60 s. */
+    async function mintAndLetExpire(s) {
+        s.report('m4mini', {}, 2);
+        await s.d.tick();                 // sweeps older ones, mints one if A is still demand
+        s.clock.t += 61 * 1000;
+    }
+    /** One more runner for job A that GitHub hands to job `other`: it binds and runs. */
+    async function mintAndBindElsewhere(s, other) {
+        s.report('m4mini', {}, 2);
+        await s.d.tick();
+        const before = s.assignments.snapshot().filter((x) => x.state === 'pending' && x.intendedJob.id === A);
+        assert.equal(before.length, 1, 'fixture: a runner was minted for A');
+        s.assignments.takeForMachine('m4mini');
+        s.d.onJob(rec(other, { status: 'in_progress', runnerName: before[0].runnerName }), 'pickup');
+        assert.equal(s.assignments.get(before[0].id).boundJob.id, other, 'fixture: bound to the other job');
+        s.clock.t += 5 * 1000;
+    }
+
+    for (const [expired, retired] of [[4, false], [5, true]]) {
+        test(`${expired} expired-unbound runners ${retired ? 'retire' : 'do not retire'} the job`, async () => {
+            const s = setup({ machines: ['m4mini'] });
+            s.d.onJob(rec(A), 'queued');
+            for (let i = 0; i < expired; i++) await mintAndLetExpire(s);
+            s.report('m4mini', {}, 2);
+            await s.d.tick();             // sweep records the expiries; decide judges the count
+            assert.equal(s.assignments.snapshot().filter((x) => x.state === 'expired').length, expired);
+            assert.equal(isRetired(s), retired);
+            assert.equal(s.d.queue().some((q) => q.jobId === A), !retired);
+            if (retired) {
+                assert.ok(s.alerts.list().some((x) => x.type === 'ci-dispatcher-degraded' && /5 runners expired unpicked/.test(x.body)));
+                assert.equal(mints(s).length, 5, 'no sixth runner');
+            } else {
+                assert.equal(mints(s).length, 5, 'still dispatched: the fifth runner goes out');
+            }
+        });
+    }
+
+    test('runners minted for A but bound to a different job do NOT count: 8 of them leave A tracked', async () => {
+        const s = setup({ machines: ['m4mini'] });
+        s.d.onJob(rec(A), 'queued');
+        for (let i = 0; i < 8; i++) await mintAndBindElsewhere(s, 500 + i);
+        assert.equal(isRetired(s), false);
+        assert.equal(s.d.queue().some((q) => q.jobId === A), true);
+        assert.equal(mints(s).length, 8, 'each stolen runner is replaced');
+    });
+
+    test('runners bound elsewhere that then FAIL (runner-lost, job failure) still do not count: a bound job is never "unpicked"', async () => {
+        const s = setup({ machines: ['m4mini'] });
+        s.d.onJob(rec(A), 'queued');
+        for (let i = 0; i < 7; i++) {
+            await mintAndBindElsewhere(s, 700 + i);
+            const mine = s.assignments.snapshot().find((x) => x.state === 'running' && x.intendedJob.id === A);
+            assert.equal(s.assignments.report(mine.id, 'm4mini', { state: 'failed', reason: 'runner-lost' }).status, 'ok');
+        }
+        s.report('m4mini', {}, 2);
+        await s.d.tick();
+        assert.equal(s.assignments.snapshot().filter((x) => x.state === 'failed' && x.boundJob).length, 7, 'fixture: seven bound-then-failed runners');
+        assert.equal(isRetired(s), false);
+        assert.equal(s.d.queue().some((q) => q.jobId === A), true);
+    });
+
+    test('mixed: 6 bound elsewhere + 4 expired-unbound keeps A; the 5th expired-unbound retires it', async () => {
+        const s = setup({ machines: ['m4mini'] });
+        s.d.onJob(rec(A), 'queued');
+        for (let i = 0; i < 6; i++) await mintAndBindElsewhere(s, 600 + i);
+        for (let i = 0; i < 4; i++) await mintAndLetExpire(s);
+        s.report('m4mini', {}, 2);
+        await s.d.tick();
+        assert.equal(isRetired(s), false);
+        assert.equal(s.d.queue().some((q) => q.jobId === A), true);
+        await mintAndLetExpire(s);        // the 5th unpicked runner for A (minted during the previous tick)
+        s.report('m4mini', {}, 2);
+        await s.d.tick();
+        assert.equal(isRetired(s), true);
+        assert.equal(s.d.queue().some((q) => q.jobId === A), false);
+    });
+
+    test('restart-expired assignments say nothing about the job and are not counted', async () => {
+        const s = setup({ machines: ['m4mini'], maxMintsPerJob: 1 });
+        s.d.onJob(rec(A), 'queued');
+        s.report('m4mini', {}, 2);
+        await s.d.tick();
+        // a restart: a second assignments instance over the same state file expires the live record with reason `restart`
+        const again = createAssignments({ file: s.assignments.file, github: s.gh, now: () => s.clock.t, logger: { error() {}, warn() {} } });
+        assert.equal(again.load().expired, 1);
+        assert.equal(again.snapshot()[0].reason, 'restart');
+        const d2 = createDispatcher({
+            maxMintsPerJob: 1, env: ENV_ON, store: s.store, assignments: again, alerts: s.alerts, audit: { append: (e, f) => s.auditRows.push({ event: e, ...f }) },
+            watcher: { async runCycle() { return 15000; } }, reports: s.reports, logger: { log() {}, warn() {}, error() {} }, now: () => s.clock.t,
+        });
+        d2.onJob(rec(A), 'queued');
+        s.clock.t += 1000;
+        await d2.tick();
+        assert.equal(isRetired(s), false);
+    });
+
+    test('the 24 h age bound is unchanged', async () => {
+        const s = setup({ machines: ['m4mini'], maxTrackedMs: 60 * 60 * 1000 });
+        s.d.onJob(rec(A), 'queued');
+        await s.d.tick();
+        s.clock.t += 61 * 60 * 1000;
+        await s.d.tick();
+        assert.equal(s.d.queue().length, 0);
+        assert.ok(s.auditRows.some((r) => r.event === 'expire' && /tracked over 1 h/.test(r.reason)));
+    });
+});

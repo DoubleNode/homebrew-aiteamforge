@@ -128,7 +128,7 @@ test('allowlist beats fork: a fork job in a non-allowlisted repo is not-allowlis
 
 test('labels: exact set, subsets and case', () => {
   const ok = (labels) => ev(rec({ labels })).accept;
-  assert.strictEqual(ok(['self-hosted', 'fleet-pool']), true);                       // minimal subset
+  assert.strictEqual(ok(['self-hosted', 'fleet-pool', 'macOS']), true);              // minimal: pool + exactly one OS
   assert.strictEqual(ok(['Self-Hosted', 'FLEET-POOL', 'linux', 'arm64', 'M1Mini']), true);
   assert.strictEqual(ok(['self-hosted', 'Linux', 'ARM64', 'fleet-pool', 'm1mini']), true);
 });
@@ -145,6 +145,25 @@ test('labels: any label outside the allowed set -> label:unknown (superset rejec
     assert.deepStrictEqual(v, { accept: false, reason: 'label:unknown', alert: false }, extra);
   }
 });
+
+// XACA-1441-031: a pool job that no single runner can satisfy is a misconfiguration, not a capacity outage.
+const AMBIGUITY_TABLE = [
+  // [description, labels, accept, reason]
+  ['one OS label', ['self-hosted', 'fleet-pool', 'macOS'], true, 'ok'],
+  ['one OS label and one host label', ['self-hosted', 'fleet-pool', 'Linux', 'm1mini'], true, 'ok'],
+  ['one OS label, any casing, repeated', ['self-hosted', 'fleet-pool', 'Linux', 'linux'], true, 'ok'],
+  ['two OS labels', ['self-hosted', 'fleet-pool', 'Linux', 'macOS'], false, 'label:ambiguous'],
+  ['no OS label', ['self-hosted', 'fleet-pool', 'ARM64'], false, 'label:ambiguous'],
+  ['no OS label, minimal set', ['self-hosted', 'fleet-pool'], false, 'label:ambiguous'],
+  ['two host labels', ['self-hosted', 'fleet-pool', 'macOS', 'm4mini', 'm1mini'], false, 'label:ambiguous'],
+  ['two OS and two host labels', ['self-hosted', 'fleet-pool', 'macOS', 'Linux', 'm4mini', 'm1mini'], false, 'label:ambiguous'],
+  ['an unknown label still reports label:unknown first', ['self-hosted', 'fleet-pool', 'macOS', 'Linux', 'gpu'], false, 'label:unknown'],
+];
+for (const [name, labels, accept, reason] of AMBIGUITY_TABLE) {
+  test(`ambiguity (031): ${name} -> ${reason}`, () => {
+    assert.deepStrictEqual(ev(rec({ labels })), { accept, reason, alert: false });
+  });
+}
 
 test('malformed inputs fail closed and never throw', () => {
   const bad = [
