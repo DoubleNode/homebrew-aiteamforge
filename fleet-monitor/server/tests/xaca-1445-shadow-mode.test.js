@@ -382,3 +382,53 @@ describe('static-label jobs in shadow (plan D1a)', () => {
     assert.deepEqual(by[4], { host: null, reason: 'not-pool' });
   });
 });
+
+// XACA-1445-014: a job accepted ONLY via its static host label may mint solely on a host whose mode is
+// EXPLICITLY 'live' (absent = shadow), under a live global mode. Pool-labelled jobs are unchanged.
+describe('static host-label jobs mint only on an explicitly-live host (014)', () => {
+  const LABEL_ROWS = [
+    ['Linux', ['self-hosted', 'Linux', 'ARM64', 'm1mini']],
+    ['macOS', ['self-hosted', 'macOS', 'ARM64', 'm1mini']],
+    ['Linux', ['self-hosted', 'linux', 'arm64', 'm1mini']],
+  ];
+  for (const [osName, labels] of LABEL_ROWS) {
+    for (const hostMode of [undefined, 'shadow', 'live']) {
+      for (const globalMode of ['1', 'shadow']) {
+        const minting = hostMode === 'live' && globalMode === '1';
+        test(`[${labels.join(',')}] host mode ${hostMode === undefined ? 'absent' : hostMode} x global ${globalMode}: ${minting ? 'exactly 1 mint' : '0 mints'}, record written`, async () => {
+          const s = setup({ env: { FLEET_CI_DISPATCHER: globalMode }, machines: ['m1mini'], modes: hostMode ? { m1mini: hostMode } : {} });
+          s.report('m1mini', { slots: slots(1, osName) });
+          s.d.onJob(rec(1, { labels }), 'queued');
+          await s.d.tick(); await s.d.tick();
+          assert.equal(mints(s).length, minting ? 1 : 0, `mints: ${mints(s).length}`);
+          if (minting) assert.ok(mints(s)[0][1].labels.map((l) => l.toLowerCase()).includes(osName.toLowerCase()));
+          assert.equal(s.assignments.snapshot().length, minting ? 1 : 0);
+          const r = s.records();
+          assert.equal(r.length, 1, 'a decision record in every cell');
+          assert.deepEqual(r[0].decision, { host: 'm1mini', reason: 'pinned:m1mini' });
+          assert.equal(r[0].mode, minting ? 'live' : 'shadow');
+          assert.equal(s.alerts.list().filter((a) => a.type === 'ci-no-capacity').length, 0);
+        });
+      }
+    }
+  }
+
+  test('a static job whose pinned host has no slot is recorded as shadow with no-capacity, with an absent host mode', async () => {
+    const s = setup({ env: { FLEET_CI_DISPATCHER: '1' }, machines: ['m1mini'] });
+    s.report('m1mini', { slots: [] });
+    s.d.onJob(rec(1, { labels: ['self-hosted', 'Linux', 'ARM64', 'm1mini'] }), 'queued');
+    await s.d.tick();
+    assert.equal(mints(s).length, 0);
+    assert.equal(s.records()[0].mode, 'shadow');
+    assert.match(s.records()[0].decision.reason, /capacity|slot/);
+  });
+
+  test('control: a POOL-labelled job on a host with mode absent under global 1 still mints (unchanged)', async () => {
+    const s = setup({ env: { FLEET_CI_DISPATCHER: '1' }, machines: ['m1mini'] });
+    s.report('m1mini');
+    s.d.onJob(rec(1), 'queued');
+    await s.d.tick();
+    assert.equal(mints(s).length, 1);
+    assert.equal(s.records()[0].mode, 'live');
+  });
+});

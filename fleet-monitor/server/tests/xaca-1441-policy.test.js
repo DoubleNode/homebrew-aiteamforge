@@ -191,7 +191,8 @@ test('evaluateJob is pure: does not mutate its inputs', () => {
 
 // XACA-1445-011 (plan D1a): static-label jobs (self-hosted + one known host label, no pool label).
 test('static-label jobs (D1a): self-hosted + exactly one known host label is accepted without the pool label', () => {
-  assert.deepStrictEqual(ev(rec({ labels: ['self-hosted', 'Linux', 'ARM64', 'm1mini'] })), { accept: true, reason: 'ok', alert: false });
+  assert.deepStrictEqual(ev(rec({ labels: ['self-hosted', 'Linux', 'ARM64', 'm1mini'] })), { accept: true, reason: 'ok', alert: false, viaHostLabel: true });
+  assert.strictEqual(ev(rec({ labels: ['self-hosted', 'Linux', 'ARM64', 'fleet-pool', 'm1mini'] })).viaHostLabel, undefined, 'pool-labelled verdicts carry no flag');
   assert.strictEqual(ev(rec({ labels: ['Self-Hosted', 'macOS', 'M4Mini'] })).accept, true);
 });
 

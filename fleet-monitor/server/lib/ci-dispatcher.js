@@ -20,7 +20,8 @@
  *
  * MODES (XACA-1445-011): FLEET_CI_DISPATCHER = "1" (live) | "shadow" (decide + record, NEVER
  * mint) | anything else (dormant; an unknown value is logged and never treated as live). A
- * pool machine record may also carry mode:'shadow'|'live' (absent = live): a host in shadow is
+ * pool machine record may also carry mode:'shadow'|'live' (absent = live, EXCEPT for a job accepted only via
+ * its static host label with no pool label, XACA-1445-014: that mints solely on an explicit 'live' host): a host in shadow is
  * decided for but never minted on, which is the per-host rollback (plan R1). Every newly seen
  * queued job gets ONE decision record appended to the JSONL file named by FLEET_CI_SHADOW_LOG
  * (or opts.shadowLogPath), in shadow and live alike, so the two are comparable. See
@@ -177,10 +178,19 @@ function createDispatcher(deps) {
      * Effective mode for ONE host. Anything but a global 'live' AND a host mode of absent/'live' is
      * 'shadow' (never mints): an unknown per-host value fails closed to shadow, never to live.
      */
-    const machineMode = (m) => {
+    const machineMode = (m, viaHostLabel) => {
         if (effectiveMode() !== 'live') return 'shadow';
         const v = m && m.mode;
+        // XACA-1445-014: a job accepted ONLY through its host label (no pool label) is served by the
+        // persistent runners today; it may mint solely where mode:'live' is set EXPLICITLY (absent = shadow).
+        if (viaHostLabel === true) return v === 'live' ? 'live' : 'shadow';
         return v === undefined || v === 'live' ? 'live' : 'shadow';
+    };
+    /** The pool machine a static-label job is pinned to (its host label), or null. */
+    const pinnedMachineOf = (rec, machines) => {
+        const jl = plc.normalizeLabels(rec.labels) || [];
+        const id = Object.keys(machines).find((k) => jl.includes(plc.hostLabelOf(Object.assign({ id: k }, machines[k]))));
+        return id === undefined ? null : machines[id];
     };
 
     // ------------------------------------------------------- decision records
@@ -307,13 +317,14 @@ function createDispatcher(deps) {
      * A policy-accepted job: record the placement decision exactly as live would make it, against
      * the capacity left after earlier decisions in this tick (`decRes`, a copy of the reservations).
      */
-    function recordPlacement(rec, machines, base, decRes, pcfg, covered) {
+    function recordPlacement(rec, machines, base, decRes, pcfg, covered, viaHostLabel) {
         try {
             if (!shadowLogFile() || decided.has(rec.jobId) || effectiveMode() === 'dormant') return;
             const adjusted = withReservations(base, decRes);
             const evals = plc.evaluateMachines(machines, adjusted, rec, pcfg);
             const decision = decisionFrom(rec, evals, machines);
-            const mode = decision.host ? machineMode(machines[decision.host]) : effectiveMode();
+            const mode = decision.host ? machineMode(machines[decision.host], viaHostLabel)
+                : (viaHostLabel === true ? machineMode(pinnedMachineOf(rec, machines), true) : effectiveMode());
             appendDecision(rec, decision, capacityOf(machines, adjusted, evals, rec), mode);
             const osName = plc.jobOs(rec);
             if (decision.host && osName && !covered) decRes.set(`${decision.host}|${osName}`, (decRes.get(`${decision.host}|${osName}`) || 0) + 1);
@@ -331,7 +342,10 @@ function createDispatcher(deps) {
         if (v.accept) {
             configRejected.delete(rec.key);
             rejected.delete(rec.key); // a later re-rejection is a new decision and is audited again
-            if (!tracked.has(rec.key)) tracked.set(rec.key, { rec, noCapSince: null, trackedAt: now() });
+            const viaHostLabel = v.viaHostLabel === true;
+            const existing = tracked.get(rec.key);
+            if (existing) existing.viaHostLabel = viaHostLabel;   // a config change can flip the acceptance path
+            else tracked.set(rec.key, { rec, noCapSince: null, trackedAt: now(), viaHostLabel });
             return;
         }
 
@@ -522,7 +536,7 @@ function createDispatcher(deps) {
         for (const t of jobs) {
             const setKey = plc.labelSetKey(t.rec.labels);
             const isCovered = (coverage.get(setKey) || 0) > 0;
-            recordPlacement(t.rec, machines, base, decRes, pcfg, isCovered);
+            recordPlacement(t.rec, machines, base, decRes, pcfg, isCovered, t.viaHostLabel === true);
             if (isCovered) {
                 coverage.set(setKey, coverage.get(setKey) - 1);
                 t.noCapSince = null; demand.push(t.rec);
@@ -532,7 +546,7 @@ function createDispatcher(deps) {
             const top = evals.find((e) => e.eligible);
             // Shadow (global, or the decided host): the decision above is recorded, but the job is
             // NOT demand and nothing is minted for it. Never tracked as in-flight supply.
-            if (top && machineMode(machines[top.id]) !== 'live') { t.noCapSince = null; continue; }
+            if (top && machineMode(machines[top.id], t.viaHostLabel === true) !== 'live') { t.noCapSince = null; continue; }
             if (top) { t.noCapSince = null; demand.push(t.rec); needing.push(t.rec); continue; }
             if (t.noCapSince === null) t.noCapSince = nowMs;
             if (globalShadow) continue;   // shadow raises no operational alerts: the persistent runners still serve the job
@@ -562,7 +576,7 @@ function createDispatcher(deps) {
                 const ranked = plc.rankCandidates(machines, adjusted, job, pcfg);
                 if (!ranked.length) break; // capacity ran out mid-tick; the next tick re-evaluates
                 const id = ranked[0].id;
-                if (machineMode(machines[id]) !== 'live') continue;   // last line of defence: shadow never mints
+                if (machineMode(machines[id], !!(tracked.get(job.key) && tracked.get(job.key).viaHostLabel)) !== 'live') continue;   // last line of defence: shadow never mints
                 const mrec = Object.assign({ id }, machines[id]);
                 const labels = plc.mintLabels(job, mrec, pcfg);
                 const os = plc.jobOs(job);

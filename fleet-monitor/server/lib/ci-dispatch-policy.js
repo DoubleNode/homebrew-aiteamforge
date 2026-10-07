@@ -32,7 +32,9 @@
  *      (a fork-origin job aimed at the pool = workflow misconfiguration).
  *   5. label:not-pool   must include `self-hosted` and the pool label OR exactly-known host label
  *                       (XACA-1445-011, plan D1a: a static-label job `self-hosted` + one host label, no pool label,
- *                       is accepted; neither pool nor host label stays label:not-pool)
+ *                       is accepted; neither pool nor host label stays label:not-pool).
+ *                       Such a verdict carries viaHostLabel:true (XACA-1445-014): the dispatcher mints for it
+ *                       ONLY on a host whose mode is EXPLICITLY 'live'; pool-labelled verdicts have no such field.
  *   6. label:unknown    labels must be a subset of {self-hosted, OS, ARM64, pool, <host>}
  *   7. label:ambiguous  a pool (or static host-label) job must carry EXACTLY ONE OS label (linux|macos) and AT MOST ONE
  *                       host label (XACA-1441-031). Zero or two OS labels, or two host labels,
@@ -146,7 +148,11 @@ function evaluateJob(record, ctx) {
   const hostCount = hostOnJob.size;
   if (osCount !== 1 || hostCount > 1) return verdict(false, 'label:ambiguous');
 
-  return verdict(true, 'ok');
+  // XACA-1445-014: say WHICH path accepted the job, so callers never re-derive it from labels. A job
+  // accepted only through its host label (no pool label) may mint solely on an explicitly-live host.
+  const v = verdict(true, 'ok');
+  if (!hasPool) v.viaHostLabel = true;
+  return v;
 }
 
 module.exports = {
