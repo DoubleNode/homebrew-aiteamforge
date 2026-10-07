@@ -100,6 +100,7 @@ Components:
   network         Network connectivity (Tailscale if configured)
   disk            Disk space for kanban backups
   mandatory-teams Missing/unprovisioned mandatory team fleet install (XACA-1070)
+  ci-capability   CI runner capability state: dormant|enabled|paused|pending|misconfigured + provision skew (XACA-1443-004)
   all             Run all checks (default)
 
 Examples:
@@ -2386,6 +2387,81 @@ check_network() {
 }
 
 # Check: Disk Space
+# ─────────────────────────────────────────────────────────────────────────────
+# XACA-1443-004: CI runner capability state.
+#
+# ONE classifier (scripts/ci-runner/lib/ci-status.sh, shipped in the dormant bundle, mirrored from
+# dev-team) shared with `aiteamforge ci status`, so the two can never disagree. Read-only: no sudo,
+# no launchctl/dscl/limactl, no GitHub/Fleet API. Levels:
+#   dormant (shipped default)            -> pass   (NOT a warning: nothing is wrong with a machine that has CI off)
+#   enabled, in sync with this release   -> pass
+#   enable-pending / disable-pending / paused / enabled+skew (skewed OR unknown) -> warn
+#   misconfigured (corrupt/mis-moded state file, state vs artefact disagreement, stray plists,
+#                  bundle missing, any probe that could not run)                   -> fail
+# Dev-team source machine: reported as dormant-by-design and does NOT fail, but a stray
+# com.doublenode.ci-runner* plist / state file there is still `misconfigured` (XACA-0212 history).
+# Fail closed: if the classifier itself cannot be loaded this is a FAIL, never a pass.
+# ─────────────────────────────────────────────────────────────────────────────
+check_ci_capability() {
+  print_section "Checking CI Runner Capability"
+
+  local working_dir lib="" cand
+  working_dir=$(get_working_dir)
+  for cand in "${working_dir}/scripts/ci-runner/lib/ci-status.sh" "${LIBEXEC_DIR}/../share/scripts/ci-runner/lib/ci-status.sh"; do
+    if [ -r "$cand" ]; then lib="$cand"; break; fi
+  done
+  if [ -z "$lib" ] || ! . "$lib" 2>/dev/null; then
+    check_result fail "CI capability: cannot classify (ci-status.sh not found in ${working_dir}/scripts/ci-runner/lib)" \
+      "Fix: aiteamforge upgrade   (restores the CI bundle)"
+    return 0
+  fi
+
+  local rc=0 line first detail
+  ci_capability_state || rc=$?
+  # first non-note reason (the verdict line); notes and detail stay in --verbose
+  first=$(printf '%s\n' "${CI_STATUS_REASONS}" | grep -v '^note:' | head -n 1 || true)
+  [ -n "$first" ] || first="${CI_STATUS_REASONS%%
+*}"
+  detail=$(printf '%s\n' "${CI_STATUS_REASONS}" | sed 's/^/    /' || true)
+
+  case "$CI_STATUS_LEVEL" in
+    ok)
+      if [ "$CI_STATUS_STATE" = dormant ] && [ "$CI_STATUS_DEV" = 1 ]; then
+        check_result pass "CI capability: dormant (dev-team source machine; CI capability disabled by design)" "$detail"
+      elif [ "$CI_STATUS_STATE" = dormant ]; then
+        check_result pass "CI capability: dormant (shipped default; 'aiteamforge ci enable' turns it on)" "$detail"
+      else
+        check_result pass "CI capability: ${CI_STATUS_STATE}, provision ${CI_STATUS_SKEW} with this release" "$detail"
+      fi
+      ;;
+    warn)
+      if [ "$CI_STATUS_STATE" = enabled ] || [ "$CI_STATUS_STATE" = paused ]; then
+        check_result warn "CI capability: ${CI_STATUS_STATE}, provision ${CI_STATUS_SKEW} (${first})" "$detail"
+      else
+        check_result warn "CI capability: ${CI_STATUS_STATE} (${first})" "$detail"
+      fi
+      ;;
+    *)
+      check_result fail "CI capability: misconfigured (${first})" "$detail"
+      ;;
+  esac
+  if [ "$CI_STATUS_LEVEL" != ok ] && [ -n "$CI_STATUS_NEXT" ]; then
+    print_info "  Next: ${CI_STATUS_NEXT}"
+  fi
+  # skew detail is worth a line each even without --verbose: it names what to refresh
+  if [ "$CI_STATUS_LEVEL" = warn ] && [ -n "$CI_STATUS_SKEW_REASONS" ]; then
+    while IFS= read -r line; do [ -z "$line" ] || print_info "    ${line}"; done <<EOF_SKEW
+${CI_STATUS_SKEW_REASONS}
+EOF_SKEW
+  fi
+  if [ "$CI_STATUS_LEVEL" = warn ] && [ -n "$CI_STATUS_SKEW_UNSEEN" ]; then
+    while IFS= read -r line; do [ -z "$line" ] || print_info "    (not seen) ${line}"; done <<EOF_UNSEEN
+${CI_STATUS_SKEW_UNSEEN}
+EOF_UNSEEN
+  fi
+  return 0
+}
+
 check_disk() {
   print_section "Checking Disk Space"
 
@@ -2515,6 +2591,9 @@ case "$CHECK_COMPONENT" in
   mandatory-teams)
     check_mandatory_teams
     ;;
+  ci-capability)
+    check_ci_capability
+    ;;
   services)
     check_services
     ;;
@@ -2556,6 +2635,7 @@ case "$CHECK_COMPONENT" in
     check_git
     check_network
     check_disk
+    check_ci_capability
     ;;
   *)
     print_error "Unknown component: ${CHECK_COMPONENT}"

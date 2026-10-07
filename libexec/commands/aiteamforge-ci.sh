@@ -6,7 +6,7 @@
 #   aiteamforge ci disable           XACA-1443-003 (this file; root half: bundle teardown-host.sh)
 #   aiteamforge ci refresh           XACA-1443-013/-015 (this file; root half: bundle provision-host.sh again;
 #                                    skew logic: bundle lib/ci-provision-version.sh, sourceable by 004)
-#   aiteamforge ci status            XACA-1443-004 (stub: rc 2)
+#   aiteamforge ci status            XACA-1443-004 (this file; classifier: bundle lib/ci-status.sh, shared with `aiteamforge doctor`)
 #
 # `ci enable` runs as the INVOKING USER and NEVER runs sudo, launchctl, dscl, limactl, curl or
 # gh. It checks, validates, records a state file and PRINTS one sudo command for the operator
@@ -34,6 +34,7 @@ RC_OK=0 RC_ENV=1 RC_USAGE=2
 RC_HEADROOM=12 RC_NO_FIT=13 RC_NO_LIMA=14 RC_PROBE=16 RC_STATE=17 RC_NOT_PROVISIONED=18
 RC_LEFTOVERS=19   # disable --confirm: teardown artefacts remain
 RC_REFRESH_PENDING=20   # refresh --confirm: the host does not match the keg yet (or cannot be verified)
+RC_STATUS_USAGE=21      # ci status: bad option (status itself exits 0 ok | 1 warn | 2 fail, the doctor's levels)
 # 10 / 11 are ci_enable_guard's own codes, passed through unchanged.
 
 _err()  { echo "ERROR: $*" >&2; }
@@ -47,10 +48,10 @@ Usage: aiteamforge ci <enable|disable|refresh|status> [options]
   enable     Check this machine, record the CI configuration, print ONE sudo command
   disable    Tear CI down: print ONE sudo teardown command, then verify with --confirm
   refresh    Bring an ENABLED host up to date after an upgrade: print ONE sudo command, then --confirm
-  status     Report dormant|enabled|paused|...   (not yet implemented)
+  status     Report dormant|enable-pending|enabled|paused|disable-pending|misconfigured + provision skew (read-only)
 
 CI is dormant on every install until you run `aiteamforge ci enable`.
-For details: aiteamforge ci enable --help | aiteamforge ci disable --help | aiteamforge ci refresh --help
+For details: aiteamforge ci enable --help | aiteamforge ci disable --help | aiteamforge ci refresh --help | aiteamforge ci status --help
 EOF
 }
 
@@ -962,13 +963,93 @@ cmd_refresh_confirm() { # host skew_rc dry
   return $RC_OK
 }
 
+# ---------------------------------------------------------------- status (XACA-1443-004)
+
+status_usage() {
+  cat <<'EOF'
+Usage: aiteamforge ci status
+       aiteamforge ci status --help
+
+Read-only. Reports the CI capability of THIS machine, the same verdict `aiteamforge doctor` shows:
+
+  dormant           CI is off (the shipped default). Nothing is installed, nothing runs.   exit 0
+  enabled           provisioned and in sync with this release.                              exit 0
+  enabled / paused  works, but see "Provision skew" (an upgrade left it behind, or it could   exit 1
+                    not be verified: unknown is never reported as healthy) / the XACA-1440
+                    pause marker is present (draining, paused, resuming).
+  enable-pending    `ci enable` recorded the host; the sudo line / `ci enable --confirm` is open.   exit 1
+  disable-pending   `ci disable` recorded a teardown; the sudo line / `--confirm` is open.          exit 1
+  misconfigured     the state file and what is on disk disagree, or a probe could not run   exit 2
+                    (corrupt / mis-moded state file, stray CI daemon plists with no state file,
+                    enabled without the user or a daemon plist, the CI bundle missing, an
+                    unreadable directory). Dormant requires positive evidence; an unreadable
+                    path is never read as "nothing there".
+
+Never runs sudo, launchctl, dscl, limactl, curl or gh; never calls GitHub or Fleet Monitor. It cannot
+see inside ci-runner's private home (the VM), loaded daemons or plist contents, and says so.
+On the dev-team source machine it reports "dormant (dev-team source machine; CI capability disabled by
+design)" and exit 0, unless a state file or CI artefact is found there (misconfigured, exit 2).
+
+Exit codes: 0 ok | 1 warn | 2 fail (misconfigured, or the classifier could not run) | 21 bad option.
+EOF
+}
+
+cmd_status() {
+  local a lib="" cand
+  for a in "$@"; do
+    case "$a" in -h|--help) status_usage; return $RC_OK ;; esac
+  done
+  if [ $# -gt 0 ]; then
+    _err "unknown option for 'ci status': $1"; status_usage >&2; return $RC_STATUS_USAGE
+  fi
+  # The install dir's bundle copy first; when the bundle is gone, the tap's own copy lets the classifier
+  # still run and name the missing bundle. Neither readable = fail closed (misconfigured), never "dormant".
+  for cand in "$CI_BUNDLE_DIR/lib/ci-status.sh" "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." 2>/dev/null && pwd)/share/scripts/ci-runner/lib/ci-status.sh"; do
+    if [ -r "$cand" ]; then lib="$cand"; break; fi
+  done
+  # shellcheck source=/dev/null
+  if [ -z "$lib" ] || ! . "$lib"; then
+    echo "CI capability: misconfigured   [FAIL]"
+    echo "Why:"
+    echo "  - the CI classifier (lib/ci-status.sh) is not available in $CI_BUNDLE_DIR; nothing can be verified, so no healthy state is reported"
+    echo "Next: aiteamforge upgrade"
+    return 2
+  fi
+  local rc=0 lvl line
+  ci_capability_state || rc=$?
+  case "$CI_STATUS_LEVEL" in ok) lvl=OK ;; warn) lvl=WARN ;; *) lvl=FAIL ;; esac
+  echo "CI capability: ${CI_STATUS_STATE}   [${lvl}]"
+  [ -z "$CI_STATUS_HOST" ] || echo "Host: ${CI_STATUS_HOST}"
+  if [ -n "$CI_STATUS_REASONS" ]; then
+    echo "Why:"
+    while IFS= read -r line; do
+      [ -z "$line" ] || case "$line" in "  "*) echo "  $line" ;; *) echo "  - $line" ;; esac
+    done <<EOF_R
+$CI_STATUS_REASONS
+EOF_R
+  fi
+  echo "Provision skew: ${CI_STATUS_SKEW}"
+  if [ -n "$CI_STATUS_SKEW_REASONS" ]; then
+    while IFS= read -r line; do [ -z "$line" ] || echo "  - $line"; done <<EOF_S
+$CI_STATUS_SKEW_REASONS
+EOF_S
+  fi
+  if [ -n "$CI_STATUS_SKEW_UNSEEN" ]; then
+    while IFS= read -r line; do [ -z "$line" ] || echo "  - (not seen) $line"; done <<EOF_U
+$CI_STATUS_SKEW_UNSEEN
+EOF_U
+  fi
+  [ -z "$CI_STATUS_NEXT" ] || echo "Next: ${CI_STATUS_NEXT}"
+  return $rc
+}
+
 # ---------------------------------------------------------------- dispatch
 
 case "${1:-}" in
   enable)  shift; cmd_enable "$@"; exit $? ;;
   disable) shift; cmd_disable "$@"; exit $? ;;
   refresh) shift; cmd_refresh "$@"; exit $? ;;
-  status)  echo "aiteamforge ci status: not yet implemented (XACA-1443-004)." >&2; exit 2 ;;
+  status)  shift; cmd_status "$@"; exit $? ;;
   -h|--help|help|"") usage; exit 0 ;;
   *) _err "unknown ci subcommand: $1"; usage >&2; exit 2 ;;
 esac
