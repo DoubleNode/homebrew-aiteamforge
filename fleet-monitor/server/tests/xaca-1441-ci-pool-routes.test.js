@@ -399,12 +399,13 @@ describe('GET /api/ci-pool redaction', () => {
         for (const secret of [KEY_A, KEY_B, JIT, 'keyHash', 'jitConfig', 'encodedJit']) assert.equal(text.includes(secret), false, secret);
         assert.equal(/[0-9a-f]{64}/.test(text), false, 'no sha256 hex anywhere');
         assert.equal(r.body.machines.m4mini.hasKey, true);
+        assert.equal(r.body.machines.m4mini.hasTelemetryKey, false);
         assert.equal(r.body.machines.m4mini.lastPollAt, new Date(T0).toISOString());
         assert.equal(r.body.machines.m4mini.capacity.vmState, 'running');
         assert.equal(r.body.machines.m1mini.lastPollAt, null);
         assert.equal(r.body.dispatcherEnabled, true);
         assert.equal(r.body.assignments.length, 2);
-        assert.deepEqual(Object.keys(r.body.machines.m4mini).sort(), ['agentVersion', 'capacity', 'enabled', 'hasKey', 'lastPollAt', 'pauseReason', 'pausedAt', 'pausedBy', 'paused', 'prefers', 'slots', 'thresholds'].sort());
+        assert.deepEqual(Object.keys(r.body.machines.m4mini).sort(), ['agentVersion', 'capacity', 'enabled', 'hasKey', 'hasTelemetryKey', 'lastPollAt', 'pauseReason', 'pausedAt', 'pausedBy', 'paused', 'prefers', 'slots', 'thresholds'].sort());
     });
 });
 

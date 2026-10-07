@@ -16,13 +16,22 @@
  *   GET  /api/ci-pool                         open, REDACTED (same posture as GET /api/ci-runners)
  *   PUT  /api/ci-pool/machines/:machine       admin          enabled, paused(+reason), prefers, thresholds
  *   PUT  /api/ci-pool/config                  admin          allowlist, poolLabel, jobClasses, thresholds
+ *   POST   /api/ci-pool/machines/:machine/key            admin   mint the agent key (fcp_), shown ONCE
+ *   DELETE /api/ci-pool/machines/:machine/key            admin   revoke it
+ *   POST   /api/ci-pool/machines/:machine/telemetry-key  admin   mint the telemetry key (fct_), shown ONCE
+ *   DELETE /api/ci-pool/machines/:machine/telemetry-key  admin   revoke it
  *
  * Agent auth (C1): ONLY a per-host key (`fcp_<43 base64url>`) verified against the
  * pool store's sha256 hashes. The fleet key, admin key and telemetry key are all
  * 401 here. The matched machine becomes req.ciMachine and is the ONLY machine an
  * agent route ever acts on; neither the URL nor the body picks it.
- * Key issuance/rotation is owned by XACA-1422-012 (it calls store.setHostSecret);
- * this module only VERIFIES.
+ * Issuance (XACA-1422-012): the four admin routes above mint and revoke the two per-host
+ * credentials. Only sha256 is stored; the plaintext exists in the one mint response.
+ *
+ * Telemetry auth (XACA-1422): requireCiTelemetryKey() gates POST /api/ci-runners-push (that
+ * route lives in ci-runners-routes.js). It accepts ONLY a per-host `fct_` key and ONLY when
+ * body.machine is the machine the key belongs to (403 otherwise). It is exported from here
+ * so both credential kinds are verified in one place with one shape.
  *
  * DORMANT (Requirement 3): with the dispatcher not enabled the poll answers
  * `enabled:false` with no assignments and slows the agent to 60 s. No route in
@@ -32,6 +41,7 @@
  * the owning machine's poll. Operator views are built from explicit allowlists.
  */
 
+const crypto = require('crypto');
 const { requireAdminKey } = require('./auth-middleware');
 const { MACHINE_ID_RE } = require('./ci-pool-store');
 const { ID_RE } = require('./ci-dispatch-assignments');
@@ -43,6 +53,7 @@ const POLL_AFTER_SECONDS = 10;
 const POLL_AFTER_DORMANT_SECONDS = 60;
 
 const HOST_KEY_RE = /^fcp_[A-Za-z0-9_-]{43}$/;
+const TELEMETRY_KEY_RE = /^fct_[A-Za-z0-9_-]{43}$/;
 const BEARER_RE = /^[Bb][Ee][Aa][Rr][Ee][Rr][ \t]+(.+)$/;
 const AGENT_VERSION_RE = /^[0-9A-Za-z._+-]{1,32}$/;
 const SLOT_ID_RE = /^a_[A-Za-z0-9-]{1,64}$/;
@@ -54,6 +65,8 @@ const MAX_SLOTS = 32;
 
 // Same byte-identical body as auth-middleware's UNAUTHORIZED_BODY (contract §4: no reason leaks).
 const UNAUTHORIZED_BODY = { error: 'Unauthorized', code: 'unauthorized' };
+// Valid telemetry key, but body.machine is not the machine it was minted for.
+const FORBIDDEN_BODY = { error: 'Forbidden', code: 'forbidden' };
 
 class PollValidationError extends Error {
     constructor(message, extra) {
@@ -150,14 +163,20 @@ function validateStateReport(body) {
 
 // ------------------------------------------------------------------- auth
 
-function presentedHostKey(req) {
+/** The bearer token iff it is well-formed for `re`; null otherwise (missing, wrong scheme, wrong shape). */
+function presentedKey(req, re) {
     const header = req.get ? req.get('authorization') : (req.headers && req.headers.authorization);
     if (!header) return null;
     const m = BEARER_RE.exec(String(header));
     if (!m) return null;
-    const key = m[1].trim();
-    return HOST_KEY_RE.test(key) ? key : null;
+    const token = m[1].trim();
+    return re.test(token) ? token : null;
 }
+
+const presentedHostKey = (req) => presentedKey(req, HOST_KEY_RE);
+
+/** New credential: `<prefix>` + 43 base64url chars from 32 random bytes. */
+const mintKey = (prefix) => prefix + crypto.randomBytes(32).toString('base64url');
 
 /**
  * Per-host key middleware (C1). Accepts ONLY `Bearer fcp_<43 base64url>` whose sha256
@@ -176,6 +195,31 @@ function requireCiHostKey(store) {
         }
         if (matched === null) return res.status(401).set('WWW-Authenticate', 'Bearer').json(UNAUTHORIZED_BODY);
         req.ciMachine = matched;
+        return next();
+    };
+}
+
+/**
+ * Telemetry-key middleware for POST /api/ci-runners-push (XACA-1422). Accepts ONLY
+ * `Bearer fct_<43 base64url>` whose sha256 matches some machine's telemetryKeyHash; the fleet
+ * token, admin token and agent (`fcp_`) key are all 401 (no fallback). Every machine is compared
+ * (no early exit). The matched machine must equal body.machine, else 403: a key holder can
+ * only write its own host's record. With no store this FAILS CLOSED (401 for everything).
+ * Sets req.ciTelemetryMachine.
+ */
+function requireCiTelemetryKey(store) {
+    return function ciTelemetryKey(req, res, next) {
+        const presented = store ? presentedKey(req, TELEMETRY_KEY_RE) : null;
+        let matched = null;
+        if (presented) {
+            for (const id of Object.keys(store.listMachines())) {
+                if (store.verifyTelemetrySecret(id, presented) && matched === null) matched = id;
+            }
+        }
+        if (matched === null) return res.status(401).set('WWW-Authenticate', 'Bearer').json(UNAUTHORIZED_BODY);
+        const claimed = req.body && typeof req.body === 'object' ? req.body.machine : undefined;
+        if (claimed !== matched) return res.status(403).json(FORBIDDEN_BODY);
+        req.ciTelemetryMachine = matched;
         return next();
     };
 }
@@ -303,6 +347,7 @@ function registerCiPoolRoutes(app, deps) {
                     enabled: m.enabled, paused: m.paused, pausedBy: m.pausedBy, pausedAt: m.pausedAt,
                     pauseReason: m.pauseReason, prefers: m.prefers, thresholds: m.thresholds,
                     hasKey: m.keyHash !== null,
+                    hasTelemetryKey: m.telemetryKeyHash !== null,
                     lastPollAt: r ? iso(r.receivedAt) : null,
                     agentVersion: r ? r.agentVersion : null,
                     capacity: r ? r.capacity : null,
@@ -359,7 +404,7 @@ function registerCiPoolRoutes(app, deps) {
             const m = after;
             return res.status(200).json({
                 success: true, machine: id,
-                record: { enabled: m.enabled, paused: m.paused, pausedBy: m.pausedBy, pausedAt: m.pausedAt, pauseReason: m.pauseReason, prefers: m.prefers, thresholds: m.thresholds, hasKey: m.keyHash !== null },
+                record: { enabled: m.enabled, paused: m.paused, pausedBy: m.pausedBy, pausedAt: m.pausedAt, pauseReason: m.pauseReason, prefers: m.prefers, thresholds: m.thresholds, hasKey: m.keyHash !== null, hasTelemetryKey: m.telemetryKeyHash !== null },
             });
         } catch (error) {
             log.error('[CI-POOL] error updating machine:', error && error.message);
@@ -379,11 +424,61 @@ function registerCiPoolRoutes(app, deps) {
         }
     });
 
+    // ------------------------------------------- per-host credential mint / revoke (XACA-1422-012)
+    // kind: 'agent' (fcp_, keyHash) | 'telemetry' (fct_, telemetryKeyHash). Handlers are shared; the
+    // four registrations below stay literal so the admin-tier route inventory can read them.
+    const KINDS = {
+        agent:     { prefix: 'fcp_', set: (id, k) => store.setHostSecret(id, k),      clear: (id) => store.clearHostSecret(id) },
+        telemetry: { prefix: 'fct_', set: (id, k) => store.setTelemetrySecret(id, k), clear: (id) => store.clearTelemetrySecret(id) },
+    };
+
+    function mintHandler(kind) {
+        return (req, res) => {
+            try {
+                const id = req.params.machine;
+                if (!MACHINE_ID_RE.test(id)) return res.status(400).json({ error: 'bad machine id' });
+                if (!store.getMachine(id)) return res.status(404).json({ error: 'unknown machine' });
+                const minted = mintKey(KINDS[kind].prefix);
+                const result = KINDS[kind].set(id, minted);
+                if (!result.ok) return storeFailure(res, result);
+                audit('key-mint', { machine: id, keyKind: kind, by: 'operator' }); // never the credential
+                res.set('Cache-Control', 'no-store');
+                return res.status(200).json({ machine: id, key: minted });
+            } catch (error) {
+                log.error('[CI-POOL] error minting key:', error && error.message);
+                return res.status(500).json({ error: 'Internal server error' });
+            }
+        };
+    }
+
+    function revokeHandler(kind) {
+        return (req, res) => {
+            try {
+                const id = req.params.machine;
+                if (!MACHINE_ID_RE.test(id)) return res.status(400).json({ error: 'bad machine id' });
+                if (!store.getMachine(id)) return res.status(404).json({ error: 'unknown machine' });
+                const result = KINDS[kind].clear(id);
+                if (!result.ok) return storeFailure(res, result);
+                audit('key-revoke', { machine: id, keyKind: kind, by: 'operator' });
+                res.set('Cache-Control', 'no-store');
+                return res.status(200).json({ success: true, machine: id });
+            } catch (error) {
+                log.error('[CI-POOL] error revoking key:', error && error.message);
+                return res.status(500).json({ error: 'Internal server error' });
+            }
+        };
+    }
+
+    app.post('/api/ci-pool/machines/:machine/key', requireAdminKey, mintHandler('agent'));
+    app.delete('/api/ci-pool/machines/:machine/key', requireAdminKey, revokeHandler('agent'));
+    app.post('/api/ci-pool/machines/:machine/telemetry-key', requireAdminKey, mintHandler('telemetry'));
+    app.delete('/api/ci-pool/machines/:machine/telemetry-key', requireAdminKey, revokeHandler('telemetry'));
+
     return { reports };
 }
 
 module.exports = {
-    registerCiPoolRoutes, requireCiHostKey, validatePoll, validateStateReport, PollValidationError,
+    registerCiPoolRoutes, requireCiHostKey, requireCiTelemetryKey, validatePoll, validateStateReport, PollValidationError,
     SCHEMA_VERSION, MAX_POLL_BYTES, MAX_STATE_BYTES, POLL_AFTER_SECONDS, POLL_AFTER_DORMANT_SECONDS,
-    HOST_KEY_RE,
+    HOST_KEY_RE, TELEMETRY_KEY_RE,
 };

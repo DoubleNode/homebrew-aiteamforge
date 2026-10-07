@@ -1771,7 +1771,7 @@ CHECKS_EOF
         # own fetch and its own fail-closed handling of an empty BASE_REF.
         CONFLICT_BASE=$(gh pr view "$PR_NUM" --repo "$REPO" --json baseRefName --jq '.baseRefName' 2>/dev/null)
         [ -n "$CONFLICT_BASE" ] && [ "$CONFLICT_BASE" != "null" ] || CONFLICT_BASE="the PR's base branch"
-        printf '%s\n' "  Resolve manually: checkout the branch, merge/rebase $CONFLICT_BASE, resolve, push. CHANGELOG [Unreleased] collisions are union-resolved — keep BOTH blocks, then de-duplicate."
+        printf '%s\n' "  Resolve manually: checkout the branch, merge/rebase $CONFLICT_BASE, resolve, push. If CHANGELOG.md conflicts: move your [Unreleased] entry to changelog.d/<ITEM-ID>.md (see changelog.d/README.md) and take the base CHANGELOG.md. PRs predating XACA-0876 that still conflict on CHANGELOG.md should do exactly that rather than union-resolve."
         verdict CONFLICT "mergeable=$MERGEABLE mergeStateStatus=$MERGE_STATE"
     fi
 
@@ -1842,9 +1842,12 @@ CHECKS_EOF
         # buys nothing. Ignoring it is a TRADE, not a free lunch: a genuine
         # CHANGELOG conflict is no longer caught HERE, pre-emptively; it
         # surfaces later as an ordinary merge conflict (verdict CONFLICT)
-        # when the merge is attempted, which is where CLAUDE.md's
-        # union-resolve guidance already handles it. That is accepted, not
-        # an oversight. Nothing else is on this list: RELNOTES_*.md carries
+        # when the merge is attempted, where the CONFLICT message tells the
+        # author to move the entry to changelog.d/<ITEM-ID>.md. That is
+        # accepted, not an oversight. (XACA-0876: changelog.d/ needs NO entry
+        # here — each ticket owns a uniquely named fragment file, so two PRs
+        # cannot overlap on it. CHANGELOG.md stays listed for in-flight PRs
+        # that predate the fragment model.) Nothing else is on this list: RELNOTES_*.md carries
         # per-release content rather than a near-universal per-commit touch
         # like CHANGELOG's [Unreleased] header, so there is no equivalent
         # evidence it is safe to ignore — do not extend this list on

@@ -20,9 +20,12 @@
  *    dropped. A corrupt file on load is moved aside (".corrupt-<ts>") and the
  *    store starts from dormant defaults; it never crashes boot.
  *  - `machines[m].paused` is the ONLY pause field the dispatcher reads (§C7).
- *  - NO PLAINTEXT CREDENTIALS: per-host secrets (minted by XACA-1422-012) are
- *    stored only as sha256 hex (`keyHash`) and compared with
- *    crypto.timingSafeEqual.
+ *  - NO PLAINTEXT CREDENTIALS: per-host secrets (minted by the operator routes,
+ *    XACA-1422-012) are stored only as sha256 hex and compared with
+ *    crypto.timingSafeEqual. Each machine has TWO independent hashes: `keyHash`
+ *    (pool agent credential, `fcp_`) and `telemetryKeyHash` (CI telemetry
+ *    credential, `fct_`, XACA-1422). A file written before XACA-1422 has no
+ *    `telemetryKeyHash`; load() reads that one missing field as null.
  *  - Every mutation validates the whole candidate, writes atomically
  *    (temp + rename) and rolls the in-memory state back if the write fails.
  */
@@ -68,7 +71,7 @@ const DEFAULT_JOB_CLASSES = Object.freeze({
 
 const CONFIG_FIELDS = ['allowlist', 'poolLabel', 'jobClasses', 'thresholds'];
 const MACHINE_FIELDS = ['enabled', 'paused', 'pausedBy', 'pausedAt', 'pauseReason',
-                        'prefers', 'thresholds', 'keyHash'];
+                        'prefers', 'thresholds', 'keyHash', 'telemetryKeyHash'];
 const TOP_FIELDS = ['schemaVersion', 'config', 'machines'];
 
 const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
@@ -88,6 +91,7 @@ function defaultMachine() {
     return {
         enabled: false, paused: false, pausedBy: null, pausedAt: null,
         pauseReason: null, prefers: null, thresholds: {}, keyHash: null,
+        telemetryKeyHash: null,
     };
 }
 
@@ -178,6 +182,9 @@ function validateMachine(m, id) {
     if (m.keyHash !== null && (typeof m.keyHash !== 'string' || !HASH_RE.test(m.keyHash))) {
         errs.push(`${where}.keyHash: must be null or 64 lowercase hex chars (sha256)`);
     }
+    if (m.telemetryKeyHash !== null && (typeof m.telemetryKeyHash !== 'string' || !HASH_RE.test(m.telemetryKeyHash))) {
+        errs.push(`${where}.telemetryKeyHash: must be null or 64 lowercase hex chars (sha256)`);
+    }
     return errs;
 }
 
@@ -194,6 +201,19 @@ function validatePool(p) {
         for (const id of ids) errs.push(...validateMachine(p.machines[id], id));
     }
     return errs;
+}
+
+/**
+ * XACA-1422: a ci-pool.json written before the telemetry credential existed has no
+ * `telemetryKeyHash`. Read that one missing field as null so an upgrade does not move a
+ * valid file aside and wipe every machine's config. Nothing else is defaulted: any other
+ * missing or unknown field still fails validation.
+ */
+function upgradeLegacy(parsed) {
+    if (!isPlainObject(parsed) || !isPlainObject(parsed.machines)) return;
+    for (const m of Object.values(parsed.machines)) {
+        if (isPlainObject(m) && !has(m, 'telemetryKeyHash')) m.telemetryKeyHash = null;
+    }
 }
 
 // --------------------------------------------------------------- persistence
@@ -247,7 +267,7 @@ function createPoolStore(opts) {
         }
         let parsed;
         let errs;
-        try { parsed = JSON.parse(raw); errs = validatePool(parsed); } catch (e) { errs = [`not valid JSON: ${e.message}`]; }
+        try { parsed = JSON.parse(raw); upgradeLegacy(parsed); errs = validatePool(parsed); } catch (e) { errs = [`not valid JSON: ${e.message}`]; }
         if (errs.length) {
             const aside = `${file}.corrupt-${Date.now()}`;
             try { fs.renameSync(file, aside); } catch (_) { /* best effort */ }
@@ -327,16 +347,42 @@ function createPoolStore(opts) {
 
     /** Constant-time compare of sha256(candidate) with the stored hash. Unknown machine / none stored / bad input -> false. */
     function verifyHostSecret(id, secret) {
+        return verifyHash(id, 'keyHash', secret);
+    }
+
+    function verifyHash(id, field, secret) {
         const m = getMachine(id);
-        if (!m || !m.keyHash || typeof secret !== 'string' || secret.length === 0) return false;
+        if (!m || !m[field] || typeof secret !== 'string' || secret.length === 0) return false;
         const a = Buffer.from(hashSecret(secret), 'hex');
-        const b = Buffer.from(m.keyHash, 'hex');
+        const b = Buffer.from(m[field], 'hex');
         return a.length === b.length && crypto.timingSafeEqual(a, b);
+    }
+
+    /** CI telemetry credential (`fct_`, XACA-1422): same contract as the host-secret trio, independent hash. */
+    function setTelemetrySecret(id, secret) {
+        if (!getMachine(id)) return { ok: false, error: 'unknown machine' };
+        let h;
+        try { h = hashSecret(secret); } catch (e) { return { ok: false, error: e.message }; }
+        const next = clone(pool);
+        next.machines[id].telemetryKeyHash = h;
+        return commit(next);
+    }
+
+    function clearTelemetrySecret(id) {
+        if (!getMachine(id)) return { ok: false, error: 'unknown machine' };
+        const next = clone(pool);
+        next.machines[id].telemetryKeyHash = null;
+        return commit(next);
+    }
+
+    function verifyTelemetrySecret(id, secret) {
+        return verifyHash(id, 'telemetryKeyHash', secret);
     }
 
     return {
         load, save, getConfig, updateConfig, listMachines, getMachine, upsertMachine,
-        setHostSecret, clearHostSecret, verifyHostSecret, file,
+        setHostSecret, clearHostSecret, verifyHostSecret,
+        setTelemetrySecret, clearTelemetrySecret, verifyTelemetrySecret, file,
     };
 }
 

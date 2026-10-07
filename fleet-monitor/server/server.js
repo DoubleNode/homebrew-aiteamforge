@@ -3223,15 +3223,18 @@ registerTokenReportsRoutes(app, {
         .map(m => ({ machine_id: m.machine_id, hostname: m.hostname })),
 });
 
-// XACA-1387-003: self-hosted CI runner telemetry. Store flushed by the
-// periodic save + shutdown hooks below (same pattern as pushed boards).
-const ciRunnersStore = registerCiRunnersRoutes(app);
-
 // XACA-1441-007: Fleet CI Pool (GET /api/ci-pool, agent poll, operator writes). Routes are always
 // registered and answer `enabled:false` while dormant; the queue loop is started from the
 // app.listen callback and only runs when FLEET_CI_DISPATCHER=1 and App credentials exist.
 // ciPool.save() is flushed by the periodic save + shutdown hooks below.
+// Built BEFORE the CI runner routes (XACA-1422): their push gate verifies per-host telemetry
+// keys against this pool's store.
 const ciPool = wireCiPool(app, { dataDir: path.join(__dirname, 'data') });
+
+// XACA-1387-003: self-hosted CI runner telemetry. Store flushed by the periodic save + shutdown
+// hooks below (same pattern as pushed boards). XACA-1422: POST /api/ci-runners-push is gated by
+// the pool store's per-host telemetry keys, not the fleet token.
+const ciRunnersStore = registerCiRunnersRoutes(app, { poolStore: ciPool.store });
 
 // ============================================================================
 // ADMIN-TIER OPERATOR SESSION (XACA-0398-003)

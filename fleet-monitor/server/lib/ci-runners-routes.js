@@ -10,7 +10,9 @@
 /**
  * CI runner telemetry (XACA-1387-003).
  *
- *   POST /api/ci-runners-push  (requireApiKey, FLEET tier)
+ *   POST /api/ci-runners-push  (ciTelemetryKey: per-host `fct_` key, XACA-1422)
+ *        NOT the fleet tier: the fleet token is rejected here, and a key only
+ *        works when body.machine is the machine it was minted for.
  *        Push payload: fleet-monitor/docs/DATA_SCHEMA.md § "CI Runner Telemetry".
  *   GET  /api/ci-runners       (open, like /api/fleet)
  *        Response: fleet-monitor/docs/CI-RUNNERS-API-CONTRACT.md (v1, normative --
@@ -40,7 +42,7 @@
 const fs   = require('fs');
 const path = require('path');
 
-const { requireApiKey } = require('./auth-middleware');
+const { requireCiTelemetryKey } = require('./ci-pool-routes');
 
 const SCHEMA_VERSION = 1;          // push payload + store file
 const CONTRACT_SCHEMA_VERSION = 1; // GET /api/ci-runners response
@@ -1007,7 +1009,11 @@ function registerCiRunnersRoutes(app, opts = {}) {
     const store = createCiRunnerStore(file, { rollupFile: opts.rollupFile, clock: opts.clock });
     store.load();
 
-    app.post('/api/ci-runners-push', requireApiKey, (req, res) => {
+    // XACA-1422: opts.poolStore is the CI pool store holding the per-host telemetry key hashes.
+    // Without it the gate rejects every push; it never falls back to the fleet token.
+    const ciTelemetryKey = requireCiTelemetryKey(opts.poolStore);
+
+    app.post('/api/ci-runners-push', ciTelemetryKey, (req, res) => {
         try {
             // The global express.json limit is 10 MB; the 64 KiB cap lives here.
             const size = Buffer.byteLength(JSON.stringify(req.body === undefined ? null : req.body), 'utf8');

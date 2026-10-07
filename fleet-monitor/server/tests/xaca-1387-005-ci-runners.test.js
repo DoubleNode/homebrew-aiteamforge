@@ -13,7 +13,8 @@
  * GET contract:  fleet-monitor/docs/CI-RUNNERS-API-CONTRACT.md (shape is
  * asserted table-driven in xaca-1387-016-contract-shape.test.js).
  *
- * Auth uses the REAL requireApiKey (FLEET_AUTH_TOKEN, a fake fixture value).
+ * Auth uses the REAL per-host telemetry gate (XACA-1422) over a real pool store, with a
+ * credential minted on demand per machine. The fleet token is only used to prove it is REJECTED.
  * Every store points at a mkdtemp file -- never the real data/ path.
  */
 
@@ -30,6 +31,7 @@ const SAVED_ENV = { a: process.env.FLEET_AUTH_TOKEN, b: process.env.FLEET_ADMIN_
 process.env.FLEET_AUTH_TOKEN = TOKEN;
 delete process.env.FLEET_ADMIN_TOKEN;
 
+const { createPoolStore } = require('../lib/ci-pool-store');
 const {
     registerCiRunnersRoutes, createCiRunnerStore, validatePush, validateJob,
     ValidationError, CapacityError, parseJobsLimit, MAX_BODY_BYTES, MAX_MACHINES, STALE_THRESHOLD_MS, OFFLINE_THRESHOLD_MS,
@@ -48,11 +50,32 @@ after(() => {
 function mount(file = newFile()) {
     const app = express();
     app.use(express.json({ limit: '10mb' })); // same global limit as server.js; the 64 KiB cap is in-route
-    const store = registerCiRunnersRoutes(app, { file });
-    return { app, store, file };
+    const pool = createPoolStore({ file: path.join(path.dirname(file), 'ci-pool.json') });
+    const store = registerCiRunnersRoutes(app, { file, poolStore: pool });
+    app.locals.pool = pool;
+    return { app, store, file, pool };
 }
 const auth = (r) => r.set('Authorization', `Bearer ${TOKEN}`);
-const push = (app, body) => auth(request(app).post('/api/ci-runners-push')).send(body);
+let credSeq = 0;
+// Telemetry credential for `machine` (XACA-1422): creates the pool record, mints once per app.
+function credFor(app, machine) {
+    const pool = app.locals.pool;
+    app.locals.creds = app.locals.creds || {};
+    if (!app.locals.creds[machine]) {
+        const cred = `fct_${String(++credSeq).padStart(43, 'k')}`;
+        if (!pool.getMachine(machine)) pool.upsertMachine(machine, {});
+        if (!pool.setTelemetrySecret(machine, cred).ok) return null; // unmintable id (a validation test)
+        app.locals.creds[machine] = cred;
+    }
+    return app.locals.creds[machine];
+}
+// Authenticate as `machine` regardless of what the body claims.
+const pushAs = (app, machine, body) => {
+    const cred = credFor(app, machine);
+    const req = request(app).post('/api/ci-runners-push');
+    return (cred ? req.set('Authorization', `Bearer ${cred}`) : req).send(body);
+};
+const push = (app, body) => pushAs(app, body && body.machine, body);
 
 const RUN_URL = 'https://github.com/DoubleNode/dev-team/actions/runs/123/job/456';
 const job = (id, over = {}) => ({
@@ -83,17 +106,25 @@ describe('1. auth (real requireApiKey)', () => {
         assert.equal(r.status, 401);
         assert.equal(store.machines.size, 0);
     });
-    test('valid bearer -> 200', async () => {
+    test('valid per-host telemetry key -> 200', async () => {
         const { app } = mount();
         const r = await push(app, payload());
         assert.equal(r.status, 200);
         assert.equal(r.body.success, true);
         assert.equal(r.body.machine, 'm1mini');
     });
-    test('valid X-API-Key -> 200', async () => {
-        const { app } = mount();
-        const r = await request(app).post('/api/ci-runners-push').set('X-API-Key', TOKEN).send(payload());
-        assert.equal(r.status, 200);
+    test('the fleet token (bearer or X-API-Key) is rejected: no fallback (XACA-1422)', async () => {
+        const { app, store } = mount();
+        assert.equal((await auth(request(app).post('/api/ci-runners-push')).send(payload())).status, 401);
+        assert.equal((await request(app).post('/api/ci-runners-push').set('X-API-Key', TOKEN).send(payload())).status, 401);
+        assert.equal(store.machines.size, 0);
+    });
+    test('a store-less registration fails closed, even for the fleet token', async () => {
+        const app = express();
+        app.use(express.json());
+        const store = registerCiRunnersRoutes(app, { file: newFile() });
+        assert.equal((await auth(request(app).post('/api/ci-runners-push')).send(payload())).status, 401);
+        assert.equal(store.machines.size, 0);
     });
     test('auth is checked before body validation (bad body without key -> 401, not 400)', async () => {
         const { app } = mount();
@@ -108,28 +139,45 @@ describe('1. auth (real requireApiKey)', () => {
 
 // ---------------------------------------------------------------------------
 describe('2. schema validation', () => {
+    // Authenticated as m1mini (the default payload's machine) so the request reaches validation.
     const bad = async (body, field) => {
         const { app, store } = mount();
-        const r = await push(app, body);
+        const r = await pushAs(app, 'm1mini', body);
         assert.equal(r.status, 400, JSON.stringify(r.body));
         if (field) assert.equal(r.body.field, field);
         assert.equal(store.machines.size, 0, 'nothing stored on 400');
         return r;
     };
+    // XACA-1422: a body whose `machine` is not the key's machine never reaches validation (403).
+    const refusedAtGate = async (body) => {
+        const { app, store } = mount();
+        const r = await pushAs(app, 'm1mini', body);
+        assert.equal(r.status, 403, JSON.stringify(r.body));
+        assert.equal(store.machines.size, 0, 'nothing stored on 403');
+    };
 
-    for (const f of ['schema_version', 'machine', 'reportedAt', 'reporterVersion', 'host', 'vm', 'runners', 'jobs']) {
+    for (const f of ['schema_version', 'reportedAt', 'reporterVersion', 'host', 'vm', 'runners', 'jobs']) {
         test(`missing required field: ${f}`, async () => {
             const p = payload(); delete p[f];
             await bad(p, f);
         });
     }
-    test('non-object body (array) -> 400', async () => { await bad([], 'body'); });
+    test('missing required field: machine -> 403 at the key gate (XACA-1422)', async () => {
+        const p = payload(); delete p.machine;
+        await refusedAtGate(p);
+    });
+    test('non-object body (array) -> 403 at the key gate (no machine to bind)', async () => { await refusedAtGate([]); });
     test('wrong schema_version (2, "1", null)', async () => {
         for (const v of [2, '1', null, 0]) await bad(payload({ schema_version: v }), 'schema_version');
     });
-    test('bad machine ids', async () => {
+    test('bad machine ids (no key can be minted for them; 403 at the gate, never stored)', async () => {
         for (const m of ['', '-lead', '.dot', 'has space', 'a/b', 'x'.repeat(129), 42, null, 'bad\nid', '../etc']) {
-            await bad(payload({ machine: m }), 'machine');
+            await refusedAtGate(payload({ machine: m }));
+        }
+    });
+    test('validatePush still rejects a bad machine id itself (defence in depth)', () => {
+        for (const m of ['', '-lead', 'a/b', 42, null]) {
+            assert.throws(() => validatePush(payload({ machine: m })), (e) => e instanceof ValidationError && e.field === 'machine');
         }
     });
     test('good machine ids accepted (boundary 128, dots, dashes)', async () => {
@@ -212,8 +260,8 @@ describe('2. schema validation', () => {
     });
     test('control characters in strings are rejected (host.disk.path, runner label, machine)', async () => {
         await bad(payload({ host: { uptimeSeconds: 1, disk: { path: '/\u001b[31m', totalBytes: 1, freeBytes: 1 } } }), 'host.disk');
-        await bad(payload({ machine: 'm1\u0000' }), 'machine');
-        await bad(payload({ machine: 'm1\u007f' }), 'machine');
+        await refusedAtGate(payload({ machine: 'm1\u0000' }));
+        await refusedAtGate(payload({ machine: 'm1\u007f' }));
     });
     test('over-length job strings are per-job rejections', () => {
         for (const [k, len] of [['workflow', 129], ['jobName', 129], ['id', 129], ['runner', 65]]) {
@@ -285,7 +333,7 @@ describe('2. schema validation', () => {
     });
     test('413 is decided BEFORE validation (oversized AND schema-invalid -> 413, not 400)', async () => {
         const { app } = mount();
-        const r = await push(app, { schema_version: 99, pad: 'z'.repeat(MAX_BODY_BYTES + 10) });
+        const r = await push(app, { machine: 'm1mini', schema_version: 99, pad: 'z'.repeat(MAX_BODY_BYTES + 10) });
         assert.equal(r.status, 413);
     });
     test('body just under the cap passes the size gate', async () => {

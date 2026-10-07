@@ -142,12 +142,13 @@ describe('wireCiPool with FLEET_CI_DISPATCHER unset (dormant)', () => {
 describe('server.js call sites (structural)', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
 
-    test('requires lib/ci-dispatcher and builds the pool once, after registerCiRunnersRoutes, over data/', () => {
+    test('requires lib/ci-dispatcher and builds the pool once, BEFORE registerCiRunnersRoutes (XACA-1422: it needs ciPool.store), over data/', () => {
         assert.equal((src.match(/require\('\.\/lib\/ci-dispatcher'\)/g) || []).length, 1);
         const calls = src.match(/wireCiPool\(app,/g) || [];
         assert.equal(calls.length, 1);
         assert.match(src, /const ciPool = wireCiPool\(app, \{ dataDir: path\.join\(__dirname, 'data'\) \}\);/);
-        assert.ok(src.indexOf('registerCiRunnersRoutes(app)') < src.indexOf('wireCiPool(app,'));
+        assert.ok(src.indexOf('wireCiPool(app,') < src.indexOf('registerCiRunnersRoutes(app,'));
+        assert.match(src, /registerCiRunnersRoutes\(app, \{ poolStore: ciPool\.store \}\)/);
     });
 
     test('ciPool.save() is in the periodic save block and both shutdown handlers', () => {
