@@ -77,6 +77,7 @@ function setup(opts = {}) {
     const env = Object.assign({ FLEET_CI_DISPATCHER: 'shadow', FLEET_CI_SHADOW_LOG: logFile }, CREDS, opts.env || {});
     const watcher = { cycles: 0, async runCycle() { this.cycles++; return 15000; }, stop() {} };
     const d = createDispatcher({
+        maxTrackedMs: opts.maxTrackedMs,
         env, store, assignments, alerts, watcher, reports, logger, now: () => clock.t,
         setTimer: (fn, ms) => { const h = { fn, ms }; timers.set.push(h); return h; },
         clearTimer() {},
@@ -418,7 +419,11 @@ describe('static host-label jobs mint only on an explicitly-live host (014)', ()
     s.report('m1mini', { slots: [] });
     s.d.onJob(rec(1, { labels: ['self-hosted', 'Linux', 'ARM64', 'm1mini'] }), 'queued');
     await s.d.tick();
+    s.clock.t += 3 * 60 * 1000;
+    s.report('m1mini', { slots: [] });
+    await s.d.tick();
     assert.equal(mints(s).length, 0);
+    assert.equal(s.alerts.list().filter((x) => x.type === 'ci-no-capacity').length, 0, 'no alert past the threshold');
     assert.equal(s.records()[0].mode, 'shadow');
     assert.match(s.records()[0].decision.reason, /capacity|slot/);
   });
@@ -430,5 +435,134 @@ describe('static host-label jobs mint only on an explicitly-live host (014)', ()
     await s.d.tick();
     assert.equal(mints(s).length, 1);
     assert.equal(s.records()[0].mode, 'live');
+  });
+});
+
+// XACA-1445-015: a shadow host that ranks first must not strand a job a LIVE host could take.
+// Mint/demand use LIVE hosts only; the decision record keeps the all-host choice.
+describe('live-only placement for minting and demand (015)', () => {
+  const LONG = { name: 'shell-suite' };
+  const noCap = (s) => s.alerts.list().filter((a) => a.type === 'ci-no-capacity').length;
+  async function runPastThreshold(s, ...ids) {
+    await s.d.tick();
+    s.clock.t += 3 * 60 * 1000;
+    for (const id of ids) s.report(id);
+    await s.d.tick();
+  }
+  const hostOf = (s) => mints(s)[0][1].labels.map((l) => l.toLowerCase());
+
+  test('(1) pool-only long job, m4mini shadow + prefers long, m1mini live idle: mints on m1mini; record keeps m4mini', async () => {
+    const s = setup({ env: { FLEET_CI_DISPATCHER: '1' }, modes: { m4mini: 'shadow' } });
+    s.report('m4mini'); s.report('m1mini');
+    s.d.onJob(rec(1, LONG), 'queued');
+    await s.d.tick();
+    assert.equal(mints(s).length, 1);
+    assert.ok(hostOf(s).includes('m1mini'));
+    assert.equal(s.records()[0].decision.host, 'm4mini');
+    assert.equal(s.records()[0].mode, 'shadow');
+  });
+
+  test('(2) control: both live: mints on m4mini (prefers long)', async () => {
+    const s = setup({ env: { FLEET_CI_DISPATCHER: '1' } });
+    s.report('m4mini'); s.report('m1mini');
+    s.d.onJob(rec(1, LONG), 'queued');
+    await s.d.tick();
+    assert.equal(mints(s).length, 1);
+    assert.ok(hostOf(s).includes('m4mini'));
+  });
+
+  test('(3) shadow host ranks first only by the memReclaimableBytes tie-break: mints on the live one', async () => {
+    const s = setup({ env: { FLEET_CI_DISPATCHER: '1' }, modes: { m4mini: 'shadow' } });
+    assert.equal(s.store.upsertMachine('m4mini', { prefers: null }).ok, true);
+    assert.equal(s.store.upsertMachine('m1mini', { prefers: null }).ok, true);
+    s.report('m4mini', { capacity: { memReclaimableBytes: 9000000000 } });
+    s.report('m1mini', { capacity: { memReclaimableBytes: 2000000000 } });
+    s.d.onJob(rec(1), 'queued');
+    await s.d.tick();
+    assert.equal(mints(s).length, 1);
+    assert.ok(hostOf(s).includes('m1mini'));
+    assert.equal(s.records()[0].decision.host, 'm4mini');
+  });
+
+  test('(4) the only pool host is shadow under global 1: 0 mints AND a ci-no-capacity alert past the threshold', async () => {
+    const s = setup({ env: { FLEET_CI_DISPATCHER: '1' }, machines: ['m4mini'], modes: { m4mini: 'shadow' } });
+    s.report('m4mini');
+    s.d.onJob(rec(1, LONG), 'queued');
+    await runPastThreshold(s, 'm4mini');
+    assert.equal(mints(s).length, 0);
+    assert.equal(noCap(s), 1);
+    assert.equal(s.records().length, 1);
+  });
+
+  test('(5) a host-pinned (viaHostLabel) job on a shadow host: 0 mints, no alert, even past the threshold', async () => {
+    const s = setup({ env: { FLEET_CI_DISPATCHER: '1' }, machines: ['m4mini'], modes: { m4mini: 'shadow' } });
+    s.report('m4mini');
+    s.d.onJob(rec(1, { labels: ['self-hosted', 'Linux', 'ARM64', 'm4mini'] }), 'queued');
+    await runPastThreshold(s, 'm4mini');
+    assert.equal(mints(s).length, 0);
+    assert.equal(noCap(s), 0);
+    assert.equal(s.d.queue().length, 1);
+    assert.equal(s.records()[0].mode, 'shadow');
+  });
+
+  for (const [name, o] of [
+    ['(6a) pool long job, one host shadow, one live', { modes: { m4mini: 'shadow' } }],
+    ['(6b) both hosts live', {}],
+    ['(6c) the only pool host', { machines: ['m4mini'] }],
+    ['(6d) the only pool host, shadow', { machines: ['m4mini'], modes: { m4mini: 'shadow' } }],
+  ]) {
+    test(`${name} under global shadow: 0 mints, 0 alerts`, async () => {
+      const s = setup(Object.assign({ env: { FLEET_CI_DISPATCHER: 'shadow' } }, o));
+      s.report('m4mini'); s.report('m1mini');
+      s.d.onJob(rec(1, LONG), 'queued');
+      await runPastThreshold(s, 'm4mini', 'm1mini');
+      assert.equal(mints(s).length, 0);
+      assert.equal(s.alerts.list().length, 0);
+      assert.equal(s.records().length, 1);
+    });
+  }
+});
+
+// XACA-1445-017: a host-label-only job whose pinned host has no slot / is paused raises NO ci-no-capacity alert
+// unless the host is EXPLICITLY live (then it is an ordinary unplaceable job: exactly one alert).
+describe('static-label job, pinned host unavailable: alerts follow the host mode (017)', () => {
+  const LABELS = [['self-hosted', 'Linux', 'ARM64', 'm1mini'], ['self-hosted', 'macOS', 'ARM64', 'm1mini'], ['self-hosted', 'linux', 'arm64', 'm1mini']];
+  for (const labels of LABELS) {
+    for (const state of ['no-slot', 'paused']) {
+      for (const hostMode of [undefined, 'shadow', 'live']) {
+        test(`[${labels.slice(1, 2)}] ${state} x host mode ${hostMode || 'absent'}: ${hostMode === 'live' ? '1 alert' : '0 alerts'}, 0 mints`, async () => {
+          const s = setup({ env: { FLEET_CI_DISPATCHER: '1' }, machines: ['m1mini'], modes: hostMode ? { m1mini: hostMode } : {} });
+          const osName = labels[1].toLowerCase() === 'macos' ? 'macOS' : 'Linux';
+          const rep = () => s.report('m1mini', { slots: state === 'no-slot' ? [] : slots(1, osName) });
+          if (state === 'paused') assert.equal(s.store.upsertMachine('m1mini', { paused: true }, { by: 't', now: T0 }).ok, true);
+          rep();
+          s.d.onJob(rec(1, { labels }), 'queued');
+          await s.d.tick();
+          s.clock.t += 3 * 60 * 1000;
+          rep();
+          await s.d.tick();
+          assert.equal(mints(s).length, 0);
+          assert.equal(s.alerts.list().filter((a) => a.type === 'ci-no-capacity').length, hostMode === 'live' ? 1 : 0);
+          assert.equal(s.records().length, 1);
+        });
+      }
+    }
+  }
+
+  test('ghost sweep: a static job on a non-live host that outlives maxTrackedMs is dropped SILENTLY; on an explicit-live host it still alerts', async () => {
+    const alertsFor = async (hostMode) => {
+      const s = setup({ env: { FLEET_CI_DISPATCHER: '1' }, machines: ['m1mini'], modes: hostMode ? { m1mini: hostMode } : {}, maxTrackedMs: 60 * 1000 });
+      s.report('m1mini', { slots: [] });
+      s.d.onJob(rec(1, { labels: ['self-hosted', 'Linux', 'ARM64', 'm1mini'] }), 'queued');
+      await s.d.tick();
+      s.clock.t += 5 * 60 * 1000;
+      s.report('m1mini', { slots: [] });
+      await s.d.tick();
+      assert.equal(s.d.queue().length, 0, 'dropped from tracking');
+      return s.alerts.list().filter((a) => a.type === 'ci-dispatcher-degraded').length;
+    };
+    assert.equal(await alertsFor(undefined), 0);
+    assert.equal(await alertsFor('shadow'), 0);
+    assert.equal(await alertsFor('live'), 1);
   });
 });

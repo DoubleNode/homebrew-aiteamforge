@@ -22,7 +22,8 @@
  * mint) | anything else (dormant; an unknown value is logged and never treated as live). A
  * pool machine record may also carry mode:'shadow'|'live' (absent = live, EXCEPT for a job accepted only via
  * its static host label with no pool label, XACA-1445-014: that mints solely on an explicit 'live' host): a host in shadow is
- * decided for but never minted on, which is the per-host rollback (plan R1). Every newly seen
+ * decided for but never minted on, which is the per-host rollback (plan R1). Minting and demand rank over
+ * LIVE hosts only (XACA-1445-015); the decision record keeps the all-host choice. Every newly seen
  * queued job gets ONE decision record appended to the JSONL file named by FLEET_CI_SHADOW_LOG
  * (or opts.shadowLogPath), in shadow and live alike, so the two are comparable. See
  * fleet-monitor/docs/CI-POOL-API-CONTRACT.md for the record contract.
@@ -511,6 +512,9 @@ function createDispatcher(deps) {
             tracked.delete(key);
             writeAudit('expire', { repo: `${t.rec.owner}/${t.rec.repo}`, jobId: t.rec.jobId, runAttempt: t.rec.runAttempt, state: 'tracked', reason: `ghost-bound: ${why}` });
             say('warn', `stopped dispatching job ${t.rec.jobId} (${why})`);
+            // XACA-1445-017: a host-label-only job on a non-live host was never being dispatched (the
+            // persistent runners serve it), so dropping it is not a degradation: no alert.
+            if (t.viaHostLabel === true && machineMode(pinnedMachineOf(t.rec, machines), true) !== 'live') continue;
             alerts.raise('ci-dispatcher-degraded', {
                 severity: 'warning',
                 title: `CI dispatcher stopped dispatching a job in ${t.rec.owner}/${t.rec.repo}`,
@@ -543,10 +547,15 @@ function createDispatcher(deps) {
                 continue;
             }
             const evals = plc.evaluateMachines(machines, adjusted, t.rec, pcfg);
-            const top = evals.find((e) => e.eligible);
-            // Shadow (global, or the decided host): the decision above is recorded, but the job is
-            // NOT demand and nothing is minted for it. Never tracked as in-flight supply.
-            if (top && machineMode(machines[top.id], t.viaHostLabel === true) !== 'live') { t.noCapSince = null; continue; }
+            const via = t.viaHostLabel === true;
+            // A job accepted ONLY through its static host label whose pinned host is not explicitly live
+            // is the designed exception (014): recorded above, NOT demand, NO alert (the persistent
+            // runners serve it).
+            if (via && machineMode(pinnedMachineOf(t.rec, machines), true) !== 'live') { t.noCapSince = null; continue; }
+            // Placement for minting/demand considers LIVE hosts only (XACA-1445-015): a shadow host that
+            // ranks first must not strand a job a live host could take. The decision RECORD above still
+            // uses the all-host ranking (that is the shadow comparison).
+            const top = evals.find((e) => e.eligible && machineMode(machines[e.id], via) === 'live');
             if (top) { t.noCapSince = null; demand.push(t.rec); needing.push(t.rec); continue; }
             if (t.noCapSince === null) t.noCapSince = nowMs;
             if (globalShadow) continue;   // shadow raises no operational alerts: the persistent runners still serve the job
@@ -573,10 +582,11 @@ function createDispatcher(deps) {
             for (let i = 0; i < s.mint && i < inSet.length; i++) {
                 const job = inSet[i];
                 adjusted = withReservations(base, reserved);
-                const ranked = plc.rankCandidates(machines, adjusted, job, pcfg);
+                const jobVia = !!(tracked.get(job.key) && tracked.get(job.key).viaHostLabel);
+                const ranked = plc.rankCandidates(machines, adjusted, job, pcfg).filter((r) => machineMode(machines[r.id], jobVia) === 'live');
                 if (!ranked.length) break; // capacity ran out mid-tick; the next tick re-evaluates
                 const id = ranked[0].id;
-                if (machineMode(machines[id], !!(tracked.get(job.key) && tracked.get(job.key).viaHostLabel)) !== 'live') continue;   // last line of defence: shadow never mints
+                if (machineMode(machines[id], jobVia) !== 'live') continue;   // last line of defence: shadow never mints
                 const mrec = Object.assign({ id }, machines[id]);
                 const labels = plc.mintLabels(job, mrec, pcfg);
                 const os = plc.jobOs(job);
