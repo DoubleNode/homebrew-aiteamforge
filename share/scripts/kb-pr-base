@@ -110,12 +110,21 @@ except Exception as e:  # registry unreadable: report, never guess
     sys.exit("cannot load team registry: %s" % e)
 found = None
 for t in teams:
+    # A broken entry for some OTHER team must not block this lookup: skip it.
     try:
         if reg.team_code(t) != code:
             continue
-        kd = reg.kanban_dir(t)   # raises for board-less aliases (e.g. mainevent)
     except Exception:
         continue
+    # The matching team: only a board-less alias (e.g. mainevent) is skipped.
+    # Any other failure is this team's real error -- report it, don't mask it
+    # as "no team has code".
+    try:
+        kd = reg.kanban_dir(t)
+    except reg.BoardLessTeamError:
+        continue
+    except Exception as e:
+        sys.exit("team %r (code %r) is registered but its kanban dir cannot be resolved: %s" % (t, code, e))
     found = (t, kd)
     break
 if not found:
