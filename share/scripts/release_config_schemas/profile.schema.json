@@ -174,11 +174,16 @@
       "additionalProperties": false,
       "properties": {
         "note": { "type": "string" },
-        "categories": { "type": "array", "items": { "type": "string" } },
-        "action": { "type": "string", "enum": ["fold", "omit"], "description": "Exact, case-sensitive: fold counts excluded items into a summary line; omit drops them silently. Matches release_fact_dictionary._EXCLUDED_ACTIONS." },
+        "categories": { "type": "array", "items": { "type": "string", "pattern": "\\S" }, "description": "Non-blank strings, matching the engine's check." },
+        "action": { "type": "string", "enum": ["fold", "omit"], "description": "Exact, case-sensitive: fold counts excluded items into a summary line; omit drops them silently. Matches release_fact_dictionary._EXCLUDED_ACTIONS. Required when categories is non-empty." },
         "sourceRule": { "type": "string" },
         "needsLeadDecision": { "type": "string" }
-      }
+      },
+      "if": {
+        "properties": { "categories": { "minItems": 1 } },
+        "required": ["categories"]
+      },
+      "then": { "required": ["action"] }
     }
   },
   "additionalProperties": true
