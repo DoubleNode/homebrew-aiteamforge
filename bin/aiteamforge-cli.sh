@@ -50,6 +50,7 @@ Commands:
   uninstall   Remove aiteamforge environment
   start       Start aiteamforge services
   stop        Stop aiteamforge services
+  ci          Opt-in CI runner capability (dormant until: ci enable)
   restart     Restart aiteamforge services
   version     Show version information
   help        Show this help message
@@ -132,6 +133,14 @@ case "${1:-}" in
     check_configured
     shift
     exec "${AITEAMFORGE_HOME}/libexec/commands/aiteamforge-stop.sh" "$@"
+    ;;
+
+  ci)
+    # XACA-1443: dormant CI runner capability. The command does its own configured/guard
+    # checks (ci --help must work on an unconfigured machine). Never auto-invoked by
+    # setup/upgrade; only the operator reaches it.
+    shift
+    exec "${AITEAMFORGE_HOME}/libexec/commands/aiteamforge-ci.sh" "$@"
     ;;
 
   restart)
