@@ -19,7 +19,7 @@
 #
 # Layout (the subdirectory is why neither setup's flat `find -maxdepth 1` copy
 # nor update_runtime_helpers' flat *.sh sweep reaches these files):
-#   scripts/ci-runner/{provision-host.sh,ci-host.sh,create-ci-runner-user.sh}
+#   scripts/ci-runner/{provision-host.sh,ci-host.sh,create-ci-runner-user.sh,teardown-host.sh}
 #   scripts/ci-runner/lib/{ci-host-lib.sh,ci-enable-guard.sh,ci-headroom.sh}
 #   scripts/ci-runner/client/{ci-pool-agent.py,ci-runner-*.sh}
 # provision-host.sh falls back to ${its dir}/client when the dev tree's
@@ -33,6 +33,7 @@ _aitf_ci_runner_bundle_files() {
 755 provision-host.sh
 755 ci-host.sh
 755 create-ci-runner-user.sh
+755 teardown-host.sh
 755 lib/ci-host-lib.sh
 644 lib/ci-enable-guard.sh
 644 lib/ci-headroom.sh
