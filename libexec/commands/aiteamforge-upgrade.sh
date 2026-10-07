@@ -3237,6 +3237,18 @@ PYEOF
 # JSON schema siblings (release_config_schemas/*.schema.json) carry neither
 # extension the sweep globs for NOR a flat scripts/ destination -- see the
 # dedicated materialize step in update_runtime_helpers() below.
+# XACA-1454: release_fact_dictionary.py, release_profile_resolver.py,
+# release_profile_validate.py, release_template_render.py. Mirrored into
+# share/scripts/ by XACA-1349 (tap 63aafdb2) but never listed here, so the
+# test-xaca-0673 PARITY guard has been red since. They are imported by shipped
+# kanban-hooks (release_cr_stage.py, release_cr_facts.py,
+# release_cr_record_publish.py, release_notify.py), which update_kanban_hooks
+# rsyncs on every upgrade -- so an upgraded consumer gets the importers and
+# none of the modules (measured: release_cr_facts / release_cr_stage raise
+# ModuleNotFoundError: release_fact_dictionary). share/scripts/kb-wiki also
+# imports two of them, but kb-wiki itself is extensionless and not in the
+# sweep, so it is not refreshed on upgrade (separate gap). All four are .py,
+# so the glob sweep reaches them once listed.
 _xaca0673_mandatory_materialize_basenames() {
   cat <<'EOF'
 iterm2_venv_bootstrap.py
@@ -3271,6 +3283,10 @@ vault-fetch.sh
 cc-credential-team-resolver.sh
 kb-release-config-validate.sh
 release_config_validate.py
+release_fact_dictionary.py
+release_profile_resolver.py
+release_profile_validate.py
+release_template_render.py
 EOF
 }
 
