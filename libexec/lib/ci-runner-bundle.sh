@@ -23,8 +23,12 @@
 #   scripts/ci-runner/lib/{ci-host-lib.sh,ci-enable-guard.sh,ci-headroom.sh,ci-provision-version.sh,ci-runner-version.sh,ci-status.sh}
 #   scripts/ci-runner/runner-pin.conf   (data: pinned fallback actions/runner + registration floor, XACA-1443-014)
 #   scripts/ci-runner/client/{ci-pool-agent.py,ci-runner-*.sh}
-# provision-host.sh falls back to ${its dir}/client when the dev tree's
-# ../../fleet-monitor/client is absent. NOT shipped: provision-m1mini.sh
+# provision-host.sh resolves its client payload by provenance (XACA-1443-016):
+# the sibling ${its dir}/client wins whenever it exists (only this shipped
+# bundle has one); the dev tree's ../../fleet-monitor/client is used only when
+# the checkout carries the .aiteamforge-source-tree sentinel. A customer's
+# $AITEAMFORGE_DIR/fleet-monitor/client (fleet reporter) is never used.
+# NOT shipped: provision-m1mini.sh
 # (M1Mini-specific), spike*.sh (research). List must match sync-tap.sh's
 # XACA-1443-001 block.
 
