@@ -170,12 +170,12 @@
     },
     "excludedFromScope": {
       "type": "object",
-      "description": "Business-policy filter for guest-facing scope (XACA-1343 owns the rendering behavior; this schema only accepts the shape).",
+      "description": "Business-policy filter for guest-facing scope (XACA-1343 owns the rendering behavior; this schema accepts the shape and constrains action to the values the engine accepts, XACA-1366).",
       "additionalProperties": false,
       "properties": {
         "note": { "type": "string" },
         "categories": { "type": "array", "items": { "type": "string" } },
-        "action": { "type": "string" },
+        "action": { "type": "string", "enum": ["fold", "omit"], "description": "Exact, case-sensitive: fold counts excluded items into a summary line; omit drops them silently. Matches release_fact_dictionary._EXCLUDED_ACTIONS." },
         "sourceRule": { "type": "string" },
         "needsLeadDecision": { "type": "string" }
       }
