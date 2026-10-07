@@ -653,15 +653,8 @@ def _import_profile_modules():
     here = str(Path(__file__).resolve().parent)
     if here not in sys.path:
         sys.path.insert(0, here)
-    try:
-        import release_profile_resolver
-        import release_profile_validate
-    except ImportError:
-        # XACA-1343's resolver registers release_config_validate in sys.modules
-        # BEFORE executing it and leaves the half-built module behind on failure;
-        # a second import would then die with AttributeError instead of ImportError.
-        sys.modules.pop("release_config_validate", None)
-        raise
+    import release_profile_resolver
+    import release_profile_validate
     return release_profile_resolver, release_profile_validate
 
 

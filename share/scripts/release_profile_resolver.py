@@ -94,7 +94,14 @@ def _load_rcv():
     )
     mod = importlib.util.module_from_spec(spec)
     sys.modules["release_config_validate"] = mod
-    spec.loader.exec_module(mod)
+    try:
+        spec.loader.exec_module(mod)
+    except BaseException:
+        # XACA-1368: don't leave the half-built module registered (the early
+        # sys.modules.get() above would hand it to a 2nd import -> AttributeError).
+        if sys.modules.get("release_config_validate") is mod:
+            del sys.modules["release_config_validate"]
+        raise
     return mod
 
 
