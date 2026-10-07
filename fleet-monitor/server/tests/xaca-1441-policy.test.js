@@ -188,3 +188,20 @@ test('evaluateJob is pure: does not mutate its inputs', () => {
   evaluateJob(r, c);
   assert.strictEqual(JSON.stringify([r, c]), before);
 });
+
+// XACA-1445-011 (plan D1a): static-label jobs (self-hosted + one known host label, no pool label).
+test('static-label jobs (D1a): self-hosted + exactly one known host label is accepted without the pool label', () => {
+  assert.deepStrictEqual(ev(rec({ labels: ['self-hosted', 'Linux', 'ARM64', 'm1mini'] })), { accept: true, reason: 'ok', alert: false });
+  assert.strictEqual(ev(rec({ labels: ['Self-Hosted', 'macOS', 'M4Mini'] })).accept, true);
+});
+
+test('static-label jobs (D1a): every rejection rule still applies first or after', () => {
+  const L = ['self-hosted', 'Linux', 'ARM64', 'm1mini'];
+  assert.strictEqual(ev(rec({ labels: L.concat('gpu') })).reason, 'label:unknown');
+  assert.strictEqual(ev(rec({ labels: ['self-hosted', 'Linux', 'ARM64', 'm1mini', 'm4mini'] })).reason, 'label:ambiguous');
+  assert.strictEqual(ev(rec({ labels: ['self-hosted', 'm1mini'] })).reason, 'label:ambiguous');
+  assert.strictEqual(ev(rec({ labels: L, run: { headRepoFullName: 'evil/dev-team' } })).reason, 'reject:fork');
+  assert.strictEqual(ev(rec({ labels: L, run: { event: 'workflow_run' } })).reason, 'reject:fork-unverifiable');
+  assert.strictEqual(ev(rec({ labels: ['self-hosted', 'Linux', 'ARM64', 'm9mini'] })).reason, 'label:not-pool');
+  assert.strictEqual(ev(rec({ labels: ['Linux', 'ARM64', 'm1mini'] })).reason, 'label:not-pool');
+});

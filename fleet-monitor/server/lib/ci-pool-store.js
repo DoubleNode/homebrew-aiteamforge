@@ -71,7 +71,11 @@ const DEFAULT_JOB_CLASSES = Object.freeze({
 
 const CONFIG_FIELDS = ['allowlist', 'poolLabel', 'jobClasses', 'thresholds'];
 const MACHINE_FIELDS = ['enabled', 'paused', 'pausedBy', 'pausedAt', 'pauseReason',
-                        'prefers', 'thresholds', 'keyHash', 'telemetryKeyHash'];
+                        'prefers', 'thresholds', 'keyHash', 'telemetryKeyHash', 'mode'];
+// XACA-1445-011: `mode` is OPTIONAL (absent = 'live'), so pools written before it existed stay valid
+// and defaultMachine() is unchanged. 'shadow' = decide and record, never mint (per-host rollback R1).
+const OPTIONAL_MACHINE_FIELDS = ['mode'];
+const MACHINE_MODES = ['live', 'shadow'];
 const TOP_FIELDS = ['schemaVersion', 'config', 'machines'];
 
 const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
@@ -162,7 +166,7 @@ function validateMachine(m, id) {
     if (!MACHINE_ID_RE.test(id)) return [`${where}: bad machine id`];
     if (!isPlainObject(m)) return [`${where}: must be an object`];
     const errs = unknownFields(m, MACHINE_FIELDS, where);
-    for (const f of MACHINE_FIELDS) if (!has(m, f)) errs.push(`${where}.${f}: required`);
+    for (const f of MACHINE_FIELDS) if (!OPTIONAL_MACHINE_FIELDS.includes(f) && !has(m, f)) errs.push(`${where}.${f}: required`);
     if (errs.length) return errs;
 
     if (typeof m.enabled !== 'boolean') errs.push(`${where}.enabled: must be boolean`);
@@ -175,6 +179,7 @@ function validateMachine(m, id) {
     if (m.pausedAt !== null && (typeof m.pausedAt !== 'string' || Number.isNaN(Date.parse(m.pausedAt)))) {
         errs.push(`${where}.pausedAt: must be null or an ISO timestamp`);
     }
+    if (has(m, 'mode') && !MACHINE_MODES.includes(m.mode)) errs.push(`${where}.mode: must be "live" or "shadow"`);
     if (m.prefers !== null && !JOB_CLASS_VALUES.includes(m.prefers)) {
         errs.push(`${where}.prefers: must be null, "long" or "short"`);
     }
@@ -306,7 +311,7 @@ function createPoolStore(opts) {
     function upsertMachine(id, patch, meta) {
         if (typeof id !== 'string' || !MACHINE_ID_RE.test(id)) return { ok: false, error: 'bad machine id' };
         if (!isPlainObject(patch)) return { ok: false, error: 'patch must be an object' };
-        const patchable = ['enabled', 'paused', 'pauseReason', 'prefers', 'thresholds'];
+        const patchable = ['enabled', 'paused', 'pauseReason', 'prefers', 'thresholds', 'mode'];
         const bad = unknownFields(patch, patchable, 'machine patch');
         if (bad.length) return { ok: false, error: bad.join('; ') };
 

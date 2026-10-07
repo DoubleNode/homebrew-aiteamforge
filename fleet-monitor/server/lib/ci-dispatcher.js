@@ -18,7 +18,15 @@
  * and the NEXT tick is scheduled with the delay the watcher asked for (15 s busy / 60 s
  * idle / rate-limit resume), via a self-rescheduling timer so ticks never overlap.
  *
- * DORMANT (Requirement 3): unless env.FLEET_CI_DISPATCHER === '1' AND the GitHub App
+ * MODES (XACA-1445-011): FLEET_CI_DISPATCHER = "1" (live) | "shadow" (decide + record, NEVER
+ * mint) | anything else (dormant; an unknown value is logged and never treated as live). A
+ * pool machine record may also carry mode:'shadow'|'live' (absent = live): a host in shadow is
+ * decided for but never minted on, which is the per-host rollback (plan R1). Every newly seen
+ * queued job gets ONE decision record appended to the JSONL file named by FLEET_CI_SHADOW_LOG
+ * (or opts.shadowLogPath), in shadow and live alike, so the two are comparable. See
+ * fleet-monitor/docs/CI-POOL-API-CONTRACT.md for the record contract.
+ *
+ * DORMANT (Requirement 3): unless env.FLEET_CI_DISPATCHER is "1" or "shadow" AND the GitHub App
  * credentials are configured, start() creates no watcher, schedules no timer and makes no
  * GitHub call; tick() is a no-op. isEnabled() is what the agent poll reports as `enabled`.
  *
@@ -37,6 +45,7 @@
  * anything but ids, counts and reason codes.
  */
 
+const fs = require('fs');
 const path = require('path');
 const placement = require('./ci-dispatch-placement');
 const policy = require('./ci-dispatch-policy');
@@ -58,6 +67,11 @@ const MAX_TRACKED_MS = 24 * 60 * 60 * 1000;
 // job is never made acceptable by editing config.
 const CONFIG_DEPENDENT_REASONS = Object.freeze(['not-allowlisted', 'label:unknown', 'label:not-pool', 'label:ambiguous']);
 const MAX_CONFIG_REJECTED = 500;
+// XACA-1445-011: decision-record dedup memory (job ids) and how much of the log tail is read at
+// first use to re-prime it after a restart, so a restart does not re-record still-queued jobs.
+const MAX_DECIDED_IDS = 20000;
+const SHADOW_LOG_PRIME_BYTES = 512 * 1024;
+const DEFAULT_SHADOW_LOG_NAME = 'ci-shadow-decisions.jsonl';
 
 const clean = (v) => (v === undefined || v === null ? '' : String(v).trim());
 
@@ -67,10 +81,25 @@ function hasCredentials(env) {
     return (clean(e.GITHUB_APP_CLIENT_ID) !== '' || clean(e.GITHUB_APP_ID) !== '') && clean(e.GITHUB_APP_PRIVATE_KEY) !== '';
 }
 
+/**
+ * XACA-1445-011: the global dispatcher mode from FLEET_CI_DISPATCHER.
+ *   "1"      -> live    (backwards compatible)
+ *   "shadow" -> shadow  (decide + record, never mint)
+ *   unset / "" / "0" -> dormant;  anything else -> dormant AND `unknown:true` (fail closed, logged).
+ */
+function globalMode(env) {
+    const raw = clean((env || {}).FLEET_CI_DISPATCHER);
+    if (raw === '1') return { mode: 'live', unknown: false, raw };
+    if (raw.toLowerCase() === 'shadow') return { mode: 'shadow', unknown: false, raw };
+    return { mode: 'dormant', unknown: !(raw === '' || raw === '0'), raw };
+}
+
 /** Why the dispatcher is dormant, or null when it may run. Never includes a secret. */
 function dormantReason(env) {
     const e = env || {};
-    if (e.FLEET_CI_DISPATCHER !== '1') return 'FLEET_CI_DISPATCHER is not "1"';
+    const g = globalMode(e);
+    if (g.unknown) return `FLEET_CI_DISPATCHER has unknown mode "${g.raw.slice(0, 20)}" (expected "1" or "shadow"); staying dormant`;
+    if (g.mode === 'dormant') return 'FLEET_CI_DISPATCHER is not "1" or "shadow"';
     if (!hasCredentials(e)) return 'GitHub App credentials are not configured (need GITHUB_APP_CLIENT_ID or GITHUB_APP_ID, and GITHUB_APP_PRIVATE_KEY)';
     return null;
 }
@@ -90,6 +119,7 @@ function dormantReason(env) {
  * @param {Map}      [deps.reports]    machine -> report; shared with the routes
  * @param {number}   [deps.maxMintsPerJob]  ghost backstop: runners that expired unpicked for one job (default MAX_MINTS_PER_JOB)
  * @param {number}   [deps.maxTrackedMs]    ghost backstop (default MAX_TRACKED_MS)
+ * @param {string}   [deps.shadowLogPath] decision-record file (env FLEET_CI_SHADOW_LOG wins); none = no records written
  * @param {Function} [deps.now]
  * @param {Function} [deps.setTimer]   (fn, ms) => handle
  * @param {Function} [deps.clearTimer]
@@ -141,6 +171,156 @@ function createDispatcher(deps) {
     const rejected = new Set();
 
     const isEnabled = () => dormantReason(env) === null;
+    /** 'dormant' | 'shadow' | 'live' from the global switch (read live, so tests/operators can flip env). */
+    const effectiveMode = () => (isEnabled() ? globalMode(env).mode : 'dormant');
+    /**
+     * Effective mode for ONE host. Anything but a global 'live' AND a host mode of absent/'live' is
+     * 'shadow' (never mints): an unknown per-host value fails closed to shadow, never to live.
+     */
+    const machineMode = (m) => {
+        if (effectiveMode() !== 'live') return 'shadow';
+        const v = m && m.mode;
+        return v === undefined || v === 'live' ? 'live' : 'shadow';
+    };
+
+    // ------------------------------------------------------- decision records
+    /** job ids already recorded (insertion order = age), primed from the log tail once. */
+    const decided = new Set();
+    let decidedPrimed = false;
+    let decisionsRecorded = 0;
+    let decisionWriteFailures = 0;
+    const shadowLogFile = () => clean(env.FLEET_CI_SHADOW_LOG) || clean(d.shadowLogPath) || null;
+
+    function markDecided(id) {
+        decided.add(id);
+        while (decided.size > MAX_DECIDED_IDS) decided.delete(decided.values().next().value);
+    }
+
+    /** Best effort: re-learn recorded job ids from the log tail so a restart does not duplicate them. */
+    function primeDecided(file) {
+        decidedPrimed = true;
+        let fd = null;
+        try {
+            fd = fs.openSync(file, 'r');
+            const size = fs.fstatSync(fd).size;
+            const len = Math.min(size, SHADOW_LOG_PRIME_BYTES);
+            if (len <= 0) return;
+            const buf = Buffer.alloc(len);
+            fs.readSync(fd, buf, 0, len, size - len);
+            const lines = buf.toString('utf8').split('\n');
+            if (size > len) lines.shift(); // first line may be cut off
+            for (const ln of lines) {
+                if (!ln) continue;
+                try { const o = JSON.parse(ln); if (Number.isInteger(o.job_id)) markDecided(o.job_id); } catch (_) { /* partial/foreign line */ }
+            }
+        } catch (_) { /* no log yet is the normal case */ } finally {
+            if (fd !== null) { try { fs.closeSync(fd); } catch (_) { /* nothing */ } }
+        }
+    }
+
+    const pcfgFor = (cfg) => ({ now: now(), thresholds: cfg.thresholds, jobClasses: cfg.jobClasses, poolLabel: cfg.poolLabel });
+
+    const OFFLINE_REASONS = ['no-report', 'stale-poll', 'no-last-poll', 'poll-in-future', 'no-clock'];
+    /** Per-host snapshot the decision was made from (D2 contract). Never carries a secret. */
+    function capacityOf(machines, adjusted, evals, rec) {
+        const out = {};
+        const osName = plc.jobOs(rec);
+        for (const e of evals) {
+            const m = machines[e.id] || {};
+            const r = adjusted[e.id];
+            const slotList = r && Array.isArray(r.slots) ? r.slots : [];
+            out[e.id] = {
+                online: !e.reasons.some((x) => OFFLINE_REASONS.includes(x)),
+                enabled: m.enabled === true,
+                paused: m.paused !== false,
+                free_slots: slotList.filter((sl) => sl && sl.state === 'idle' && (osName === null || sl.os === osName)).length,
+                reason: e.reasons.length ? e.reasons.join(',') : null,
+            };
+        }
+        return out;
+    }
+
+    /** First eligible host -> placed/pinned; otherwise host-paused (a pinned host is paused) or no-capacity. */
+    function decisionFrom(rec, evals, machines) {
+        const jl = plc.normalizeLabels(rec.labels) || [];
+        const hostLabel = (id) => plc.hostLabelOf(Object.assign({ id }, machines[id]));
+        const top = evals.find((e) => e.eligible);
+        if (top) {
+            const hl = hostLabel(top.id);
+            return { host: top.id, reason: hl && jl.includes(hl) ? `pinned:${top.id}` : 'placed' };
+        }
+        for (const e of evals) {
+            const hl = hostLabel(e.id);
+            if (hl && jl.includes(hl) && e.reasons.includes('paused')) return { host: null, reason: 'host-paused' };
+        }
+        return { host: null, reason: 'no-capacity' };
+    }
+
+    /** Append one record, once per job id. Never throws; a write error is logged, not raised. */
+    function appendDecision(rec, decision, capacity, mode) {
+        try {
+            if (!Number.isInteger(rec.jobId) || effectiveMode() === 'dormant') return;
+            const file = shadowLogFile();
+            if (!file) return;
+            if (!decidedPrimed) primeDecided(file);
+            if (decided.has(rec.jobId)) return;
+            markDecided(rec.jobId);
+            const line = JSON.stringify({
+                ts: new Date(now()).toISOString(),
+                job_id: rec.jobId,
+                run_id: Number.isInteger(rec.runId) ? rec.runId : 0,
+                labels: Array.isArray(rec.labels) ? rec.labels.map((l) => String(l)) : [],
+                mode,
+                decision: { host: decision.host, reason: decision.reason },
+                capacity,
+            }) + '\n';
+            try {
+                fs.mkdirSync(path.dirname(file), { recursive: true });
+                fs.appendFileSync(file, line, { mode: 0o600 });   // single write of line + "\n"
+                decisionsRecorded++;
+            } catch (e) {
+                decisionWriteFailures++;
+                if (decisionWriteFailures === 1 || decisionWriteFailures % 50 === 0) {
+                    say('error', `decision record not written (${clean((e && e.code) || (e && e.message)).slice(0, 80)}); ${decisionWriteFailures} failure(s)`);
+                }
+            }
+        } catch (e) {
+            say('error', `decision record failed (${clean(e && e.message).slice(0, 120)})`);
+        }
+    }
+
+    /** A job policy refused: record host:null + the policy reason (once per job id). */
+    function recordRejected(rec, reason) {
+        try {
+            if (!shadowLogFile() || effectiveMode() === 'dormant') return;
+            const cfg = store.getConfig();
+            const machines = store.listMachines();
+            const base = reportsObject();
+            const evals = plc.evaluateMachines(machines, base, rec, pcfgFor(cfg));
+            appendDecision(rec, { host: null, reason: reason === 'label:not-pool' ? 'not-pool' : reason }, capacityOf(machines, base, evals, rec), effectiveMode());
+        } catch (e) {
+            say('error', `decision record failed (${clean(e && e.message).slice(0, 120)})`);
+        }
+    }
+
+    /**
+     * A policy-accepted job: record the placement decision exactly as live would make it, against
+     * the capacity left after earlier decisions in this tick (`decRes`, a copy of the reservations).
+     */
+    function recordPlacement(rec, machines, base, decRes, pcfg, covered) {
+        try {
+            if (!shadowLogFile() || decided.has(rec.jobId) || effectiveMode() === 'dormant') return;
+            const adjusted = withReservations(base, decRes);
+            const evals = plc.evaluateMachines(machines, adjusted, rec, pcfg);
+            const decision = decisionFrom(rec, evals, machines);
+            const mode = decision.host ? machineMode(machines[decision.host]) : effectiveMode();
+            appendDecision(rec, decision, capacityOf(machines, adjusted, evals, rec), mode);
+            const osName = plc.jobOs(rec);
+            if (decision.host && osName && !covered) decRes.set(`${decision.host}|${osName}`, (decRes.get(`${decision.host}|${osName}`) || 0) + 1);
+        } catch (e) {
+            say('error', `decision record failed (${clean(e && e.message).slice(0, 120)})`);
+        }
+    }
 
     // ---------------------------------------------------------------- events
     function evaluate(rec) {
@@ -156,6 +336,7 @@ function createDispatcher(deps) {
         }
 
         tracked.delete(rec.key);
+        recordRejected(rec, v.reason);
         if (CONFIG_DEPENDENT_REASONS.includes(v.reason)) {
             configRejected.delete(rec.key); // refresh its age
             configRejected.set(rec.key, rec);
@@ -333,19 +514,28 @@ function createDispatcher(deps) {
             const ck = plc.labelSetKey(String(raw).split(','));
             coverage.set(ck, (coverage.get(ck) || 0) + n);
         }
+        const globalShadow = effectiveMode() !== 'live';
+        const decRes = new Map(reserved);   // reservations as the decision records see them (shadow decisions consume capacity too)
         const demand = [];   // covered + needing: what computeSupply sees
         const needing = [];  // uncovered jobs that have an eligible machine: where new mints go
         let adjusted = withReservations(base, reserved);
         for (const t of jobs) {
             const setKey = plc.labelSetKey(t.rec.labels);
-            if ((coverage.get(setKey) || 0) > 0) {
+            const isCovered = (coverage.get(setKey) || 0) > 0;
+            recordPlacement(t.rec, machines, base, decRes, pcfg, isCovered);
+            if (isCovered) {
                 coverage.set(setKey, coverage.get(setKey) - 1);
                 t.noCapSince = null; demand.push(t.rec);
                 continue;
             }
             const evals = plc.evaluateMachines(machines, adjusted, t.rec, pcfg);
-            if (evals.some((e) => e.eligible)) { t.noCapSince = null; demand.push(t.rec); needing.push(t.rec); continue; }
+            const top = evals.find((e) => e.eligible);
+            // Shadow (global, or the decided host): the decision above is recorded, but the job is
+            // NOT demand and nothing is minted for it. Never tracked as in-flight supply.
+            if (top && machineMode(machines[top.id]) !== 'live') { t.noCapSince = null; continue; }
+            if (top) { t.noCapSince = null; demand.push(t.rec); needing.push(t.rec); continue; }
             if (t.noCapSince === null) t.noCapSince = nowMs;
+            if (globalShadow) continue;   // shadow raises no operational alerts: the persistent runners still serve the job
             const waited = nowMs - t.noCapSince;
             if (waited >= NO_CAPACITY_AFTER_MS) {
                 const cls = plc.jobClass(t.rec.name, cfg.jobClasses);
@@ -372,6 +562,7 @@ function createDispatcher(deps) {
                 const ranked = plc.rankCandidates(machines, adjusted, job, pcfg);
                 if (!ranked.length) break; // capacity ran out mid-tick; the next tick re-evaluates
                 const id = ranked[0].id;
+                if (machineMode(machines[id]) !== 'live') continue;   // last line of defence: shadow never mints
                 const mrec = Object.assign({ id }, machines[id]);
                 const labels = plc.mintLabels(job, mrec, pcfg);
                 const os = plc.jobOs(job);
@@ -440,7 +631,7 @@ function createDispatcher(deps) {
     function start() {
         if (started) return true;
         const why = dormantReason(env);
-        if (why !== null) { say('log', `dispatcher dormant: ${why}`); return false; }
+        if (why !== null) { say(globalMode(env).unknown ? 'warn' : 'log', `dispatcher dormant: ${why}`); return false; }
         started = true; stopped = false;
         if (!watcher) {
             watcher = d.createWatcher({
@@ -450,7 +641,7 @@ function createDispatcher(deps) {
                 log: (level, msg) => say(level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'log', msg),
             });
         }
-        say('log', `dispatcher ENABLED (single instance; fly machine ${clean(env.FLY_MACHINE_ID) || 'n/a'}; allowlist changes apply live)`);
+        say('log', `dispatcher ENABLED in ${effectiveMode().toUpperCase()} mode${effectiveMode() === 'shadow' ? ' (decides and records, mints nothing)' : ''} (single instance; fly machine ${clean(env.FLY_MACHINE_ID) || 'n/a'}; allowlist changes apply live)`);
         schedule(0);
         return true;
     }
@@ -476,7 +667,7 @@ function createDispatcher(deps) {
         }));
     }
 
-    const status = () => ({ enabled: isEnabled(), running: started, lastTickAt, tracked: tracked.size, notPoolSkipped, configRejected: configRejected.size });
+    const status = () => ({ enabled: isEnabled(), mode: effectiveMode(), decisionsRecorded, running: started, lastTickAt, tracked: tracked.size, notPoolSkipped, configRejected: configRejected.size });
 
     return { start, stop, tick, isEnabled, alerts: () => alerts.list(), queue, status, onJob, onDegraded, onConfigChanged };
 }
@@ -529,7 +720,9 @@ function wireCiPool(app, opts) {
     const a = assignments.load();
     if (a && a.ok === false) logger.error(`[CI-DISPATCH] ci-dispatch-state.json not loaded: ${a.error}`);
 
+    // XACA-1445-011: decision records default to <dataDir>/ci-shadow-decisions.jsonl (env FLEET_CI_SHADOW_LOG wins).
     dispatcher = createDispatcher({
+        shadowLogPath: path.join(o.dataDir, 'ci-shadow-decisions.jsonl'),
         env, store, assignments, alerts, audit, github, reports, now: o.now, logger,
         createWatcher: ({ allowlist, getAllowlist, onJob, log }) => createWatcher({ github, allowlist, getAllowlist, onJob, log, now: o.now }),
     });
@@ -544,6 +737,6 @@ function wireCiPool(app, opts) {
 }
 
 module.exports = {
-    createDispatcher, wireCiPool, hasCredentials, dormantReason,
+    createDispatcher, wireCiPool, hasCredentials, dormantReason, globalMode,
     NO_CAPACITY_AFTER_MS, FALLBACK_DELAY_MS, MAX_MINTS_PER_JOB, MAX_TRACKED_MS, MAX_CONFIG_REJECTED,
 };

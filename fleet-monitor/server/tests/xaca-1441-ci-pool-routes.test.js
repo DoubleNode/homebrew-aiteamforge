@@ -534,7 +534,7 @@ describe('GET /api/ci-pool redaction', () => {
         assert.equal(r.body.machines.m1mini.lastPollAt, null);
         assert.equal(r.body.dispatcherEnabled, true);
         assert.equal(r.body.assignments.length, 2);
-        assert.deepEqual(Object.keys(r.body.machines.m4mini).sort(), ['agentVersion', 'capacity', 'enabled', 'hasKey', 'hasTelemetryKey', 'lastPollAt', 'pauseDrift', 'pauseMarker', 'pauseReason', 'pausedAt', 'pausedBy', 'paused', 'prefers', 'slots', 'thresholds'].sort());
+        assert.deepEqual(Object.keys(r.body.machines.m4mini).sort(), ['agentVersion', 'capacity', 'enabled', 'hasKey', 'hasTelemetryKey', 'lastPollAt', 'mode', 'pauseDrift', 'pauseMarker', 'pauseReason', 'pausedAt', 'pausedBy', 'paused', 'prefers', 'slots', 'thresholds'].sort());
     });
 });
 

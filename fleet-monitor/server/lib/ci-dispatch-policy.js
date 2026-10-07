@@ -30,9 +30,11 @@
  *                       (D7). Checked for every event that reaches this step.
  *      Both fork reasons set alert=true only when the job also carries the pool label
  *      (a fork-origin job aimed at the pool = workflow misconfiguration).
- *   5. label:not-pool   must include `self-hosted` and the pool label
+ *   5. label:not-pool   must include `self-hosted` and the pool label OR exactly-known host label
+ *                       (XACA-1445-011, plan D1a: a static-label job `self-hosted` + one host label, no pool label,
+ *                       is accepted; neither pool nor host label stays label:not-pool)
  *   6. label:unknown    labels must be a subset of {self-hosted, OS, ARM64, pool, <host>}
- *   7. label:ambiguous  a pool job must carry EXACTLY ONE OS label (linux|macos) and AT MOST ONE
+ *   7. label:ambiguous  a pool (or static host-label) job must carry EXACTLY ONE OS label (linux|macos) and AT MOST ONE
  *                       host label (XACA-1441-031). Zero or two OS labels, or two host labels,
  *                       can never be satisfied by a single minted runner: that is a workflow
  *                       misconfiguration to alert on, not a capacity outage to wait out.
@@ -130,15 +132,18 @@ function evaluateJob(record, ctx) {
     return verdict(false, 'reject:fork', hasPool);
   }
 
-  // 5. + 6. labels (D6)
-  if (labels.indexOf('self-hosted') === -1 || !hasPool) return verdict(false, 'label:not-pool');
+  // 5. + 6. labels (D6). XACA-1445-011 (plan D1a): a job still written for the static split carries
+  // `self-hosted` and a known host label but NOT the pool label; it is accepted on that host label
+  // (the ambiguity rule below then demands exactly one). Neither pool nor host label = not ours.
+  const hostSet = new Set(hostLabels.map(canonical));
+  const hostOnJob = new Set(labels.filter(function (l) { return hostSet.has(l); }));
+  if (labels.indexOf('self-hosted') === -1 || (!hasPool && hostOnJob.size === 0)) return verdict(false, 'label:not-pool');
   const allowed = allowedLabelSet(poolLabel, hostLabels);
   if (!labels.every(function (l) { return allowed.has(l); })) return verdict(false, 'label:unknown');
 
   // 7. ambiguity (XACA-1441-031). Distinct canonical labels, so `Linux` + `linux` is one OS label.
   const osCount = new Set(labels.filter(function (l) { return OS_LABELS.indexOf(l) !== -1; })).size;
-  const hostSet = new Set(hostLabels.map(canonical));
-  const hostCount = new Set(labels.filter(function (l) { return hostSet.has(l); })).size;
+  const hostCount = hostOnJob.size;
   if (osCount !== 1 || hostCount > 1) return verdict(false, 'label:ambiguous');
 
   return verdict(true, 'ok');

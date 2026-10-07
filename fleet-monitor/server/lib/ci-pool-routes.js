@@ -386,6 +386,7 @@ function registerCiPoolRoutes(app, deps) {
                 machines[id] = {
                     enabled: m.enabled, paused: m.paused, pausedBy: m.pausedBy, pausedAt: m.pausedAt,
                     pauseReason: m.pauseReason, prefers: m.prefers, thresholds: m.thresholds,
+                    mode: m.mode === undefined ? 'live' : m.mode,
                     hasKey: m.keyHash !== null,
                     hasTelemetryKey: m.telemetryKeyHash !== null,
                     lastPollAt: r ? iso(r.receivedAt) : null,
@@ -428,7 +429,7 @@ function registerCiPoolRoutes(app, deps) {
             if (!MACHINE_ID_RE.test(id)) return res.status(400).json({ error: 'bad machine id' });
             const body = req.body;
             if (!isPlainObject(body)) return res.status(400).json({ error: 'body must be a JSON object' });
-            const allowed = ['enabled', 'paused', 'reason', 'prefers', 'thresholds'];
+            const allowed = ['enabled', 'paused', 'reason', 'prefers', 'thresholds', 'mode'];
             const extra = Object.keys(body).filter((k) => !allowed.includes(k));
             if (extra.length) return res.status(400).json({ error: `unknown field "${extra[0]}"` });
             const patch = {};
@@ -447,7 +448,7 @@ function registerCiPoolRoutes(app, deps) {
             configChanged();   // hostLabels feed label:unknown / label:ambiguous
             return res.status(200).json({
                 success: true, machine: id,
-                record: { enabled: m.enabled, paused: m.paused, pausedBy: m.pausedBy, pausedAt: m.pausedAt, pauseReason: m.pauseReason, prefers: m.prefers, thresholds: m.thresholds, hasKey: m.keyHash !== null, hasTelemetryKey: m.telemetryKeyHash !== null },
+                record: { enabled: m.enabled, paused: m.paused, pausedBy: m.pausedBy, pausedAt: m.pausedAt, pauseReason: m.pauseReason, prefers: m.prefers, thresholds: m.thresholds, mode: m.mode === undefined ? 'live' : m.mode, hasKey: m.keyHash !== null, hasTelemetryKey: m.telemetryKeyHash !== null },
             });
         } catch (error) {
             log.error('[CI-POOL] error updating machine:', error && error.message);
