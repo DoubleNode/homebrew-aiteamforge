@@ -19,7 +19,7 @@ const REPO = 'acme/widgets';
 
 /** Fake github: world = { queued:[run], in_progress:[run], jobs:{runId:[job]} }; a 304 when the body is unchanged. */
 function makeWorld() {
-    const world = { queued: [], in_progress: [], jobs: {}, calls: [], rate: { mode: 'normal', resumeAt: null }, seen: new Map(), throwNext: null };
+    const world = { queued: [], in_progress: [], jobs: {}, calls: [], rate: { mode: 'normal', resumeAt: null }, seen: new Map(), throwNext: null, failJobs: {} };
     world.github = {
         getRateState: () => ({ ...world.rate }),
         async conditionalGet({ owner, repo, path, purpose }) {
@@ -27,6 +27,8 @@ function makeWorld() {
             if (world.throwNext) { const e = world.throwNext; world.throwNext = null; throw e; }
             let data;
             let m;
+            // Per-run job-fetch failure (e.g. a deleted run answers 404/410), persistent until cleared.
+            if ((m = /\/actions\/runs\/(\d+)\/jobs/.exec(path)) && world.failJobs[m[1]]) throw world.failJobs[m[1]];
             if ((m = /\/actions\/runs\?status=(\w+)/.exec(path))) data = { workflow_runs: world[m[1]] };
             else if ((m = /\/actions\/runs\/(\d+)\/jobs/.exec(path))) data = { jobs: world.jobs[m[1]] || [] };
             else throw new Error(`unexpected path ${path}`);
@@ -326,13 +328,20 @@ describe('memory bound', () => {
         assert.equal(s.jobs.queued, 1);
     });
 
-    test('an open job unseen for over a day is dropped', async () => {
-        const { world, clock, w } = setup();
+    test('an open job that disappears is closed (vanished), never dropped silently, then aged out', async () => {
+        // PR #1083: a silent drop left the dispatcher holding the job as demand forever.
+        const { world, clock, events, w } = setup();
         world.queued = [run(1)]; world.jobs[1] = [job(11)];
         await w.runCycle();
         world.queued = [];
         world.jobs[1] = []; // the run no longer reports the job and it never completes
         clock.t += 25 * 3600 * 1000;
+        await w.runCycle();
+        const done = events.filter((e) => e.change === 'completed' && e.rec.jobId === 11);
+        assert.equal(done.length, 1);
+        assert.equal(done[0].rec.conclusion, 'vanished');
+        assert.equal(w.snapshot().jobs.queued, 0);
+        clock.t += 2 * 3600 * 1000; // past the completed-retention window
         await w.runCycle();
         assert.equal(w.snapshot().jobs.tracked, 0);
     });
@@ -368,5 +377,87 @@ describe('snapshot and config', () => {
         world.throwNext = Object.assign(new Error('limited'), { code: 'RATE_LIMITED' });
         await w.runCycle();
         assert.equal(world.calls.length, 1);
+    });
+});
+
+// XACA-1441 PR #1083 review (tester BLOCKING): every way an open job leaves GitHub's view must end in
+// a terminal event, or the dispatcher keeps it as demand and re-mints runners for it without limit.
+describe('vanished jobs end in a terminal event (PR #1083)', () => {
+    const { GithubError } = require('../lib/ci-dispatch-github');
+    const httpErr = (status) => new GithubError('HTTP', `GET jobs failed: HTTP ${status}`, { status });
+    const terminal = (events, jobId) => events.filter((e) => e.change === 'completed' && e.rec.jobId === jobId);
+
+    // Each row: mutate the world after job 11 (run 1, attempt 1) is queued; `advanceMs` then one cycle.
+    const ROWS = [
+        ['run deleted: its jobs answer 404', (wd) => { wd.queued = []; wd.failJobs[1] = httpErr(404); }, 0, 'vanished'],
+        ['run deleted: its jobs answer 410', (wd) => { wd.queued = []; wd.failJobs[1] = httpErr(410); }, 0, 'vanished'],
+        ['finished run no longer lists the job (fresh 200)', (wd) => { wd.queued = []; wd.jobs[1] = []; }, 0, 'vanished'],
+        ['cancel + re-run: attempt 2 supersedes the attempt-1 job', (wd) => {
+            wd.queued = [run(1, { run_attempt: 2, updated_at: '2026-10-06T12:05:00Z' })];
+            wd.jobs[1] = [job(31, { run_attempt: 2 })];
+        }, 0, 'vanished'],
+        ['run left the lists, jobs body unchanged (304): pruned after 24 h, not dropped silently', (wd) => { wd.queued = []; }, 25 * 3600 * 1000, 'vanished'],
+        // controls: these must NOT vanish the job
+        ['control: still-listed run, job missing from the first page (pagination)', (wd) => {
+            wd.queued = [run(1, { updated_at: '2026-10-06T12:05:00Z' })]; wd.jobs[1] = [job(12)];
+        }, 0, null],
+        ['control: run left the lists, jobs body unchanged (304), within 24 h', (wd) => { wd.queued = []; }, 60 * 1000, null],
+        ['control: still-listed, unchanged run keeps its job alive past 24 h', () => {}, 25 * 3600 * 1000, null],
+    ];
+
+    for (const [name, mutate, advanceMs, conclusion] of ROWS) {
+        test(name, async () => {
+            const { world, clock, events, w } = setup();
+            world.queued = [run(1)]; world.jobs[1] = [job(11)];
+            await w.runCycle();
+            assert.equal(events.filter((e) => e.rec.jobId === 11 && e.change === 'queued').length, 1);
+            mutate(world);
+            clock.t += advanceMs;
+            await w.runCycle();
+            const done = terminal(events, 11);
+            if (conclusion === null) {
+                assert.equal(done.length, 0, 'a live job must not be vanished');
+            } else {
+                assert.equal(done.length, 1, 'exactly one terminal event');
+                assert.equal(done[0].rec.conclusion, conclusion);
+                assert.equal(done[0].rec.status, 'completed');
+            }
+        });
+    }
+
+    test('a 404 on one gone run does not hide the completion of another gone run', async () => {
+        const { world, events, w } = setup();
+        world.queued = [run(1), run(2)]; world.jobs[1] = [job(11)]; world.jobs[2] = [job(21)];
+        await w.runCycle();
+        world.queued = [];
+        world.failJobs[1] = httpErr(404);
+        world.jobs[2] = [job(21, { status: 'completed', conclusion: 'success' })];
+        await w.runCycle();
+        assert.equal(terminal(events, 11)[0].rec.conclusion, 'vanished');
+        assert.equal(terminal(events, 21)[0].rec.conclusion, 'success');
+    });
+
+    test('a rate limit on a gone run is not a vanish (and still propagates to the cycle)', async () => {
+        const { world, events, w } = setup();
+        world.queued = [run(1)]; world.jobs[1] = [job(11)];
+        await w.runCycle();
+        world.queued = [];
+        world.failJobs[1] = Object.assign(new Error('limited'), { code: 'RATE_LIMITED' });
+        await w.runCycle();
+        assert.equal(terminal(events, 11).length, 0);
+    });
+
+    test('a 5xx on a gone run is retried next cycle, not a vanish', async () => {
+        const { world, events, w } = setup();
+        world.queued = [run(1)]; world.jobs[1] = [job(11)];
+        await w.runCycle();
+        world.queued = [];
+        world.failJobs[1] = httpErr(502);
+        await w.runCycle();
+        assert.equal(terminal(events, 11).length, 0);
+        delete world.failJobs[1];
+        world.jobs[1] = [job(11, { status: 'completed', conclusion: 'success' })];
+        await w.runCycle();
+        assert.equal(terminal(events, 11)[0].rec.conclusion, 'success');
     });
 });

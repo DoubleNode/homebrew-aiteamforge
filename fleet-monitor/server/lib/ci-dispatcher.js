@@ -45,6 +45,11 @@ const NO_CAPACITY_AFTER_MS = 120 * 1000;
 const FALLBACK_DELAY_MS = 60 * 1000;
 const TICK_FAIL_ALERT_AFTER = 3;
 const MINT_FAIL_ALERT_AFTER = 3;
+// Backstop against ghost demand (XACA-1441 PR #1083 review): a tracked job whose runners keep
+// expiring unpicked, or that has been tracked longer than GitHub keeps a job queued, stops being
+// demand. The watcher's `vanished` completions are the primary fix; these bound whatever is left.
+const MAX_MINTS_PER_JOB = 5;
+const MAX_TRACKED_MS = 24 * 60 * 60 * 1000;
 
 const clean = (v) => (v === undefined || v === null ? '' : String(v).trim());
 
@@ -75,6 +80,8 @@ function dormantReason(env) {
  * @param {object}   [deps.policy]     defaults to ci-dispatch-policy
  * @param {object}   [deps.placement]  defaults to ci-dispatch-placement
  * @param {Map}      [deps.reports]    machine -> report; shared with the routes
+ * @param {number}   [deps.maxMintsPerJob]  ghost backstop (default MAX_MINTS_PER_JOB)
+ * @param {number}   [deps.maxTrackedMs]    ghost backstop (default MAX_TRACKED_MS)
  * @param {Function} [deps.now]
  * @param {Function} [deps.setTimer]   (fn, ms) => handle
  * @param {Function} [deps.clearTimer]
@@ -96,6 +103,8 @@ function createDispatcher(deps) {
     const setTimer = d.setTimer || ((fn, ms) => { const h = setTimeout(fn, ms); if (h && h.unref) h.unref(); return h; });
     const clearTimer = d.clearTimer || clearTimeout;
     const log = d.logger || console;
+    const maxMintsPerJob = Number.isInteger(d.maxMintsPerJob) && d.maxMintsPerJob > 0 ? d.maxMintsPerJob : MAX_MINTS_PER_JOB;
+    const maxTrackedMs = Number.isFinite(d.maxTrackedMs) && d.maxTrackedMs > 0 ? d.maxTrackedMs : MAX_TRACKED_MS;
 
     const say = (level, msg) => {
         const fn = log[level] || log.log;
@@ -116,7 +125,7 @@ function createDispatcher(deps) {
     let lastTickAt = null;
     let notPoolSkipped = 0;
 
-    /** key -> {rec, noCapSince|null}: policy-accepted, still-queued, unbound jobs. */
+    /** key -> {rec, noCapSince|null, mints, trackedAt}: policy-accepted, still-queued, unbound jobs. */
     const tracked = new Map();
     /** keys already audited as rejected (one row per job, not per tick). */
     const rejected = new Set();
@@ -129,7 +138,7 @@ function createDispatcher(deps) {
         const machines = store.listMachines();
         const hostLabels = Object.keys(machines).map((id) => plc.hostLabelOf(Object.assign({ id }, machines[id]))).filter(Boolean);
         const v = pol.evaluateJob(rec, { allowlist: cfg.allowlist, poolLabel: cfg.poolLabel, hostLabels });
-        if (v.accept) { if (!tracked.has(rec.key)) tracked.set(rec.key, { rec, noCapSince: null }); return; }
+        if (v.accept) { if (!tracked.has(rec.key)) tracked.set(rec.key, { rec, noCapSince: null, mints: 0, trackedAt: now() }); return; }
 
         tracked.delete(rec.key);
         if (v.reason === 'label:not-pool') { notPoolSkipped++; return; } // not addressed to the pool: not ours, not audit noise
@@ -143,8 +152,8 @@ function createDispatcher(deps) {
         if (v.alert) {
             alerts.raise('ci-fork-job-on-pool', {
                 severity: 'warning',
-                title: `Fork job targets the CI pool label in ${rec.owner}/${rec.repo}`,
-                body: `A job from a fork run carries the pool label and was rejected (${v.reason}). This is a workflow misconfiguration: pool runners must never take fork code.`,
+                title: `Fork-origin job targets the CI pool label in ${rec.owner}/${rec.repo}`,
+                body: `A job that comes from, or cannot be proven not to come from, a fork carries the pool label and was rejected (${v.reason}). This is a workflow misconfiguration: pool runners must never take fork code, and workflow_run jobs cannot target the pool.`,
                 ref: `${rec.owner}/${rec.repo}`,
             });
         }
@@ -224,6 +233,22 @@ function createDispatcher(deps) {
             }
         }
 
+        // Ghost backstop: retire tracked jobs that can no longer be real demand.
+        for (const [key, t] of tracked) {
+            const why = t.mints >= maxMintsPerJob ? `minted ${t.mints} runners, none picked up`
+                : (nowMs - t.trackedAt > maxTrackedMs ? `tracked over ${Math.round(maxTrackedMs / 3600000)} h` : null);
+            if (!why) continue;
+            tracked.delete(key);
+            writeAudit('expire', { repo: `${t.rec.owner}/${t.rec.repo}`, jobId: t.rec.jobId, runAttempt: t.rec.runAttempt, state: 'tracked', reason: `ghost-bound: ${why}` });
+            say('warn', `stopped dispatching job ${t.rec.jobId} (${why})`);
+            alerts.raise('ci-dispatcher-degraded', {
+                severity: 'warning',
+                title: `CI dispatcher stopped dispatching a job in ${t.rec.owner}/${t.rec.repo}`,
+                body: `Job "${clean(t.rec.name).slice(0, 80)}" (${t.rec.jobId}): ${why}. If the job is still queued on GitHub, check the machine agents; it will not be re-dispatched.`,
+                ref: `ghost:${key}`,
+            });
+        }
+
         const jobs = [...tracked.values()].sort((a, b) => (a.rec.firstSeenAt < b.rec.firstSeenAt ? -1 : a.rec.firstSeenAt > b.rec.firstSeenAt ? 1 : 0));
         const outstanding = assignments.outstandingBySet();
         // The oldest `outstanding` jobs of a label-set are COVERED: runners already exist for them
@@ -279,6 +304,7 @@ function createDispatcher(deps) {
                 const r = await assignments.mint({ job, machine: id, labels, os });
                 if (r && r.ok) {
                     stats.minted++; mintFailures = 0;
+                    const t = tracked.get(job.key); if (t) t.mints++;
                     reserved.set(`${id}|${os}`, (reserved.get(`${id}|${os}`) || 0) + 1);
                 } else {
                     stats.failed++; mintFailures++;
@@ -444,5 +470,5 @@ function wireCiPool(app, opts) {
 
 module.exports = {
     createDispatcher, wireCiPool, hasCredentials, dormantReason,
-    NO_CAPACITY_AFTER_MS, FALLBACK_DELAY_MS,
+    NO_CAPACITY_AFTER_MS, FALLBACK_DELAY_MS, MAX_MINTS_PER_JOB, MAX_TRACKED_MS,
 };

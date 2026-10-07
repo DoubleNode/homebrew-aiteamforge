@@ -102,7 +102,7 @@ function createWatcher(opts = {}) {
     }
 
     /** Fold one GitHub job into the lifecycle table, emitting changes in order. */
-    function observeJob(owner, repo, run, j, nowMs) {
+    function observeJob(owner, repo, run, j, nowMs, touch) {
         const runAttempt = j.run_attempt ?? run.runAttempt ?? 1;
         const key = `${owner}/${repo}#${j.id}#${runAttempt}`;
         const status = normalizeStatus(j.status);
@@ -125,7 +125,9 @@ function createWatcher(opts = {}) {
             };
             jobs.set(key, entry);
         }
-        entry.lastSeenMs = nowMs;
+        // A 304 replay of a gone run's cached body is not a sighting: it must not keep the job
+        // alive past the prune bound (a run parked in `waiting` returns the same body forever).
+        if (touch !== false) entry.lastSeenMs = nowMs;
         const rec = entry.rec;
         if (rec.status === 'completed') return; // terminal; a later re-sighting is not news
 
@@ -156,6 +158,34 @@ function createWatcher(opts = {}) {
         emit(rec, 'completed');
     }
 
+    /**
+     * An open job left GitHub's view without a completion we could observe (run deleted:
+     * 404/410; superseded by a re-run attempt; missing from its run's job list; or unseen for
+     * OPEN_JOB_MAX_AGE_MS). Emit a terminal `completed` with conclusion `vanished` so every
+     * consumer stops treating it as demand. Without this the dispatcher kept a ghost job and
+     * re-minted runners for it on every assignment expiry (XACA-1441 PR #1083 review).
+     */
+    function vanish(entry, nowMs, why) {
+        const rec = entry.rec;
+        if (rec.status === 'completed') return;
+        rec.status = 'completed';
+        rec.conclusion = 'vanished';
+        rec.completedAt = iso(nowMs);
+        entry.completedSeenMs = nowMs;
+        log('warn', `watcher: job ${rec.owner}/${rec.repo}#${rec.jobId} attempt ${rec.runAttempt} vanished (${why})`);
+        emit(rec, 'completed');
+    }
+
+    /** Open job entries of one run. */
+    function openEntriesFor(owner, repo, runId) {
+        const out = [];
+        for (const e of jobs.values()) {
+            const rec = e.rec;
+            if (rec.owner === owner && rec.repo === repo && rec.runId === runId && rec.status !== 'completed') out.push(e);
+        }
+        return out;
+    }
+
     function openJobsFor(owner, repo, runId) {
         for (const { rec } of jobs.values()) {
             if (rec.owner === owner && rec.repo === repo && rec.runId === runId && rec.status !== 'completed') return true;
@@ -163,14 +193,44 @@ function createWatcher(opts = {}) {
         return false;
     }
 
-    async function fetchJobs(r, run, nowMs) {
+    /**
+     * Fetch one run's latest-attempt jobs and fold them in.
+     * `gone` = the run has left the queued/in_progress lists, so its job list is final: an open
+     * job of ours that a fresh (200) response does not contain has vanished. For a still-listed
+     * run a missing job may just be past the first page (per_page=100), so it is left alone.
+     * A 304 replays the cached body, which already held our jobs, so it never vanishes anything.
+     */
+    async function fetchJobs(r, run, nowMs, gone) {
         const res = await github.conditionalGet({
             owner: r.owner, repo: r.repo, purpose: 'watcher',
             path: `/repos/${r.owner}/${r.repo}/actions/runs/${run.id}/jobs?filter=latest&per_page=100`,
         });
         last.calls++;
+        const fresh = !!(res && res.status === 200 && res.data && Array.isArray(res.data.jobs));
         const list = res && res.data && Array.isArray(res.data.jobs) ? res.data.jobs : [];
-        for (const j of list) observeJob(r.owner, r.repo, run, j, nowMs);
+        const seen = new Set();
+        for (const j of list) {
+            observeJob(r.owner, r.repo, run, j, nowMs, fresh || !gone);
+            seen.add(`${r.owner}/${r.repo}#${j.id}#${j.run_attempt ?? run.runAttempt ?? 1}`);
+        }
+        const attempt = Number.isInteger(run.runAttempt) ? run.runAttempt : null;
+        for (const e of openEntriesFor(r.owner, r.repo, run.id)) {
+            // filter=latest hides an older attempt's jobs: a re-run supersedes them.
+            if (attempt !== null && e.rec.runAttempt < attempt) vanish(e, nowMs, `superseded by attempt ${attempt}`);
+            else if (gone && fresh && !seen.has(e.rec.key)) vanish(e, nowMs, 'absent from its finished run');
+        }
+    }
+
+    /** A gone run's job fetch failed. 404/410 = the run no longer exists. Rate limits propagate. */
+    function onGoneFetchError(r, id, e, nowMs) {
+        const status = e && e.status;
+        if (status === 404 || status === 410) {
+            for (const entry of openEntriesFor(r.owner, r.repo, id)) vanish(entry, nowMs, `run ${status}`);
+            return;
+        }
+        if (e && e.code === 'RATE_LIMITED') throw e;
+        // Anything else: skip this run for this cycle, keep checking the others.
+        log('warn', `watcher: ${r.slug} run ${id} jobs fetch failed (${(e && (e.code || e.message)) || 'error'}); retrying next cycle`);
     }
 
     async function pollRepo(r, nowMs) {
@@ -191,6 +251,8 @@ function createWatcher(opts = {}) {
             const prev = runs.get(rk);
             const changed = !prev || prev.updatedAt !== wr.updated_at || prev.runAttempt !== wr.run_attempt;
             runs.set(rk, { updatedAt: wr.updated_at, runAttempt: wr.run_attempt, listedCycle: cycle });
+            // A still-listed run is still visible: its open jobs are not "unseen" (prune bound).
+            for (const e of openEntriesFor(r.owner, r.repo, id)) e.lastSeenMs = nowMs;
             if (!changed) continue;
             await fetchJobs(r, {
                 id, runAttempt: wr.run_attempt, event: wr.event,
@@ -209,11 +271,16 @@ function createWatcher(opts = {}) {
             const prev = runs.get(`${r.slug}#${id}`);
             const sample = [...jobs.values()].find((e) => e.rec.owner === r.owner && e.rec.repo === r.repo && e.rec.runId === id);
             if (!sample) continue;
-            await fetchJobs(r, {
-                id, runAttempt: (prev && prev.runAttempt) || sample.rec.runAttempt,
-                event: sample.rec.run.event, repoFullName: sample.rec.run.repoFullName,
-                headRepoFullName: sample.rec.run.headRepoFullName,
-            }, nowMs);
+            try {
+                await fetchJobs(r, {
+                    id, runAttempt: (prev && prev.runAttempt) || sample.rec.runAttempt,
+                    event: sample.rec.run.event, repoFullName: sample.rec.run.repoFullName,
+                    headRepoFullName: sample.rec.run.headRepoFullName,
+                }, nowMs, true);
+            } catch (e) {
+                // One deleted run must not abort the loop and hide every other run's completion.
+                onGoneFetchError(r, id, e, nowMs);
+            }
             if (openJobsFor(r.owner, r.repo, id)) active = true;
         }
         return active;
@@ -223,7 +290,10 @@ function createWatcher(opts = {}) {
         for (const [key, e] of jobs) {
             const doneAged = e.completedSeenMs !== null && nowMs - e.completedSeenMs > retentionMs;
             const openStale = e.completedSeenMs === null && nowMs - e.lastSeenMs > OPEN_JOB_MAX_AGE_MS;
-            if (doneAged || openStale) jobs.delete(key);
+            // Never drop an open job silently: consumers would keep it as demand forever.
+            // It is kept (completed/vanished) for the normal retention window, for dedupe.
+            if (openStale) { vanish(e, nowMs, 'unseen for 24 h'); continue; }
+            if (doneAged) jobs.delete(key);
         }
         if (jobs.size > maxJobs) {
             const done = [...jobs.entries()].filter(([, e]) => e.completedSeenMs !== null)

@@ -16,13 +16,27 @@
  * odd field is `malformed`, never an accept.
  *
  * Check order (first failure wins; the order is part of the contract):
- *   1. malformed        record/ctx shape, owner/repo vs run.repoFullName disagreement
+ *   1. malformed        record/ctx shape (incl. a missing run.event), owner/repo vs
+ *                       run.repoFullName disagreement
  *   2. not-allowlisted  exact owner/repo, case-insensitive (GitHub names are)
- *   3. reject:fork      run.headRepoFullName must be present AND equal run.repoFullName,
- *                       for EVERY event type (D7). alert=true only when the job also
- *                       carries the pool label (a fork job aimed at the pool = misconfig).
- *   4. label:not-pool   must include `self-hosted` and the pool label
- *   5. label:unknown    labels must be a subset of {self-hosted, OS, ARM64, pool, <host>}
+ *   3. reject:fork-unverifiable
+ *                       run.event is one whose run-level head repo CANNOT show a fork
+ *                       origin (UNVERIFIABLE_EVENTS). A `workflow_run` always runs in the
+ *                       base repo, so its own head_repository is the base repo even when it
+ *                       was chained from a fork PR (measured on live GitHub, XACA-1441
+ *                       PR #1083 review). Rejected outright: the upstream run is not linked
+ *                       from the run object, and resolving it is easy to get wrong.
+ *   4. reject:fork      run.headRepoFullName must be present AND equal run.repoFullName
+ *                       (D7). Checked for every event that reaches this step.
+ *      Both fork reasons set alert=true only when the job also carries the pool label
+ *      (a fork-origin job aimed at the pool = workflow misconfiguration).
+ *   5. label:not-pool   must include `self-hosted` and the pool label
+ *   6. label:unknown    labels must be a subset of {self-hosted, OS, ARM64, pool, <host>}
+ *
+ * DECISION (D7): `issue_comment` and other events that run the BASE repo's default-branch
+ * code report head == base and are accepted. That is the same posture as the XACA-1442
+ * job-started hook's PASS. A workflow that then checks out fork code on the pool is a
+ * workflow misconfiguration this module cannot see; the hook remains defence in depth.
  *
  * Label comparison is case-insensitive (GitHub treats labels so). The canonical key
  * helper here is deliberately local and simple; the orchestrator reconciles it with
@@ -30,8 +44,12 @@
  */
 
 const REASONS = Object.freeze([
-  'ok', 'not-allowlisted', 'reject:fork', 'label:not-pool', 'label:unknown', 'malformed'
+  'ok', 'not-allowlisted', 'reject:fork-unverifiable', 'reject:fork', 'label:not-pool',
+  'label:unknown', 'malformed'
 ]);
+
+/** Events whose run-level head repo cannot show a fork origin (step 3). Canonical form. */
+const UNVERIFIABLE_EVENTS = Object.freeze(['workflow_run']);
 
 const OS_LABELS = Object.freeze(['linux', 'macos']);
 const BASE_LABELS = Object.freeze(['self-hosted', 'arm64']);
@@ -82,7 +100,8 @@ function evaluateJob(record, ctx) {
   }
   if (!isNonEmptyString(record.owner) || !isNonEmptyString(record.repo) ||
       !Array.isArray(record.labels) || !record.labels.every(isNonEmptyString) ||
-      !record.run || typeof record.run !== 'object' || !isNonEmptyString(record.run.repoFullName)) {
+      !record.run || typeof record.run !== 'object' || !isNonEmptyString(record.run.repoFullName) ||
+      !isNonEmptyString(record.run.event)) {
     return verdict(false, 'malformed');
   }
   const fullName = record.owner + '/' + record.repo;
@@ -97,12 +116,17 @@ function evaluateJob(record, ctx) {
   const labels = record.labels.map(canonical);
   const hasPool = labels.indexOf(canonical(poolLabel)) !== -1;
 
-  // 3. fork rule (D7), every event type
+  // 3. events whose run-level head cannot reveal a fork origin: never trust head == base
+  if (UNVERIFIABLE_EVENTS.indexOf(canonical(record.run.event)) !== -1) {
+    return verdict(false, 'reject:fork-unverifiable', hasPool);
+  }
+
+  // 4. fork rule (D7)
   if (!isSameRepoRun(record.run.repoFullName, record.run.headRepoFullName)) {
     return verdict(false, 'reject:fork', hasPool);
   }
 
-  // 4. + 5. labels (D6)
+  // 5. + 6. labels (D6)
   if (labels.indexOf('self-hosted') === -1 || !hasPool) return verdict(false, 'label:not-pool');
   const allowed = allowedLabelSet(poolLabel, hostLabels);
   if (!labels.every(function (l) { return allowed.has(l); })) return verdict(false, 'label:unknown');
@@ -112,6 +136,7 @@ function evaluateJob(record, ctx) {
 
 module.exports = {
   REASONS: REASONS,
+  UNVERIFIABLE_EVENTS: UNVERIFIABLE_EVENTS,
   evaluateJob: evaluateJob,
   isAllowlisted: isAllowlisted,
   isSameRepoRun: isSameRepoRun,

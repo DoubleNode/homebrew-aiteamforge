@@ -75,8 +75,12 @@ function setup(opts = {}) {
     const logger = { log: (m) => lines.push(m), warn: (m) => lines.push(m), error: (m) => lines.push(m) };
     const alerts = createAlerts({ now: () => clock.t, logger, getEmitter: () => null });
     const timers = { set: [], cleared: [] };
-    const watcher = { cycles: 0, stopped: 0, async runCycle() { this.cycles++; if (this.onCycle) this.onCycle(); return 15000; }, stop() { this.stopped++; } };
-    const d = createDispatcher({
+    const ref = {};
+    const watcher = opts.makeWatcher
+        ? opts.makeWatcher({ now: () => clock.t, onJob: (r, c) => ref.d.onJob(r, c) })
+        : { cycles: 0, stopped: 0, async runCycle() { this.cycles++; if (this.onCycle) this.onCycle(); return 15000; }, stop() { this.stopped++; } };
+    const d = ref.d = createDispatcher({
+        maxMintsPerJob: opts.maxMintsPerJob, maxTrackedMs: opts.maxTrackedMs,
         env: opts.env || ENV_ON, store, assignments, alerts, audit, watcher, reports, logger, now: () => clock.t,
         setTimer: (fn, ms) => { const h = { fn, ms }; timers.set.push(h); return h; },
         clearTimer: (h) => timers.cleared.push(h),
@@ -181,6 +185,24 @@ describe('policy first (D7)', () => {
         assert.equal(a.length, 1);
         assert.equal(a[0].type, 'ci-fork-job-on-pool');
         assert.equal(a[0].severity, 'warning');
+        assert.equal(s.d.queue().length, 0);
+        assert.equal(mints(s).length, 0);
+    });
+
+    test('workflow_run job (run-level head == base, as GitHub emits it): reject:fork-unverifiable, alert, never minted', async () => {
+        // PR #1083 review BLOCKING 1: a workflow_run chained from a fork PR reports head_repository = base.
+        const s = setup();
+        s.report('m4mini', {}, 2);
+        const chained = rec(11, { run: { event: 'workflow_run', repoFullName: REPO, headRepoFullName: REPO } });
+        s.d.onJob(chained, 'queued');
+        await s.d.tick();
+        const rows = s.auditRows.filter((r) => r.event === 'reject');
+        assert.equal(rows.length, 1);
+        assert.equal(rows[0].reason, 'reject:fork-unverifiable');
+        assert.equal(rows[0].runEvent, 'workflow_run');
+        const a = s.alerts.list();
+        assert.equal(a.length, 1);
+        assert.equal(a[0].type, 'ci-fork-job-on-pool');
         assert.equal(s.d.queue().length, 0);
         assert.equal(mints(s).length, 0);
     });
@@ -422,5 +444,107 @@ describe('queue()/status() views', () => {
         assert.equal(q[0].repo, REPO);
         assert.ok(q[0].waitingMs >= 29000);
         assert.deepEqual(Object.keys(q[0]).sort(), ['jobClass', 'jobId', 'key', 'name', 'noCapacityMs', 'repo', 'waitingMs']);
+    });
+});
+
+// XACA-1441 PR #1083 review (tester BLOCKING): a tracked job that leaves GitHub's view without a
+// `completed` event must stop being demand. Real watcher + real dispatcher + real assignments over a
+// fake GitHub; machines re-report every step so a stale poll can never make a row pass vacuously.
+describe('ghost demand is bounded end to end (PR #1083)', () => {
+    const { createWatcher } = require('../lib/ci-dispatch-watcher');
+    const { GithubError } = require('../lib/ci-dispatch-github');
+    const { MAX_MINTS_PER_JOB } = require('../lib/ci-dispatcher');
+    const httpErr = (status) => new GithubError('HTTP', `GET jobs failed: HTTP ${status}`, { status });
+
+    function fakeWorld() {
+        const w = { queued: [], in_progress: [], jobs: {}, failJobs: {}, seen: new Map() };
+        w.github = {
+            getRateState: () => ({ mode: 'normal', resumeAt: null }),
+            async conditionalGet({ path: p }) {
+                let m;
+                if ((m = /\/actions\/runs\/(\d+)\/jobs/.exec(p)) && w.failJobs[m[1]]) throw w.failJobs[m[1]];
+                let data;
+                if ((m = /\/actions\/runs\?status=(\w+)/.exec(p))) data = { workflow_runs: w[m[1]] };
+                else if ((m = /\/actions\/runs\/(\d+)\/jobs/.exec(p))) data = { jobs: w.jobs[m[1]] || [] };
+                else throw new Error(`unexpected path ${p}`);
+                const body = JSON.stringify(data);
+                const notModified = w.seen.get(p) === body;
+                w.seen.set(p, body);
+                return { status: notModified ? 304 : 200, notModified, data, etag: 'x' };
+            },
+        };
+        return w;
+    }
+    const ghRun = (id, extra = {}) => ({ id, run_attempt: 1, event: 'push', updated_at: '2026-10-06T12:00:00Z',
+        repository: { full_name: REPO }, head_repository: { full_name: REPO }, ...extra });
+    const ghJob = (id, extra = {}) => ({ id, name: 'unit', status: 'queued', conclusion: null, runner_name: null,
+        labels: POOL.slice(), created_at: '2026-10-06T11:59:00Z', run_attempt: 1, ...extra });
+
+    function build() {
+        const world = fakeWorld();
+        world.queued = [ghRun(7)]; world.jobs[7] = [ghJob(101)];
+        const s = setup({
+            machines: ['m4mini'],
+            makeWatcher: ({ now, onJob }) => createWatcher({ github: world.github, allowlist: [REPO], now, onJob, log: () => {} }),
+        });
+        const step = async (ms = 30 * 1000) => { s.clock.t += ms; s.report('m4mini', {}, 2); await s.d.tick(); };
+        const mintsFor = (jobId) => s.auditRows.filter((r) => r.event === 'assign' && r.jobId === jobId && r.state !== 'mint-failed').length;
+        const queued = (jobId) => s.d.queue().some((q) => q.jobId === jobId);
+        return { world, s, step, mintsFor, queued };
+    }
+
+    const VANISH_ROWS = [
+        ['run deleted: jobs answer 404', (w) => { w.queued = []; w.failJobs[7] = httpErr(404); }],
+        ['run deleted: jobs answer 410', (w) => { w.queued = []; w.failJobs[7] = httpErr(410); }],
+        ['finished run no longer lists the job', (w) => { w.queued = []; w.jobs[7] = []; }],
+        ['cancel + re-run: attempt 2 supersedes the attempt-1 job', (w) => {
+            w.queued = [ghRun(7, { run_attempt: 2, updated_at: '2026-10-06T12:05:00Z' })];
+            w.jobs[7] = [ghJob(301, { run_attempt: 2 })];
+        }],
+    ];
+    for (const [name, mutate] of VANISH_ROWS) {
+        test(`${name}: leaves the queue and is never minted again`, async () => {
+            const g = build();
+            await g.step();
+            assert.equal(g.mintsFor(101), 1, 'fixture: the job was dispatched once');
+            mutate(g.world);
+            for (let i = 0; i < 40; i++) await g.step(); // 20 min: pending/delivered/started expiries all pass
+            assert.equal(g.queued(101), false, 'ghost left the queue');
+            assert.equal(g.mintsFor(101), 1, 'no further generate-jitconfig for the ghost');
+        });
+    }
+
+    test('run parked off the lists with an unchanged body (e.g. waiting): mints capped, then retired', async () => {
+        const g = build();
+        await g.step();
+        g.world.queued = []; // jobs body unchanged: every fetch is a 304 replay
+        for (let i = 0; i < 80; i++) await g.step(); // 40 min of runner expiries, no pickup
+        assert.ok(g.mintsFor(101) <= MAX_MINTS_PER_JOB, `bounded: ${g.mintsFor(101)} mints`);
+        assert.equal(g.queued(101), false);
+        assert.ok(g.s.auditRows.some((r) => r.event === 'expire' && r.jobId === 101 && /^ghost-bound: /.test(r.reason)));
+        assert.ok(g.s.alerts.list().some((a) => a.type === 'ci-dispatcher-degraded'));
+    });
+
+    test('backstop: tracked longer than maxTrackedMs is retired even with no mints', async () => {
+        const world = fakeWorld();
+        world.queued = [ghRun(7)]; world.jobs[7] = [ghJob(101)];
+        const s = setup({ machines: ['m4mini'], maxTrackedMs: 60 * 60 * 1000,
+            makeWatcher: ({ now, onJob }) => createWatcher({ github: world.github, allowlist: [REPO], now, onJob, log: () => {} }) });
+        await s.d.tick();               // tracked; no machine has reported, so nothing is minted
+        assert.equal(s.d.queue().length, 1);
+        s.clock.t += 61 * 60 * 1000;
+        await s.d.tick();
+        assert.equal(s.d.queue().length, 0);
+        assert.equal(s.ghCalls.filter((c) => c[0] === 'mint').length, 0);
+        assert.ok(s.auditRows.some((r) => r.event === 'expire' && /tracked over 1 h/.test(r.reason)));
+    });
+
+    test('control: a live, listed, still-queued job keeps being dispatched (no false retirement)', async () => {
+        const g = build();
+        await g.step();
+        for (let i = 0; i < 6; i++) await g.step(); // 3 min: one expiry, one re-mint at most
+        assert.equal(g.queued(101) || g.mintsFor(101) >= 1, true);
+        assert.ok(g.mintsFor(101) < MAX_MINTS_PER_JOB);
+        assert.equal(g.s.auditRows.filter((r) => r.event === 'expire' && /ghost-bound/.test(r.reason || '')).length, 0);
     });
 });

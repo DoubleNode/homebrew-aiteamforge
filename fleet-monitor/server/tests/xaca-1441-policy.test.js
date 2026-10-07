@@ -29,18 +29,57 @@ function rec(over) {
 }
 const ev = (r, c) => evaluateJob(r, c || CTX);
 
-test('fork rule: same-repo events pass for every event type', () => {
-  for (const event of ['push', 'pull_request', 'workflow_dispatch', 'schedule', 'workflow_run']) {
+test('fork rule: same-repo events whose head is meaningful pass', () => {
+  for (const event of ['push', 'pull_request', 'workflow_dispatch', 'schedule']) {
     const v = ev(rec({ run: { event } }));
     assert.deepStrictEqual(v, { accept: true, reason: 'ok', alert: false }, event);
   }
 });
 
-test('fork rule: fork jobs reject with alert for every event type, pool label present', () => {
-  for (const event of ['pull_request', 'pull_request_target', 'workflow_run']) {
-    const v = ev(rec({ run: { event, headRepoFullName: 'evil/dev-team' } }));
-    assert.deepStrictEqual(v, { accept: false, reason: 'reject:fork', alert: true }, event);
+// XACA-1441 PR #1083 review, BLOCKING 1. Each row is the RUN-LEVEL shape GitHub actually emits
+// for a job triggered from a fork (measured on facebook/react, 2026-10-06). A workflow_run always
+// runs in the base repo, so its own head_repository is the base repo even when a fork PR started
+// the chain. The old fixture gave workflow_run a fork head, which GitHub never emits, so the defect
+// was invisible.
+const FORK = 'Irish-Joseph/dev-team';
+const BASE = 'DoubleNode/dev-team';
+const ORIGIN_TABLE = [
+  // [description, run shape, expected reason, accept]
+  ['pull_request from a fork', { event: 'pull_request', headRepoFullName: FORK }, 'reject:fork', false],
+  ['pull_request_target from a fork', { event: 'pull_request_target', headRepoFullName: FORK }, 'reject:fork', false],
+  ['pull_request_review on a fork PR', { event: 'pull_request_review', headRepoFullName: FORK }, 'reject:fork', false],
+  ['pull_request_review_comment on a fork PR', { event: 'pull_request_review_comment', headRepoFullName: FORK }, 'reject:fork', false],
+  ['workflow_run chained from a fork pull_request (head == base)', { event: 'workflow_run', headRepoFullName: BASE }, 'reject:fork-unverifiable', false],
+  ['workflow_run chained from a workflow_run chained from a fork (same run-level shape)', { event: 'workflow_run', headRepoFullName: BASE }, 'reject:fork-unverifiable', false],
+  ['workflow_run, any casing', { event: 'Workflow_Run', headRepoFullName: BASE }, 'reject:fork-unverifiable', false],
+  ['workflow_run from a same-repo push: indistinguishable at run level, so also rejected', { event: 'workflow_run', headRepoFullName: BASE }, 'reject:fork-unverifiable', false],
+  ['workflow_run with a fork head (not emitted by GitHub; still rejected)', { event: 'workflow_run', headRepoFullName: FORK }, 'reject:fork-unverifiable', false],
+  // D7 DECISION: issue_comment runs the base repo's default-branch code (head == base). Accepted,
+  // the same posture as the XACA-1442 job-started hook's PASS. Pinned so a change is deliberate.
+  ['issue_comment on a fork PR (base default-branch code; D7 decision)', { event: 'issue_comment', headRepoFullName: BASE }, 'ok', true],
+];
+
+test('fork origin table: realistic run-level shapes, pool label present', () => {
+  for (const [desc, run, reason, accept] of ORIGIN_TABLE) {
+    const v = ev(rec({ run }));
+    assert.deepStrictEqual(v, { accept, reason, alert: !accept }, desc);
   }
+});
+
+test('fork origin table: no pool label means reject without alert', () => {
+  const labels = ['self-hosted', 'macOS', 'ARM64'];
+  for (const [desc, run, reason, accept] of ORIGIN_TABLE) {
+    if (accept) continue;
+    assert.deepStrictEqual(ev(rec({ labels, run })), { accept: false, reason, alert: false }, desc);
+  }
+});
+
+test('missing / empty / non-string run.event fails closed as malformed', () => {
+  for (const event of [undefined, null, '', '  ', 42, {}]) {
+    assert.deepStrictEqual(ev(rec({ run: { event } })), { accept: false, reason: 'malformed', alert: false }, String(event));
+  }
+  const r = rec(); delete r.run.event;
+  assert.strictEqual(ev(r).reason, 'malformed');
 });
 
 test('fork rule: null / missing / empty / non-string head repo fails closed', () => {
