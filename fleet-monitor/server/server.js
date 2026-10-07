@@ -41,6 +41,8 @@ const { registerMsgRelayRoutes } = require('./lib/msg-relay-routes');
 const { registerTokenReportsRoutes } = require('./lib/token-reports-routes');
 // XACA-1387-003: CI runner telemetry (POST /api/ci-runners-push, GET /api/ci-runners).
 const { registerCiRunnersRoutes } = require('./lib/ci-runners-routes');
+// XACA-1441-007: Fleet CI Pool dispatcher (dormant unless FLEET_CI_DISPATCHER=1 + GitHub App secrets).
+const { wireCiPool } = require('./lib/ci-dispatcher');
 
 // XACA-0395-005: shared API-key auth gate (kanban/plans/XACA-0395/
 // XACA-0395_auth_contract.md). requireApiKey is mounted as the second
@@ -3225,6 +3227,12 @@ registerTokenReportsRoutes(app, {
 // periodic save + shutdown hooks below (same pattern as pushed boards).
 const ciRunnersStore = registerCiRunnersRoutes(app);
 
+// XACA-1441-007: Fleet CI Pool (GET /api/ci-pool, agent poll, operator writes). Routes are always
+// registered and answer `enabled:false` while dormant; the queue loop is started from the
+// app.listen callback and only runs when FLEET_CI_DISPATCHER=1 and App credentials exist.
+// ciPool.save() is flushed by the periodic save + shutdown hooks below.
+const ciPool = wireCiPool(app, { dataDir: path.join(__dirname, 'data') });
+
 // ============================================================================
 // ADMIN-TIER OPERATOR SESSION (XACA-0398-003)
 // ============================================================================
@@ -3957,6 +3965,7 @@ setInterval(() => {
 // SIGTERM/SIGINT handlers below make the same single call.
 setInterval(() => {
     ciRunnersStore.save();
+    ciPool.save();
 }, SAVE_INTERVAL_MS);
 
 // XACA-1031-003: resolve the latest published tap VERSION now (fire-and-
@@ -4046,6 +4055,7 @@ if (String(process.env.FLEET_REQUIRE_AUTH || '') === '1' && _authPosture.identic
 // ============================================================================
 
 app.listen(PORT, () => {
+    ciPool.start(); // no-op (logs why) unless FLEET_CI_DISPATCHER=1 and App credentials are set
     console.log('');
     console.log('╔══════════════════════════════════════════════════════════╗');
     console.log('║     STARFLEET OPERATIONS MONITOR - ONLINE                ║');
@@ -4083,6 +4093,8 @@ process.on('SIGTERM', () => {
     saveMachineData();
     savePushedKnowledge();
     ciRunnersStore.save();
+    ciPool.stop();
+    ciPool.save();
     process.exit(0);
 });
 
@@ -4091,5 +4103,7 @@ process.on('SIGINT', () => {
     saveMachineData();
     savePushedKnowledge();
     ciRunnersStore.save();
+    ciPool.stop();
+    ciPool.save();
     process.exit(0);
 });

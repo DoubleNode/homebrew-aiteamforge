@@ -22,7 +22,7 @@
  *   3. Cookie login + CSRF — login/logout/session routes, each CSRF layer
  *      rejecting on its own, header auth unaffected, cookie refused on the
  *      fleet tier, rate limit, no echo of the token.
- *   4. Route inventory (static, source-derived) — the 19 admin routes are on
+ *   4. Route inventory (static, source-derived) — the 21 admin routes are on
  *      requireAdminKey, the 9 fleet routes stay on the fleet gate, and every
  *      mutating route anywhere is gated or deliberately allowlisted.
  *   5. vault + engines (real route modules) — ALL 9 of their admin routes
@@ -578,7 +578,7 @@ describe('cookie on an admin route — each CSRF layer rejects on its own', () =
 // 4. Route inventory (static, source-derived)
 // ===========================================================================
 
-// The 19 admin-tier routes, from the design's §1 tier classification. This is
+// The 21 admin-tier routes (19 from the design's §1 tier classification + 2 XACA-1441). This is
 // the EXPECTED list — deliberately not derived from source, so a route moved
 // back to requireApiKey disappears from the source-derived admin set and the
 // equality assertion below fails.
@@ -602,6 +602,9 @@ const ADMIN_ROUTES = [
     { method: 'POST',   path: '/api/vault/secrets',                              file: 'lib/vault-routes.js' },
     { method: 'PUT',    path: '/api/vault/secrets/:engineSlug/:accountSlug',     file: 'lib/vault-routes.js' },
     { method: 'DELETE', path: '/api/vault/secrets/:engineSlug/:accountSlug',     file: 'lib/vault-routes.js' },
+    // XACA-1441: CI pool operator routes (machine enable/pause, pool config).
+    { method: 'PUT',    path: '/api/ci-pool/machines/:machine',                  file: 'lib/ci-pool-routes.js' },
+    { method: 'PUT',    path: '/api/ci-pool/config',                             file: 'lib/ci-pool-routes.js' },
 ];
 
 // The 11 fleet-tier routes (XACA-1328 added the vault ciphertext GET). 8 use requireApiKey middleware; the 3 msg-relay
@@ -617,6 +620,11 @@ const FLEET_GUARD_ROUTES = ['POST /api/msg', 'GET /api/msg', 'POST /api/msg/ack'
 // Mutating routes that are deliberately ungated: the login/logout routes are
 // unauthenticated by nature (CSRF rules + rate limit instead, contract §3.6).
 const UNGATED_MUTATING_ALLOWLIST = ['POST /api/auth/login', 'POST /api/auth/logout'];
+
+// XACA-1441: CI pool agent routes are gated by a per-host key bound to the machine id
+// (`ciHostKey`, keys issued by XACA-1422-012) — deliberately NOT the fleet or admin tier,
+// so a fleet-token holder cannot pull another host's JIT config. Only in ci-pool-routes.js.
+const CI_HOST_KEY_ROUTES = ['POST /api/ci-pool/agent/poll', 'POST /api/ci-pool/assignments/:id/state'];
 
 function sourceFiles() {
     const libDir = path.join(SERVER_DIR, 'lib');
@@ -641,12 +649,12 @@ describe('route inventory — every admin route is on the admin gate (static)', 
     const regs = deriveRegistrations();
     const key = (r) => `${r.method} ${r.path}`;
 
-    test('exactly 19 expected admin routes, no duplicates', () => {
-        assert.equal(ADMIN_ROUTES.length, 19);
-        assert.equal(new Set(ADMIN_ROUTES.map(key)).size, 19);
+    test('exactly 21 expected admin routes, no duplicates', () => {
+        assert.equal(ADMIN_ROUTES.length, 21);
+        assert.equal(new Set(ADMIN_ROUTES.map(key)).size, 21);
     });
 
-    test('the source-derived requireAdminKey set equals the 19 expected admin routes exactly', () => {
+    test('the source-derived requireAdminKey set equals the 21 expected admin routes exactly', () => {
         const derived = regs.filter((r) => r.gate === 'requireAdminKey').map((r) => `${r.file} ${key(r)}`).sort();
         const expected = ADMIN_ROUTES.map((r) => `${r.file} ${key(r)}`).sort();
         assert.deepEqual(derived, expected);
@@ -673,17 +681,25 @@ describe('route inventory — every admin route is on the admin gate (static)', 
         assert.ok(!/checkAdminKey/.test(src));
     });
 
-    test('tier totals: 19 admin + 11 fleet = 30 guarded', () => {
+    test('tier totals: 21 admin + 11 fleet + 2 ci-host = 34 guarded', () => {
         const admin = regs.filter((r) => r.gate === 'requireAdminKey').length;
         const fleet = regs.filter((r) => r.gate === 'requireApiKey').length + FLEET_GUARD_ROUTES.length;
-        assert.equal(admin, 19);
+        assert.equal(admin, 21);
         assert.equal(fleet, 11);
+        assert.equal(regs.filter((r) => r.gate === 'ciHostKey').length, 2);
+    });
+
+    test('the ciHostKey (per-host key) set is exactly the 2 CI pool agent routes, only in ci-pool-routes.js', () => {
+        const derived = regs.filter((r) => r.gate === 'ciHostKey');
+        assert.deepEqual(derived.map(key).sort(), [...CI_HOST_KEY_ROUTES].sort());
+        assert.ok(derived.every((r) => r.file === 'lib/ci-pool-routes.js'));
     });
 
     test('every mutating /api route in the server is gated by a tier or explicitly allowlisted', () => {
         const ungated = regs
             .filter((r) => r.method !== 'GET')
             .filter((r) => r.gate !== 'requireAdminKey' && r.gate !== 'requireApiKey')
+            .filter((r) => !(r.gate === 'ciHostKey' && r.file === 'lib/ci-pool-routes.js' && CI_HOST_KEY_ROUTES.includes(key(r))))
             .filter((r) => r.file !== 'lib/msg-relay-routes.js') // guard form, asserted above
             .map(key)
             .filter((k) => !UNGATED_MUTATING_ALLOWLIST.includes(k));
@@ -707,7 +723,9 @@ function concretePath(p) {
 
 describe('vault + engines route modules — all 9 admin routes refuse the fleet token', () => {
     let app;
-    const libRoutes = ADMIN_ROUTES.filter((r) => r.file !== 'server.js');
+    // vault + engines only: the CI pool admin routes' fleet-token 401s are exercised against the
+    // real module in tests/xaca-1441-ci-pool-routes.test.js ("operator writes (admin tier)").
+    const libRoutes = ADMIN_ROUTES.filter((r) => r.file === 'lib/vault-routes.js' || r.file === 'lib/engines-routes.js');
 
     before(() => {
         app = express();
