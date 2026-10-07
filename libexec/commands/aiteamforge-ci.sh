@@ -166,6 +166,19 @@ _state_get() { # key -> value of the first matching line, else empty
 _gib() { awk -v b="$1" 'BEGIN { printf "%.2f", b / 1073741824 }'; }
 _sha256() { shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'; }
 
+# XACA-1443-016: the client payload the root half installs must be in the bundle BEFORE the sudo line is printed:
+# the line starts with create-ci-runner-user.sh, so a payload that is missing only at install time would leave a
+# created user and a half-provisioned host. provision-host.sh re-checks (payload_preflight) before any change.
+# usage: _ci_payload_check <with_macos 0|1>; rc 0 ok | RC_ENV (names what is missing)
+_ci_payload_check() {
+  local f missing="" need="ci-runner-reporter.sh ci-pool-agent.py ci-runner-jit-guest.sh ci-runner-job-started.sh"
+  [ "${1:-1}" = 1 ] && need="$need ci-runner-jit-macos.sh"
+  for f in $need; do [ -f "$CI_BUNDLE_DIR/client/$f" ] || missing="${missing} client/${f}"; done
+  [ -z "$missing" ] && return 0
+  _err "CI bundle incomplete ($CI_BUNDLE_DIR is missing:${missing}). Run: aiteamforge upgrade"
+  return $RC_ENV
+}
+
 # Load the provision-version / skew library (XACA-1443-013) from the bundle. rc 0 | RC_ENV.
 _load_pv_lib() {
   local l="$CI_BUNDLE_DIR/lib/ci-provision-version.sh"
@@ -356,6 +369,8 @@ cmd_enable() {
   fi
   echo "  proposed guest         : ${CI_HR_VM_GIB} GiB RAM / ${CI_HR_VM_CPUS} vCPU / ${CI_HR_LINUX_SLOTS} Linux job slot(s)   (judgement, calibrated on one 16 GiB host)"
 
+  _ci_payload_check "$with_macos" || return $?
+
   # ---- 7. the ONE sudo command
   local create_sh="$CI_BUNDLE_DIR/create-ci-runner-user.sh" prov_sh="$CI_BUNDLE_DIR/provision-host.sh"
   local pargs=(--host "$host" --no-register --vm-cpus "$CI_HR_VM_CPUS" --vm-memory "$CI_HR_VM_GIB"
@@ -467,7 +482,7 @@ cmd_enable_confirm() {
 
 disable_usage() {
   cat <<'EOF'
-Usage: aiteamforge ci disable [--remove-user] [--kill-running] [--dry-run]
+Usage: aiteamforge ci disable [--remove-user] [--kill-running] [--vm-gone] [--dry-run]
        aiteamforge ci disable --confirm [--remove-user]
        aiteamforge ci disable --force [--host <name>] [...]      (recovery, see below)
        aiteamforge ci disable --help
@@ -482,7 +497,11 @@ Then `ci disable --confirm` verifies nothing is left and removes the state file:
   --remove-user     ALSO delete the ci-runner user, its group and /Users/ci-runner. Default: KEEP
                     the user (it is cheap and re-used by the next `ci enable`).
   --kill-running    pass through to the teardown: proceed although a pool job is running
-                    (without it the teardown refuses, rc 3, and changes nothing)
+                    (without it the teardown refuses, rc 3; if the job appears while the agent is being stopped the
+                    agent stays stopped, nothing else is touched, and the way to resume is printed)
+  --vm-gone         pass through to the teardown: limactl was removed from this machine but the ci-runner user
+                    remains, so the Lima VM cannot be checked; you state it is gone. (An absent
+                    ~ci-runner/.lima/<vm> directory is accepted without it; an unreadable one never is.)
   --dry-run         do the checks and print the plan and the command; write NOTHING
   --confirm         AFTER you ran the sudo command: verify the teardown and go dormant.
                     Refuses (rc 19, state kept) while any artefact remains.
@@ -619,11 +638,12 @@ cmd_disable() {
   # ---- 1. GUARD FIRST, same as enable (the printed sudo line would act on THIS machine)
   _run_guard || return $?
 
-  local rm_user=0 kill_run=0 dry=0 confirm=0 force=0 host_arg=""
+  local rm_user=0 kill_run=0 vm_gone=0 dry=0 confirm=0 force=0 host_arg=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --remove-user)  rm_user=1; shift ;;
       --kill-running) kill_run=1; shift ;;
+      --vm-gone)      vm_gone=1; shift ;;
       --dry-run)      dry=1; shift ;;
       --confirm)      confirm=1; shift ;;
       --force)        force=1; shift ;;
@@ -636,6 +656,7 @@ cmd_disable() {
     _valid_host "$host_arg" || { _err "--host must match [a-z0-9]([a-z0-9-]*[a-z0-9])?, got '${host_arg}'"; return $RC_USAGE; }
   fi
   if [ "$confirm" = 1 ] && [ "$kill_run" = 1 ]; then _err "--kill-running belongs to the teardown, not to --confirm"; return $RC_USAGE; fi
+  if [ "$confirm" = 1 ] && [ "$vm_gone" = 1 ]; then _err "--vm-gone belongs to the teardown, not to --confirm"; return $RC_USAGE; fi
 
   # ---- 2. which host / which state
   local healthy=0 st="" host="" derived n
@@ -706,6 +727,7 @@ cmd_disable() {
   local targs=(--host "$host")
   [ "$rm_user" = 0 ] || targs=("${targs[@]}" --remove-user)
   [ "$kill_run" = 0 ] || targs=("${targs[@]}" --kill-running)
+  [ "$vm_gone" = 0 ] || targs=("${targs[@]}" --vm-gone)
   local sudo_line="sudo /bin/bash $(printf '%q' "$td_sh")"
   local dry_line="bash $(printf '%q' "$td_sh")"
   for p in "${targs[@]}"; do
@@ -906,6 +928,7 @@ cmd_refresh() {
     _err "provisioning scripts missing from $CI_BUNDLE_DIR. Run: aiteamforge upgrade"
     return $RC_ENV
   fi
+  _ci_payload_check "$wmac" || return $?
   local pargs=(--host "$host" --no-register --vm-cpus "$vcpu" --vm-memory "$vmem" --linux-count "$slots")
   [ "$wmac" = 1 ] || pargs=("${pargs[@]}" --no-macos)
   pargs=("${pargs[@]}" --with-agent)

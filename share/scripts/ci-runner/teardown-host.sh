@@ -3,13 +3,15 @@
 # (XACA-1443-003). The root half of `aiteamforge ci disable`.
 #
 # Run ON the host, under sudo, by an operator who read it (the CLI prints the one line):
-#   sudo bash teardown-host.sh --host <name> [--remove-user] [--kill-running] [--dry-run]
+#   sudo bash teardown-host.sh --host <name> [--remove-user] [--kill-running] [--vm-gone] [--dry-run]
 #
 # It is the mirror of provision-host.sh, in the REVERSE order, and idempotent: every step
 # checks what is on disk first, so a second run (or a run on a half-provisioned host) is safe.
 #
 #   1. refuse while a pool job is starting/busy/cleaning (slots.json), unless --kill-running
-#   2. bootout the daemons: agent (stops new work), reporter, macos, lima-vm
+#   2. bootout the daemons: agent FIRST (stops new work), then slots.json is read AGAIN (XACA-1443-017: a job
+#      can start between step 1 and the bootout); busy now and no --kill-running = refuse rc 3 BEFORE the VM is
+#      touched, with the agent stopped and the way to resume printed. Then reporter, macos, lima-vm
 #   3. (--kill-running) kill the macOS Runner.Listener and clean the macOS slot directories
 #   4. delete the Lima VM `ci-linux-<host>` as ci-runner (`limactl delete -f`); it carries the
 #      Linux runners, so no registration survives inside it. FAILURE HERE STOPS THE SCRIPT
@@ -48,7 +50,7 @@
 
 set -u
 
-HOST=""; REMOVE_USER=0; KILL_RUNNING=0; DRY=0
+HOST=""; REMOVE_USER=0; KILL_RUNNING=0; DRY=0; VM_GONE=0
 CI_USER="${CI_RUNNER_USER:-ci-runner}"
 LD_DIR="${CI_LAUNCHDAEMONS_DIR:-/Library/LaunchDaemons}"
 LIBEXEC_DIR="${CI_LIBEXEC_DIR:-/usr/local/libexec}"
@@ -63,12 +65,16 @@ FAILS=0
 
 usage() {
   cat <<'EOF'
-Usage: sudo bash teardown-host.sh --host <name> [--remove-user] [--kill-running] [--dry-run]
+Usage: sudo bash teardown-host.sh --host <name> [--remove-user] [--kill-running] [--vm-gone] [--dry-run]
 
   --host <name>     the host name used at provisioning (runner/VM/daemon suffix)
   --remove-user     ALSO delete the ci-runner user, its group and /Users/ci-runner (default: keep)
   --kill-running    proceed although a pool job is starting/busy/cleaning (kills the macOS
                     listener; deleting the VM ends the Linux ones)
+  --vm-gone         ONLY for a host whose limactl was removed while the ci-runner user still exists:
+                    you state the Lima VM is gone and accept that it is not verified or deleted.
+                    (Without the flag an absent ~ci-runner/.lima/<vm> directory is accepted on its own;
+                    an unreadable directory never is.)
   --dry-run         print the plan and what exists now; change nothing (no root needed)
 EOF
 }
@@ -85,6 +91,7 @@ while [ $# -gt 0 ]; do
     --host) [ $# -ge 2 ] || usage_err "--host needs a value"; HOST="$2"; shift 2 ;;
     --remove-user) REMOVE_USER=1; shift ;;
     --kill-running) KILL_RUNNING=1; shift ;;
+    --vm-gone) VM_GONE=1; shift ;;
     --dry-run) DRY=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) usage_err "unknown option: $1" ;;
@@ -136,6 +143,15 @@ run() {
 }
 as_ci() { sudo -n -u "$CI_USER" -H env PATH="$CI_PATH" "$@"; }
 user_exists() { id -u "$CI_USER" >/dev/null 2>&1; }
+# absent | present | unknown for ~ci-runner/.lima/<vm>. "absent" needs a readable, searchable home (and .lima), so a
+# permission failure is never mistaken for "not there".
+vm_dir_state() {
+  local lima="$CI_HOME/.lima"
+  [ -d "$CI_HOME" ] && [ -r "$CI_HOME" ] && [ -x "$CI_HOME" ] || { echo unknown; return; }
+  if [ ! -e "$lima" ] && [ ! -L "$lima" ]; then echo absent; return; fi
+  [ -d "$lima" ] && [ -r "$lima" ] && [ -x "$lima" ] || { echo unknown; return; }
+  if [ -e "$lima/$VM_NAME" ] || [ -L "$lima/$VM_NAME" ]; then echo present; else echo absent; fi
+}
 
 OTHERS="$(count_other_plists)"
 
@@ -168,8 +184,8 @@ fi
 log "plan: host=${HOST} vm=${VM_NAME} user=${CI_USER} remove-user=${REMOVE_USER} kill-running=${KILL_RUNNING} dry-run=${DRY} other-hosts-plists=${OTHERS}"
 
 # ---- 2. daemons -----------------------------------------------------------------------------------
-for k in $LABELS_ORDER; do
-  l="$(label_of "$k")"
+boot_one() { # key
+  local l; l="$(label_of "$1")"
   if [ "$DRY" = 1 ]; then
     log "[dry-run] would: bootout system/${l} (loaded now: $(launchctl print "system/$l" >/dev/null 2>&1 && echo yes || echo no))"
   elif launchctl print "system/$l" >/dev/null 2>&1; then
@@ -177,6 +193,24 @@ for k in $LABELS_ORDER; do
   else
     log "daemon ${l}: not loaded"
   fi
+}
+# The agent goes first: it is what dispatches new work. Once it is down nothing can START a job, so the second
+# slots.json read below is final (XACA-1443-017; the check in step 1 only narrows the window, it cannot close it).
+boot_one agent
+if [ "$DRY" = 0 ] && [ -e "$SLOTS" ] && [ "$KILL_RUNNING" = 0 ]; then
+  busy2=0
+  if [ ! -r "$SLOTS" ]; then busy2=1
+  elif grep -Eq '"state": ?"(starting|busy|cleaning)"' "$SLOTS" 2>/dev/null; then busy2=1; fi
+  if [ "$busy2" = 1 ]; then
+    echo "teardown-host.sh: a pool job started (or $SLOTS became unreadable) while the agent was being stopped." >&2
+    echo "The agent daemon is now STOPPED (no new job will start). The VM, the other daemons, the keys and the plists were NOT touched." >&2
+    echo "  Resume as before:  sudo launchctl bootstrap system $(plist_of agent)" >&2
+    echo "  Or finish the job first and re-run this script, or re-run it with --kill-running to end the job." >&2
+    result BUSY_AGENT_STOPPED 3; exit 3
+  fi
+fi
+for k in $LABELS_ORDER; do
+  [ "$k" = agent ] || boot_one "$k"
 done
 
 # ---- 3. running macOS work ---------------------------------------------------------------------------
@@ -205,8 +239,20 @@ if user_exists && [ -x "$LIMACTL" ]; then
     log "VM ${VM_NAME}: absent"
   fi
 elif user_exists; then
-  warn "limactl not found at ${LIMACTL}: cannot verify or delete VM ${VM_NAME}; plists will be KEPT"
-  FAILS=$((FAILS + 1)); VM_FAILED=1
+  # limactl is gone but the user is still here: the VM can never be listed or deleted through limactl. Root can look at
+  # the VM directory itself; an ABSENT one is positive evidence there is nothing to delete. Anything unreadable stays
+  # unknown and fails closed (XACA-1443-018).
+  _vs="$(vm_dir_state)"
+  if [ "$_vs" = absent ]; then
+    log "limactl not found at ${LIMACTL}, and ${CI_HOME}/.lima/${VM_NAME} does not exist: VM ${VM_NAME} is absent"
+  elif [ "$VM_GONE" = 1 ]; then
+    log "limactl not found at ${LIMACTL}: --vm-gone given, so VM ${VM_NAME} is taken as already gone (not verified)"
+    [ "$_vs" != present ] || warn "${CI_HOME}/.lima/${VM_NAME} is still on disk: nothing here deletes it; remove it yourself if the VM is really gone"
+  else
+    warn "limactl not found at ${LIMACTL}: cannot verify or delete VM ${VM_NAME} (its directory is $([ "$_vs" = present ] && echo 'still on disk' || echo 'unreadable')); plists will be KEPT"
+    warn "if the VM is already gone, re-run with --vm-gone (aiteamforge ci disable --vm-gone)"
+    FAILS=$((FAILS + 1)); VM_FAILED=1
+  fi
 else
   log "user ${CI_USER}: absent, so no VM can exist"
 fi

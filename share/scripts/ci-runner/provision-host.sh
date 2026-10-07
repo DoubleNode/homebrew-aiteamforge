@@ -171,13 +171,20 @@ REPORTER_MACHINE=""      # derived: <host>
 REPORTER_INTERVAL=60
 REPORTER_CFG_DIR="${CI_HOME}/.aiteamforge"
 REPORTER_CFG="${REPORTER_CFG_DIR}/fleet-config.json"
-# XACA-1443-001: client payload resolves from the dev-team tree (../../fleet-monitor/client)
-# OR, in the shipped tap layout ($AITEAMFORGE_DIR/scripts/ci-runner/), from the sibling
-# client/ dir that the tap bundles beside this script. First hit wins; dev tree is first so
-# canonical-tree behaviour (and its tests) is unchanged.
+# XACA-1443-016: the client payload is chosen by PROVENANCE, never by "does some directory exist".
+#   1. a sibling client/ dir beside this script: only the SHIPPED bundle ($AITEAMFORGE_DIR/scripts/ci-runner/,
+#      placed by the tap installer) has one, and it wins unconditionally.
+#   2. else the dev-team tree's fleet-monitor/client, but ONLY when this script sits in a checkout carrying the
+#      .aiteamforge-source-tree sentinel at its root. A customer install also has
+#      $AITEAMFORGE_DIR/fleet-monitor/client (holding only fleet-reporter.sh, or stale same-named files), which
+#      the old "-d ../../fleet-monitor/client" test mistook for the payload and then installed as root.
+#   3. else the sibling path anyway: it does not exist, so the preflight below refuses BEFORE any side effect.
 _PH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
-if [ -d "${_PH_DIR}/../../fleet-monitor/client" ]; then
-  _PH_CLIENT="${_PH_DIR}/../../fleet-monitor/client"
+_PH_ROOT="$(cd "${_PH_DIR}/../.." 2>/dev/null && pwd)"
+if [ -d "${_PH_DIR}/client" ]; then
+  _PH_CLIENT="${_PH_DIR}/client"
+elif [ -f "${_PH_ROOT}/.aiteamforge-source-tree" ] && [ -d "${_PH_ROOT}/fleet-monitor/client" ]; then
+  _PH_CLIENT="${_PH_ROOT}/fleet-monitor/client"
 else
   _PH_CLIENT="${_PH_DIR}/client"
 fi
@@ -1300,6 +1307,18 @@ do_status() {
   return "$rc"
 }
 
+# XACA-1443-016: every payload file this run will install must exist BEFORE anything changes (the user, the VM,
+# the daemons). A missing file used to surface only at install time, after create-ci-runner-user.sh had run.
+payload_preflight() {
+  local f missing="" need="$REPORTER_SRC"
+  if [ "$WITH_AGENT" = "1" ]; then
+    need="$need $AGENT_SRC $GUEST_JIT_SRC $JOB_STARTED_SRC"
+    [ "$NO_MACOS" = "1" ] || need="$need $MAC_JIT_SRC"
+  fi
+  for f in $need; do [ -f "$f" ] || missing="${missing} ${f}"; done
+  [ -z "$missing" ] || die "client payload missing:${missing} (payload dir: ${_PH_CLIENT}). The shipped bundle carries a client/ dir beside this script; run: aiteamforge upgrade. Nothing was changed."
+}
+
 do_dry_run() {
   local st i linux_names="" linux_idx=""
   i=1
@@ -1433,6 +1452,7 @@ case "$MODE" in
   dry-run) do_dry_run; exit 0 ;;
 esac
 
+[ "$MODE" = "baseline-only" ] || payload_preflight
 [ "$(uname -s)" = "Darwin" ] || die "macOS only"
 [ "$(uname -m)" = "arm64" ] || die "Apple Silicon only"
 [ -x "$LIMACTL" ] || die "limactl not found at ${LIMACTL}"
