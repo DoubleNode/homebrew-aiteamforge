@@ -78,6 +78,11 @@ def load_config(path=None):
         "statePath": raw.get("statePath") or DEFAULT_STATE_PATH,
         # see build_poll_body: only an explicit JSON true enables it
         "sendPauseMarker": raw.get("sendPauseMarker") is True,
+        # XACA-1445-012 persistent-runner switch (all optional)
+        "persistentStatePath": raw.get("persistentStatePath") or DEFAULT_PERSIST_PATH,
+        "launchctl": raw.get("launchctl") or DEFAULT_LAUNCHCTL,
+        "plistDir": raw.get("plistDir") or DEFAULT_PLIST_DIR,
+        "macLabel": raw.get("macLabel") or "",
     }
 
 
@@ -1505,7 +1510,375 @@ def run_loop(config, supervisor, stop=None, sleep=None, rand=random.random,
     return 0
 
 
+# ---------------------------------------------------------------------------
+# XACA-1445-012: reversible disable/enable of the host's PERSISTENT runners
+# ---------------------------------------------------------------------------
+# CLI (run as root on the host, same config as the daemon):
+#   ci-pool-agent.py persistent-status [--json]   what exists and its state
+#   ci-pool-agent.py persistent-disable [--force] stop + disable, KEEP registrations
+#   ci-pool-agent.py persistent-enable            restore exactly what disable stopped
+# Exit: 0 ok, 2 usage/config, 3 a unit/daemon step failed (names it), 4 refused: a
+# persistent runner is mid-job (or cannot be proven idle) and --force was not given.
+#
+# What it touches: the Linux guest's actions.runner.* systemd units (VM must be
+# Running) and, when its plist exists, the macOS runner LaunchDaemon. It NEVER runs
+# config.sh remove: registrations stay, so rollback R1 needs no registration token.
+# Hard removal is a separate, later step (runbook section 5).
+#
+# State marker (persistent.json, 0600, atomic, written after EVERY step so a partial
+# failure is still restorable): the units disable stopped and their prior state. The
+# marker's presence tells the JIT loop (see main()) that persistent units are
+# intentionally off. enable restores exactly the recorded units, drops each from the
+# marker only once it is verified back, and deletes the marker when none remain.
+# Both directions are idempotent.
+DEFAULT_PERSIST_PATH = "/usr/local/var/ci-pool-agent/persistent.json"
+DEFAULT_LAUNCHCTL = "/bin/launchctl"
+DEFAULT_PLIST_DIR = "/Library/LaunchDaemons"
+GUEST_UNIT_GLOB = "actions.runner.*"
+UNIT_RE = re.compile(r"^actions\.runner\.[A-Za-z0-9_.@:-]{1,200}\.service$")
+LABEL_RE = re.compile(r"^[A-Za-z0-9_.-]{1,200}$")
+PERSIST_COMMANDS = ("persistent-status", "persistent-disable", "persistent-enable")
+EXIT_FAILED = 3
+EXIT_BUSY = 4
+# Guest probe (argv $1 = unit): exit 0 = a Runner.Worker lives in the unit's cgroup
+# (a job is running), 1 = idle, anything else = could not tell (treated as busy).
+_GUEST_BUSY_SH = ('cg=$(systemctl show -p ControlGroup --value "$1" 2>/dev/null) || exit 2; '
+                  '[ -n "$cg" ] || exit 1; f="/sys/fs/cgroup${cg}/cgroup.procs"; '
+                  '[ -r "$f" ] || exit 1; '
+                  'for p in $(cat "$f"); do tr "\\0" " " </proc/$p/cmdline 2>/dev/null; echo; done '
+                  '| grep -q "Runner.Worker" && exit 0; exit 1')
+MAC_WORKER_PATTERN = "actions-runner-macos/bin/Runner.Worker"
+
+
+def run_rc(argv, timeout=60):
+    """Run argv (list, never a shell). Return (rc, stdout); rc is None when it
+    could not be run or timed out. stderr is discarded."""
+    if not isinstance(argv, (list, tuple)):
+        raise TypeError("argv must be a list")
+    try:
+        p = subprocess.run(list(argv), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                           stderr=subprocess.DEVNULL, timeout=timeout,
+                           universal_newlines=True)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None, ""
+    return p.returncode, p.stdout
+
+
+def mac_label(config):
+    """The macOS runner LaunchDaemon label, as provision-host.sh derives it
+    (m1mini keeps the legacy unsuffixed name)."""
+    if config.get("macLabel"):
+        return config["macLabel"]
+    host = config.get("machine") or ""
+    return "com.doublenode.ci-runner.macos" if host == "m1mini" \
+        else "com.doublenode.ci-runner.%s.macos" % host
+
+
+class PersistentRunners(object):
+    def __init__(self, config, out=None, clock=time.time):
+        self.cfg = config
+        self.limactl = config.get("limactl") or DEFAULT_LIMACTL
+        self.vm = config.get("vmName") or ""
+        self.launchctl = config.get("launchctl") or DEFAULT_LAUNCHCTL
+        self.plist_dir = config.get("plistDir") or DEFAULT_PLIST_DIR
+        self.path = config.get("persistentStatePath") or DEFAULT_PERSIST_PATH
+        self.label = mac_label(config)
+        self.plist = os.path.join(self.plist_dir, self.label + ".plist")
+        self.out = out if out is not None else sys.stdout
+        self.clock = clock
+
+    def say(self, text):
+        self.out.write(text + "\n")
+
+    # -- marker --------------------------------------------------------------------
+    def load_marker(self):
+        """{'units': [...]} ; {} when absent. Raises ValueError when unreadable (we
+        refuse to guess what was stopped)."""
+        try:
+            with open(self.path) as f:
+                raw = json.load(f)
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError) as e:
+            raise ValueError("cannot read marker %s: %s" % (self.path, e))
+        if not isinstance(raw, dict) or not isinstance(raw.get("units"), list):
+            raise ValueError("marker %s is malformed" % self.path)
+        for u in raw["units"]:
+            if not (isinstance(u, dict) and u.get("kind") in ("linux-unit", "macos-daemon")
+                    and isinstance(u.get("name"), str)):
+                raise ValueError("marker %s has a malformed unit entry" % self.path)
+        return raw
+
+    def save_marker(self, marker):
+        marker["version"] = 1
+        tmp = "%s.tmp.%d" % (self.path, os.getpid())
+        os.makedirs(os.path.dirname(self.path), mode=0o700, exist_ok=True)
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump(marker, f, sort_keys=True)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, self.path)
+
+    def drop_marker(self):
+        try:
+            os.unlink(self.path)
+        except FileNotFoundError:
+            pass
+
+    # -- guest / host primitives ---------------------------------------------------
+    def _guest(self, *args):
+        return as_ci([self.limactl, "shell", "--workdir", "/tmp", self.vm, "--"] + list(args))
+
+    def vm_running(self):
+        return bool(self.vm) and collect_vm_state(self.limactl, self.vm) == "running"
+
+    def linux_units(self):
+        """[(unit, enabled, active)] for every guest actions.runner.* service, or
+        None when the guest cannot be read."""
+        rc, out = run_rc(self._guest("systemctl", "list-unit-files", "--no-legend",
+                                     "--plain", "--type=service", GUEST_UNIT_GLOB))
+        if rc != 0:
+            return None
+        units = []
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) < 2 or not UNIT_RE.match(parts[0]):
+                continue
+            arc, _ = run_rc(self._guest("systemctl", "is-active", "--quiet", parts[0]))
+            if arc is None:
+                return None
+            units.append((parts[0], parts[1] == "enabled", arc == 0))
+        return units
+
+    def linux_busy(self, unit):
+        """True busy / False idle / None unknown."""
+        rc, _ = run_rc(self._guest("sh", "-c", _GUEST_BUSY_SH, "sh", unit))
+        return True if rc == 0 else False if rc == 1 else None
+
+    def mac_present(self):
+        return os.path.isfile(self.plist)
+
+    def mac_loaded(self):
+        rc, _ = run_rc([self.launchctl, "print", "system/" + self.label])
+        return rc == 0
+
+    def mac_disabled(self):
+        rc, out = run_rc([self.launchctl, "print-disabled", "system"])
+        if rc != 0:
+            return None
+        m = re.search(r'"%s"\s*=>\s*(disabled|enabled|true|false)' % re.escape(self.label), out)
+        return None if not m else m.group(1) in ("disabled", "true")
+
+    def mac_busy(self):
+        rc, _ = run_rc(["pgrep", "-f", MAC_WORKER_PATTERN])
+        return True if rc == 0 else False if rc == 1 else None
+
+    # -- commands ------------------------------------------------------------------
+    def status(self, as_json=False):
+        try:
+            marker = self.load_marker()
+        except ValueError as e:
+            self.say("persistent-status: %s" % e)
+            return EXIT_FAILED
+        rows = []
+        vm_state = collect_vm_state(self.limactl, self.vm) if self.vm else "none"
+        if vm_state == "running":
+            units = self.linux_units()
+            if units is None:
+                self.say("persistent-status: cannot list guest runner units")
+                return EXIT_FAILED
+            rows += [{"kind": "linux-unit", "name": u, "enabled": e, "active": a}
+                     for (u, e, a) in units]
+        if self.mac_present():
+            rows.append({"kind": "macos-daemon", "name": self.label,
+                         "loaded": self.mac_loaded(), "disabled": self.mac_disabled()})
+        if as_json:
+            self.say(json.dumps({"vm": vm_state, "units": rows,
+                                 "markerPresent": bool(marker),
+                                 "markerUnits": [u["name"] for u in marker.get("units", [])]},
+                                sort_keys=True))
+            return 0
+        self.say("vm: %s" % vm_state)
+        for r in rows:
+            if r["kind"] == "linux-unit":
+                self.say("linux-unit %s enabled=%s active=%s" % (
+                    r["name"], "yes" if r["enabled"] else "no", "yes" if r["active"] else "no"))
+            else:
+                self.say("macos-daemon %s loaded=%s disabled=%s" % (
+                    r["name"], "yes" if r["loaded"] else "no",
+                    "unknown" if r["disabled"] is None else "yes" if r["disabled"] else "no"))
+        self.say("marker: %s" % ("present (%s)" % ", ".join(u["name"] for u in marker["units"])
+                                 if marker else "absent"))
+        return 0
+
+    def disable(self, force=False):
+        try:
+            marker = self.load_marker()
+        except ValueError as e:
+            self.say("persistent-disable: %s" % e)
+            return EXIT_FAILED
+        marker.setdefault("units", [])
+        known = set((u["kind"], u["name"]) for u in marker["units"])
+        plan = []                                     # entries still to stop
+        if self.vm:
+            if not self.vm_running():
+                self.say("persistent-disable: VM '%s' is not running; guest units cannot be "
+                         "controlled (start it, or this host is already paused)" % self.vm)
+                return EXIT_FAILED
+            units = self.linux_units()
+            if units is None:
+                self.say("persistent-disable: cannot list guest runner units")
+                return EXIT_FAILED
+            for (u, enabled, active) in units:
+                if enabled or active:
+                    plan.append({"kind": "linux-unit", "name": u,
+                                 "wasEnabled": enabled, "wasActive": active})
+        if self.mac_present():
+            loaded = self.mac_loaded()
+            dis = self.mac_disabled()
+            if loaded or dis is not True:
+                plan.append({"kind": "macos-daemon", "name": self.label,
+                             "wasEnabled": dis is not True, "wasActive": loaded})
+        # Busy gate runs for EVERYTHING before anything is stopped.
+        if not force:
+            busy = []
+            for e in plan:
+                if not e["wasActive"]:
+                    continue
+                b = self.linux_busy(e["name"]) if e["kind"] == "linux-unit" else self.mac_busy()
+                if b is not False:
+                    busy.append("%s (%s)" % (e["name"], "mid-job" if b else "cannot tell if idle"))
+            if busy:
+                self.say("persistent-disable: refusing, nothing was stopped. Busy: %s. "
+                         "Wait for the job, or use --force." % ", ".join(busy))
+                return EXIT_BUSY
+        failed = []
+        for e in plan:
+            ok = self._stop_linux(e) if e["kind"] == "linux-unit" else self._stop_mac(e)
+            if not ok:
+                failed.append(e["name"])
+            # record even a half-stopped unit so enable can put it back
+            if (e["kind"], e["name"]) not in known:
+                marker["units"].append(e)
+                known.add((e["kind"], e["name"]))
+            marker["disabledAt"] = int(self.clock())
+            self.save_marker(marker)
+        if failed:
+            self.say("persistent-disable: FAILED for: %s (marker kept; persistent-enable restores)"
+                     % ", ".join(failed))
+            return EXIT_FAILED
+        self.say("persistent-disable: ok; %d unit(s) off, registrations untouched%s" % (
+            len(marker["units"]), "" if plan else " (already off)"))
+        return 0
+
+    def _stop_linux(self, e):
+        u = e["name"]
+        rc, _ = run_rc(self._guest("sudo", "-n", "systemctl", "disable", "--now", u))
+        if rc != 0:
+            return False
+        arc, _ = run_rc(self._guest("systemctl", "is-active", "--quiet", u))
+        erc, _ = run_rc(self._guest("systemctl", "is-enabled", "--quiet", u))
+        return arc not in (0, None) and erc not in (0, None)
+
+    def _stop_mac(self, e):
+        rc, _ = run_rc([self.launchctl, "disable", "system/" + self.label])
+        if rc != 0:
+            return False
+        if self.mac_loaded():
+            rc, _ = run_rc([self.launchctl, "bootout", "system/" + self.label])
+            if rc != 0:
+                return False
+        return not self.mac_loaded()
+
+    def enable(self):
+        try:
+            marker = self.load_marker()
+        except ValueError as e:
+            self.say("persistent-enable: %s" % e)
+            return EXIT_FAILED
+        todo = marker.get("units", [])
+        if not todo:
+            self.say("persistent-enable: nothing to restore (no marker); ok")
+            return 0
+        if any(e["kind"] == "linux-unit" for e in todo) and not self.vm_running():
+            self.say("persistent-enable: VM '%s' is not running; start it first" % self.vm)
+            return EXIT_FAILED
+        failed = []
+        remaining = []
+        for e in todo:
+            ok = self._start_linux(e) if e["kind"] == "linux-unit" else self._start_mac(e)
+            if ok:
+                continue
+            failed.append(e["name"])
+            remaining.append(e)
+        if remaining:
+            marker["units"] = remaining
+            self.save_marker(marker)
+            self.say("persistent-enable: FAILED for: %s (marker kept for those)" % ", ".join(failed))
+            return EXIT_FAILED
+        self.drop_marker()
+        self.say("persistent-enable: ok; %d unit(s) restored" % len(todo))
+        return 0
+
+    def _start_linux(self, e):
+        u = e["name"]
+        if e.get("wasEnabled"):
+            args = ["enable"] + (["--now"] if e.get("wasActive") else []) + [u]
+        elif e.get("wasActive"):
+            args = ["start", u]
+        else:
+            return True
+        rc, _ = run_rc(self._guest("sudo", "-n", "systemctl", *args))
+        if rc != 0:
+            return False
+        if e.get("wasActive"):
+            arc, _ = run_rc(self._guest("systemctl", "is-active", "--quiet", u))
+            return arc == 0
+        return True
+
+    def _start_mac(self, e):
+        if e.get("wasEnabled"):
+            rc, _ = run_rc([self.launchctl, "enable", "system/" + self.label])
+            if rc != 0:
+                return False
+        if e.get("wasActive") and not self.mac_loaded():
+            rc, _ = run_rc([self.launchctl, "bootstrap", "system", self.plist])
+            if rc != 0:
+                return False
+        return self.mac_loaded() if e.get("wasActive") else True
+
+
+def persistent_main(argv, config=None, out=None):
+    cmd, rest = argv[0], argv[1:]
+    allowed = {"persistent-disable": ("--force",), "persistent-status": ("--json",),
+               "persistent-enable": ()}[cmd]
+    bad = [a for a in rest if a not in allowed]
+    if bad:
+        sys.stderr.write("ci-pool-agent %s: unknown option %s (allowed: %s)\n"
+                         % (cmd, bad[0], " ".join(allowed) or "none"))
+        return 2
+    if config is None:
+        try:
+            config = load_config()
+        except ValueError as e:
+            sys.stderr.write("ci-pool-agent: %s\n" % e)
+            return 2
+    if config.get("machine") and not LABEL_RE.match(config["machine"]):
+        sys.stderr.write("ci-pool-agent: config machine is not a valid host name\n")
+        return 2
+    pr = PersistentRunners(config, out=out)
+    if cmd == "persistent-status":
+        return pr.status(as_json="--json" in rest)
+    if cmd == "persistent-disable":
+        return pr.disable(force="--force" in rest)
+    return pr.enable()
+
+
 def main(argv=None):
+    args = sys.argv[1:] if argv is None else list(argv)
+    if args and args[0] in PERSIST_COMMANDS:
+        return persistent_main(args)
     try:
         cfg = load_config()
     except ValueError as e:
@@ -1518,6 +1891,9 @@ def main(argv=None):
     except ValueError as e:
         log.error("config: %s", e)
         return 2
+    if os.path.exists(cfg.get("persistentStatePath") or DEFAULT_PERSIST_PATH):
+        log.info("persistent runner units are intentionally OFF (marker present); "
+                 "persistent-enable restores them")
     stop = StopFlag()
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda s, f: stop.set())
