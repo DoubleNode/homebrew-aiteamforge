@@ -3258,6 +3258,9 @@ PYEOF
 # explicit entry in update_runtime_helpers' sweep loop -- the kb-pr-base
 # (XACA-1449) / kb-token-report (XACA-1300) shape. kb-tap-release is deliberately
 # NOT listed or swept: dev-only, needs an outer dev-team checkout + kb-tap-lock.sh.
+# aiteamforge-team-paths-wizard.py (XACA-1460-012): aiteamforge-paths execs it from
+# its own dir (WIZARD_PY="${SCRIPT_DIR}/..."), so materialising the wrapper without
+# it makes `aiteamforge-paths init` exit 1. It is *.py, so the glob reaches it.
 _xaca0673_mandatory_materialize_basenames() {
   cat <<'EOF'
 iterm2_venv_bootstrap.py
@@ -3302,6 +3305,7 @@ kb-release-push-promote
 kb-release-version-bump
 kb-release-version-gate
 kb-wiki
+aiteamforge-team-paths-wizard.py
 EOF
 }
 

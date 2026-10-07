@@ -218,7 +218,31 @@ def is_py_shebang(path):
         return first.startswith(b"#!") and b"python" in first
     except Exception:
         return False
+# XACA-1460-012: consumer-delivered extensionless SHELL scripts (the extensionless
+# entries of the mandatory set, argv[2]) reference siblings by path, e.g.
+# WIZARD_PY="${SCRIPT_DIR}/aiteamforge-team-paths-wizard.py". Scan those for exact
+# full basenames (path-delimited, not substrings). Dev-only allowlisted scripts
+# (kb-tap-release) are not consumer-delivered, so they are never scanned.
+consumer_x = {n for n in (sys.argv[2].split("\n") if len(sys.argv) > 2 else []) if n and "." not in n}
 imported = set()
+for f in files:
+    if f not in consumer_x:
+        continue
+    path = os.path.join(sdir, f)
+    if is_py_shebang(path):
+        continue                # python scripts are covered by the walk below
+    try:
+        # Full-line shell comments are dropped: prose mentions ("NEVER invoke
+        # auto-upgrade.sh") are not dependencies and were measured as the only noise.
+        txt = "\n".join(l for l in open(path, encoding="utf-8", errors="ignore").read().splitlines()
+                        if not l.lstrip().startswith("#"))
+    except Exception:
+        continue
+    for base in files:
+        if base == f:
+            continue
+        if re.search(r'(?<![\w.-])' + re.escape(base) + r'(?![\w.-])', txt):
+            imported.add(base)
 for root, dirs, fnames in os.walk(share):
     if "tests" in os.path.normpath(root).split(os.sep):
         continue
@@ -246,8 +270,8 @@ for root, dirs, fnames in os.walk(share):
 for name in sorted(imported):
     print(name)
 PY
-MISSING="$(python3 "$_SCAN_PY" "$GUARD_SHARE")"
 MANDATORY_SET="$(_xaca0673_mandatory_materialize_basenames)"
+MISSING="$(python3 "$_SCAN_PY" "$GUARD_SHARE" "$MANDATORY_SET")"
 # Known exceptions (documented follow-ups, NOT silently weakened):
 #   kb-cr.sh - referenced by server.py; aux-map-owned (refreshed if present) but not
 #   aux-mandatory. Always laid down by install-kanban.sh. XACA-1460 disposition
@@ -256,17 +280,37 @@ MANDATORY_SET="$(_xaca0673_mandatory_materialize_basenames)"
 #   os.path.join; it is a *.py (refreshed if present) and kb-msg-provision degrades
 #   to a 'no-registrar' outcome when absent. Surfaced by the XACA-1460-004 widening;
 #   follow-up: decide whether it should be 0673-mandatory.
-PARITY_KNOWN_EXCEPTIONS=$'kb-cr.sh\nregister-claude-hook.py'
+#   lcars-health-check.sh - root-destined aux-map entry (refreshed if present);
+#   kb-spacedock probes $HOME/dev-team/ and $AITEAMFORGE_DIR[/scripts]/ for it and
+#   reports 'unknown' when absent. Surfaced by the XACA-1460-012 shell-sibling
+#   widening; pre-existing, follow-up: decide whether it should be aux-mandatory.
+PARITY_KNOWN_EXCEPTIONS=$'kb-cr.sh\nregister-claude-hook.py\nlcars-health-check.sh'
 # Consumer datafiles (msg-client.js, vault-keygen.js, ...) have their own refresh
 # path (_aitf_consumer_datafiles in libexec/lib/msg-client-deps.sh); extract by text.
 _DATAFILES="$(awk '/^_aitf_consumer_datafiles\(\) \{/{f=1;next} f&&/^EOF$/{exit} f&&!/cat <</{print}' "$TAP_ROOT/libexec/lib/msg-client-deps.sh")"
 [ -n "$_DATAFILES" ] || { _parity_ok_pre=false; echo "     FAIL-CLOSED: could not extract _aitf_consumer_datafiles" >&2; }
 # A reference is covered by 0673 OR the aux-mandatory set (XACA-1143) OR a known exception.
-MANDATORY_SET="$MANDATORY_SET"$'\n'"$(_xaca1143_aux_mandatory_materialize_basenames)"$'\n'"$PARITY_KNOWN_EXCEPTIONS"$'\n'"$_DATAFILES"
+_REAL_COVER="$MANDATORY_SET"$'\n'"$(_xaca1143_aux_mandatory_materialize_basenames)"$'\n'"$_DATAFILES"
+MANDATORY_SET="$_REAL_COVER"$'\n'"$PARITY_KNOWN_EXCEPTIONS"
 _parity_ok=true
 [ "${_parity_ok_pre:-true}" = true ] || _parity_ok=false
-# Fail-closed: an empty scan (parse failure) must never pass.
-[ -n "$MISSING" ] || { _parity_ok=false; echo "     FAIL-CLOSED: importer/reference scan found nothing (expected many)" >&2; }
+# Fail-closed: an empty or collapsed scan (parse failure) must never pass.
+# Floor, not equality: measured 15 references on 2026-10-07 (XACA-1460-011), before
+# the XACA-1460-012 shell-sibling widening added more.
+_ref_count="$(printf '%s\n' "$MISSING" | grep -c .)"
+[ "$_ref_count" -ge 12 ] || { _parity_ok=false; echo "     FAIL-CLOSED: importer/reference scan found $_ref_count reference(s) (< 12 floor; expected ~15)" >&2; }
+# Stale known exceptions (XACA-1460-011): each must still be referenced AND still
+# uncovered, else it silently outlives the follow-up that fixed it — remove it.
+while IFS= read -r exc; do
+    [ -n "$exc" ] || continue
+    case $'\n'"$MISSING"$'\n' in
+        *$'\n'"$exc"$'\n'*) : ;;
+        *) _parity_ok=false; echo "     STALE-EXCEPTION: '$exc' is no longer referenced by any shipped script — remove it from PARITY_KNOWN_EXCEPTIONS" >&2 ;;
+    esac
+    case $'\n'"$_REAL_COVER"$'\n' in
+        *$'\n'"$exc"$'\n'*) _parity_ok=false; echo "     STALE-EXCEPTION: '$exc' is now covered by a mandatory set — remove it from PARITY_KNOWN_EXCEPTIONS" >&2 ;;
+    esac
+done <<< "$PARITY_KNOWN_EXCEPTIONS"
 while IFS= read -r mod; do
     [ -n "$mod" ] || continue
     case $'\n'"$MANDATORY_SET"$'\n' in
@@ -328,6 +372,61 @@ if [ "$_g_ok" = true ]; then
     done
 fi
 if [ "$_g_ok" = true ]; then test_pass; else test_fail "extensionless upgrade-path coverage guard failed (see messages above)"; fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TEST 8 (XACA-1460-012): TABLE-DRIVEN ADVERSARIAL INPUTS FOR THE PARITY SCAN.
+# Runs the TEST 6 scanner ($_SCAN_PY) against a synthetic share/ so every
+# reference form is pinned. Per case: with the sibling NOT mandatory the
+# guard must report it (offender); with it mandatory the guard must pass.
+# Columns (TAB-separated): label, shebang, body line, sibling, expect(hit|miss),
+# consumer(yes|no: is kb-fake in the mandatory set, i.e. consumer-delivered).
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "PARITY scan: adversarial reference forms (table-driven)"
+_ADV="$TEST_TMP_DIR/xaca1460-adv/share"
+mkdir -p "$_ADV/scripts"
+printf '#!/usr/bin/env python3\n' > "$_ADV/scripts/x.py"
+printf '#!/usr/bin/env bash\n'    > "$_ADV/scripts/x.sh"
+_adv_ok=true
+_adv_n=0
+while IFS=$'\t' read -r _lbl _sb _body _sib _exp _cons; do
+    [ -n "$_lbl" ] || continue
+    _adv_n=$((_adv_n + 1))
+    printf '%s\n%s\n' "$_sb" "$_body" > "$_ADV/scripts/kb-fake"
+    _mset="probe-only"
+    [ "$_cons" = yes ] && _mset="kb-fake"
+    _found="$(python3 "$_SCAN_PY" "$_ADV" "$_mset")"
+    _hit=no
+    case $'\n'"$_found"$'\n' in *$'\n'"$_sib"$'\n'*) _hit=yes ;; esac
+    if [ "$_exp" = hit ] && [ "$_hit" != yes ]; then
+        _adv_ok=false; echo "     ADV[$_lbl]: '$_sib' NOT detected (guard would pass a missing dependency)" >&2
+    elif [ "$_exp" = miss ] && [ "$_hit" = yes ]; then
+        _adv_ok=false; echo "     ADV[$_lbl]: '$_sib' detected but must not be (false positive)" >&2
+    fi
+    # Predicate check: offender iff referenced AND not in the mandatory set.
+    if [ "$_hit" = yes ]; then
+        for _cover in no yes; do
+            _m="$_mset"; [ "$_cover" = yes ] && _m="$_m"$'\n'"$_sib"
+            case $'\n'"$_m"$'\n' in *$'\n'"$_sib"$'\n'*) _off=no ;; *) _off=yes ;; esac
+            if [ "$_cover" = no ] && [ "$_off" != yes ]; then _adv_ok=false; echo "     ADV[$_lbl]: uncovered '$_sib' not an offender" >&2; fi
+            if [ "$_cover" = yes ] && [ "$_off" != no ]; then _adv_ok=false; echo "     ADV[$_lbl]: mandatory '$_sib' still an offender" >&2; fi
+        done
+    fi
+done <<'TABLE'
+SCRIPT_DIR-braced-py	#!/usr/bin/env bash	WIZARD_PY="${SCRIPT_DIR}/x.py"	x.py	hit	yes
+SCRIPT_DIR-bare-sh	#!/usr/bin/env bash	H="$SCRIPT_DIR/x.sh"	x.sh	hit	yes
+dirname-0-py	#!/bin/sh	python3 "$(dirname "$0")/x.py"	x.py	hit	yes
+source-sh	#!/usr/bin/env bash	source "$DIR/x.sh"	x.sh	hit	yes
+dot-source-sh	#!/usr/bin/env bash	. "$DIR/x.sh"	x.sh	hit	yes
+single-quoted	#!/usr/bin/env bash	f='x.py'	x.py	hit	yes
+double-quoted	#!/usr/bin/env bash	f="x.py"	x.py	hit	yes
+commented-out	#!/usr/bin/env bash	# source "$DIR/x.sh"	x.sh	miss	yes
+indented-comment	#!/usr/bin/env bash	    # NEVER invoke x.sh here	x.sh	miss	yes
+substring-only	#!/usr/bin/env bash	f="$DIR/prefix-x.sh.bak"	x.sh	miss	yes
+python-shebang	#!/usr/bin/env python3	p = os.path.join(d, "x.py")	x.py	hit	no
+dev-only-shell	#!/usr/bin/env bash	source "$DIR/x.sh"	x.sh	miss	no
+TABLE
+[ "$_adv_n" -ge 12 ] || { _adv_ok=false; echo "     FAIL-CLOSED: adversarial table ran $_adv_n case(s), expected 12" >&2; }
+if [ "$_adv_ok" = true ]; then test_pass; else test_fail "PARITY scan adversarial table failed (see ADV[...] above)"; fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Summary (standalone only).
