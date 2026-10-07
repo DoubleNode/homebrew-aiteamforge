@@ -146,8 +146,10 @@ VM_DISK="60GiB"
 
 REPO_URL="https://github.com/DoubleNode/dev-team"
 RUNNER_LABELS=""         # derived: <host>[,extra]; config.sh itself adds self-hosted, <OS>, <ARCH>
-# Fallback only if the GitHub API is unreachable and RUNNER_VERSION is unset.
-RUNNER_VERSION_FALLBACK="2.337.0"
+# XACA-1443-014: the actions/runner version is resolved by lib/ci-runner-version.sh (GitHub latest + its published
+# sha256, else the runner already staged, else the PINNED fallback in runner-pin.conf; never an unverified download).
+# The old hard-coded RUNNER_VERSION_FALLBACK is gone: the pin is data that ships with each release.
+RUNNER_SHA_LINUX=""; RUNNER_SHA_OSX=""; RUNNER_SOURCE=""; RUNNER_CHECKED_AT=""
 
 LINUX_RUNNER_COUNT=2
 MAC_RUNNER_NAME=""       # derived: <host>-macos-1
@@ -492,16 +494,33 @@ daemon_state() { # echoes running | loaded-idle | not-loaded
   if grep -q 'state = running' <<<"$out"; then echo running; else echo loaded-idle; fi
 }
 
-latest_runner_version() {
-  local v
-  if [ -n "${RUNNER_VERSION:-}" ]; then echo "${RUNNER_VERSION#v}"; return 0; fi
-  v=$(curl -fsSL --max-time 20 https://api.github.com/repos/actions/runner/releases/latest 2>/dev/null \
-        | grep -o '"tag_name": *"v[0-9.]*"' | head -1 | sed 's/.*"v\([0-9.]*\)"/\1/') || true
-  if [ -z "$v" ]; then
-    warn "could not resolve latest actions/runner; using fallback ${RUNNER_VERSION_FALLBACK}"
-    v="$RUNNER_VERSION_FALLBACK"
+# XACA-1443-014. Sets VERSION, RUNNER_SHA_LINUX, RUNNER_SHA_OSX, RUNNER_SOURCE (latest|explicit|pinned|kept) and
+# RUNNER_CHECKED_AT; returns 1 (CI_RUNNER_WHY set) when no VERIFIABLE runner can be chosen. Loud, never silent, when it
+# could not reach GitHub. JIT one-job runners cannot disable self-update (the setting is in the server-generated JIT
+# config), so the cached tarball is what keeps them current: see docs/ci-runner-runbook.md section 8.
+resolve_runner_try() {
+  local lib="${_PH_DIR}/lib/ci-runner-version.sh" kv="" ksl="" kso="" kat=""
+  if [ ! -r "$lib" ]; then CI_RUNNER_WHY="${lib} is missing"; return 1; fi
+  # shellcheck source=/dev/null
+  . "$lib"
+  # A runner staged earlier lets a refresh that cannot reach GitHub KEEP it rather than fall back to an older pin.
+  if ci_runner_manifest_record "$HOST" 2>/dev/null && [ -n "$CI_RR_LINUX" ]; then
+    set -- $CI_RR_LINUX; kv="$1"; ksl="$2"
+    if [ -n "$CI_RR_OSX" ]; then set -- $CI_RR_OSX; if [ "$1" = "$kv" ]; then kso="$2"; fi; fi
+    # --no-macos hosts record no macOS runner; the macOS digest is unused there, so any valid digest will do.
+    if [ "$NO_MACOS" = "1" ] && [ -z "$kso" ]; then kso="$ksl"; fi
+    kat="$CI_RR_CHECKED_AT"
   fi
-  echo "$v"
+  ci_runner_resolve "${_PH_DIR}/runner-pin.conf" "${RUNNER_VERSION:-}" "$kv" "$ksl" "$kso" "$kat" || return 1
+  VERSION="$CI_RUNNER_VERSION"; RUNNER_SHA_LINUX="$CI_RUNNER_SHA_LINUX"; RUNNER_SHA_OSX="$CI_RUNNER_SHA_OSX"
+  RUNNER_SOURCE="$CI_RUNNER_SOURCE"
+  RUNNER_CHECKED_AT="${CI_RUNNER_CHECKED_AT:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
+  return 0
+}
+resolve_runner() {
+  resolve_runner_try || die "cannot choose an actions/runner to stage: ${CI_RUNNER_WHY}"
+  if [ -n "$CI_RUNNER_NOTICE" ]; then warn "${CI_RUNNER_NOTICE}"; fi
+  log "actions/runner version: ${VERSION} (${RUNNER_SOURCE}; sha256 linux-arm64 ${RUNNER_SHA_LINUX%${RUNNER_SHA_LINUX#????????}}..., osx-arm64 ${RUNNER_SHA_OSX%${RUNNER_SHA_OSX#????????}}...)"
 }
 
 # Install a LaunchDaemon plist produced by generator function $2. Returns 0 if
@@ -764,12 +783,16 @@ fi
 GUEST
 }
 
-# Args: IDX VERSION NAME LABELS URL REGISTER(1|0). Token = first stdin line.
+# Args: IDX VERSION NAME LABELS URL REGISTER(1|0) SHA256. Token = first stdin line. SHA256 = the expected digest of the
+# linux-arm64 tarball (XACA-1443-014): required, 64 hex. No digest, or a mismatch, refuses to stage (it used to skip the
+# check when the digest could not be read). A cached tarball is re-verified too, and other versions are pruned.
 guest_runner_script() {
   cat <<'GUEST'
 #!/bin/bash
 set -euo pipefail
-IDX="$1"; VER="$2"; NAME="$3"; LABELS="$4"; URL="$5"; REGISTER="$6"
+IDX="$1"; VER="$2"; NAME="$3"; LABELS="$4"; URL="$5"; REGISTER="$6"; WANT="${7:-}"
+case "$WANT" in ''|*[!0-9a-f]*) echo "ERROR: no valid expected sha256 for runner ${VER}; refusing to stage an unverified runner" >&2; exit 1 ;; esac
+[ "${#WANT}" -eq 64 ] || { echo "ERROR: expected sha256 for runner ${VER} is not 64 hex; refusing" >&2; exit 1; }
 DIR="/opt/actions-runner-${IDX}"
 DIST="/opt/runner-dist"
 TB="${DIST}/actions-runner-linux-arm64-${VER}.tar.gz"
@@ -777,22 +800,24 @@ TB="${DIST}/actions-runner-linux-arm64-${VER}.tar.gz"
 mkdir -p "$DIST" "$DIR"
 chown runner:runner "$DIR"
 
+if [ -s "$TB" ] && [ "$(sha256sum "$TB" | awk '{print $1}')" != "$WANT" ]; then
+  echo "cached ${TB} does not match the expected sha256; discarding it"; rm -f "$TB"
+fi
 if [ ! -s "$TB" ]; then
   echo "downloading actions-runner ${VER} (linux-arm64)"
   curl -fsSL -o "${TB}.part" \
     "https://github.com/actions/runner/releases/download/v${VER}/actions-runner-linux-arm64-${VER}.tar.gz"
-  # The release notes carry the tarball sha256. Mismatch is fatal; an
-  # unreadable hash (API rate limit) only warns — the download is TLS from
-  # github.com either way.
-  expected=$(curl -fsSL --max-time 20 "https://api.github.com/repos/actions/runner/releases/tags/v${VER}" 2>/dev/null \
-    | grep -o 'BEGIN SHA linux-arm64 -->[0-9a-f]*' | head -1 | sed 's/.*-->//') || true
   actual=$(sha256sum "${TB}.part" | awk '{print $1}')
-  if [ -n "$expected" ] && [ "$expected" != "$actual" ]; then
-    rm -f "${TB}.part"; echo "ERROR: sha256 mismatch for runner ${VER}" >&2; exit 1
+  if [ "$WANT" != "$actual" ]; then
+    rm -f "${TB}.part"; echo "ERROR: sha256 mismatch for runner ${VER}: expected ${WANT}, got ${actual}" >&2; exit 1
   fi
-  [ -n "$expected" ] || echo "WARN: could not read published sha256; skipped verification"
   mv "${TB}.part" "$TB"
 fi
+# One tarball stays in the cache: the JIT launcher extracts the NEWEST file here for every job, so an older one must go.
+for f in "${DIST}"/actions-runner-linux-arm64-*.tar.gz; do
+  [ -e "$f" ] || continue
+  [ "$f" = "$TB" ] || rm -f "$f"
+done
 
 if [ ! -x "${DIR}/config.sh" ]; then
   sudo -u runner tar xzf "$TB" -C "$DIR"
@@ -903,33 +928,42 @@ stage_linux_runners() {
     if [ "$register" = "1" ]; then
       # No token file = converge-only run: the guest script skips registered
       # runners and fails with a clear message on an unregistered one.
-      guest sudo "$GUEST_SCRIPT" "$i" "$version" "$name" "$RUNNER_LABELS" "$REPO_URL" 1 <"${TOKEN_FILE:-/dev/null}"
+      guest sudo "$GUEST_SCRIPT" "$i" "$version" "$name" "$RUNNER_LABELS" "$REPO_URL" 1 "$RUNNER_SHA_LINUX" <"${TOKEN_FILE:-/dev/null}"
     else
-      guest sudo "$GUEST_SCRIPT" "$i" "$version" "$name" "$RUNNER_LABELS" "$REPO_URL" 0 </dev/null
+      guest sudo "$GUEST_SCRIPT" "$i" "$version" "$name" "$RUNNER_LABELS" "$REPO_URL" 0 "$RUNNER_SHA_LINUX" </dev/null
     fi
     i=$((i + 1))
   done
 }
 
 stage_macos_runner() {
-  local version="$1" dist tb expected actual
+  local version="$1" dist tb expected actual f
   if [ "$NO_MACOS" = "1" ]; then log "macOS runner skipped (--no-macos)"; return 0; fi
   as_ci mkdir -p "$LOG_DIR" "${CI_HOME}/runner-dist" "$MAC_RUNNER_DIR"
   dist="${CI_HOME}/runner-dist"
   tb="${dist}/actions-runner-osx-arm64-${version}.tar.gz"
+  # XACA-1443-014: verified against the digest resolve_runner took from the release notes (or runner-pin.conf). A cached
+  # tarball is re-verified; a download that does not match is deleted; no digest is never a pass.
+  if [ -s "$tb" ] && ! ci_runner_verify_file "$tb" "$RUNNER_SHA_OSX"; then
+    warn "cached ${tb} does not match the expected sha256 (or cannot be verified); discarding it"
+    as_ci rm -f "$tb"
+  fi
   if [ ! -s "$tb" ]; then
     log "downloading actions-runner ${version} (osx-arm64)"
     as_ci curl -fsSL -o "${tb}.part" \
       "https://github.com/actions/runner/releases/download/v${version}/actions-runner-osx-arm64-${version}.tar.gz"
-    expected=$(curl -fsSL --max-time 20 "https://api.github.com/repos/actions/runner/releases/tags/v${version}" 2>/dev/null \
-      | grep -o 'BEGIN SHA osx-arm64 -->[0-9a-f]*' | head -1 | sed 's/.*-->//') || true
     actual=$(as_ci shasum -a 256 "${tb}.part" | awk '{print $1}')
-    if [ -n "$expected" ] && [ "$expected" != "$actual" ]; then
-      as_ci rm -f "${tb}.part"; die "sha256 mismatch for macOS runner ${version}"
+    expected="$RUNNER_SHA_OSX"
+    if [ -z "$expected" ] || [ "$expected" != "$actual" ]; then
+      as_ci rm -f "${tb}.part"; die "sha256 mismatch for macOS runner ${version}: expected ${expected:-<none>}, got ${actual:-<none>}"
     fi
-    [ -n "$expected" ] || warn "could not read published sha256 for macOS runner; skipped verification"
     as_ci mv "${tb}.part" "$tb"
   fi
+  # One tarball stays in the cache: the JIT launcher extracts the NEWEST file here for every job.
+  for f in "${dist}"/actions-runner-osx-arm64-*.tar.gz; do
+    [ -e "$f" ] || continue
+    [ "$f" = "$tb" ] || as_ci rm -f "$f"
+  done
   if [ "$NO_REGISTER" = "1" ]; then
     # XACA-1442: JIT model. The tarball cache above is all the agent needs;
     # no persistent runner is extracted, registered or daemonized.
@@ -1276,7 +1310,7 @@ do_dry_run() {
   done
   plan "preflight: macOS arm64, user ${CI_USER} exists: $(id -u "$CI_USER" >/dev/null 2>&1 && echo yes || echo 'NO (run create-ci-runner-user.sh first)'); limactl at ${LIMACTL}: $([ -x "$LIMACTL" ] && echo yes || echo NO)"
   if [ -n "$TOKEN_FILE" ]; then plan "token file ${TOKEN_FILE}: $([ -s "$TOKEN_FILE" ] && echo present || echo MISSING) (would be deleted on exit)"; else plan "token file: none given (fine when every runner is already registered; required to register a missing one)"; fi
-  plan "resolve actions/runner version: \$RUNNER_VERSION, else GitHub latest (fallback ${RUNNER_VERSION_FALLBACK}); would use: $(latest_runner_version)"
+  plan "resolve actions/runner: \$RUNNER_VERSION, else GitHub latest + its published sha256 (no credentials); if GitHub cannot be asked: keep the staged runner, else the PINNED fallback in runner-pin.conf (announced, sha256-verified); refuse if nothing can be verified. Would use: $( if resolve_runner_try; then echo "${VERSION} (${RUNNER_SOURCE})${CI_RUNNER_NOTICE:+ - NOTICE: ${CI_RUNNER_NOTICE}}"; else echo "REFUSED: ${CI_RUNNER_WHY}"; fi )"
   st=$(vm_state)
   plan "VM ${VM_NAME}: current state ${st}$([ "$st" = unknown ] && echo ' (needs sudo to read)')"
   plan "  would: if absent, limactl create ${VM_NAME} --mount-none (vz, ${VM_CPUS} CPU / ${VM_MEMORY} / ${VM_DISK}, containerd off)"
@@ -1367,6 +1401,12 @@ write_provision_manifest() {
       ci_provision_entry libexec client/ci-runner-job-started.sh "$MAC_JOB_STARTED_DEST" "$JOB_STARTED_SRC" || ok=0
     fi
   fi
+  # XACA-1443-014: the staged actions/runner. R lines are part of provision_version; runner_checked_at is not.
+  ci_provision_runner_entry linux-arm64 "$VERSION" "$RUNNER_SHA_LINUX" "$RUNNER_SOURCE" || ok=0
+  if [ "$NO_MACOS" != "1" ]; then
+    ci_provision_runner_entry osx-arm64 "$VERSION" "$RUNNER_SHA_OSX" "$RUNNER_SOURCE" || ok=0
+  fi
+  CI_PM_RUNNER_CHECKED_AT_W="$RUNNER_CHECKED_AT"
   if [ "$ok" != "1" ]; then
     warn "provision manifest NOT written: a bundle file could not be hashed; 'aiteamforge ci' will keep reporting this host as behind"
     return 0
@@ -1447,8 +1487,7 @@ fi
 # ci-runner may not be able to read the invoker's cwd; limactl/sudo dislike that.
 cd /
 
-VERSION=$(latest_runner_version)
-log "actions/runner version: ${VERSION}"
+resolve_runner
 
 # launchd will not create StandardOutPath's directory; the VM daemon needs it first.
 if [ "$MODE" != "baseline-only" ]; then as_ci mkdir -p "$LOG_DIR"; fi

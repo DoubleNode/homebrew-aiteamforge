@@ -25,6 +25,12 @@
 #            <dest> is `-`. A change to it means plists / VM config / user setup / guest baseline may have
 #            changed, so the host must re-converge.
 # <bundle-relpath> is relative to $AITEAMFORGE_DIR/scripts/ci-runner (the keg's copy of the bundle).
+# XACA-1443-014 adds the staged actions/runner (what the JIT launchers extract for every job):
+#   R <os> <version> <sha256> <source>     os = linux-arm64|osx-arm64   source = latest|explicit|pinned|kept
+#   runner_checked_at=<UTC ISO>            when GitHub last confirmed the version was the newest (NOT in the hash)
+# R lines ARE part of provision_version (a re-stage of a different runner changes it and so shows up as a stale
+# `record:`), runner_checked_at is not (re-checking the same runner must not look like a change). A manifest without
+# R lines is read as before; ci_runner_skew_check (lib/ci-runner-version.sh) reports it as `runner:` skew.
 #
 # WHY A CONTENT HASH (not a hand-bumped integer): nothing can forget to bump it. Cost: a comment-only edit
 # of provision-host.sh also reads as skew. That is the safe direction: `ci refresh` is idempotent and cheap,
@@ -100,7 +106,21 @@ ci_provision_manifest_path() { # host -> path
 # ci_provision_entry <kind> <relpath> <dest> <source-file>
 #   Appends one F line to CI_PM_ENTRIES (newline separated). rc 1 (nothing appended) if the file is unreadable.
 CI_PM_ENTRIES=""
-ci_provision_entry_reset() { CI_PM_ENTRIES=""; }
+CI_PM_RUNNERS=""; CI_PM_RUNNER_CHECKED_AT_W=""
+ci_provision_entry_reset() { CI_PM_ENTRIES=""; CI_PM_RUNNERS=""; CI_PM_RUNNER_CHECKED_AT_W=""; }
+
+# ci_provision_runner_entry <os> <version> <sha256> <source>   (XACA-1443-014) rc 1 and nothing appended if any field is invalid.
+ci_provision_runner_entry() {
+    local os="${1:-}" v="${2:-}" sha="${3:-}" src="${4:-}"
+    case "$os" in linux-arm64|osx-arm64) ;; *) return 1 ;; esac
+    case "$src" in latest|explicit|pinned|kept) ;; *) return 1 ;; esac
+    case "$v" in ''|*[!0-9.]*|*..*|.*|*.) return 1 ;; esac
+    case "$sha" in ''|*[!0-9a-f]*) return 1 ;; esac
+    [ "${#sha}" -eq 64 ] || return 1
+    CI_PM_RUNNERS="${CI_PM_RUNNERS:+${CI_PM_RUNNERS}
+}R ${os} ${v} ${sha} ${src}"
+    return 0
+}
 ci_provision_entry() {
     local kind="$1" rel="$2" dest="$3" src="$4" sha
     case "$kind" in libexec|guest|step) ;; *) return 1 ;; esac
@@ -121,14 +141,17 @@ ci_provision_version_of() { # "<F lines>" -> 12 hex
 # ci_provision_manifest_render <host> <timestamp>  -> the manifest on stdout. rc 1 when there are no entries.
 ci_provision_manifest_render() {
     local host="$1" ts="$2" v
+    local all="$CI_PM_ENTRIES${CI_PM_RUNNERS:+
+$CI_PM_RUNNERS}"
     [ -n "$CI_PM_ENTRIES" ] || return 1
-    v="$(ci_provision_version_of "$CI_PM_ENTRIES")" || return 1
+    v="$(ci_provision_version_of "$all")" || return 1
     echo "# aiteamforge CI provision manifest v1 - written by provision-host.sh (root). No secrets. Contract: XACA-1443-013."
     echo "schema=1"
     echo "host=${host}"
     echo "provision_version=${v}"
     echo "provisioned_at=${ts}"
-    printf '%s\n' "$CI_PM_ENTRIES" | LC_ALL=C sort
+    [ -z "$CI_PM_RUNNERS" ] || echo "runner_checked_at=${CI_PM_RUNNER_CHECKED_AT_W:-$ts}"
+    printf '%s\n' "$all" | LC_ALL=C sort
 }
 
 # ---------------------------------------------------------------- reader half
@@ -137,10 +160,10 @@ ci_provision_manifest_render() {
 #   rc 0 loaded  -> CI_PM_VERSION, CI_PM_AT, CI_PM_FLINES (validated, version re-derived and matched)
 #   rc 1 absent  (definite: the directory can be looked into and the file is not there, or the dir is gone)
 #   rc 2 cannot tell or invalid -> CI_PM_WHY
-CI_PM_VERSION=""; CI_PM_AT=""; CI_PM_FLINES=""; CI_PM_WHY=""
+CI_PM_VERSION=""; CI_PM_AT=""; CI_PM_FLINES=""; CI_PM_WHY=""; CI_PM_RLINES=""; CI_PM_RUNNER_CHECKED_AT=""
 ci_provision_manifest_load() {
-    local host="$1" f d line key val schema="" mhost="" ver="" at="" fl="" n=0 tag sha kind rel dest extra
-    CI_PM_VERSION=""; CI_PM_AT=""; CI_PM_FLINES=""; CI_PM_WHY=""
+    local host="$1" f d line key val schema="" mhost="" ver="" at="" fl="" rl="" rat="" n=0 tag sha kind rel dest extra rv rsrc
+    CI_PM_VERSION=""; CI_PM_AT=""; CI_PM_FLINES=""; CI_PM_WHY=""; CI_PM_RLINES=""; CI_PM_RUNNER_CHECKED_AT=""
     _cipv_host_ok "$host" || { CI_PM_WHY="invalid host name"; return 2; }
     f="$(ci_provision_manifest_path "$host")"; d="${f%/*}"
     if [ ! -e "$f" ]; then
@@ -155,6 +178,18 @@ ci_provision_manifest_load() {
             host=*) mhost="${line#host=}" ;;
             provision_version=*) ver="${line#provision_version=}" ;;
             provisioned_at=*) at="${line#provisioned_at=}" ;;
+            runner_checked_at=*) rat="${line#runner_checked_at=}" ;;
+            'R '*)
+                set -- $line
+                tag="${1:-}"; kind="${2:-}"; rv="${3:-}"; sha="${4:-}"; rsrc="${5:-}"; extra="${6:-}"
+                [ -z "$extra" ] && [ -n "$rsrc" ] || { CI_PM_WHY="malformed R line"; return 2; }
+                case "$kind" in linux-arm64|osx-arm64) ;; *) CI_PM_WHY="malformed R line (os)"; return 2 ;; esac
+                case "$rv" in ''|*[!0-9.]*|*..*|.*|*.) CI_PM_WHY="malformed R line (version)"; return 2 ;; esac
+                case "$sha" in *[!0-9a-f]*) CI_PM_WHY="malformed R line (hash)"; return 2 ;; esac
+                [ "${#sha}" -eq 64 ] || { CI_PM_WHY="malformed R line (hash length)"; return 2; }
+                case "$rsrc" in latest|explicit|pinned|kept) ;; *) CI_PM_WHY="malformed R line (source)"; return 2 ;; esac
+                rl="${rl:+${rl}
+}${line}" ;;
             'F '*)
                 set -- $line
                 tag="${1:-}"; sha="${2:-}"; kind="${3:-}"; rel="${4:-}"; dest="${5:-}"; extra="${6:-}"
@@ -174,8 +209,9 @@ ci_provision_manifest_load() {
     [ "$n" -ge 1 ] || { CI_PM_WHY="no F lines"; return 2; }
     case "$ver" in ''|*[!0-9a-f]*) CI_PM_WHY="bad provision_version"; return 2 ;; esac
     [ "${#ver}" -eq 12 ] || { CI_PM_WHY="bad provision_version length"; return 2; }
-    [ "$(ci_provision_version_of "$fl")" = "$ver" ] || { CI_PM_WHY="provision_version does not match its own F lines"; return 2; }
-    CI_PM_VERSION="$ver"; CI_PM_AT="$at"; CI_PM_FLINES="$fl"
+    [ "$(ci_provision_version_of "${fl}${rl:+
+$rl}")" = "$ver" ] || { CI_PM_WHY="provision_version does not match its own F lines"; return 2; }
+    CI_PM_VERSION="$ver"; CI_PM_AT="$at"; CI_PM_FLINES="$fl"; CI_PM_RLINES="$rl"; CI_PM_RUNNER_CHECKED_AT="$rat"
     return 0
 }
 
@@ -231,6 +267,13 @@ ci_provision_skew() {
 $CI_PM_FLINES
 EOF_CIPV
 
+    # XACA-1443-014: the staged actions/runner (definite keg-vs-host differences only; see lib/ci-runner-version.sh).
+    if type ci_runner_skew_check >/dev/null 2>&1; then
+        ci_runner_skew_check "$bundle"
+    else
+        _cipv_add CI_SKEW_UNSEEN "runner: lib/ci-runner-version.sh is not loaded, so the staged actions/runner cannot be judged"
+    fi
+
     # The state file's recorded version must be the manifest's (a refresh that was run but not confirmed).
     if [ "$check_rec" = 1 ] && [ -n "$recorded" ] && [ "$recorded" != "$CI_PM_VERSION" ]; then
         _cipv_add CI_SKEW_REASONS "record: the state file records provision_version ${recorded}, the host manifest says ${CI_PM_VERSION}"
@@ -283,3 +326,12 @@ ci_provision_upgrade_notice() {
     esac
     return 0
 }
+
+# XACA-1443-014: the runner-version half is always loaded with this library (ci_provision_skew calls it). The guard
+# variable stops the mutual include (ci-runner-version.sh sources this file when it is loaded first).
+_CIPV_DIR="${BASH_SOURCE[0]:-}"
+case "$_CIPV_DIR" in */*) _CIPV_DIR="${_CIPV_DIR%/*}" ;; *) _CIPV_DIR="." ;; esac
+if [ "${_CIRV_LOADING:-0}" != 1 ] && ! type ci_runner_skew_check >/dev/null 2>&1 && [ -r "${_CIPV_DIR}/ci-runner-version.sh" ]; then
+    # shellcheck source=/dev/null
+    . "${_CIPV_DIR}/ci-runner-version.sh"
+fi

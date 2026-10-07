@@ -162,6 +162,12 @@ cmd_exec() {
     IFS= read -r line < "$cfg" || true
     rm -f "$cfg"
     [ -n "$line" ] || die "empty staged config" 70
+    # XACA-1443-014 DECISION: self-update is NOT disabled here and cannot be. DisableUpdate is a config.sh flag stored in
+    # the runner's .runner file; a JIT runner takes that file from the server-generated JIT config (generate-jitconfig has
+    # no such field), so `run.sh --disableupdate` would change nothing and disabling it would turn GitHub's 30-day rule into
+    # a hard cliff. The robust lever is the cache: the tarball extracted above is the newest VERIFIED release, kept fresh by
+    # provision-host.sh / `aiteamforge ci refresh` (runner-pin.conf, lib/ci-runner-version.sh). A runner that is still
+    # behind self-updates, which delays that one job; `aiteamforge ci status` warns before it gets there.
     ACTIONS_RUNNER_INPUT_JITCONFIG="$line"
     export ACTIONS_RUNNER_INPUT_JITCONFIG
     ACTIONS_RUNNER_HOOK_JOB_STARTED="$HOOK"

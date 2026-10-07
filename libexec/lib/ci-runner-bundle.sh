@@ -20,7 +20,8 @@
 # Layout (the subdirectory is why neither setup's flat `find -maxdepth 1` copy
 # nor update_runtime_helpers' flat *.sh sweep reaches these files):
 #   scripts/ci-runner/{provision-host.sh,ci-host.sh,create-ci-runner-user.sh,teardown-host.sh}
-#   scripts/ci-runner/lib/{ci-host-lib.sh,ci-enable-guard.sh,ci-headroom.sh,ci-provision-version.sh,ci-status.sh}
+#   scripts/ci-runner/lib/{ci-host-lib.sh,ci-enable-guard.sh,ci-headroom.sh,ci-provision-version.sh,ci-runner-version.sh,ci-status.sh}
+#   scripts/ci-runner/runner-pin.conf   (data: pinned fallback actions/runner + registration floor, XACA-1443-014)
 #   scripts/ci-runner/client/{ci-pool-agent.py,ci-runner-*.sh}
 # provision-host.sh falls back to ${its dir}/client when the dev tree's
 # ../../fleet-monitor/client is absent. NOT shipped: provision-m1mini.sh
@@ -34,10 +35,12 @@ _aitf_ci_runner_bundle_files() {
 755 ci-host.sh
 755 create-ci-runner-user.sh
 755 teardown-host.sh
+644 runner-pin.conf
 755 lib/ci-host-lib.sh
 644 lib/ci-enable-guard.sh
 644 lib/ci-headroom.sh
 644 lib/ci-provision-version.sh
+644 lib/ci-runner-version.sh
 644 lib/ci-status.sh
 644 client/ci-pool-agent.py
 755 client/ci-runner-jit-guest.sh

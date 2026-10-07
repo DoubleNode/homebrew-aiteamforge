@@ -420,6 +420,8 @@ cmd_enable() {
   echo "  $(_sha256 "$create_sh")  $create_sh"
   echo "  $(_sha256 "$prov_sh")  $prov_sh"
   echo "  $(_sha256 "$CI_BUNDLE_DIR/lib/ci-provision-version.sh")  $CI_BUNDLE_DIR/lib/ci-provision-version.sh   (sourced by provision-host.sh to write the provision manifest)"
+  echo "  $(_sha256 "$CI_BUNDLE_DIR/lib/ci-runner-version.sh")  $CI_BUNDLE_DIR/lib/ci-runner-version.sh   (sourced by provision-host.sh: picks and sha256-verifies the actions/runner it stages)"
+  echo "  $(_sha256 "$CI_BUNDLE_DIR/runner-pin.conf")  $CI_BUNDLE_DIR/runner-pin.conf   (data: the pinned fallback runner + digests)"
   echo
   echo "Preview, no root, changes nothing:"
   echo "$dry_line"
@@ -926,12 +928,15 @@ cmd_refresh() {
   else
     echo "  It refuses (exit 3, nothing changed) while a pool job is starting/busy/cleaning."
   fi
-  echo "  NOT changed: the VM's size, the keys, the actions/runner binaries."
+  echo "  NOT changed: the VM's size, the keys, runner directories that are already extracted."
+  echo "  Re-resolved: the cached actions/runner tarball (newest release GitHub publishes, sha256-verified; if GitHub cannot be asked the staged one is kept or the pinned fallback is used, and it says so)."
   echo
   echo "Before you run it, inspect what will run as root (sha256):"
   echo "  $(_sha256 "$create_sh")  $create_sh"
   echo "  $(_sha256 "$prov_sh")  $prov_sh"
   echo "  $(_sha256 "$pv_lib")  $pv_lib   (sourced by provision-host.sh to write the provision manifest)"
+  echo "  $(_sha256 "$CI_BUNDLE_DIR/lib/ci-runner-version.sh")  $CI_BUNDLE_DIR/lib/ci-runner-version.sh   (sourced by provision-host.sh: picks and sha256-verifies the actions/runner it stages)"
+  echo "  $(_sha256 "$CI_BUNDLE_DIR/runner-pin.conf")  $CI_BUNDLE_DIR/runner-pin.conf   (data: the pinned fallback runner + digests)"
   echo
   echo "Preview, no root, changes nothing:"
   echo "$dry_line"

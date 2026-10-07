@@ -53,13 +53,14 @@
 #
 # HOOK for XACA-1443-014 (actions/runner binary lifecycle): if a function named ci_status_runner_probe exists
 # when an `enabled`/`paused` host is classified, it is called as `ci_status_runner_probe <host>` and may call
-# `_cis_warn "<runner: text>"` (verdict becomes warn) or `_cis_unseen "<runner: text>"`. Nothing is probed today.
+# `_cis_warn "<runner: text>"` (verdict becomes warn) or `_cis_unseen "<runner: text>"`. XACA-1443-014 implements it in
+# lib/ci-runner-version.sh (loaded with lib/ci-provision-version.sh): it only warns, and "unknown" is a warn too.
 #
 # Portability: /bin/bash 3.2 and bash 5. Public names ci_status_* / ci_capability_state, internals _cis_*.
 
 # The bundle files `aiteamforge ci` needs on disk. MUST equal libexec/lib/ci-runner-bundle.sh's list
 # (tests/test-xaca-1443-ci-status.sh pins the two together; it also covers this file itself).
-CI_STATUS_BUNDLE_FILES="provision-host.sh ci-host.sh create-ci-runner-user.sh teardown-host.sh lib/ci-host-lib.sh lib/ci-enable-guard.sh lib/ci-headroom.sh lib/ci-provision-version.sh lib/ci-status.sh client/ci-pool-agent.py client/ci-runner-jit-guest.sh client/ci-runner-jit-macos.sh client/ci-runner-job-started.sh client/ci-runner-reporter.sh"
+CI_STATUS_BUNDLE_FILES="provision-host.sh ci-host.sh create-ci-runner-user.sh teardown-host.sh runner-pin.conf lib/ci-host-lib.sh lib/ci-enable-guard.sh lib/ci-headroom.sh lib/ci-provision-version.sh lib/ci-runner-version.sh lib/ci-status.sh client/ci-pool-agent.py client/ci-runner-jit-guest.sh client/ci-runner-jit-macos.sh client/ci-runner-job-started.sh client/ci-runner-reporter.sh"
 
 _cis_add() { # var-name line   (append a line to a newline list)
     eval "$1=\"\${$1:+\${$1}
