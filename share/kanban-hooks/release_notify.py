@@ -213,11 +213,18 @@ def _load_script_module(name: str):
             sys.modules[name] = mod  # the profile resolver looks the validator up here
             try:
                 spec.loader.exec_module(mod)
-            except ImportError as exc:  # e.g. jsonschema missing on system python
-                sys.modules.pop(name, None)
-                raise NotifyConfigError(
-                    "cannot load %s (%s); install jsonschema or use a python that has it"
-                    % (name, type(exc).__name__)) from None
+            except BaseException as exc:
+                # XACA-1463: any failure (not just ImportError) leaves a half-built
+                # module registered, and the early sys.modules.get() above would hand
+                # it to the next caller -> AttributeError. Identity check so we never
+                # evict a foreign entry that exec_module itself put there.
+                if sys.modules.get(name) is mod:
+                    del sys.modules[name]
+                if isinstance(exc, ImportError):  # e.g. jsonschema missing on system python
+                    raise NotifyConfigError(
+                        "cannot load %s (%s); install jsonschema or use a python that has it"
+                        % (name, type(exc).__name__)) from None
+                raise
             return mod
     raise NotifyConfigError("%s.py not found next to this module" % name)
 
