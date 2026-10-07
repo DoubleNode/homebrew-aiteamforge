@@ -46,8 +46,8 @@ MainEventApp-iOS/
 
 | Command | Result |
 |---------|--------|
-| `"Create worktree for feature"` | Creates `worktrees/feature/` on `main` |
-| `"Create worktree for hotfix"` | Creates `worktrees/hotfix/` on `main` |
+| `"Create worktree for feature"` | Creates `worktrees/feature/` on the base branch (`kb-pr-base <ID>`; default `develop`) |
+| `"Create worktree for hotfix"` | Creates `worktrees/hotfix/` on the base branch (`kb-pr-base <ID>`; default `develop`) |
 | `"Create worktree for feature/funcard-reload"` | Creates `worktrees/feature-funcard-reload/` with new branch |
 | `"Create worktree for hotfix/crash-3455"` | Creates `worktrees/hotfix-crash-3455/` with new branch |
 | `"Create worktree from existing branch feature/MEM-445"` | Checks out existing branch |
@@ -154,7 +154,7 @@ git worktree list
 ### Add Worktree Manually
 ```bash
 # New branch
-git worktree add -b feature/my-feature worktrees/feature main
+git worktree add -b feature/my-feature worktrees/feature "$(kb-pr-base <ITEM-ID>)"   # or `develop` with no item
 
 # Existing branch
 git worktree add worktrees/feature feature/existing-branch

@@ -233,7 +233,7 @@ cd /Users/Shared/development/Main\ Event/MainEventApp-iOS/
 
 **Result:**
 - Creates `worktrees/feature/` (or hotfix, refactor, etc.)
-- Checks out `main` branch
+- Checks out the base branch (release branch if recorded, else `develop`)
 - Ready for you to create a feature branch
 
 #### Worktree with Specific Branch
@@ -251,7 +251,7 @@ cd /Users/Shared/development/Main\ Event/MainEventApp-iOS/
 **Result:**
 - Creates `worktrees/feature-funcard-reload/` (descriptive name)
 - Creates new branch `feature/funcard-reload`
-- Based on `main` branch
+- Based on the base branch (`kb-pr-base <ITEM-ID>`: release branch if recorded, else `develop`)
 - Ready to start work immediately
 
 #### Worktree from Existing Branch
@@ -690,7 +690,7 @@ This runs `git worktree prune` to clean up orphaned references.
 **1. Creation:**
 - Create worktrees as needed, not preemptively
 - Use descriptive names for multiple worktrees of same type
-- Base on correct branch (usually `main`)
+- Base on correct branch (`kb-pr-base <ITEM-ID>`; usually `develop`, never production `main`/`master`)
 
 **2. Active Use:**
 - Keep worktrees focused on single tasks

@@ -448,9 +448,9 @@ A new worktree branch is cut from, and its PR targets, the **base branch**:
 1. **The item's release branch**, when the kanban item is assigned to a release (`releaseAssignment.releaseId`) whose `branch` is recorded.
 2. **Otherwise the integration branch**: `releaseConfig.branches.integration` on the team board (default `develop`).
 
-In trunk mode (`releaseConfig.branches.mode = "trunk"`) the release branch *is* the integration branch. A hotfix release's branch (`hotfix/<version>`) is cut from the production branch, so items assigned to it are based on that. `kb-run`/`kb-pick` resolve this for you (`_kb_get_item_release_branch` in `kanban-helpers.sh`; an assigned item whose lookup errors aborts rather than guessing). Without a kanban item, use the integration branch. In this document, "develop" in examples means the default integration branch.
+In trunk mode (`releaseConfig.branches.mode = "trunk"`) the release branch *is* the integration branch. A hotfix release's branch (`hotfix/<version>`) is cut from the production branch, so items assigned to it are based on that. `kb-run`/`kb-pick` resolve this for you (internally; an assigned item whose lookup errors aborts rather than guessing). Without a kanban item, use the integration branch. In this document, "develop" in examples means the default integration branch.
 
-To see what an item resolves to: `python3 kanban-hooks/release_branches.py item-branch --board <board.json> --item <ITEM-ID>` (prints nothing when the item has no release branch yet) and `... branches --board <board.json>` for the branch roles.
+To print the base an item resolves to: `kb-pr-base <ITEM-ID>` (non-zero exit = stop, never guess `develop`). See `docs/git-workflow.md`.
 
 ### Worktree Creation
 

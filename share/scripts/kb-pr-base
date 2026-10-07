@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+# ============================================================================
+# kb-pr-base -- print the branch a PR for a kanban item must target (XACA-1449)
+# ============================================================================
+# Why this exists: docs/git-workflow.md used to tell you to source
+# kanban-helpers.sh and call its internal helpers. That file does not source
+# cleanly under bash, so the recipe only worked in zsh. This is a standalone
+# executable (bash shebang, no bash-4 features, runs under macOS /bin/bash 3.2)
+# that calls kanban-hooks/release_branches.py directly.
+#
+# Usage: kb-pr-base <ITEM-ID>       (a subitem id resolves via its parent)
+#        kb-pr-base -h | --help
+#
+# Contract:
+#   rc 0  exactly one line on stdout: the branch name.
+#   rc 2  usage error.
+#   rc 1  any other failure: message on stderr, NOTHING on stdout. There is no
+#         silent fallback to "develop" -- a wrong base is worse than no answer.
+#
+# Resolution: the item's release branch (release_branches.py item-branch) when
+# its release is assigned and has a recorded branch; otherwise the team's
+# releaseConfig.branches.integration (release_branches.py branches).
+# Board: KB_BOARD_FILE (if set and non-blank) wins; else the board is found from
+# the id prefix X<TEAM_CODE> (XACA -> ACA -> academy) via the team registry.
+# ============================================================================
+
+usage() {
+    cat <<'USAGE'
+Usage: kb-pr-base <ITEM-ID>
+       kb-pr-base -h | --help
+
+Print the branch a PR for kanban item <ITEM-ID> must target (one line, rc 0).
+A subitem id (e.g. XACA-1449-003) resolves through its parent item.
+
+Resolution:
+  1. item has a release assignment AND that release has a recorded branch
+     -> that branch (e.g. releases/2026.12.0)
+  2. otherwise -> releaseConfig.branches.integration for the item's team
+     (develop unless the team configured otherwise; trunk mode = the same branch)
+
+Any failure exits non-zero with a message on stderr and nothing on stdout:
+unknown item id, unresolvable team/board, missing python3 or release_branches.py,
+malformed releaseConfig. It never falls back to "develop" on its own.
+Exit codes: 0 ok, 1 error, 2 usage.
+
+Environment:
+  KB_BOARD_FILE   if set and non-blank, use this board JSON instead of resolving
+                  the board from the id prefix (scratch boards / test fixtures).
+
+Example:
+  base=$(kb-pr-base XACA-1449) || exit 1
+  gh pr create --base "$base" ...
+USAGE
+}
+
+die() { echo "kb-pr-base: $*" >&2; exit 1; }
+
+case "${1-}" in
+    -h|--help) usage; exit 0 ;;
+esac
+if [ "$#" -ne 1 ] || [ -z "$1" ]; then
+    usage >&2
+    exit 2
+fi
+case "$1" in
+    -*) usage >&2; exit 2 ;;
+esac
+ITEM_ID="$1"
+
+# Locate <repo>/kanban-hooks from this script's real path (follow symlinks
+# portably: no `readlink -f` on macOS bash 3.2).
+SELF="$0"
+n=0
+while [ -L "$SELF" ]; do
+    n=$((n + 1))
+    [ "$n" -gt 40 ] && die "symlink loop resolving $0"
+    link=$(readlink "$SELF") || die "cannot read symlink $SELF"
+    case "$link" in
+        /*) SELF="$link" ;;
+        *)  SELF="$(dirname "$SELF")/$link" ;;
+    esac
+done
+SELF_DIR=$(cd "$(dirname "$SELF")" 2>/dev/null && pwd) || die "cannot locate own directory"
+HOOKS_DIR="$SELF_DIR/../kanban-hooks"
+[ -d "$HOOKS_DIR" ] || HOOKS_DIR="$SELF_DIR/kanban-hooks"
+[ -d "$HOOKS_DIR" ] || die "cannot locate kanban-hooks/ next to $SELF_DIR"
+HOOKS_DIR=$(cd "$HOOKS_DIR" && pwd)
+RB="$HOOKS_DIR/release_branches.py"
+
+command -v python3 >/dev/null 2>&1 || die "python3 not found on PATH"
+[ -f "$RB" ] || die "missing $RB"
+
+# Board resolution: KB_BOARD_FILE override (trimmed) wins.
+BOARD=$(printf '%s' "${KB_BOARD_FILE-}" | python3 -c 'import sys; print(sys.stdin.read().strip())') \
+    || die "python3 failed while reading KB_BOARD_FILE"
+if [ -z "$BOARD" ]; then
+    BOARD=$(python3 - "$HOOKS_DIR" "$ITEM_ID" <<'PY'
+import sys
+hooks, item_id = sys.argv[1], sys.argv[2]
+sys.path.insert(0, hooks)
+prefix = item_id.split("-", 1)[0].upper()
+if not (len(prefix) > 1 and prefix.startswith("X")):
+    sys.exit("cannot derive a team from item id %r (expected X<TEAM_CODE>-NNNN)" % item_id)
+code = prefix[1:]
+try:
+    import aiteamforge_paths as paths
+    import aiteamforge_registry as reg
+    teams = paths.list_teams()
+except Exception as e:  # registry unreadable: report, never guess
+    sys.exit("cannot load team registry: %s" % e)
+found = None
+for t in teams:
+    try:
+        if reg.team_code(t) != code:
+            continue
+        kd = reg.kanban_dir(t)   # raises for board-less aliases (e.g. mainevent)
+    except Exception:
+        continue
+    found = (t, kd)
+    break
+if not found:
+    sys.exit("no team with a kanban board has team code %r (from item id %r)" % (code, item_id))
+print("%s/%s-board.json" % (found[1], found[0]))
+PY
+    ) || die "cannot resolve board for $ITEM_ID (see above)"
+fi
+[ -f "$BOARD" ] || die "board file not found: $BOARD"
+
+# Validate the branch-role config first: malformed releaseConfig.branches must
+# abort, never be guessed around. Stderr goes to a temp file so stdout stays clean.
+BR_ERR=$(mktemp "${TMPDIR:-/tmp}/kb-pr-base.XXXXXX") || die "cannot create temp file"
+trap 'rm "$BR_ERR" 2>/dev/null' EXIT
+BRANCHES_JSON=$(python3 "$RB" branches --board "$BOARD" 2>"$BR_ERR")
+rc=$?
+if [ "$rc" -ne 0 ]; then
+    echo "kb-pr-base: release_branches.py branches failed (rc=$rc) for $BOARD:" >&2
+    cat "$BR_ERR" >&2
+    exit 1
+fi
+
+# item-branch errors (rc 1) on an unknown item id, prints nothing for an item
+# with no assignment / dangling release / no recorded branch.
+ITEM_BRANCH=$(python3 "$RB" item-branch --board "$BOARD" --item "$ITEM_ID" 2>"$BR_ERR")
+rc=$?
+if [ "$rc" -ne 0 ]; then
+    echo "kb-pr-base: release_branches.py item-branch failed (rc=$rc) for $ITEM_ID:" >&2
+    cat "$BR_ERR" >&2
+    exit 1
+fi
+ITEM_BRANCH=$(printf '%s' "$ITEM_BRANCH" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+
+if [ -n "$ITEM_BRANCH" ]; then
+    printf '%s\n' "$ITEM_BRANCH"
+    exit 0
+fi
+
+INTEGRATION=$(printf '%s' "$BRANCHES_JSON" | python3 -c '
+import json, sys
+v = json.load(sys.stdin).get("integration")
+if not isinstance(v, str) or not v.strip():
+    sys.exit(1)
+print(v.strip())
+') || die "no integration branch in release_branches.py output for $BOARD"
+printf '%s\n' "$INTEGRATION"

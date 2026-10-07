@@ -3254,6 +3254,7 @@ kb-host-ready.sh
 kb-msg-provision
 kb-spacedock
 kb-pr-monitor
+kb-pr-base
 gh-bot-review.sh
 gh-bot-test.sh
 team-account-display.sh
@@ -3296,12 +3297,12 @@ update_runtime_helpers() {
   local updated=0
   local src name target
   # Sweep shipped helpers. kb-init-team, kb-api-key, kb-msg-provision,
-  # kb-spacedock (XACA-1071), kb-pr-monitor (XACA-1275) and kb-token-report
+  # kb-spacedock (XACA-1071), kb-pr-monitor (XACA-1275), kb-pr-base (XACA-1449) and kb-token-report
   # (XACA-1300) are
   # extensionless, so each is listed explicitly alongside the *.sh / *.py
   # globs (XACA-0395: same gap class as kb-init-team — the glob cannot match
   # an extensionless name; kb-msg-provision added under XACA-1078-004).
-  for src in "$scripts_source"/*.sh "$scripts_source"/*.py "$scripts_source"/kb-init-team "$scripts_source"/kb-api-key "$scripts_source"/kb-msg-provision "$scripts_source"/kb-spacedock "$scripts_source"/kb-pr-monitor "$scripts_source"/kb-token-report; do
+  for src in "$scripts_source"/*.sh "$scripts_source"/*.py "$scripts_source"/kb-init-team "$scripts_source"/kb-api-key "$scripts_source"/kb-msg-provision "$scripts_source"/kb-spacedock "$scripts_source"/kb-pr-monitor "$scripts_source"/kb-pr-base "$scripts_source"/kb-token-report; do
     [ -f "$src" ] || continue
     name="$(basename "$src")"
     target="${scripts_dest}/${name}"
