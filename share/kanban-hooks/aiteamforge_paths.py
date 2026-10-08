@@ -3504,7 +3504,19 @@ def get_team_repo_root(team: str, *, config: dict | None = None) -> Path:
     working_dir = get_team_working_dir(team, config=config)
     override = config["teams"][team].get("repo_dir")
     if override not in (None, ""):
+        # A malformed override must fail closed HERE: anything else would surface as a non-ValueError
+        # that callers treat as "unregistered" and route to the very fallback this resolver replaces.
+        if not isinstance(override, str):
+            raise ValueError(
+                f"Team '{team}': repo_dir must be a path string, got "
+                f"{type(override).__name__} — fix repo_dir in {get_config_path()}."
+            )
         repo = Path(override).expanduser()
+        if not repo.is_absolute():
+            raise ValueError(
+                f"Team '{team}': repo_dir {override!r} must be an absolute path "
+                f"(a relative one resolves against the caller's cwd) — fix it in {get_config_path()}."
+            )
         if not (repo / ".git").exists():
             raise ValueError(
                 f"Team '{team}': repo_dir {repo} is not a git work-tree root "

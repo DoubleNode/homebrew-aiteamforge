@@ -294,12 +294,19 @@ def cut_release_branch(release, board, repo_root, *, dry_run=False, run=subproce
 
 
 def team_repo_root(team, kanban_dir=None):
-    """Team git working dir (aiteamforge_paths registry), else the kanban dir's parent, else None."""
+    """Team git work-tree root, else the kanban dir's parent for an unregistered team, else None.
+
+    XACA-1477: same resolution as server._resolve_team_repo_root (aiteamforge_paths.get_team_repo_root
+    looks inside container-layout working dirs). A REGISTERED team whose repo cannot be resolved raises
+    ValueError with the reason (the CLI prints it and exits 1); it never reaches the kanban-parent fallback.
+    """
     try:
-        from aiteamforge_paths import get_team_working_dir  # noqa: PLC0415
-        root = Path(get_team_working_dir(team))
+        from aiteamforge_paths import get_team_repo_root  # noqa: PLC0415
+        root = Path(get_team_repo_root(team))
         if root.is_dir():
             return root
+    except ValueError:
+        raise
     except Exception:
         pass
     if kanban_dir and Path(kanban_dir).parent.is_dir():
