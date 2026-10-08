@@ -60,7 +60,7 @@ enable_usage() {
 Usage: aiteamforge ci enable --github-app-install-id <id> --repo <owner/repo> [--repo ...]
                              --agent-key-file <path> --telemetry-key-file <path>
                              [--server-url <https-url>] [--host <name>] [--with-macos]
-                             [--dry-run]
+                             [--no-pause-marker] [--dry-run]
        aiteamforge ci enable --confirm
        aiteamforge ci enable --help
 
@@ -81,6 +81,10 @@ are an error.
   --host <name>                 machine name registered in Fleet Monitor (default: this
                                 machine's short hostname, lower-cased)
   --with-macos                  also provision the macOS runner lane (default: Linux VM only)
+  --no-pause-marker             keep this host OUT of the agent pause marker: the pool agent is
+                                provisioned with sendPauseMarker=false (default: it sends the marker).
+                                Recorded as send_pause_marker=0 in the state file so `ci refresh`
+                                keeps the opt-out.
   --dry-run                     do every check and print the plan and the command, but write
                                 NOTHING (no state file)
   --confirm                     AFTER you ran the sudo command: verify the host is provisioned
@@ -187,6 +191,23 @@ _load_pv_lib() {
   . "$l" || { _err "cannot load $l"; return $RC_ENV; }
 }
 
+# XACA-1457-010: what the host's pool agent is configured to do about the pause marker. Reads the world-readable
+# agent.json provision-host.sh wrote; prints 1 (sendPauseMarker true) or 0 (false). rc 1 = cannot be told
+# (file absent/unreadable/not JSON, key missing or not a boolean): the caller must not guess.
+_ci_host_pause_marker() {
+  local f="$CI_AGENT_CFG_DIR/agent.json" v
+  [ -r "$f" ] || return 1
+  v="$(/usr/bin/python3 -I -c 'import json, sys
+try:
+    with open(sys.argv[1]) as fh:
+        d = json.load(fh)
+    m = d.get("sendPauseMarker") if isinstance(d, dict) else None
+except Exception:
+    m = None
+print("1" if m is True else "0" if m is False else "")' "$f" 2>/dev/null)" || return 1
+  case "$v" in 0|1) printf '%s' "$v" ;; *) return 1 ;; esac
+}
+
 # Rewrite the state file atomically: each `key=value` argument REPLACES the key's line(s) in place, or is
 # appended when the key is absent; every other line (unknown keys, comments) is kept. Mode 600.
 _ci_state_set() {
@@ -242,7 +263,7 @@ cmd_enable() {
 
   # ---- 2. flags
   local install_id="" repos_raw="" agent_key="" tele_key="" server_url="" host="" with_macos=0
-  local dry=0 confirm=0
+  local dry=0 confirm=0 spm=1
   while [ $# -gt 0 ]; do
     case "$1" in
       --github-app-install-id) [ $# -ge 2 ] || { _err "$1 needs a value"; return $RC_USAGE; }; install_id="$2"; shift 2 ;;
@@ -252,6 +273,7 @@ cmd_enable() {
       --server-url)            [ $# -ge 2 ] || { _err "$1 needs a URL"; return $RC_USAGE; }; server_url="$2"; shift 2 ;;
       --host)                  [ $# -ge 2 ] || { _err "$1 needs a name"; return $RC_USAGE; }; host="$2"; shift 2 ;;
       --with-macos) with_macos=1; shift ;;
+      --no-pause-marker) spm=0; shift ;;
       --dry-run)    dry=1; shift ;;
       --confirm)    confirm=1; shift ;;
       *) _err "unknown option: $1"; enable_usage >&2; return $RC_USAGE ;;
@@ -264,7 +286,7 @@ cmd_enable() {
   fi
 
   if [ "$confirm" = 1 ]; then
-    [ -z "$install_id$repos_raw$agent_key$tele_key$server_url$host" ] && [ "$with_macos" = 0 ] && [ "$dry" = 0 ] \
+    [ -z "$install_id$repos_raw$agent_key$tele_key$server_url$host" ] && [ "$with_macos" = 0 ] && [ "$dry" = 0 ] && [ "$spm" = 1 ] \
       || { _err "--confirm takes no other options"; return $RC_USAGE; }
     cmd_enable_confirm
     return $?
@@ -378,6 +400,7 @@ cmd_enable() {
   [ "$with_macos" = 1 ] || pargs=("${pargs[@]}" --no-macos)
   pargs=("${pargs[@]}" --with-agent --agent-key-file "$agent_key" --telemetry-key-file "$tele_key")
   [ -z "$server_url" ] || pargs=("${pargs[@]}" --server-url "$server_url")
+  [ "$spm" = 1 ] || pargs=("${pargs[@]}" --no-pause-marker)
   local sudo_line="sudo /bin/bash -c 'bash \"\$1\" && shift && exec bash \"\$@\"' _ $(printf '%q' "$create_sh") $(printf '%q' "$prov_sh")"
   local p
   for p in "${pargs[@]}"; do sudo_line="$sudo_line $(printf '%q' "$p")"; done
@@ -403,6 +426,7 @@ cmd_enable() {
       echo "vm_memory_gib=$CI_HR_VM_GIB"
       echo "linux_slots=$CI_HR_LINUX_SLOTS"
       echo "with_macos=$with_macos"
+      echo "send_pause_marker=$spm"
       echo "github_app_install_id=$install_id"
       echo "allowlist=$allow"
       echo "server_url=$server_url"
@@ -473,7 +497,11 @@ cmd_enable_confirm() {
   else
     _warn "provision-version library missing; provision_version left empty"
   fi
-  _ci_state_set state=enabled updated_at="$ts" enabled_at="$ts" provision_version="$pv" || return $?
+  # XACA-1457-010: record what the host IS configured to do, not what the flag said. Unknown = leave as recorded.
+  local hspm="" spm_pair=()
+  if hspm="$(_ci_host_pause_marker)"; then spm_pair=("send_pause_marker=$hspm")
+  else echo "NOTE: cannot read sendPauseMarker from ${CI_AGENT_CFG_DIR}/agent.json; send_pause_marker left as recorded." >&2; fi
+  _ci_state_set state=enabled updated_at="$ts" enabled_at="$ts" provision_version="$pv" ${spm_pair[@]+"${spm_pair[@]}"} || return $?
   echo "CI enabled on ${host} (state=enabled, ${ts}${pv:+, provision version ${pv}})."
   return $RC_OK
 }
@@ -793,7 +821,7 @@ cmd_disable_confirm() { # host rm_user healthy st force dry
 
 refresh_usage() {
   cat <<'EOF'
-Usage: aiteamforge ci refresh [--force] [--allow-busy] [--dry-run]
+Usage: aiteamforge ci refresh [--force] [--allow-busy] [--no-pause-marker | --pause-marker] [--dry-run]
        aiteamforge ci refresh --confirm [--dry-run]
        aiteamforge ci refresh --help
 
@@ -809,10 +837,16 @@ records the new provision_version in the state file.
   --force        print the sudo command even when the host reads as in sync (re-apply anyway)
   --allow-busy   do not pass --refuse-if-busy: by default the root script exits 3, changing nothing, while a
                  pool job is starting/busy/cleaning (or its slot file cannot be read)
+  --no-pause-marker | --pause-marker
+                 one-run override of the recorded pause-marker choice (send_pause_marker in the state file,
+                 set by `ci enable --no-pause-marker`; absent = on). Implies --force (the line is printed even
+                 when the host reads as in sync). It changes the printed line only; the
+                 state file is updated by --confirm, from what the host's agent.json actually says.
+                 The two are mutually exclusive.
   --dry-run      do every check and print the plan and the commands; with --confirm, show what would be
                  recorded. Writes nothing (refresh itself writes nothing before --confirm)
   --confirm      AFTER you ran the sudo command: verify the host now matches the keg and record
-                 provision_version. rc 20 (state untouched) while it does not, or cannot be verified
+                 provision_version (and send_pause_marker, read from the host's agent.json). rc 20 (state untouched) while it does not, or cannot be verified
 
 Refuses (rc 17) from dormant, enabled-pending and disable-pending, and on a corrupt state file. Refuses on
 the dev-team source machine / a git work-tree exactly like `ci enable` (rc 10/11).
@@ -855,9 +889,13 @@ cmd_refresh() {
   # ---- 1. GUARD FIRST: the printed sudo line would act on THIS machine
   _run_guard || return $?
 
-  local dry=0 confirm=0 force=0 busy_ok=0
+  local dry=0 confirm=0 force=0 busy_ok=0 spm_ovr=""
   while [ $# -gt 0 ]; do
     case "$1" in
+      --no-pause-marker|--pause-marker)
+        local want=0; [ "$1" = --pause-marker ] && want=1
+        if [ -n "$spm_ovr" ] && [ "$spm_ovr" != "$want" ]; then _err "--pause-marker and --no-pause-marker are mutually exclusive"; return $RC_USAGE; fi
+        spm_ovr="$want"; shift ;;
       --dry-run)    dry=1; shift ;;
       --confirm)    confirm=1; shift ;;
       --force)      force=1; shift ;;
@@ -865,9 +903,12 @@ cmd_refresh() {
       *) _err "unknown option: $1"; refresh_usage >&2; return $RC_USAGE ;;
     esac
   done
-  if [ "$confirm" = 1 ] && { [ "$force" = 1 ] || [ "$busy_ok" = 1 ]; }; then
+  if [ "$confirm" = 1 ] && { [ "$force" = 1 ] || [ "$busy_ok" = 1 ] || [ -n "$spm_ovr" ]; }; then
     _err "--confirm takes only --dry-run"; return $RC_USAGE
   fi
+  # XACA-1457-010: an override changes agent.json, which the skew check does not compare, so an in-sync host
+  # would otherwise answer "Nothing to do" and silently drop it. Asking to flip it IS the reason to re-apply.
+  [ -z "$spm_ovr" ] || force=1
   if [ ! -f "$AITEAMFORGE_DIR/.aiteamforge-config" ]; then
     _err "AITeamForge is not configured ($AITEAMFORGE_DIR/.aiteamforge-config missing). Run: aiteamforge setup"
     return $RC_ENV
@@ -882,7 +923,7 @@ cmd_refresh() {
     _err "state file $CI_STATE_FILE is unreadable or has an unknown schema/state/host. Not guessing."
     return $RC_STATE
   fi
-  local st host vcpu vmem slots wmac surl
+  local st host vcpu vmem slots wmac surl spm
   st="$(_state_get state)"; host="$(_state_get host)"
   case "$st" in
     enabled) ;;
@@ -900,6 +941,12 @@ cmd_refresh() {
   _is_uint "$slots" && [ "$slots" -ge 1 ] || { _err "state file: linux_slots='${slots}' is not a positive integer"; bad=1; }
   case "$wmac" in 0|1) ;; *) _err "state file: with_macos='${wmac}' is not 0 or 1"; bad=1 ;; esac
   if [ -n "$surl" ] && ! _valid_url "$surl"; then _err "state file: server_url is not an acceptable https URL"; bad=1; fi
+  # send_pause_marker (XACA-1457-010): ABSENT = 1 (older state files); present must be exactly 0 or 1.
+  spm=1
+  if grep -q '^send_pause_marker=' "$CI_STATE_FILE" 2>/dev/null; then
+    spm="$(_state_get send_pause_marker)"
+    case "$spm" in 0|1) ;; *) _err "state file: send_pause_marker='${spm}' is not 0 or 1"; bad=1 ;; esac
+  fi
   [ "$bad" = 0 ] || { _err "Not guessing the flags. Fix the state file, or: aiteamforge ci disable && aiteamforge ci enable ..."; return $RC_STATE; }
 
   # ---- 3. skew (read-only)
@@ -934,6 +981,8 @@ cmd_refresh() {
   pargs=("${pargs[@]}" --with-agent)
   [ -z "$surl" ] || pargs=("${pargs[@]}" --server-url "$surl")
   [ "$busy_ok" = 1 ] || pargs=("${pargs[@]}" --refuse-if-busy)
+  [ -z "$spm_ovr" ] || spm="$spm_ovr"
+  [ "$spm" = 1 ] || pargs=("${pargs[@]}" --no-pause-marker)
   local sudo_line="sudo /bin/bash -c 'bash \"\$1\" && shift && exec bash \"\$@\"' _ $(printf '%q' "$create_sh") $(printf '%q' "$prov_sh")"
   local dry_line="bash $(printf '%q' "$prov_sh")" p
   for p in "${pargs[@]}"; do
@@ -986,7 +1035,10 @@ cmd_refresh_confirm() { # host skew_rc dry
     return $RC_OK
   fi
   ts="$(_now)"
-  _ci_state_set provision_version="$pv" updated_at="$ts" provision_refreshed_at="$ts" || return $?
+  local hspm="" spm_pair=()
+  if hspm="$(_ci_host_pause_marker)"; then spm_pair=("send_pause_marker=$hspm")
+  else echo "NOTE: cannot read sendPauseMarker from ${CI_AGENT_CFG_DIR}/agent.json; send_pause_marker left as recorded." >&2; fi
+  _ci_state_set provision_version="$pv" updated_at="$ts" provision_refreshed_at="$ts" ${spm_pair[@]+"${spm_pair[@]}"} || return $?
   echo "Host ${host} matches this release; recorded provision_version=${pv} (${ts})."
   return $RC_OK
 }
