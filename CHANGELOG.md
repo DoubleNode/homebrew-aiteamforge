@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+
+## [0.20.32] - 2026-10-08
 - **XACA-1461** (Added): `aiteamforge ci enable --macos-only` (macOS lane without the Linux Lima VM). `libexec/commands/aiteamforge-ci.sh`: `--macos-only` (implies `--with-macos`; rc 2 with VM sizing flags), skips the limactl and guest-size checks, adds the free-disk floor (new rc 22 below it; unreadable `df` is rc 16), records `lane=linux|both|macos` in the state file (additive, schema 1, absent = legacy), prints a sudo line with `--no-linux`; `ci disable` and `ci refresh` pass `--no-linux` for a `lane=macos` host; `ci status` prints a `Lane:` line. `libexec/commands/aiteamforge-doctor.sh`: `ci-capability` marks `(macOS-only lane)`. `share/scripts/ci-runner/{provision-host.sh,teardown-host.sh,lib/ci-headroom.sh,lib/ci-status.sh,client/ci-runner-reporter.sh}` re-mirrored (`--no-linux`, `ci_headroom_disk`, `CI_STATUS_LANE`). Tap-only edits to `aiteamforge-ci.sh` and the doctor.
 - **XACA-1444-022** (Fixed, PR #1101 round 2): `fleet-monitor/server/` re-mirrored. The CI pool Pause dialog now releases the background `inert`/`aria-hidden` on every teardown path (refresh failure, 404, bad body, render error, container cleared), restoring any pre-existing `aria-hidden`, via one release function, an exported `LCARSCIPool.teardown()` called by `lcars-cicd.js`, and a MutationObserver backstop. Verbatim copies of canonical.
 - **XACA-1444-012..020** (Fixed, PR #1101 round 1): `fleet-monitor/server/` re-mirrored. `queue[]` items gain `noEligibleMachine` (same live-mode + 120 s gate as `noCapacity`), so the banner no longer claims "no machine" in the 2026-10-07 age-only case; new additive top-level `running[]` lists jobs picked up by persistent runners. `resuming` now means only a host-reported resume marker; an unpaused machine with a stale poll / no online slots / stuck marker derives `unknown` with a `stateReason`, and always offers Pause. The PUT strand guard counts machines whose derived state is `enabled`. CI pool card refresh keeps keyboard focus on every control; the Pause dialog is a real modal overlay; the strand copy no longer asserts billing state. New `tests/xaca-1444-pr1101-r1.test.js`. Verbatim copies of canonical.
@@ -7905,7 +7907,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.31...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.32...HEAD
+[0.20.32]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.31...v0.20.32
 [0.20.31]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.30...v0.20.31
 [0.20.30]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.29...v0.20.30
 [0.20.29]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.28...v0.20.29
