@@ -34,6 +34,7 @@
     var _busy = false;          // an attach/detach request is in flight
     var _lastData = null;       // last payload handed to render()
     var _errors = {};           // accessory id -> last server error text
+    var _sel = {};              // accessory id -> machine id the operator picked
 
     function esc(v) {
         if (v === null || v === undefined) return '';
@@ -67,16 +68,26 @@
         return { cls: 'unknown', label: 'UNKNOWN' };
     }
 
+    function fmtTime(ts) {
+        var d = new Date(ts);
+        if (isNaN(d.getTime())) return DASH;
+        var p = function(n) { return String(n).padStart(2, '0'); };
+        return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+    }
+
     function readingHtml(acc) {
         var r = acc && acc.last_reading;
         if (!r || typeof r !== 'object') {
             return '<div class="accessory-reading"><span class="accessory-metric"><span class="accessory-metric-label">BATTERY</span><span class="accessory-metric-value">' + DASH + '</span></span></div>';
         }
         var pct = isNum(r.percent) ? Math.round(r.percent) + '%' : DASH;
+        var charging = (r.charging === true && isNum(r.percent)) ? ' <span class="accessory-charging">CHARGING</span>' : '';
+        var observed = r.observedAt ? fmtTime(r.observedAt) : DASH;
         var mins = isNum(r.minutes_remaining) ? '~' + Math.round(r.minutes_remaining) + ' MIN' : DASH;
         return '<div class="accessory-reading">' +
-            '<span class="accessory-metric"><span class="accessory-metric-label">BATTERY</span><span class="accessory-metric-value">' + esc(pct) + '</span></span>' +
+            '<span class="accessory-metric"><span class="accessory-metric-label">BATTERY</span><span class="accessory-metric-value">' + esc(pct) + charging + '</span></span>' +
             '<span class="accessory-metric"><span class="accessory-metric-label">RUNTIME</span><span class="accessory-metric-value">' + esc(mins) + '</span></span>' +
+            '<span class="accessory-metric"><span class="accessory-metric-label">LAST OBSERVED</span><span class="accessory-metric-value">' + esc(observed) + '</span></span>' +
             '</div>';
     }
 
@@ -98,20 +109,20 @@
         var attachedHtml = attached.length ? attached.map(function(mid) {
             var label = idx.byId[mid] ? machineName(idx.byId[mid]) : mid;
             return '<li class="accessory-attached-item"><span class="accessory-attached-name">' + esc(label) + '</span>' +
-                '<button type="button" class="btn-lcars btn-lcars-secondary accessory-detach-btn" data-accessory-id="' + esc(id) +
+                '<button type="button" class="btn-lcars btn-lcars-danger accessory-detach-btn" data-accessory-id="' + esc(id) +
                 '" data-machine-id="' + esc(mid) + '" aria-label="Detach ' + esc(label) + ' from ' + esc(name) + '">DETACH</button></li>';
         }).join('') : '<li class="accessory-attached-item accessory-none">' + DASH + ' none attached</li>';
 
         var options = idx.list.filter(function(m) {
             return m && m.machine_id && attached.indexOf(m.machine_id) === -1;
         }).map(function(m) {
-            return '<option value="' + esc(m.machine_id) + '">' + esc(machineName(m)) + '</option>';
+            return '<option value="' + esc(m.machine_id) + '"' + (_sel[id] === m.machine_id ? ' selected' : '') + '>' + esc(machineName(m)) + '</option>';
         }).join('');
         var attachHtml = options ?
             '<div class="accessory-attach-row">' +
-            '<select class="accessory-attach-select" data-accessory-id="' + esc(id) + '" aria-label="Machine to attach to ' + esc(name) + '">' +
+            '<select class="lcars-select accessory-attach-select" data-accessory-id="' + esc(id) + '" aria-label="Machine to attach to ' + esc(name) + '">' +
             '<option value="">SELECT MACHINE...</option>' + options + '</select>' +
-            '<button type="button" class="btn-lcars btn-lcars-primary accessory-attach-btn" data-accessory-id="' + esc(id) + '">ATTACH</button>' +
+            '<button type="button" class="btn-lcars btn-lcars-primary accessory-attach-btn" data-accessory-id="' + esc(id) + '" aria-label="Attach selected machine to ' + esc(name) + '">ATTACH</button>' +
             '</div>' : '';
 
         var err = _errors[id];
@@ -120,6 +131,7 @@
         return '<div class="accessory-card ' + info.cls + '" data-accessory-id="' + esc(id) + '">' +
             '<div class="accessory-header">' +
             '<span class="accessory-name">' + esc(name) + '</span>' +
+            '<span class="accessory-type">' + esc(String(acc.type || 'ups').toUpperCase()) + '</span>' +
             '<span class="accessory-state accessory-state-' + info.cls + '">' + info.label + '</span>' +
             '</div>' +
             readingHtml(acc) +
@@ -129,16 +141,27 @@
             '</div>';
     }
 
+    // Remember each card's picked machine before a rebuild; restored only if the
+    // machine is still offered (cardHtml marks it selected).
+    function captureSelections(container) {
+        var sels = container.querySelectorAll('.accessory-attach-select');
+        for (var i = 0; i < sels.length; i++) {
+            var accId = sels[i].getAttribute('data-accessory-id');
+            if (!accId) continue;
+            if (sels[i].value) _sel[accId] = sels[i].value; else delete _sel[accId];
+        }
+    }
+
     function render(data, container) {
         try {
             container = container || document.getElementById(CONTAINER_ID);
             if (!container) return;
             _lastData = data;
-            // Don't rebuild under an open dropdown / in-flight write: the poll
-            // would close the <select> or drop the pending row state.
+            // Don't rebuild under an in-flight write (drops the pending row state).
+            // An open dropdown no longer blocks the refresh: the operator's pick is
+            // captured below and restored, so UPS readings stay live.
             if (_busy) return;
-            var ae = document.activeElement;
-            if (ae && container.contains(ae) && ae.tagName === 'SELECT') return;
+            captureSelections(container);
 
             var list = (data && Array.isArray(data.accessories)) ? data.accessories : [];
             if (!list.length) {
@@ -190,20 +213,32 @@
         render(_lastData);
     }
 
+    // In-flight guard: a double-click must not send the write twice (the second
+    // would 404/409 and paint a bogus error over a successful first write).
+    function lockControls() {
+        var c = document.getElementById(CONTAINER_ID);
+        if (!c) return;
+        var b = c.querySelectorAll('.accessory-detach-btn, .accessory-attach-btn, .accessory-attach-select');
+        for (var i = 0; i < b.length; i++) b[i].disabled = true;
+    }
+
     function onClick(e) {
         var t = e.target;
-        if (!t || !t.closest) return;
+        if (!t || !t.closest || _busy) return;
         var detach = t.closest('.accessory-detach-btn');
         var attach = t.closest('.accessory-attach-btn');
         if (detach) {
-            mutate('DELETE', detach.getAttribute('data-accessory-id'), detach.getAttribute('data-machine-id'))
-                .then(refreshAfterWrite);
+            var p = mutate('DELETE', detach.getAttribute('data-accessory-id'), detach.getAttribute('data-machine-id'));
+            lockControls();
+            p.then(refreshAfterWrite);
         } else if (attach) {
             var card = attach.closest('.accessory-card');
             var sel = card && card.querySelector('.accessory-attach-select');
             var accId = attach.getAttribute('data-accessory-id');
             if (!sel || !sel.value) return;
-            mutate('PUT', accId, sel.value).then(refreshAfterWrite);
+            var p2 = mutate('PUT', accId, sel.value);
+            lockControls();
+            p2.then(refreshAfterWrite);
         }
     }
 

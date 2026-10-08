@@ -292,7 +292,9 @@ test('UI consumers of machine.system never reference system.power (no leak into 
         // contract (XACA-1392, NOT machine.system.power) is deliberately
         // rendered as the ON UPS BATTERY label. Strip exactly those names so
         // any OTHER mention of power -- notably system.power -- still fails.
-        const stripped = src.replace(/power_reason|power_state|powerEl|[a-z-]*-power-label/g, '');
+        // (?<!system\??\.) refuses to strip a name reached through system./system?. so a future
+        // machine.system.power_state still trips the guard.
+        const stripped = src.replace(/(?<!system\??\.)(?:power_reason|power_state)|powerEl|[a-z-]*-power-label/g, '');
         assert.equal(/power/i.test(stripped), false, `${rel} mentions "power"`);
     }
     const sandbox = { window: {} };
@@ -310,4 +312,11 @@ test('projection round trip: hostile JSON (proto name, null percent) cannot alte
     const m = await roundTrip(JSON.parse(body));
     assert.deepEqual(m.system.power, { source: 'ups', ups: null });
     assert.equal({}.polluted, undefined);
+});
+
+test('power guard strip refuses system.power_state / system?.power_state (self-test)', () => {
+    const strip = (src) => src.replace(/(?<!system\??\.)(?:power_reason|power_state)|powerEl|[a-z-]*-power-label/g, '');
+    assert.equal(/power/i.test(strip('const x = machine.power_state; machine.power_reason;')), false);
+    assert.equal(/power/i.test(strip('const x = machine.system.power_state;')), true);
+    assert.equal(/power/i.test(strip('const x = machine.system?.power_state;')), true);
 });

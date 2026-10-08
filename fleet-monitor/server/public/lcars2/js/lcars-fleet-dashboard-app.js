@@ -1279,12 +1279,32 @@
     // No server string is ever put in an attribute (this file's XACA-0416-004
     // invariant; escapeAttr() stays undefined here): controls carry NUMERIC
     // indexes into `view`, and the click handler resolves the real ids from it.
-    const accessoriesUi = { busy: {}, errors: {}, lastSig: null, view: { accessories: [], machines: [] } };
+    // `sel` remembers the operator's picked machine per accessory id (captured from
+    // the live DOM just before each rebuild, restored only if still a valid choice).
+    const accessoriesUi = { busy: {}, errors: {}, sel: {}, lastSig: null, view: { accessories: [], machines: [] } };
+
+    // Same resolution order as the machine cards / v1: nickname -> hostname -> id.
+    function accessoryMachineLabel(m) {
+        return (m && (m.nickname || m.hostname || m.machine_id)) || '';
+    }
+
+    // Before a rebuild, read each select's current choice via the OLD view (the
+    // DOM and the view are always from the same render) so it survives the redraw.
+    function captureAccessorySelections(container) {
+        const old = accessoriesUi.view;
+        container.querySelectorAll('select.accessory-attach-select').forEach(function(sel) {
+            const acc = old.accessories[Number(sel.getAttribute('data-acc-idx'))];
+            if (!acc || !acc.id) return;
+            const m = sel.value === '' ? null : old.machines[Number(sel.value)];
+            if (m && m.machine_id) accessoriesUi.sel[acc.id] = m.machine_id;
+            else delete accessoriesUi.sel[acc.id];
+        });
+    }
 
     function accessoryMachineName(machines, id) {
         for (let i = 0; i < machines.length; i++) {
             if (machines[i] && machines[i].machine_id === id) {
-                return machines[i].display_name || machines[i].hostname || id;
+                return accessoryMachineLabel(machines[i]) || id;
             }
         }
         return id;
@@ -1329,12 +1349,13 @@
         let options = '';
         machines.forEach(function(m, mi) {
             if (!m || !m.machine_id || attached.indexOf(m.machine_id) !== -1) return;
-            options += '<option value="' + mi + '">' +
-                escapeHtml(m.display_name || m.hostname || m.machine_id) + '</option>';
+            options += '<option value="' + mi + '"' +
+                (accessoriesUi.sel[acc.id] === m.machine_id ? ' selected' : '') + '>' +
+                escapeHtml(accessoryMachineLabel(m)) + '</option>';
         });
         const attach = options
             ? '<div class="accessory-attach"><select class="accessory-attach-select" data-acc-idx="' + accIdx +
-              '"' + dis + '>' + options + '</select>' +
+              '"' + dis + '><option value="">SELECT MACHINE...</option>' + options + '</select>' +
               '<button type="button" class="btn-lcars btn-lcars-primary accessory-attach-btn" data-acc-idx="' +
               accIdx + '"' + dis + '>ATTACH</button></div>'
             : '';
@@ -1352,6 +1373,25 @@
             '</ul>' + attach + errHtml + '</div></div>';
     }
 
+    // Accessible names (WCAG 4.1.2 / 2.4.6) are set with setAttribute AFTER the
+    // markup is built, so server strings (accessory / machine names) never pass
+    // through an attribute in an HTML string. Same wording as v1.
+    function labelAccessoryControls(container, accessories, machines) {
+        container.querySelectorAll('[data-acc-idx]').forEach(function(el) {
+            const acc = accessories[Number(el.getAttribute('data-acc-idx'))];
+            if (!acc) return;
+            const name = acc.display_name || acc.name || acc.id || 'UPS';
+            if (el.classList.contains('accessory-attach-select')) {
+                el.setAttribute('aria-label', 'Machine to attach to ' + name);
+            } else if (el.classList.contains('accessory-attach-btn')) {
+                el.setAttribute('aria-label', 'Attach selected machine to ' + name);
+            } else if (el.classList.contains('accessory-detach')) {
+                const mid = (acc.attached_machine_ids || [])[Number(el.getAttribute('data-attached-idx'))];
+                el.setAttribute('aria-label', 'Detach ' + accessoryMachineName(machines, mid) + ' from ' + name);
+            }
+        });
+    }
+
     function renderAccessories() {
         const container = document.getElementById('accessories-list');
         if (!container) return;
@@ -1361,10 +1401,11 @@
         // Don't rebuild under the operator's hands: the 30s poll would reset an
         // open <select> or drop focus mid-request. Re-render only on change.
         const sig = JSON.stringify([accessories, machines.map(function(m) {
-            return m && [m.machine_id, m.display_name, m.hostname];
+            return m && [m.machine_id, m.nickname, m.hostname];
         }), accessoriesUi.busy, accessoriesUi.errors]);
         if (sig === accessoriesUi.lastSig) return;
         accessoriesUi.lastSig = sig;
+        captureAccessorySelections(container);
 
         if (!accessories.length) {
             accessoriesUi.view = { accessories: [], machines: machines };
@@ -1375,6 +1416,7 @@
         container.innerHTML = accessories.map(function(acc, i) {
             return acc && acc.id ? buildAccessoryCardHtml(acc, i, machines) : '';
         }).join('');
+        labelAccessoryControls(container, accessories, machines);
     }
 
     async function accessoryMutate(accId, machineId, method) {
@@ -1416,7 +1458,9 @@
                 if (mid) accessoryMutate(acc.id, mid, 'DELETE');
             } else if (btn.classList.contains('accessory-attach-btn')) {
                 const sel = btn.parentNode.querySelector('select');
-                const m = sel ? view.machines[Number(sel.value)] : null;
+                // '' (the placeholder) is refused; a real value indexes the machines
+                // array captured in the SAME render as this select.
+                const m = sel && sel.value !== '' ? view.machines[Number(sel.value)] : null;
                 if (m && m.machine_id) accessoryMutate(acc.id, m.machine_id, 'PUT');
             }
         });

@@ -2816,10 +2816,12 @@
             if (typeof r.minutes_remaining === 'number' && isFinite(r.minutes_remaining)) parts.push('~' + Math.round(r.minutes_remaining) + ' MIN');
             return {
                 cls: 'on-battery',
-                labelHtml: '<span class="machine-power-label" role="status">' + escapeHtml(parts.join(' \u00b7 ')) + '</span>'
+                labelHtml: '<span class="machine-power-label">' + escapeHtml(parts.join(' \u00b7 ')) + '</span>'
             };
         }
-        const cls = (raw === 'online' || raw === 'offline' || raw === 'warning') ? raw : (machine.status || 'offline');
+        // Allowlist both steps: no server string can become a class name.
+        const okCls = function(v) { return (v === 'online' || v === 'offline' || v === 'warning') ? v : null; };
+        const cls = okCls(raw) || okCls(machine.status) || 'offline';
         return { cls: cls, labelHtml: '' };
     }
 

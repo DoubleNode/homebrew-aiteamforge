@@ -65,7 +65,7 @@ test('on_battery full power_reason: class, dot and exact label', () => {
     assert.equal(row.querySelector('.status-indicator').className, 'status-indicator on-battery');
     const label = row.querySelector('.status-row-power-label');
     assert.equal(label.textContent, 'ON UPS BATTERY · 85% · ~40 MIN');
-    assert.equal(label.getAttribute('role'), 'status');
+    assert.equal(label.getAttribute('role'), null, 'no live region: cards rebuild every poll');
     assert.ok(!/\bwarning\b/.test(row.className));
 });
 

@@ -533,6 +533,12 @@ body {
    own colour and read as blank space rather than a button (XACA-0963 follow-up).
    Tan was freed when SETTINGS moved to the utility bar. */
 .sidebar-button[data-section="analytics"] { background: var(--lcars-tan); }
+/* CI/CD (data-section="cicd", added XACA-1388) had NO background rule, so it painted
+   the sidebar frame's own colour and read as blank space rather than a button
+   (XACA-1474). NOT blue: lcars-fleet-theme.css paints the sidebar frame with
+   --fleet-body-primary (= --lcars-blue), so a blue button is just as invisible.
+   Teal is used by neither the frame nor any other sidebar button. */
+.sidebar-button[data-section="cicd"] { background: var(--lcars-teal); }
 .sidebar-button[data-section="settings"] {
     background: var(--lcars-tan);
 }
@@ -564,6 +570,17 @@ body {
 .sidebar-button[data-section="analytics"].active {
     background: var(--lcars-black);
     color: var(--lcars-tan);
+}
+.sidebar-button[data-section="cicd"].active {
+    background: var(--lcars-black);
+    color: var(--lcars-teal);
+}
+/* ACCESSORIES (XACA-1393) needs its own colour for the same XACA-1474 reason. Lavender is used
+   by neither the frame (blue) nor any other button; yellow/red/green are status colours here. */
+.sidebar-button[data-section="accessories"] { background: var(--lcars-lavender); }
+.sidebar-button[data-section="accessories"].active {
+    background: var(--lcars-black);
+    color: var(--lcars-lavender);
 }
 .sidebar-button[data-section="settings"].active {
     background: var(--lcars-black);

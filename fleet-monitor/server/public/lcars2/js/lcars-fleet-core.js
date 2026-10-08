@@ -1230,7 +1230,9 @@ window.LCARS_CORE = window.LCARS_CORE || {};
                 if (typeof r.minutes_remaining === 'number' && isFinite(r.minutes_remaining)) parts.push('~' + Math.round(r.minutes_remaining) + ' MIN');
                 return { cls: 'on-battery', label: parts.join(' \u00b7 ') };
             }
-            const cls = (raw === 'online' || raw === 'offline' || raw === 'warning') ? raw : (machine.status || 'offline');
+            // Allowlist both steps: no server string can become a class name.
+            const okCls = function(v) { return (v === 'online' || v === 'offline' || v === 'warning') ? v : null; };
+            const cls = okCls(raw) || okCls(machine.status) || 'offline';
             return { cls: cls, label: '' };
         },
 
@@ -1369,7 +1371,6 @@ window.LCARS_CORE = window.LCARS_CORE || {};
             if (displayStatus.label) {
                 const powerEl = document.createElement('span');
                 powerEl.className = 'status-row-power-label';
-                powerEl.setAttribute('role', 'status');
                 powerEl.textContent = displayStatus.label;
                 item.insertBefore(powerEl, item.lastElementChild);
             }

@@ -1129,6 +1129,13 @@ body {
     background: var(--lcars-black);
     color: var(--lcars-amber);
 }
+/* ACCESSORIES (XACA-1393): own colour, else it paints as blank sidebar (the XACA-1474 defect).
+   Lavender matches v1 and is not a status colour. */
+.sidebar-button[data-section="accessories"] { background: var(--lcars-lavender); }
+.sidebar-button[data-section="accessories"].active {
+    background: var(--lcars-black);
+    color: var(--lcars-lavender);
+}
 
 /* ---------------------------------------------------------------------------
    BUTTONS (btn-lcars) — shared with engines modals
