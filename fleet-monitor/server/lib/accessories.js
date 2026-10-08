@@ -248,7 +248,9 @@ function createRegistry(opts) {
      *  - The data-link host is auto-attached ONLY on creation.
      *  - lastReading is refreshed in memory every report; it is persisted lazily
      *    (dirty flag, flushIfDirty on the server's save interval) so a 60 s
-     *    heartbeat does not become a 60 s disk write. Create / rename flush now.
+     *    heartbeat does not become a 60 s disk write. Creation, an upsId change,
+     *    attach/detach/nickname and derive() state transitions flush immediately;
+     *    reads (derive with no transition) never write.
      *
      * Returns the accessory id, or null when nothing was upserted.
      */
@@ -345,12 +347,29 @@ function createRegistry(opts) {
     // ------------------------------------------------- 004 derived state
 
     /**
-     * Accessory state from its data-link host's CURRENT machine record.
+     * Accessory state from its data-link host's LATEST report (XACA-1392-012).
      *
      * `machine.status` is the value updateMachineStatuses() already set from
      * WARNING_THRESHOLD_MS / OFFLINE_THRESHOLD_MS -- no new threshold is invented
      * here. Anything but 'online' (missing, warning, offline) is stale => unknown.
-     * Only source 'ups' => on_battery and 'ac' => ac; absent power or any other
+     *
+     * The host's `system.power` is replaced wholesale by every POST /api/status, so
+     * the stored record IS the latest report; presence is read from it directly and
+     * nothing extra is tracked or persisted. The report only counts when it still
+     * contains THIS UPS (`power.ups.name === rec.name`, the accessory's identity).
+     * Why: a Mac on a UPS outlet reads AC even while the UPS is on battery; only the
+     * USB data link makes pmset say "UPS Power". When the link drops the reporter
+     * sends `source:"ac", ups:null`, which says nothing about the UPS and must never
+     * turn attached machines GREEN mid-outage (EPIC D6/D7a: "could not read" is never
+     * AC). So a latest report with ups:null, power absent, or a DIFFERENT ups name
+     * => unknown. (The upsert side stays a no-op for those: nothing is detached or
+     * deleted; only the derived state degrades.)
+     *
+     * Restart: machines.json persists the host record, so a restart with no new report
+     * re-derives from the persisted last report, and the host is `offline` (=> unknown)
+     * once last_seen ages past the existing thresholds. Both outcomes are sane.
+     *
+     * With a matching UPS present: source 'ups' => on_battery, 'ac' => ac; any other
      * source (e.g. 'battery') => unknown. Never defaults to ac.
      */
     function stateFor(rec, machinesById) {
@@ -358,6 +377,7 @@ function createRegistry(opts) {
         if (!host || host.status !== 'online') return 'unknown';
         const power = host.system && host.system.power;
         if (!power) return 'unknown';
+        if (!power.ups || power.ups.name !== rec.name) return 'unknown';
         if (power.source === 'ups') return 'on_battery';
         if (power.source === 'ac') return 'ac';
         return 'unknown';
@@ -385,6 +405,7 @@ function createRegistry(opts) {
         const perMachine = new Map(); // machineId -> accessory views attached
 
         const views = [];
+        let transitioned = false;
         for (const rec of records.values()) {
             const next = stateFor(rec, machinesById);
             if (next !== rec.state) {
@@ -394,6 +415,7 @@ function createRegistry(opts) {
                 rec.state = next;
                 rec.stateSince = at;
                 dirty = true;
+                transitioned = true;
                 if (onTransition) {
                     try { onTransition(clone(rec), from, next, at); } catch (e) { log(`accessories: onTransition failed: ${e.message}`); }
                 }
@@ -405,7 +427,10 @@ function createRegistry(opts) {
                 perMachine.get(mid).push(v);
             }
         }
-        flushIfDirty();
+        // XACA-1392-013: a READ must not write. Only a state transition flushes here (it
+        // also carries any pending lastReading along); an unchanged state leaves the
+        // dirty lastReading to the 30 s interval / shutdown flush, as documented.
+        if (transitioned) save();
 
         const machines = new Map();
         for (const [mid, m] of machinesById.entries()) {
