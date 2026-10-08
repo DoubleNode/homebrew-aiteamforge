@@ -51,6 +51,7 @@ const fs = require('fs');
 const path = require('path');
 const placement = require('./ci-dispatch-placement');
 const policy = require('./ci-dispatch-policy');
+const derive = require('./ci-pool-derive');
 
 const NO_CAPACITY_AFTER_MS = 120 * 1000;
 const FALLBACK_DELAY_MS = 60 * 1000;
@@ -574,6 +575,12 @@ function createDispatcher(deps) {
             }
         }
 
+        // XACA-1444-011: queue-AGE alert. Independent of the no-capacity path above, because that path
+        // only fires when NO machine is eligible; on 2026-10-07 44 jobs sat ~32 min on `fleet-pool,m1mini`
+        // while one JIT runner was busy and two persistent runners idled, so "capacity" existed and
+        // nothing fired. Fires in shadow too: queue wait is a fact about GitHub, not about our mints.
+        raiseQueueAgeAlerts(nowMs);
+
         const supply = plc.computeSupply(demand, outstanding);
         const stats = { minted: 0, failed: 0 };
         for (const s of supply) {
@@ -610,6 +617,54 @@ function createDispatcher(deps) {
             }
         }
         return stats;
+    }
+
+    // ------------------------------------------------------- queue age (XACA-1444-011)
+    const queueAgeThresholdMs = () => derive.queueAgeThresholdMs(env);
+    /** Pool machine id whose host label the job's labels name, or null. */
+    function hostOfLabels(labels) {
+        const jl = plc.normalizeLabels(labels) || [];
+        const machines = store.listMachines();
+        const id = Object.keys(machines).find((k) => jl.includes(plc.hostLabelOf(Object.assign({ id: k }, machines[k]))));
+        return id === undefined ? null : id;
+    }
+    function queueAgeView(nowMs) {
+        if (!isEnabled()) return [];   // dormant: nothing is polled, so a stray tracked job is not a real queue
+        const jobs = [...tracked.values()].map((t) => t.rec);
+        return derive.computeQueueAge(jobs, nowMs, queueAgeThresholdMs(), hostOfLabels, plc.labelSetKey);
+    }
+    /** Label-set keys currently over threshold, so a clear is logged once on the way out. */
+    const queueAlerting = new Set();
+    function raiseQueueAgeAlerts(nowMs) {
+        const over = new Map(queueAgeView(nowMs).filter((g) => g.overThreshold).map((g) => [g.labels, g]));
+        for (const [setKey, g] of over) {
+            const res = alerts.raise('ci-queue-age', {
+                severity: 'high',
+                title: `CI jobs queued ${Math.round(g.oldestWaitSec / 60)} min on ${g.labels}`,
+                body: `${g.depth} job(s) queued on ${g.labels}${g.host ? ` (host ${g.host})` : ''}; oldest has waited ${g.oldestWaitSec}s (threshold ${Math.round(queueAgeThresholdMs() / 1000)}s). Runners may be busy, mis-labelled or offline; check the CI/CD tab.`,
+                ref: `queue:${setKey}`,
+            });
+            if (res.raised) writeAudit('alert', { machine: g.host, waitedMs: g.oldestWaitSec * 1000, reason: 'ci-queue-age' });
+            queueAlerting.add(setKey);
+        }
+        for (const setKey of [...queueAlerting]) {
+            if (!over.has(setKey)) { queueAlerting.delete(setKey); say('log', `queue-age alert cleared for ${setKey}`); }
+        }
+    }
+    const queueAge = () => queueAgeView(now());
+    /**
+     * noCapSince only counts once it is alertable: live mode and waited >= NO_CAPACITY_AFTER_MS. In
+     * shadow the persistent runners still serve the job, so a bare "no live host" is not an outage.
+     */
+    function noCapacity() {
+        const nowMs = now();
+        if (!isEnabled()) return derive.computeNoCapacity([], [], 0, plc.labelSetKey);
+        const live = effectiveMode() === 'live';
+        const jobs = [...tracked.values()].map((t) => ({
+            rec: t.rec,
+            noCapSince: live && t.noCapSince !== null && nowMs - t.noCapSince >= NO_CAPACITY_AFTER_MS ? t.noCapSince : null,
+        }));
+        return derive.computeNoCapacity(jobs, queueAgeView(nowMs), queueAgeThresholdMs(), plc.labelSetKey);
     }
 
     // ------------------------------------------------------------------ tick
@@ -680,6 +735,14 @@ function createDispatcher(deps) {
     function queue() {
         const cfg = store.getConfig();
         const nowMs = now();
+        // XACA-1444: the machine an outstanding (non-terminal) assignment is held for / bound to this job.
+        const live = assignments.snapshot().filter((a) => !['completed', 'failed', 'expired', 'cancelled', 'lost'].includes(a.state));
+        const machineFor = (rec) => {
+            const repo = `${rec.owner}/${rec.repo}`.toLowerCase();
+            const hit = live.find((a) => String(a.repo).toLowerCase() === repo &&
+                ((a.boundJob ? a.boundJob.id : (a.intendedJob ? a.intendedJob.id : null)) === rec.jobId));
+            return hit ? hit.machine : null;
+        };
         return [...tracked.values()].map((t) => ({
             key: t.rec.key,
             repo: `${t.rec.owner}/${t.rec.repo}`,
@@ -688,12 +751,19 @@ function createDispatcher(deps) {
             jobClass: plc.jobClass(t.rec.name, cfg.jobClasses),
             waitingMs: Math.max(0, nowMs - Date.parse(t.rec.firstSeenAt)),
             noCapacityMs: t.noCapSince === null ? 0 : nowMs - t.noCapSince,
+            branch: t.rec.branch || null,
+            workflow: t.rec.workflow || null,
+            url: t.rec.url || null,
+            labels: Array.isArray(t.rec.labels) ? t.rec.labels.slice() : [],
+            status: t.rec.status || 'queued',
+            runnerName: t.rec.runnerName || null,
+            machine: machineFor(t.rec),
         }));
     }
 
     const status = () => ({ enabled: isEnabled(), mode: effectiveMode(), decisionsRecorded, running: started, lastTickAt, tracked: tracked.size, notPoolSkipped, configRejected: configRejected.size });
 
-    return { start, stop, tick, isEnabled, alerts: () => alerts.list(), queue, status, onJob, onDegraded, onConfigChanged };
+    return { start, stop, tick, isEnabled, alerts: () => alerts.list(), queue, queueAge, noCapacity, queueAgeThresholdSec: () => Math.round(queueAgeThresholdMs() / 1000), status, onJob, onDegraded, onConfigChanged };
 }
 
 // ============================================================================

@@ -83,7 +83,7 @@ describe('wiring — every mutating browser fetch goes through fleetApiFetch', (
 
     const sites = mutatingFetchSites();
 
-    test('21 mutating fetch sites found (lcars-engines 7+7, dashboards-ui 4, dashboard-app 1, credentials-ui 2)', () => {
+    test('22 mutating fetch sites found (lcars-engines 7+7, dashboards-ui 4, dashboard-app 1, credentials-ui 2, ci-pool 1)', () => {
         const byFile = {};
         for (const s of sites) byFile[s.file] = (byFile[s.file] || 0) + 1;
         assert.deepEqual(byFile, {
@@ -92,6 +92,7 @@ describe('wiring — every mutating browser fetch goes through fleetApiFetch', (
             'lcars/js/lcars-dashboards-ui.js': 4,
             'lcars/js/lcars-engines.js': 7,
             'lcars2/js/lcars-engines.js': 7,
+            'shared/js/lcars-ci-pool.js': 1, // XACA-1444-002: Pause/Resume/Enable PUT
         });
     });
 

@@ -406,10 +406,12 @@ describe('no-capacity alert (Requirement 10)', () => {
         await s.d.tick();
         s.clock.t = T0 + 120 * 1000; await s.d.tick();
         assert.deepEqual(s.alerts.list().map((a) => a.ref).sort(), ['class:long', 'class:short']);
+        // Filter by type: at +17 min the jobs are also past the XACA-1444 queue-age threshold, a separate alert.
+        const noCap = () => s.alerts.list().filter((x) => x.type === 'ci-no-capacity');
         s.clock.t = T0 + 600 * 1000; await s.d.tick();
-        assert.equal(s.alerts.list().length, 2);
+        assert.equal(noCap().length, 2);
         s.clock.t = T0 + 120 * 1000 + 15 * 60 * 1000; await s.d.tick();
-        assert.equal(s.alerts.list().length, 4);
+        assert.equal(noCap().length, 4);
     });
 
     test('capacity returning within the window resets the clock (continuous wait only)', async () => {
@@ -443,7 +445,7 @@ describe('queue()/status() views', () => {
         assert.equal(q[0].jobClass, 'long');
         assert.equal(q[0].repo, REPO);
         assert.ok(q[0].waitingMs >= 29000);
-        assert.deepEqual(Object.keys(q[0]).sort(), ['jobClass', 'jobId', 'key', 'name', 'noCapacityMs', 'repo', 'waitingMs']);
+        assert.deepEqual(Object.keys(q[0]).sort(), ['branch', 'jobClass', 'jobId', 'key', 'labels', 'machine', 'name', 'noCapacityMs', 'repo', 'runnerName', 'status', 'url', 'waitingMs', 'workflow']);
     });
 });
 

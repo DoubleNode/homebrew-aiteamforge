@@ -35,6 +35,7 @@
 
     var CI_RUNNERS_API = '/api/ci-runners';
     var CONTAINER_ID = 'cicd-content';
+    var CI_POOL_API = '/api/ci-pool';
     var DEFAULT_STALE_AFTER = 180;
     var DEFAULT_OFFLINE_AFTER = 600;
     var MAX_JOBS_RENDERED = 50;
@@ -605,9 +606,46 @@
         });
     }
 
+    // XACA-1444-002: pool cards + queue/banners, same cadence as the runners view.
+    // Skipped entirely when neither module is loaded (keeps the XACA-1388 harness
+    // and any page without the pool assets byte-identical in behaviour).
+    function poolModules() {
+        return [
+            { mod: window.LCARSCIPool, el: document.getElementById('cicd-pool') },
+            { mod: window.LCARSCIQueue, el: document.getElementById('cicd-queue') }
+        ].filter(function(m) { return m.mod && typeof m.mod.render === 'function' && m.el; });
+    }
+
+    function hidePool(mods) {
+        mods.forEach(function(m) { m.el.innerHTML = ''; m.el.hidden = true; });
+    }
+
+    function doPoolRefresh() {
+        var mods = poolModules();
+        if (!mods.length) return Promise.resolve();
+        return Promise.resolve().then(function() {
+            return window.fetch(CI_POOL_API, { credentials: 'same-origin' });
+        }).then(function(resp) {
+            if (!resp || !resp.ok) { hidePool(mods); return null; }
+            return resp.json().then(function(body) {
+                if (!body || typeof body !== 'object' || !body.machines || typeof body.machines !== 'object') {
+                    hidePool(mods);
+                    return null;
+                }
+                mods.forEach(function(m) {
+                    try { m.mod.render(body, m.el, { document: document }); } catch (e) { m.el.hidden = true; }
+                });
+                return null;
+            });
+        }).catch(function() {
+            try { hidePool(mods); } catch (e) { /* never reject */ }
+            return null;
+        });
+    }
+
     function refresh() {
         if (_inflight) return _inflight;
-        _inflight = doRefresh().then(function() { _inflight = null; }, function() { _inflight = null; });
+        _inflight = Promise.all([doRefresh(), doPoolRefresh()]).then(function() { _inflight = null; }, function() { _inflight = null; });
         return _inflight;
     }
 
@@ -629,6 +667,9 @@
         document.addEventListener('lcars:sectionChange', function(e) {
             if (e.detail && e.detail.section === 'cicd') refresh();
         });
+        // A successful pool write (Enable/Pause/Resume) refreshes immediately.
+        var poolEl = document.getElementById('cicd-pool');
+        if (poolEl) poolEl.addEventListener('cicd-pool:changed', function() { refresh(); });
         if (document.querySelector('.lcars-section.active[data-section="cicd"]')) refresh();
     }
 

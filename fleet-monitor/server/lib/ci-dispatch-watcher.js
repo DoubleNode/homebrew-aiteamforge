@@ -50,6 +50,15 @@ const MAX_TRACKED_JOBS = 5000;                   // hard cap; oldest completed e
 const PAGE_SIZE = 100;                           // per_page on every list call
 const MAX_PAGES = 10;                            // XACA-1441-032: pagination cap per list (1000 items)
 
+const FIELD_CAP = 200;                           // XACA-1444: cap on branch / workflow / url strings
+
+/** Display string from untrusted GitHub data: string only, control chars dropped, length-capped, else null. */
+function capStr(v, max = FIELD_CAP) {
+    if (typeof v !== 'string') return null;
+    const t = v.replace(/[\u0000-\u001f\u007f]/g, ' ').trim();
+    return t === '' ? null : t.slice(0, max);
+}
+
 const SLUG_RE = /^([A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))\/([A-Za-z0-9._-]{1,100})$/;
 
 function normalizeStatus(s) {
@@ -132,6 +141,7 @@ function createWatcher(opts = {}) {
                     key, owner, repo,
                     runId: run.id, runAttempt, jobId: j.id,
                     name: j.name,
+                    branch: capStr(run.branch), workflow: capStr(run.workflow), url: capStr(j.html_url, 500),
                     labels: Array.isArray(j.labels) ? j.labels.slice() : [],
                     status: 'queued', conclusion: null, runnerName: null,
                     createdAt: j.created_at || null,
@@ -293,6 +303,7 @@ function createWatcher(opts = {}) {
             if (!changed) continue;
             await fetchJobs(r, {
                 id, runAttempt: wr.run_attempt, event: wr.event,
+                branch: wr.head_branch, workflow: wr.name,
                 repoFullName: (wr.repository && wr.repository.full_name) || r.slug,
                 headRepoFullName: (wr.head_repository && wr.head_repository.full_name) ?? null,
             }, nowMs);
@@ -311,6 +322,7 @@ function createWatcher(opts = {}) {
             try {
                 await fetchJobs(r, {
                     id, runAttempt: (prev && prev.runAttempt) || sample.rec.runAttempt,
+                    branch: sample.rec.branch, workflow: sample.rec.workflow,
                     event: sample.rec.run.event, repoFullName: sample.rec.run.repoFullName,
                     headRepoFullName: sample.rec.run.headRepoFullName,
                 }, nowMs, true);

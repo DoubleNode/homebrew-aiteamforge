@@ -1,0 +1,323 @@
+{
+  "schemaVersion": 1,
+  "serverTime": "2026-10-07T18:00:00.000Z",
+  "dispatcherEnabled": true,
+  "config": {
+    "allowlist": [
+      "DoubleNode/dev-team"
+    ],
+    "poolLabel": "fleet-pool",
+    "jobClasses": {
+      "shell-suite": "long",
+      "bats": "long",
+      "pytest-suite": "long"
+    },
+    "thresholds": {
+      "memReclaimableBytes": 1610612736,
+      "swapUsedBytes": 3006477107,
+      "memFreePct": 35,
+      "loadPerCpu": 0.75,
+      "pollStaleMs": 30000
+    }
+  },
+  "machines": {
+    "m4mini": {
+      "enabled": true,
+      "paused": false,
+      "pausedBy": null,
+      "pausedAt": null,
+      "pauseReason": null,
+      "prefers": null,
+      "thresholds": {},
+      "mode": "live",
+      "hasKey": true,
+      "hasTelemetryKey": false,
+      "lastPollAt": "2026-10-07T17:59:56.000Z",
+      "agentVersion": "1.0.0",
+      "pauseMarker": null,
+      "pauseDrift": null,
+      "capacity": {
+        "memTotalBytes": 17179869184,
+        "memReclaimableBytes": 4080000000,
+        "memFreePct": 45,
+        "swapUsedBytes": 100,
+        "swapTotalBytes": 3221225472,
+        "load1": 1.2,
+        "load5": 1,
+        "load15": 1,
+        "ncpu": 10,
+        "teamSessions": 6,
+        "vmState": "running"
+      },
+      "slots": [
+        {
+          "os": "Linux",
+          "index": 1,
+          "state": "idle",
+          "assignmentId": null
+        },
+        {
+          "os": "macOS",
+          "index": 1,
+          "state": "busy",
+          "assignmentId": "a_1"
+        }
+      ],
+      "state": "enabled",
+      "stateReason": "accepting",
+      "capability": "enabled"
+    },
+    "m1mini": {
+      "enabled": true,
+      "paused": true,
+      "pausedBy": "operator",
+      "pausedAt": "2026-10-07T17:50:00.000Z",
+      "pauseReason": "disk cleanup",
+      "prefers": null,
+      "thresholds": {},
+      "mode": "live",
+      "hasKey": true,
+      "hasTelemetryKey": false,
+      "lastPollAt": "2026-10-07T17:59:56.000Z",
+      "agentVersion": "1.0.0",
+      "pauseMarker": "draining",
+      "pauseDrift": false,
+      "capacity": {
+        "memTotalBytes": 17179869184,
+        "memReclaimableBytes": 4080000000,
+        "memFreePct": 45,
+        "swapUsedBytes": 100,
+        "swapTotalBytes": 3221225472,
+        "load1": 1.2,
+        "load5": 1,
+        "load15": 1,
+        "ncpu": 10,
+        "teamSessions": 6,
+        "vmState": "running"
+      },
+      "slots": [
+        {
+          "os": "macOS",
+          "index": 1,
+          "state": "busy",
+          "assignmentId": "a_2"
+        },
+        {
+          "os": "macOS",
+          "index": 2,
+          "state": "idle",
+          "assignmentId": null
+        }
+      ],
+      "state": "draining",
+      "stateReason": "busy-slots",
+      "capability": "unknown"
+    },
+    "m1pro": {
+      "enabled": true,
+      "paused": true,
+      "pausedBy": "operator",
+      "pausedAt": "2026-10-07T17:50:00.000Z",
+      "pauseReason": "OS update",
+      "prefers": null,
+      "thresholds": {},
+      "mode": "live",
+      "hasKey": true,
+      "hasTelemetryKey": false,
+      "lastPollAt": "2026-10-07T17:59:56.000Z",
+      "agentVersion": "1.0.0",
+      "pauseMarker": "paused",
+      "pauseDrift": false,
+      "capacity": {
+        "memTotalBytes": 17179869184,
+        "memReclaimableBytes": 4080000000,
+        "memFreePct": 45,
+        "swapUsedBytes": 100,
+        "swapTotalBytes": 3221225472,
+        "load1": 1.2,
+        "load5": 1,
+        "load15": 1,
+        "ncpu": 10,
+        "teamSessions": 6,
+        "vmState": "running"
+      },
+      "slots": [
+        {
+          "os": "Linux",
+          "index": 1,
+          "state": "idle",
+          "assignmentId": null
+        }
+      ],
+      "state": "paused",
+      "stateReason": "marker-confirms",
+      "capability": "dormant"
+    },
+    "m3pro": {
+      "enabled": true,
+      "paused": false,
+      "pausedBy": null,
+      "pausedAt": null,
+      "pauseReason": null,
+      "prefers": null,
+      "thresholds": {},
+      "mode": "live",
+      "hasKey": false,
+      "hasTelemetryKey": false,
+      "lastPollAt": "2026-10-07T17:59:56.000Z",
+      "agentVersion": "1.0.0",
+      "pauseMarker": "resuming",
+      "pauseDrift": false,
+      "capacity": {
+        "memTotalBytes": 17179869184,
+        "memReclaimableBytes": 4080000000,
+        "memFreePct": 45,
+        "swapUsedBytes": 100,
+        "swapTotalBytes": 3221225472,
+        "load1": 1.2,
+        "load5": 1,
+        "load15": 1,
+        "ncpu": 10,
+        "teamSessions": 6,
+        "vmState": "running"
+      },
+      "slots": [
+        {
+          "os": "Linux",
+          "index": 1,
+          "state": "idle",
+          "assignmentId": null
+        }
+      ],
+      "state": "resuming",
+      "stateReason": "marker-resuming",
+      "capability": "unknown"
+    },
+    "m2mini": {
+      "enabled": false,
+      "paused": false,
+      "pausedBy": null,
+      "pausedAt": null,
+      "pauseReason": null,
+      "prefers": null,
+      "thresholds": {},
+      "mode": "live",
+      "hasKey": false,
+      "hasTelemetryKey": false,
+      "lastPollAt": null,
+      "agentVersion": null,
+      "pauseMarker": null,
+      "pauseDrift": null,
+      "capacity": null,
+      "slots": null,
+      "state": "disabled",
+      "stateReason": "not-enabled",
+      "capability": "unknown"
+    },
+    "m5mini": {
+      "enabled": true,
+      "paused": false,
+      "pausedBy": null,
+      "pausedAt": null,
+      "pauseReason": null,
+      "prefers": null,
+      "thresholds": {},
+      "mode": "live",
+      "hasKey": false,
+      "hasTelemetryKey": false,
+      "lastPollAt": null,
+      "agentVersion": null,
+      "pauseMarker": null,
+      "pauseDrift": null,
+      "capacity": null,
+      "slots": null,
+      "state": "unknown",
+      "stateReason": "no-report",
+      "capability": "unknown"
+    }
+  },
+  "assignments": [],
+  "alerts": [],
+  "queue": [
+    {
+      "key": "DoubleNode/dev-team#1#1",
+      "repo": "DoubleNode/dev-team",
+      "jobId": 1,
+      "name": "unit",
+      "jobClass": "short",
+      "waitingMs": 0,
+      "noCapacityMs": 0,
+      "branch": "feature/xaca-1444",
+      "workflow": "CI",
+      "url": "https://github.com/DoubleNode/dev-team/actions/runs/5/job/1",
+      "labels": [
+        "self-hosted",
+        "Linux",
+        "ARM64",
+        "fleet-pool"
+      ],
+      "status": "queued",
+      "runnerName": null,
+      "machine": null
+    },
+    {
+      "key": "DoubleNode/dev-team#2#1",
+      "repo": "DoubleNode/dev-team",
+      "jobId": 2,
+      "name": "unit",
+      "jobClass": "short",
+      "waitingMs": 0,
+      "noCapacityMs": 0,
+      "branch": "feature/xaca-1444",
+      "workflow": "CI",
+      "url": "https://github.com/DoubleNode/dev-team/actions/runs/5/job/2",
+      "labels": [
+        "self-hosted",
+        "Linux",
+        "ARM64",
+        "fleet-pool"
+      ],
+      "status": "queued",
+      "runnerName": null,
+      "machine": null
+    },
+    {
+      "key": "DoubleNode/dev-team#3#1",
+      "repo": "DoubleNode/dev-team",
+      "jobId": 3,
+      "name": "unit",
+      "jobClass": "short",
+      "waitingMs": 0,
+      "noCapacityMs": 0,
+      "branch": "feature/xaca-1444",
+      "workflow": "CI",
+      "url": "https://github.com/DoubleNode/dev-team/actions/runs/5/job/3",
+      "labels": [
+        "self-hosted",
+        "Linux",
+        "ARM64",
+        "fleet-pool"
+      ],
+      "status": "queued",
+      "runnerName": null,
+      "machine": null
+    }
+  ],
+  "noCapacity": {
+    "active": false,
+    "since": null,
+    "queuedCount": 0,
+    "oldestQueuedAt": null
+  },
+  "queueAge": [
+    {
+      "labels": "arm64,fleet-pool,linux,self-hosted",
+      "host": null,
+      "depth": 3,
+      "oldestQueuedAt": "2026-10-07T17:56:00.000Z",
+      "oldestWaitSec": 240,
+      "overThreshold": false
+    }
+  ],
+  "queueAgeThresholdSec": 900
+}

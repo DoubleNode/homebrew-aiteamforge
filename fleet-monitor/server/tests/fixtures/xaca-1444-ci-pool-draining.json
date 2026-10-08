@@ -1,0 +1,180 @@
+{
+  "schemaVersion": 1,
+  "serverTime": "2026-10-07T18:00:00.000Z",
+  "dispatcherEnabled": true,
+  "config": {
+    "allowlist": [
+      "DoubleNode/dev-team"
+    ],
+    "poolLabel": "fleet-pool",
+    "jobClasses": {
+      "shell-suite": "long",
+      "bats": "long",
+      "pytest-suite": "long"
+    },
+    "thresholds": {
+      "memReclaimableBytes": 1610612736,
+      "swapUsedBytes": 3006477107,
+      "memFreePct": 35,
+      "loadPerCpu": 0.75,
+      "pollStaleMs": 30000
+    }
+  },
+  "machines": {
+    "m4mini": {
+      "enabled": true,
+      "paused": true,
+      "pausedBy": "operator",
+      "pausedAt": "2026-10-07T17:50:00.000Z",
+      "pauseReason": "restart agent",
+      "prefers": null,
+      "thresholds": {},
+      "mode": "live",
+      "hasKey": true,
+      "hasTelemetryKey": false,
+      "lastPollAt": "2026-10-07T17:59:56.000Z",
+      "agentVersion": "1.0.0",
+      "pauseMarker": "draining",
+      "pauseDrift": false,
+      "capacity": {
+        "memTotalBytes": 17179869184,
+        "memReclaimableBytes": 4080000000,
+        "memFreePct": 45,
+        "swapUsedBytes": 100,
+        "swapTotalBytes": 3221225472,
+        "load1": 1.2,
+        "load5": 1,
+        "load15": 1,
+        "ncpu": 10,
+        "teamSessions": 6,
+        "vmState": "running"
+      },
+      "slots": [
+        {
+          "os": "Linux",
+          "index": 1,
+          "state": "busy",
+          "assignmentId": "a_1"
+        },
+        {
+          "os": "Linux",
+          "index": 2,
+          "state": "idle",
+          "assignmentId": null
+        }
+      ],
+      "state": "draining",
+      "stateReason": "busy-slots",
+      "capability": "unknown"
+    },
+    "m1mini": {
+      "enabled": true,
+      "paused": false,
+      "pausedBy": null,
+      "pausedAt": null,
+      "pauseReason": null,
+      "prefers": null,
+      "thresholds": {},
+      "mode": "live",
+      "hasKey": true,
+      "hasTelemetryKey": false,
+      "lastPollAt": "2026-10-07T17:59:56.000Z",
+      "agentVersion": "1.0.0",
+      "pauseMarker": null,
+      "pauseDrift": null,
+      "capacity": {
+        "memTotalBytes": 17179869184,
+        "memReclaimableBytes": 4080000000,
+        "memFreePct": 45,
+        "swapUsedBytes": 100,
+        "swapTotalBytes": 3221225472,
+        "load1": 1.2,
+        "load5": 1,
+        "load15": 1,
+        "ncpu": 10,
+        "teamSessions": 6,
+        "vmState": "running"
+      },
+      "slots": [
+        {
+          "os": "macOS",
+          "index": 1,
+          "state": "idle",
+          "assignmentId": null
+        },
+        {
+          "os": "macOS",
+          "index": 2,
+          "state": "idle",
+          "assignmentId": null
+        }
+      ],
+      "state": "enabled",
+      "stateReason": "accepting",
+      "capability": "unknown"
+    }
+  },
+  "assignments": [],
+  "alerts": [],
+  "queue": [
+    {
+      "key": "DoubleNode/dev-team#1#1",
+      "repo": "DoubleNode/dev-team",
+      "jobId": 1,
+      "name": "unit",
+      "jobClass": "short",
+      "waitingMs": 0,
+      "noCapacityMs": 0,
+      "branch": "feature/xaca-1444",
+      "workflow": "CI",
+      "url": "https://github.com/DoubleNode/dev-team/actions/runs/5/job/1",
+      "labels": [
+        "self-hosted",
+        "Linux",
+        "ARM64",
+        "fleet-pool"
+      ],
+      "status": "queued",
+      "runnerName": null,
+      "machine": null
+    },
+    {
+      "key": "DoubleNode/dev-team#2#1",
+      "repo": "DoubleNode/dev-team",
+      "jobId": 2,
+      "name": "unit",
+      "jobClass": "short",
+      "waitingMs": 0,
+      "noCapacityMs": 0,
+      "branch": "feature/xaca-1444",
+      "workflow": "CI",
+      "url": "https://github.com/DoubleNode/dev-team/actions/runs/5/job/2",
+      "labels": [
+        "self-hosted",
+        "Linux",
+        "ARM64",
+        "fleet-pool"
+      ],
+      "status": "queued",
+      "runnerName": null,
+      "machine": null
+    }
+  ],
+  "noCapacity": {
+    "active": false,
+    "since": null,
+    "queuedCount": 0,
+    "oldestQueuedAt": null
+  },
+  "queueAge": [
+    {
+      "labels": "arm64,fleet-pool,linux,self-hosted",
+      "host": null,
+      "depth": 2,
+      "oldestQueuedAt": "2026-10-07T17:58:00.000Z",
+      "oldestWaitSec": 120,
+      "overThreshold": false
+    }
+  ],
+  "queueAgeThresholdSec": 900
+}

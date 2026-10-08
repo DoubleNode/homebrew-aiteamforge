@@ -230,13 +230,42 @@ describe('lifecycle events', () => {
         await w.runCycle();
         const r = events[0].rec;
         assert.deepEqual(Reflect.ownKeys(r).sort(), [
-            'completedAt', 'conclusion', 'createdAt', 'firstSeenAt', 'inProgressAt', 'jobId', 'key', 'labels', 'name',
-            'owner', 'repo', 'run', 'runAttempt', 'runId', 'runnerName', 'status',
+            'branch', 'completedAt', 'conclusion', 'createdAt', 'firstSeenAt', 'inProgressAt', 'jobId', 'key', 'labels', 'name',
+            'owner', 'repo', 'run', 'runAttempt', 'runId', 'runnerName', 'status', 'url', 'workflow',
         ]);
         assert.equal(r.owner, 'acme'); assert.equal(r.repo, 'widgets');
         assert.equal(r.runId, 7); assert.equal(r.jobId, 70);
         assert.deepEqual(r.run, { event: 'pull_request', repoFullName: REPO, headRepoFullName: 'forker/widgets' });
         assert.equal(r.firstSeenAt, new Date(T0).toISOString());
+    });
+
+    test('XACA-1444: branch, workflow and job url are carried from the run/job; null when absent', async () => {
+        const { world, events, w } = setup();
+        world.queued = [run(9, { head_branch: 'feature/x', name: 'CI' }), run(10)];
+        world.jobs[9] = [job(90, { html_url: 'https://github.com/acme/widgets/actions/runs/9/job/90' })];
+        world.jobs[10] = [job(100)];
+        await w.runCycle();
+        const a = events.find((e) => e.rec.jobId === 90).rec;
+        assert.equal(a.branch, 'feature/x'); assert.equal(a.workflow, 'CI');
+        assert.equal(a.url, 'https://github.com/acme/widgets/actions/runs/9/job/90');
+        const b = events.find((e) => e.rec.jobId === 100).rec;
+        assert.equal(b.branch, null); assert.equal(b.workflow, null); assert.equal(b.url, null);
+    });
+
+    test('XACA-1444: hostile / oversize branch, workflow and url are capped and control chars stripped', async () => {
+        const { world, events, w } = setup();
+        world.queued = [run(11, { head_branch: 'b'.repeat(5000), name: 'w\u0000\n<script>' })];
+        world.jobs[11] = [job(110, { html_url: 'https://x/' + 'u'.repeat(5000) })];
+        await w.runCycle();
+        const r = events[0].rec;
+        assert.equal(r.branch.length, 200);
+        assert.equal(r.workflow, 'w  <script>');
+        assert.equal(r.url.length, 500);
+        world.queued = [run(12, { head_branch: { evil: 1 }, name: 42 })];
+        world.jobs[12] = [job(120, { html_url: 7 })];
+        await w.runCycle();
+        const q = events.find((e) => e.rec.jobId === 120).rec;
+        assert.equal(q.branch, null); assert.equal(q.workflow, null); assert.equal(q.url, null);
     });
 
     test('a missing head_repository is reported as null, not filtered', async () => {

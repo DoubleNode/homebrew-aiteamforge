@@ -1,0 +1,54 @@
+/*
+ *  lcars-ci-queue.css
+ *  DoubleNode Dev-Team Infrastructure (AITeamForge)
+ *
+ *  Copyright © 2026 - 2025 DoubleNode.com. All rights reserved.
+ */
+
+/* XACA-1444-003/-011: CI queue view. Theme tokens only (no raw hex), no animation. */
+
+.ciq { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+
+.ciq-banner {
+    padding: 10px 14px;
+    border-left: 8px solid var(--lcars-alert-red);
+    background: var(--lcars-dark);
+    color: var(--lcars-peach);
+    border-radius: 0 12px 12px 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 12px;
+    align-items: baseline;
+}
+.ciq-banner[hidden] { display: none; }
+.ciq-banner-head { color: var(--lcars-alert-red); overflow-wrap: anywhere; }
+.ciq-banner-head::before { content: "\25B2\00A0"; }
+.ciq-banner-detail { overflow-wrap: anywhere; }
+
+.ciq-h { margin: 0 0 6px; color: var(--lcars-cyan); font-weight: normal; letter-spacing: 0.05em; text-transform: uppercase; }
+.ciq-age[hidden], .ciq-empty[hidden], .ciq-scroll[hidden] { display: none; }
+.ciq-age-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.ciq-age-item {
+    display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline;
+    padding: 6px 10px; background: var(--lcars-darker);
+    border-left: 4px solid var(--lcars-teal); border-radius: 0 8px 8px 0;
+}
+.ciq-age-item.ciq-over { border-left-color: var(--lcars-alert-red); }
+.ciq-age-name { color: var(--lcars-cyan); }
+.ciq-age-labels { color: var(--lcars-brown); overflow-wrap: anywhere; font-size: 0.85em; }
+.ciq-flag { color: var(--lcars-alert-red); font-weight: bold; }
+.ciq-empty { margin: 0; color: var(--lcars-brown); }
+
+.ciq-scroll { max-width: 100%; overflow: auto; max-height: 60vh; }
+.ciq-scroll:focus-visible { outline: 2px solid var(--lcars-cyan); outline-offset: 2px; }
+.ciq-table { border-collapse: collapse; width: 100%; min-width: 34em; color: var(--lcars-peach); }
+.ciq-caption { text-align: left; color: var(--lcars-cyan); padding-bottom: 4px; }
+.ciq-table th { text-align: left; color: var(--lcars-purple); border-bottom: 2px solid var(--lcars-purple); padding: 4px 8px; white-space: nowrap; }
+.ciq-table td { padding: 4px 8px; border-bottom: 1px solid var(--lcars-navy); overflow-wrap: anywhere; }
+.ciq-table a { color: var(--lcars-cyan); }
+.ciq-table a:focus-visible { outline: 2px solid var(--lcars-cyan); outline-offset: 2px; }
+.ciq-null { color: var(--lcars-brown); }
+
+@media (prefers-reduced-motion: reduce) {
+    .ciq, .ciq * { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+}

@@ -45,6 +45,7 @@ const crypto = require('crypto');
 const { requireAdminKey } = require('./auth-middleware');
 const { MACHINE_ID_RE } = require('./ci-pool-store');
 const { ID_RE } = require('./ci-dispatch-assignments');
+const derive = require('./ci-pool-derive');
 
 const SCHEMA_VERSION = 1;
 const MAX_POLL_BYTES = 16 * 1024;
@@ -63,6 +64,8 @@ const OS_VALUES = ['Linux', 'macOS'];
 const REPORT_STATES = ['started', 'completed', 'failed', 'cancelled'];
 // XACA-1441-025: the XACA-1440 pause marker as the agent read it (optional field of the poll).
 const PAUSE_MARKERS = ['absent', 'draining', 'paused', 'resuming', 'corrupt'];
+// XACA-1444-001: optional self-report of the host's CI capability (XACA-1443 dormant bundle). Never inferred server-side.
+const CAPABILITY_VALUES = ['dormant', 'enabled'];
 const MAX_SLOTS = 32;
 
 // Same byte-identical body as auth-middleware's UNAUTHORIZED_BODY (contract §4: no reason leaks).
@@ -107,7 +110,7 @@ const CAPACITY_SPEC = {
 /** Allowlist-copy (validatePush style): returns a fresh object holding only known, valid fields. */
 function validatePoll(body) {
     if (!isPlainObject(body)) bad('body must be a JSON object');
-    noUnknown(body, ['schemaVersion', 'agentVersion', 'capacity', 'slots', 'pauseMarker'], 'poll');
+    noUnknown(body, ['schemaVersion', 'agentVersion', 'capacity', 'slots', 'pauseMarker', 'capability'], 'poll');
     if (body.schemaVersion !== SCHEMA_VERSION) {
         throw new PollValidationError('unsupported schemaVersion', { expected: SCHEMA_VERSION });
     }
@@ -149,6 +152,12 @@ function validatePoll(body) {
             bad(`pauseMarker: must be one of ${PAUSE_MARKERS.join('|')}`);
         }
         out.pauseMarker = body.pauseMarker;
+    }
+    if (has(body, 'capability')) {
+        if (typeof body.capability !== 'string' || !CAPABILITY_VALUES.includes(body.capability)) {
+            bad(`capability: must be one of ${CAPABILITY_VALUES.join('|')}`);
+        }
+        out.capability = body.capability;
     }
     return out;
 }
@@ -318,6 +327,7 @@ function registerCiPoolRoutes(app, deps) {
             const now = clock();
             const rep = { receivedAt: now, capacity: parsed.capacity, slots: parsed.slots, agentVersion: parsed.agentVersion };
             if (parsed.pauseMarker !== undefined) rep.pauseMarker = parsed.pauseMarker;
+            if (parsed.capability !== undefined) rep.capability = parsed.capability;
             reports.set(machineId, rep);
 
             const on = dispatcherOn();
@@ -377,11 +387,14 @@ function registerCiPoolRoutes(app, deps) {
     app.get('/api/ci-pool', (req, res) => {
         try {
             const cfg = store.getConfig();
+            const nowForView = clock();
             const machines = {};
             const stored = store.listMachines();
             for (const id of Object.keys(stored)) {
                 const m = stored[id];
                 const r = reports.get(id) || null;
+                const staleMs = Number.isFinite(m.thresholds && m.thresholds.pollStaleMs) ? m.thresholds.pollStaleMs : cfg.thresholds.pollStaleMs;
+                const derived = derive.deriveMachineState(m, r, { nowMs: nowForView, pollStaleMs: staleMs });
                 // Explicit allowlist: keyHash and every secret-bearing field stay out by construction.
                 machines[id] = {
                     enabled: m.enabled, paused: m.paused, pausedBy: m.pausedBy, pausedAt: m.pausedAt,
@@ -395,6 +408,10 @@ function registerCiPoolRoutes(app, deps) {
                     pauseDrift: r ? pauseDrift(r.pauseMarker, m.paused) : null,
                     capacity: r ? r.capacity : null,
                     slots: r ? r.slots : null,
+                    // XACA-1444-001 (additive): derived read model, rules in ci-pool-derive.js.
+                    state: derived.state,
+                    stateReason: derived.reason,
+                    capability: derive.deriveCapability(r),
                 };
             }
             const out = {
@@ -406,6 +423,13 @@ function registerCiPoolRoutes(app, deps) {
                 assignments: assignments.snapshot(),
                 alerts: d.dispatcher && typeof d.dispatcher.alerts === 'function' ? d.dispatcher.alerts() : [],
                 queue: d.dispatcher && typeof d.dispatcher.queue === 'function' ? d.dispatcher.queue() : [],
+                // XACA-1444-001/011 (additive). Absent dispatcher => the empty/inactive shape, never an error.
+                noCapacity: d.dispatcher && typeof d.dispatcher.noCapacity === 'function'
+                    ? d.dispatcher.noCapacity()
+                    : { active: false, since: null, queuedCount: 0, oldestQueuedAt: null },
+                queueAge: d.dispatcher && typeof d.dispatcher.queueAge === 'function' ? d.dispatcher.queueAge() : [],
+                queueAgeThresholdSec: d.dispatcher && typeof d.dispatcher.queueAgeThresholdSec === 'function'
+                    ? d.dispatcher.queueAgeThresholdSec() : Math.round(derive.queueAgeThresholdMs(null) / 1000),
             };
             res.json(out);
         } catch (error) {
@@ -429,20 +453,44 @@ function registerCiPoolRoutes(app, deps) {
             if (!MACHINE_ID_RE.test(id)) return res.status(400).json({ error: 'bad machine id' });
             const body = req.body;
             if (!isPlainObject(body)) return res.status(400).json({ error: 'body must be a JSON object' });
-            const allowed = ['enabled', 'paused', 'reason', 'prefers', 'thresholds', 'mode'];
+            const allowed = ['enabled', 'paused', 'reason', 'prefers', 'thresholds', 'mode', 'confirm'];
             const extra = Object.keys(body).filter((k) => !allowed.includes(k));
             if (extra.length) return res.status(400).json({ error: `unknown field "${extra[0]}"` });
+            if (has(body, 'confirm') && typeof body.confirm !== 'boolean') return res.status(400).json({ error: 'confirm: must be boolean' });
+            const confirmed = body.confirm === true;
             const patch = {};
             for (const k of allowed) {
-                if (!has(body, k)) continue;
+                if (!has(body, k) || k === 'confirm') continue;   // confirm is a request flag, never persisted
                 patch[k === 'reason' ? 'pauseReason' : k] = body[k];
             }
             const before = store.getMachine(id);
+            // XACA-1444-001: refuse to pause/disable the LAST enabled-and-unpaused machine without confirm:true.
+            // Only a real accepting -> not-accepting transition of THIS machine counts, so an idempotent
+            // repeat (or touching an already-stopped machine) is never refused.
+            const accepting = (m) => !!m && m.enabled === true && m.paused === false;
+            if (accepting(before)) {
+                const nextEnabled = has(patch, 'enabled') ? patch.enabled : before.enabled;
+                const nextPaused = has(patch, 'paused') ? patch.paused : before.paused;
+                const stops = nextEnabled !== true || nextPaused !== false;
+                const others = Object.entries(store.listMachines()).filter(([k, m]) => k !== id && accepting(m)).length;
+                if (stops && others === 0 && !confirmed) {
+                    const action = nextEnabled !== true ? 'disable' : 'pause';
+                    audit(action === 'disable' ? 'enable' : 'pause', { machine: id, by: 'operator', action, outcome: 'refused-would-strand', confirmed: false });
+                    return res.status(409).json({
+                        error: `refusing to ${action} ${id}: it is the last enabled, unpaused CI machine and the pool would have no capacity. Resend with confirm:true to proceed.`,
+                        wouldStrand: true, machine: id, action,
+                    });
+                }
+            }
             const result = store.upsertMachine(id, patch, { by: 'operator', now: clock() });
             if (!result.ok) return storeFailure(res, result);
             const after = store.getMachine(id);
             if (has(patch, 'paused') && (!before || before.paused !== after.paused)) {
-                audit('pause', { machine: id, paused: after.paused, by: 'operator', reason: after.pauseReason });
+                audit('pause', { machine: id, paused: after.paused, by: 'operator', reason: after.pauseReason, action: after.paused ? 'pause' : 'resume', outcome: 'applied', confirmed: confirmed });
+            }
+            // XACA-1444-001: `enabled` flips were never audited. Same-value PUTs write nothing (idempotent).
+            if (has(patch, 'enabled') && (!before || before.enabled !== after.enabled)) {
+                audit('enable', { machine: id, enabled: after.enabled, by: 'operator', action: after.enabled ? 'enable' : 'disable', outcome: 'applied', confirmed: confirmed });
             }
             const m = after;
             configChanged();   // hostLabels feed label:unknown / label:ambiguous

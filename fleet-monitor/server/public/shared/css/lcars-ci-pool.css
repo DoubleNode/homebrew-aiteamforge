@@ -1,0 +1,51 @@
+/*
+ *  lcars-ci-pool.css
+ *  DoubleNode Dev-Team Infrastructure (AITeamForge)
+ *
+ *  Copyright © 2026 - 2025 DoubleNode.com. All rights reserved.
+ *
+ *  XACA-1444-002: CI pool machine cards. Theme tokens only (no raw hex).
+ *  State is never colour alone: every card also carries a text badge + glyph.
+ */
+.cicd-pool { margin: 0 0 16px; max-width: 100%; }
+.cicd-pool-title { margin: 0 0 8px; font-size: 1rem; letter-spacing: 0.08em; color: var(--lcars-cyan); }
+.cicd-pool-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr)); }
+.cicd-pool-card { background: var(--lcars-dark); color: var(--lcars-peach); border: 2px solid var(--lcars-brown);
+    border-left-width: 8px; border-radius: 8px; padding: 10px 12px; min-width: 0; overflow-wrap: anywhere; }
+.cicd-pool-card[data-cicd-pool-state="enabled"]  { border-color: var(--lcars-green); }
+.cicd-pool-card[data-cicd-pool-state="disabled"] { border-color: var(--lcars-brown); border-style: dashed; }
+.cicd-pool-card[data-cicd-pool-state="draining"] { border-color: var(--lcars-amber); }
+.cicd-pool-card[data-cicd-pool-state="paused"]   { border-color: var(--lcars-amber); border-style: double; }
+.cicd-pool-card[data-cicd-pool-state="resuming"] { border-color: var(--lcars-cyan); }
+.cicd-pool-card[data-cicd-pool-state="unknown"]  { border-color: var(--lcars-alert-red); border-style: dotted; }
+.cicd-pool-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.cicd-pool-name { margin: 0; font-size: 1.05rem; color: var(--lcars-lavender); }
+.cicd-pool-badge { display: inline-block; padding: 2px 8px; border: 1px solid currentColor; border-radius: 12px;
+    font-size: 0.8rem; letter-spacing: 0.06em; color: var(--lcars-peach); }
+.cicd-pool-card[data-cicd-pool-state="enabled"] .cicd-pool-badge { color: var(--lcars-green); }
+.cicd-pool-card[data-cicd-pool-state="draining"] .cicd-pool-badge,
+.cicd-pool-card[data-cicd-pool-state="paused"] .cicd-pool-badge { color: var(--lcars-amber); }
+.cicd-pool-card[data-cicd-pool-state="resuming"] .cicd-pool-badge { color: var(--lcars-cyan); }
+.cicd-pool-card[data-cicd-pool-state="unknown"] .cicd-pool-badge { color: var(--lcars-alert-red); }
+.cicd-pool-reason, .cicd-pool-pause, .cicd-pool-drift, .cicd-pool-why { margin: 6px 0 0; font-size: 0.85rem; }
+.cicd-pool-drift { color: var(--lcars-amber); }
+.cicd-pool-cap { margin: 8px 0; display: grid; gap: 2px; font-size: 0.85rem; }
+.cicd-pool-cap > div { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; }
+.cicd-pool-cap dt { color: var(--lcars-tan); }
+.cicd-pool-cap dd { margin: 0; text-align: right; }
+.cicd-pool-controls { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px; }
+.cicd-pool-btn { min-width: 24px; min-height: 24px; padding: 6px 14px; border: 2px solid var(--lcars-cyan);
+    border-radius: 16px; background: var(--lcars-darker); color: var(--lcars-cyan); font: inherit; cursor: pointer; }
+.cicd-pool-btn[aria-disabled="true"] { border-style: dashed; color: var(--lcars-brown); border-color: var(--lcars-brown); cursor: not-allowed; }
+.cicd-pool-btn:focus-visible, .cicd-pool-dialog input:focus-visible { outline: 3px solid var(--lcars-cyan); outline-offset: 2px; }
+.cicd-pool-cmd { margin: 0; flex-basis: 100%; font-size: 0.85rem; }
+.cicd-pool-cmd code { background: var(--lcars-darker); padding: 2px 6px; border-radius: 4px; user-select: all; }
+.cicd-pool-why { flex-basis: 100%; }
+.cicd-pool-status { min-height: 1.2em; margin-top: 8px; font-size: 0.85rem; color: var(--lcars-lavender); }
+.cicd-pool-dialog { margin-top: 12px; padding: 12px; background: var(--lcars-surface); color: var(--lcars-peach);
+    border: 2px solid var(--lcars-amber); border-radius: 8px; max-width: 100%; }
+.cicd-pool-dialog h4 { margin: 0 0 6px; }
+.cicd-pool-dialog input { max-width: 100%; box-sizing: border-box; min-height: 24px; }
+.cicd-pool-dlg-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+@media (prefers-reduced-motion: reduce) { .cicd-pool, .cicd-pool * { animation: none !important; transition: none !important; } }

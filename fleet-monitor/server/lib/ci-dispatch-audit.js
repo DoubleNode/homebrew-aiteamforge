@@ -47,7 +47,8 @@ const EVENT_FIELDS = {
   'expire':     BASE_FIELDS,
   'deregister': BASE_FIELDS.concat(['ok', 'httpStatus']),
   'alert':      BASE_FIELDS.concat(['jobClass', 'waitedMs']),
-  'pause':      BASE_FIELDS.concat(['paused', 'by']),
+  'pause':      BASE_FIELDS.concat(['paused', 'by', 'action', 'outcome', 'confirmed']),   // XACA-1444: action/outcome/confirmed
+  'enable':     BASE_FIELDS.concat(['enabled', 'by', 'action', 'outcome', 'confirmed']),  // XACA-1444: enabled flips
   'key-mint':   BASE_FIELDS.concat(['keyKind', 'by']),   // XACA-1422: never the credential itself
   'key-revoke': BASE_FIELDS.concat(['keyKind', 'by'])
 };

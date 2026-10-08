@@ -83,12 +83,23 @@ function cleanReason(v) {
     return t === '' ? null : t;
 }
 
+/** XACA-1444: display strings carried from the watcher (untrusted GitHub data): control chars dropped, capped, null when absent. */
+function capDisplay(v, max) {
+    if (!isStr(v)) return null;
+    // eslint-disable-next-line no-control-regex
+    const t = v.replace(/[\u0000-\u001f\u007f]/g, ' ').trim();
+    return t === '' ? null : t.slice(0, max);
+}
+
 function sanitizeJob(j) {
     if (!j || typeof j !== 'object') return null;
     return {
         id: isInt(j.id) ? j.id : null,
         name: isStr(j.name) ? j.name.slice(0, 200) : null,
         runId: isInt(j.runId) ? j.runId : null,
+        branch: capDisplay(j.branch, 200),
+        workflow: capDisplay(j.workflow, 200),
+        url: capDisplay(j.url, 500),
     };
 }
 
@@ -104,8 +115,8 @@ function view(rec) {
     return {
         id: rec.id, machine: rec.machine, os: rec.os, repo: rec.repo,
         runnerName: rec.runnerName, labels: rec.labels.slice(), state: rec.state,
-        intendedJob: rec.intendedJob ? Object.assign({}, rec.intendedJob) : null,
-        boundJob: rec.boundJob ? Object.assign({}, rec.boundJob) : null,
+        intendedJob: rec.intendedJob ? sanitizeJob(rec.intendedJob) : null,
+        boundJob: rec.boundJob ? sanitizeJob(rec.boundJob) : null,
         createdAt: iso(rec.createdAt), deliveredAt: iso(rec.deliveredAt),
         startedAt: iso(rec.startedAt), boundAt: iso(rec.boundAt), endedAt: iso(rec.endedAt),
         reason: rec.reason,
@@ -281,7 +292,7 @@ function createAssignments(opts) {
         if (!REPO_RE.test(repoFull)) return { ok: false, reason: 'bad-repo' };
         const slug = machine.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 24) || 'host';
         const runnerName = `fcp-${slug}-${randomHex(4)}`;
-        const intended = sanitizeJob({ id: job.jobId, name: job.name, runId: job.runId });
+        const intended = sanitizeJob({ id: job.jobId, name: job.name, runId: job.runId, branch: job.branch, workflow: job.workflow, url: job.url });
         let res;
         try {
             res = await github.generateJitConfig({ owner: job.owner, repo: job.repo, name: runnerName, labels });
@@ -457,7 +468,7 @@ function createAssignments(opts) {
             if (a.runnerName === rec.runnerName && a.repo.toLowerCase() === repoFull) { hit = a; break; }
         }
         if (!hit || hit.boundJob || (hit.state !== 'delivered' && hit.state !== 'started')) return null;
-        hit.boundJob = sanitizeJob({ id: rec.jobId, name: rec.name, runId: rec.runId });
+        hit.boundJob = sanitizeJob({ id: rec.jobId, name: rec.name, runId: rec.runId, branch: rec.branch, workflow: rec.workflow, url: rec.url });
         const wrong = !hit.intendedJob || hit.intendedJob.id !== hit.boundJob.id;
         move(hit, 'running', clock());
         if (wrong) {

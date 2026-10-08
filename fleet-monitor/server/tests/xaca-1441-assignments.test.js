@@ -138,7 +138,7 @@ describe('delivery is at-most-once to the owning machine', () => {
         assert.equal(first[0].runnerName, 'fcp-m4mini-deadbe01');
         assert.equal(first[0].jobBindTimeoutSeconds, 300);
         assert.equal(first[0].startBy, new Date(h.clock.t + 120000).toISOString());
-        assert.deepEqual(first[0].intendedJob, { id: 100, name: 'shell-suite', runId: 50 });
+        assert.deepEqual(first[0].intendedJob, { id: 100, name: 'shell-suite', runId: 50, branch: null, workflow: null, url: null });
         assert.equal(h.a.holdsConfig(v.id), false);
         assert.equal(h.a.get(v.id).state, 'delivered');
         assert.deepEqual(h.a.takeForMachine('m4mini'), []);
@@ -506,7 +506,7 @@ describe('binding by runner_name (A2) and wrong-job-pickup audit', () => {
         assert.equal(rows[0].jobId, 222);
         assert.equal(rows[0].reason, 'intended:100 bound:222');
         assert.equal(rows[0].machine, 'm4mini');
-        assert.deepEqual(h.a.get(v.id).boundJob, { id: 222, name: 'lint', runId: 50 });
+        assert.deepEqual(h.a.get(v.id).boundJob, { id: 222, name: 'lint', runId: 50, branch: null, workflow: null, url: null });
     });
 });
 
