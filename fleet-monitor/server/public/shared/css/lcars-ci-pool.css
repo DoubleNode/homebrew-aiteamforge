@@ -43,7 +43,11 @@
 .cicd-pool-cmd code { background: var(--lcars-darker); padding: 2px 6px; border-radius: 4px; user-select: all; }
 .cicd-pool-why { flex-basis: 100%; }
 .cicd-pool-status { min-height: 1.2em; margin-top: 8px; font-size: 0.85rem; color: var(--lcars-lavender); }
-.cicd-pool-dialog { margin-top: 12px; padding: 12px; background: var(--lcars-surface); color: var(--lcars-peach);
+[data-cicd-pool-dialog-host]:empty { display: none; }
+[data-cicd-pool-dialog-host]:not(:empty) { position: fixed; inset: 0; z-index: 1000; display: flex; align-items: center;
+    justify-content: center; padding: 16px; background: color-mix(in srgb, var(--lcars-darker) 82%, transparent); }
+.cicd-pool-btn-caution { border-color: var(--lcars-amber); color: var(--lcars-amber); font-weight: 700; }
+.cicd-pool-dialog { width: min(100%, 460px); max-height: 100%; overflow: auto; padding: 12px; background: var(--lcars-surface); color: var(--lcars-peach);
     border: 2px solid var(--lcars-amber); border-radius: 8px; max-width: 100%; }
 .cicd-pool-dialog h4 { margin: 0 0 6px; }
 .cicd-pool-dialog input { max-width: 100%; box-sizing: border-box; min-height: 24px; }

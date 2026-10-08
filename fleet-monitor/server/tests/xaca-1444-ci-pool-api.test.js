@@ -206,6 +206,8 @@ describe('GET /api/ci-pool additive fields', () => {
         assert.equal(body.queueAge[0].depth, 3);
         assert.equal(body.queueAge[0].overThreshold, false);
         assert.equal(body.queueAgeThresholdSec, 900);
+        assert.deepEqual(body.running, []);
+        assert.ok(body.queue.every((q) => q.noEligibleMachine === false), 'shadow never says no machine can take a job');
     });
 
     test('no-capacity scenario reports noCapacity + an over-threshold queueAge group', async () => {
@@ -358,6 +360,32 @@ describe('PUT /api/ci-pool/machines/:machine strand protection', () => {
         assert.equal((await s.put('m4mini', { paused: true })).status, 409);
     });
 
+    // PR #1101 r1 (XACA-1444-014/016): "other" machines count only when actually AVAILABLE (derived `enabled`).
+    test('an enabled-but-stale other machine is not capacity: pausing the only healthy host -> 409', async () => {
+        const s = two();
+        s.reports.get('m1mini').receivedAt = T0 - 10 * 60000;   // lapsed poll
+        const r = await s.put('m4mini', { paused: true });
+        assert.equal(r.status, 409);
+        assert.equal(r.body.wouldStrand, true);
+        assert.match(r.body.error, /last available/);
+        assert.equal(s.store.getMachine('m4mini').paused, false);
+    });
+    test('an enabled other machine with no report / all slots broken is not capacity either', async () => {
+        const s = two();
+        s.reports.get('m1mini').slots = [slot('macOS', 1, 'broken')];
+        assert.equal((await s.put('m4mini', { paused: true })).status, 409);
+        const t = two();
+        t.reports.delete('m1mini');
+        assert.equal((await t.put('m4mini', { paused: true })).status, 409);
+    });
+    test('an available other machine still lets the pause through, and confirm:true overrides the stale case', async () => {
+        const ok = two();
+        assert.equal((await ok.put('m4mini', { paused: true })).status, 200);
+        const s = two();
+        s.reports.get('m1mini').receivedAt = T0 - 10 * 60000;
+        assert.equal((await s.put('m4mini', { paused: true, confirm: true })).status, 200);
+    });
+
     test('machines that are not accepting never trip the guard; resume/enable are never refused', async () => {
         const s = one();
         assert.equal((await s.put('m1mini', { paused: true })).status, 200);      // m1mini is disabled
@@ -384,7 +412,7 @@ describe('PUT /api/ci-pool/machines/:machine strand protection', () => {
 
 describe('enabled flips are audited', () => {
     test('disable and enable each write one row with machine, action, outcome and actor', async () => {
-        const s = build({ machines: { m4mini: {}, m1mini: {} } });
+        const s = build({ machines: { m4mini: { slots: [slot('Linux', 1, 'idle')] }, m1mini: { slots: [slot('macOS', 1, 'idle')] } } });
         assert.equal((await s.put('m4mini', { enabled: false })).status, 200);
         assert.equal((await s.put('m4mini', { enabled: true })).status, 200);
         const rows = s.auditRows().filter((a) => a.event === 'enable');

@@ -83,22 +83,21 @@
             slotHtml = esc(busy + ' busy / ' + idle + ' idle');
         }
         rows.push(['Slots', slotHtml]);
-        var age = dash();
+        var ageText = DASH;
         var lp = Date.parse(m.lastPollAt), sv = Date.parse(serverTime);
         if (!isNaN(lp) && !isNaN(sv)) {
             var s = Math.max(0, Math.round((sv - lp) / 1000));
-            age = esc(s < 90 ? s + ' s ago' : Math.round(s / 60) + ' min ago');
+            ageText = s < 90 ? s + ' s ago' : Math.round(s / 60) + ' min ago';
         }
-        rows.push(['Last poll', age]);
+        // A bare text span: render() patches it in place so the ticking "N s ago" never rebuilds the card.
+        rows.push(['Last poll', '<span data-cicd-pool-age' + (ageText === DASH ? ' aria-label="not reported"' : '') + '>' + esc(ageText) + '</span>']);
         return rows;
     }
 
     // ---- which control a card gets ---------------------------------------
     function controlFor(id, m) {
-        var state = STATES[m.state] ? m.state : 'unknown';
-        if (state === 'resuming') {
-            return { action: 'resume', label: 'Resume', block: 'Resume already in progress; the machine is rejoining the pool.' };
-        }
+        // Controls follow the RAW flags, never the derived state: an enabled, unpaused machine always
+        // offers Pause, even while it reads resuming / unknown (PR #1101 round 1).
         if (m.enabled !== true) {
             var c = { action: 'enable', label: 'Enable' };
             if (m.capability === 'dormant') {
@@ -135,11 +134,12 @@
         var why = 'cicd-pool-why-' + key + '-' + c.action;
         h += '<div class="cicd-pool-controls">' +
             '<button type="button" class="cicd-pool-btn" data-cicd-pool-action="' + c.action + '" data-cicd-pool-machine="' + esc(id) + '"' +
+            ' data-cicd-pool-control="' + esc(id) + ':' + (c.block ? c.action + '-blocked' : c.action) + '"' +
             (c.block ? ' aria-disabled="true" aria-describedby="' + esc(why) + '"' : '') + '>' + esc(c.label) + '</button>';
         if (c.block) h += '<p class="cicd-pool-why" id="' + esc(why) + '" data-cicd-pool-why>' + esc(c.block) + '</p>';
         if (c.command) {
             h += '<p class="cicd-pool-cmd"><code data-cicd-pool-command>' + esc(c.command) + '</code> ' +
-                '<button type="button" class="cicd-pool-btn cicd-pool-copy" data-cicd-pool-copy="' + esc(c.command) + '">Copy command</button></p>';
+                '<button type="button" class="cicd-pool-btn cicd-pool-copy" data-cicd-pool-copy="' + esc(c.command) + '" data-cicd-pool-control="' + esc(id) + ':copy">Copy command</button></p>';
         }
         return h + '</div>';
     }
@@ -171,6 +171,21 @@
             if (items[i].getAttribute('data-cicd-pool-machine-card') === id) return items[i];
         }
         return null;
+    }
+    function findByControl(r, key) {
+        var els = r.querySelectorAll('[data-cicd-pool-control]');
+        for (var i = 0; i < els.length; i++) {
+            if (els[i].getAttribute('data-cicd-pool-control') === key) return els[i];
+        }
+        return null;
+    }
+    var AGE_RE = /<span data-cicd-pool-age[^>]*>[^<]*<\/span>/;
+    function patchAge(card, html) {
+        var m = AGE_RE.exec(html), span = card.querySelector('[data-cicd-pool-age]');
+        if (!m || !span) return;
+        var t = m[0].replace(/^<[^>]*>/, '').replace(/<\/span>$/, '').replace(/&amp;/g, '&');
+        if (span.textContent !== t) span.textContent = t;
+        if (t === DASH) span.setAttribute('aria-label', 'not reported'); else span.removeAttribute('aria-label');
     }
     function findControl(r, action, id) {
         var els = r.querySelectorAll('[data-cicd-pool-action]');
@@ -207,12 +222,15 @@
                 card.className = 'cicd-pool-card';
                 card.setAttribute('aria-labelledby', 'cicd-pool-name-' + safeId(id));
             }
-            if (card._html !== html) {
+            var sig = html.replace(AGE_RE, '');
+            if (card._sig !== sig) {
                 if (active && card.contains(active)) {
-                    refocus = [active.getAttribute('data-cicd-pool-action'), active.getAttribute('data-cicd-pool-machine')];
+                    refocus = [active.getAttribute('data-cicd-pool-control'), id];
                 }
                 card.innerHTML = html;
-                card._html = html;
+                card._sig = sig;
+            } else {
+                patchAge(card, html);   // only the relative poll time moved: no rebuild, focus untouched
             }
             card.setAttribute('data-cicd-pool-state', STATES[m.state] ? m.state : 'unknown');
             if (list.children[pos] !== card) list.insertBefore(card, list.children[pos] || null);
@@ -222,7 +240,11 @@
             if (!seen[c.getAttribute('data-cicd-pool-machine-card')]) list.removeChild(c);
         });
         if (refocus && refocus[0]) {
-            var el = findControl(r, refocus[0], refocus[1]);
+            var el = findByControl(r, refocus[0]);
+            if (!el) {   // the control itself changed (e.g. Pause -> Resume): land on the card's first control
+                var rc = findCard(list, refocus[1]);
+                el = rc && rc.querySelector('[data-cicd-pool-control]');
+            }
             if (el && doc.activeElement !== el) el.focus();
         } else if (r._pendingFocus && (!doc.activeElement || doc.activeElement === doc.body)) {
             // The control that opened a dialog was replaced by the refresh that
@@ -284,9 +306,32 @@
     }
 
     // ---- confirm dialog -----------------------------------------------------
+    // Everything outside the dialog host becomes inert (attribute + aria-hidden fallback) while it is open.
+    function setBackgroundInert(r, host, on) {
+        var doc = r.ownerDocument, node = host, list = r._inerted || [];
+        if (!on) {
+            list.forEach(function(e) { e.removeAttribute('inert'); if (e._wasAriaHidden !== true) e.removeAttribute('aria-hidden'); });
+            r._inerted = [];
+            return;
+        }
+        while (node && node !== doc.documentElement && node.parentNode) {
+            Array.prototype.slice.call(node.parentNode.children).forEach(function(sib) {
+                if (sib === node || sib.hasAttribute('inert') || sib.tagName === 'SCRIPT' || sib.tagName === 'STYLE') return;
+                if (sib.hasAttribute('data-cicd-pool-status')) return;   // the live region must keep announcing
+                sib._wasAriaHidden = sib.hasAttribute('aria-hidden');
+                sib.setAttribute('inert', '');
+                sib.setAttribute('aria-hidden', 'true');
+                list.push(sib);
+            });
+            node = node.parentNode;
+        }
+        r._inerted = list;
+    }
+
     function closeDialog(r, restore) {
         var host = r.querySelector('[data-cicd-pool-dialog-host]');
         var d = host.firstChild, inv = d && d._invoker;
+        setBackgroundInert(r, host, false);
         host.innerHTML = '';
         if (restore && inv) {
             var el = findControl(r, inv[0], inv[1]);
@@ -306,6 +351,7 @@
         d._invoker = [invoker.getAttribute('data-cicd-pool-action'), id];
         d._id = id;
         host.appendChild(d);
+        setBackgroundInert(r, host, true);
         setStep(d, 1);
     }
     function setStep(d, step) {
@@ -318,13 +364,13 @@
                 '<input type="text" maxlength="200" id="cicd-pool-reason-' + k + '" data-cicd-pool-reason-input>' +
                 '<div class="cicd-pool-dlg-actions">' +
                 '<button type="button" class="cicd-pool-btn" data-cicd-pool-dlg="cancel">Cancel</button> ' +
-                '<button type="button" class="cicd-pool-btn" data-cicd-pool-dlg="confirm">Pause ' + esc(id) + '</button></div>';
+                '<button type="button" class="cicd-pool-btn cicd-pool-btn-caution" data-cicd-pool-dlg="confirm"><span aria-hidden="true">❚❚ </span>Pause ' + esc(id) + '</button></div>';
         } else {
             d.innerHTML = '<h4 id="cicd-pool-dlg-title">' + esc(id) + ' is the last available machine</h4>' +
-                '<p id="cicd-pool-dlg-desc">Pausing it leaves CI with no capacity, and the hosted fallback is billing-blocked, so queued jobs will wait until a machine is resumed. Pause anyway?</p>' +
+                '<p id="cicd-pool-dlg-desc">With no CI machine available, queued jobs will wait until one is resumed. Pause anyway?</p>' +
                 '<div class="cicd-pool-dlg-actions">' +
                 '<button type="button" class="cicd-pool-btn" data-cicd-pool-dlg="cancel">Cancel</button> ' +
-                '<button type="button" class="cicd-pool-btn" data-cicd-pool-dlg="strand">Pause anyway</button></div>';
+                '<button type="button" class="cicd-pool-btn cicd-pool-btn-caution" data-cicd-pool-dlg="strand"><span aria-hidden="true">▲ </span>Pause anyway</button></div>';
         }
         var first = d.querySelector('[data-cicd-pool-dlg="cancel"]');
         if (first) first.focus();
@@ -357,6 +403,7 @@
     function onClick(r, e) {
         var t = e.target && e.target.closest ? e.target.closest('button') : null;
         if (!t || !r.contains(t)) return;
+        if (r.querySelector('[data-cicd-pool-dialog]') && !t.closest('[data-cicd-pool-dialog]')) { e.preventDefault(); return; }
         var dlg = t.getAttribute('data-cicd-pool-dlg');
         if (dlg) {
             var d = t.closest('[data-cicd-pool-dialog]');

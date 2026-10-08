@@ -247,6 +247,7 @@
       "jobClass": "short",
       "waitingMs": 0,
       "noCapacityMs": 0,
+      "noEligibleMachine": false,
       "branch": "feature/xaca-1444",
       "workflow": "CI",
       "url": "https://github.com/DoubleNode/dev-team/actions/runs/5/job/1",
@@ -268,6 +269,7 @@
       "jobClass": "short",
       "waitingMs": 0,
       "noCapacityMs": 0,
+      "noEligibleMachine": false,
       "branch": "feature/xaca-1444",
       "workflow": "CI",
       "url": "https://github.com/DoubleNode/dev-team/actions/runs/5/job/2",
@@ -289,6 +291,7 @@
       "jobClass": "short",
       "waitingMs": 0,
       "noCapacityMs": 0,
+      "noEligibleMachine": false,
       "branch": "feature/xaca-1444",
       "workflow": "CI",
       "url": "https://github.com/DoubleNode/dev-team/actions/runs/5/job/3",
@@ -303,6 +306,7 @@
       "machine": null
     }
   ],
+  "running": [],
   "noCapacity": {
     "active": false,
     "since": null,

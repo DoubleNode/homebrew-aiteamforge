@@ -404,6 +404,7 @@ describe('pauseMarker (025)', () => {
     test('GET shows the drift verdict end to end for every marker x paused state', async () => {
         for (const [marker, whenTrue, whenFalse] of DRIFT_TABLE) {
             const s = setup();
+            await poll(s, KEY_B);   // second AVAILABLE machine (strand guard counts derived state)
             await bearer(request(s.app).put('/api/ci-pool/machines/m4mini'), ADMIN).send({ paused: true, reason: 'r' });
             await poll(s, KEY_A, validPoll({ pauseMarker: marker }));
             let g = await request(s.app).get('/api/ci-pool');
@@ -553,6 +554,7 @@ describe('operator writes (admin tier)', () => {
 
     test('pause: sets the single source of truth, server-stamps who/when, audits, and the next poll sees it', async () => {
         const s = setup();
+        await poll(s, KEY_B);   // a second machine that is actually AVAILABLE (strand guard counts derived state)
         s.clock.t = T0 + 5000;
         const r = await put(s, '/api/ci-pool/machines/m4mini', ADMIN, { paused: true, reason: 'XACA-1440 pause' });
         assert.equal(r.status, 200);
@@ -587,6 +589,7 @@ describe('operator writes (admin tier)', () => {
 
     test('validation: unknown fields, bad types and bad ids are 400 and change nothing', async () => {
         const s = setup();
+        await poll(s, KEY_B);   // see above: keep a second available machine so the strand guard stays out of the way
         for (const [url, body] of [
             ['/api/ci-pool/machines/m4mini', { keyHash: 'a'.repeat(64) }],
             ['/api/ci-pool/machines/m4mini', { pausedBy: 'someone' }],

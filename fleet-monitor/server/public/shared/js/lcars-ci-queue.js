@@ -27,9 +27,11 @@
 //   5. No looping animation (none at all; the CSS adds none).
 //
 // Server contract notes:
-//   queue item  : { key, repo, jobId, name, branch, url, jobClass, waitingMs, noCapacityMs }  (QUEUED jobs only)
+//   queue item  : { key, repo, jobId, name, branch, url, jobClass, waitingMs, noCapacityMs, noEligibleMachine }  (QUEUED jobs only;
+//                 noEligibleMachine is the server-gated flag the banner uses, noCapacityMs is raw and ignored)
+//   running[]   : { key, repo, jobId, name, branch, workflow, url, runnerName, machine|null, startedAt }  (picked up, JIT or persistent)
 //   assignment  : { machine, repo, state, intendedJob, boundJob:{id,name,runId,branch,workflow,url}, boundAt, startedAt }
-//   Running jobs are not in queue[]; they are the assignments with state 'running' and a boundJob.
+//   Running jobs are not in queue[]; they are the assignments with state 'running' and a boundJob, plus running[].
 //   Rows are keyed by repo + jobId so a job moving queued -> running patches its row in place.
 //   The Status column says "queued" / "running" in text; the time cell is labelled
 //   "waiting <t>" or "running for <t>" so the two are never ambiguous.
@@ -120,13 +122,28 @@
         return Math.max(0, (ref - t) / 1000);
     }
 
-    // Running jobs: 'running' assignments that carry a bound job id.
-    function runningRows(assignments) {
-        var out = [];
+    // Running jobs, normalised to {repo, id, name, url, branch, machine, runnerName, at}:
+    //   1. 'running' assignments that carry a bound job id (JIT runners);
+    //   2. body.running[] (XACA-1444 PR #1101 r1): every picked-up pool job, incl. PERSISTENT runners.
+    // De-duplicated by repo#jobId, assignments first, so a job is never shown twice.
+    function runningRows(assignments, runningList) {
+        var out = [], seen = {};
         assignments.forEach(function(a) {
             if (!a || typeof a !== 'object' || a.state !== 'running' || !a.boundJob || typeof a.boundJob !== 'object') return;
             if (!isNum(a.boundJob.id) || !isStr(a.repo)) return;
-            out.push(a);
+            var k = a.repo + '#' + a.boundJob.id;
+            if (seen[k]) return;
+            seen[k] = true;
+            out.push({ repo: a.repo, id: a.boundJob.id, name: a.boundJob.name, url: a.boundJob.url, branch: a.boundJob.branch,
+                machine: isStr(a.machine) ? a.machine : null, runnerName: null, at: pick(a, ['boundAt', 'startedAt']) });
+        });
+        (Array.isArray(runningList) ? runningList : []).forEach(function(j) {
+            if (!j || typeof j !== 'object' || !isStr(j.repo) || !isNum(j.jobId)) return;
+            var k = j.repo + '#' + j.jobId;
+            if (seen[k]) return;
+            seen[k] = true;
+            out.push({ repo: j.repo, id: j.jobId, name: j.name, url: j.url, branch: j.branch,
+                machine: isStr(j.machine) ? j.machine : null, runnerName: isStr(j.runnerName) ? j.runnerName : null, at: j.startedAt });
         });
         return out;
     }
@@ -143,8 +160,12 @@
         var nc = body.noCapacity && typeof body.noCapacity === 'object' ? body.noCapacity : {};
         var groups = Array.isArray(body.queueAge) ? body.queueAge.filter(function(g) { return g && typeof g === 'object'; }) : [];
         var over = groups.filter(function(g) { return g.overThreshold === true; });
-        // Per-job evidence that no machine could take the job (server gates this at 120 s).
-        var noMachine = queue.some(function(q) { return isNum(q.noCapacityMs) && q.noCapacityMs > 0; });
+        // The server is the single authority on "no machine can take this job": noEligibleMachine uses the same
+        // gate as noCapacity() (live mode, >= 120 s). The raw noCapacityMs is NOT used: it is set in shadow mode
+        // and from the first tick (PR #1101 r1, XACA-1444-012). Older servers omit the flag; then only
+        // noCapacity.active that is not explained by an aged group counts as "no machine".
+        var hasFlag = queue.some(function(q) { return typeof q.noEligibleMachine === 'boolean'; });
+        var noMachine = hasFlag && queue.some(function(q) { return q.noEligibleMachine === true; });
         var active = nc.active === true || over.length > 0;
         if (!active) return { kind: 'none' };
         // Active with neither per-job evidence nor an aged group: the server says no capacity.
@@ -297,12 +318,12 @@
     function renderTable(doc, rootEl, body, ref) {
         var queue = Array.isArray(body.queue) ? body.queue.filter(function(q) { return q && typeof q === 'object'; }) : [];
         var assignments = Array.isArray(body.assignments) ? body.assignments : [];
-        var running = runningRows(assignments);
+        var running = runningRows(assignments, body.running);
         var tbody = rootEl.querySelector('tbody');
 
         // Stable id = repo + jobId (the queue's own key carries a run attempt the assignment does not know).
         var runIds = {};
-        running.forEach(function(a) { runIds[a.repo + '#' + a.boundJob.id] = true; });
+        running.forEach(function(a) { runIds[a.repo + '#' + a.id] = true; });
         var shown = 0;
         var wanted = [];
         queue.forEach(function(item, idx) {
@@ -327,18 +348,18 @@
             wanted.push(tr);
         });
         running.forEach(function(a) {
-            var j = a.boundJob;
-            var tr = ensureRow(doc, tbody, a.repo + '#' + j.id);
+            var tr = ensureRow(doc, tbody, a.repo + '#' + a.id);
             var cells = tr.children;
             fillCell(doc, cells[0], a.repo);
-            fillJob(doc, cells[1], isStr(j.name) ? j.name : null, j.url);
-            fillCell(doc, cells[2], isStr(j.branch) ? j.branch : null);
+            fillJob(doc, cells[1], isStr(a.name) ? a.name : null, a.url);
+            fillCell(doc, cells[2], isStr(a.branch) ? a.branch : null);
             fillCell(doc, cells[3], 'running');
             setAttr(tr, 'data-ciq-status', 'running');
-            var r = humanSec(runningSec(a, ref));
+            var r = humanSec(runningSec({ boundAt: a.at }, ref));
             fillCell(doc, cells[4], r === null ? null : 'running for ' + r);
-            fillCell(doc, cells[5], isStr(a.machine) ? a.machine : null);
-            setAttr(tr, 'data-ciq-machine', isStr(a.machine) ? a.machine : '');
+            // No machine resolved (persistent runner of unknown host): show the runner name, never a blank.
+            fillCell(doc, cells[5], a.machine !== null ? a.machine : (a.runnerName !== null ? 'runner ' + a.runnerName : null));
+            setAttr(tr, 'data-ciq-machine', a.machine !== null ? a.machine : '');
             wanted.push(tr);
             shown++;
         });

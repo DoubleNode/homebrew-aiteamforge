@@ -53,13 +53,16 @@ describe('deriveMachineState', () => {
         assert.deepEqual(st(M({ paused: true }), rep()), { state: 'paused', reason: 'drained' });
     });
 
-    test('resuming: accepting is requested but the host/poll has not caught up', () => {
-        assert.equal(st(M(), rep({ pauseMarker: 'resuming' })).state, 'resuming');
-        assert.equal(st(M(), rep({ pauseMarker: 'paused' })).state, 'resuming');
-        assert.equal(st(M(), rep({ pauseMarker: 'draining' })).state, 'resuming');
-        assert.equal(st(M(), rep({ receivedAt: NOW - 31000 })).state, 'resuming');
-        assert.equal(st(M(), rep({ slots: [] })).state, 'resuming');
-        assert.equal(st(M(), rep({ slots: [broken] })).state, 'resuming');
+    test('resuming: ONLY when the host itself reports a resume under way', () => {
+        assert.deepEqual(st(M(), rep({ pauseMarker: 'resuming' })), { state: 'resuming', reason: 'marker-resuming' });
+    });
+
+    test('an enabled, unpaused machine that is merely quiet / slotless / stuck is unknown with a reason, never resuming (PR #1101 r1)', () => {
+        assert.deepEqual(st(M(), rep({ pauseMarker: 'paused' })), { state: 'unknown', reason: 'marker-paused' });
+        assert.deepEqual(st(M(), rep({ pauseMarker: 'draining' })), { state: 'unknown', reason: 'marker-draining' });
+        assert.deepEqual(st(M(), rep({ receivedAt: NOW - 31000 })), { state: 'unknown', reason: 'stale-poll' });
+        assert.deepEqual(st(M(), rep({ slots: [] })), { state: 'unknown', reason: 'no-online-slots' });
+        assert.deepEqual(st(M(), rep({ slots: [broken] })), { state: 'unknown', reason: 'no-online-slots' });
     });
 
     test('unknown: insufficient data is never reported as zero or healthy', () => {
@@ -73,7 +76,7 @@ describe('deriveMachineState', () => {
 
     test('pollStaleMs boundary is inclusive and per-machine overridable by the caller', () => {
         assert.equal(st(M(), rep({ receivedAt: NOW - 30000 })).state, 'enabled');
-        assert.equal(st(M(), rep({ receivedAt: NOW - 30001 })).state, 'resuming');
+        assert.equal(st(M(), rep({ receivedAt: NOW - 30001 })).state, 'unknown');
         assert.equal(st(M(), rep({ receivedAt: NOW - 60000 }), { pollStaleMs: 90000 }).state, 'enabled');
     });
 

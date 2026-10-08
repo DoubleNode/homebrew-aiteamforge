@@ -177,12 +177,56 @@ test('non-dormant Enable (unknown capability does not block) and Resume send the
     btn(env, 'm1mini', 'resume').click();
     await settle();
     assert.deepEqual(f.calls[1].body, { paused: false });
-    // resuming: the control exists but is aria-disabled with a reason
-    const r = btn(env, 'm3pro', 'resume');
-    assert.equal(r.getAttribute('aria-disabled'), 'true');
-    r.click();
-    await settle();
-    assert.equal(f.calls.length, 2);
+    // resuming (enabled, unpaused): Pause stays reachable and enabled; there is no Resume to offer
+    assert.equal(btn(env, 'm3pro', 'resume'), null);
+    const r = btn(env, 'm3pro', 'pause');
+    assert.equal(r.hasAttribute('aria-disabled'), false);
+});
+
+test('PR #1101 r1: every enabled+unpaused report shape (derive -> render) has a focusable, enabled Pause', () => {
+    const { deriveMachineState } = require('../lib/ci-pool-derive');
+    const NOW = Date.UTC(2026, 9, 7, 18, 0, 0);
+    const slot = (state) => ({ os: 'Linux', index: 1, state, assignmentId: null });
+    const rep = (over) => Object.assign({ receivedAt: NOW - 5000, slots: [slot('idle')], capacity: null }, over);
+    const reports = {
+        none: null,
+        'stale poll': rep({ receivedAt: NOW - 600000 }),
+        'all slots broken': rep({ slots: [slot('broken')] }),
+        'empty slots': rep({ slots: [] }),
+        'marker paused': rep({ pauseMarker: 'paused' }),
+        'marker draining': rep({ pauseMarker: 'draining' }),
+        'marker resuming': rep({ pauseMarker: 'resuming' }),
+        'marker corrupt': rep({ pauseMarker: 'corrupt' }),
+        healthy: rep({}),
+    };
+    const flags = [
+        { enabled: true, paused: false, want: 'pause' },
+        { enabled: true, paused: true, want: 'resume' },
+        { enabled: false, paused: false, want: 'enable' },
+        { enabled: false, paused: true, want: 'enable' },
+    ];
+    for (const [rname, r] of Object.entries(reports)) {
+        for (const fl of flags) {
+            const m = { enabled: fl.enabled, paused: fl.paused, pausedBy: null, pausedAt: null, pauseReason: null, hasKey: true,
+                capacity: null, slots: r ? r.slots : null, lastPollAt: r ? new Date(r.receivedAt).toISOString() : null,
+                pauseMarker: r && r.pauseMarker ? r.pauseMarker : null, pauseDrift: null };
+            const d = deriveMachineState(m, r, { nowMs: NOW, pollStaleMs: 30000 });
+            m.state = d.state; m.stateReason = d.reason; m.capability = 'unknown';
+            const env = setup({ schemaVersion: 1, serverTime: new Date(NOW).toISOString(), machines: { mx: m }, assignments: [] });
+            const c = card(env, 'mx');
+            const label = rname + ' enabled=' + fl.enabled + ' paused=' + fl.paused;
+            assert.equal(c.getAttribute('data-cicd-pool-state'), d.state, label);
+            if (fl.enabled && !fl.paused && d.state === 'resuming') {
+                assert.equal(r.pauseMarker, 'resuming', label + ': resuming only on the host marker');
+            }
+            const b = c.querySelector('[data-cicd-pool-action]');
+            assert.equal(b.getAttribute('data-cicd-pool-action'), fl.want, label);
+            if (fl.want === 'pause') {
+                assert.equal(b.hasAttribute('aria-disabled'), false, label + ': Pause is never aria-disabled');
+                assert.equal(b.disabled, false, label);
+            }
+        }
+    }
 });
 
 test('Pause: confirm dialog copy, posts exactly once with the right body, announces, emits changed', async () => {
@@ -219,7 +263,8 @@ test('409 wouldStrand requires a second confirmation, then re-PUTs with confirm:
     const d = dialog(env);
     assert.ok(d, 'dialog stays open for the second confirmation');
     assert.match(d.textContent, /last available machine/);
-    assert.match(d.textContent, /billing-blocked/);
+    assert.match(d.textContent, /queued jobs will wait until one is resumed/);
+    assert.doesNotMatch(d.textContent, /billing/i);
     assert.equal(f.calls.length, 1, 'no second PUT until the operator confirms');
     assert.ok(d.contains(env.document.activeElement), 'focus stays inside the dialog');
     d.querySelector('[data-cicd-pool-dlg="strand"]').click();

@@ -77,6 +77,12 @@ const SHADOW_LOG_PRIME_BYTES = 512 * 1024;
 const DEFAULT_SHADOW_LOG_NAME = 'ci-shadow-decisions.jsonl';
 
 const clean = (v) => (v === undefined || v === null ? '' : String(v).trim());
+/** Display string from untrusted data: string only, control chars -> space, capped, else null. */
+function capStr(v, max) {
+    if (typeof v !== 'string') return null;
+    const t = v.replace(/[\u0000-\u001f\u007f]/g, ' ').trim();
+    return t === '' ? null : t.slice(0, max);
+}
 
 /** True when GitHub App credentials look configured (presence only; never read the value elsewhere). */
 function hasCredentials(env) {
@@ -413,6 +419,20 @@ function createDispatcher(deps) {
         return out;
     }
 
+    /**
+     * XACA-1444 PR #1101 r1: pool jobs a runner has picked up (JIT or PERSISTENT), until they complete.
+     * The queue view's running rows came only from JIT assignments, so a job taken by a persistent runner
+     * vanished the moment it left `tracked`. Bounded; oldest evicted first.
+     */
+    const running = new Map();   // job key -> {rec, since}
+    const MAX_RUNNING = 500;
+    function policyAccepts(rec) {
+        const cfg = store.getConfig();
+        const machines = store.listMachines();
+        const hostLabels = Object.keys(machines).map((id) => plc.hostLabelOf(Object.assign({ id }, machines[id]))).filter(Boolean);
+        return pol.evaluateJob(rec, { allowlist: cfg.allowlist, poolLabel: cfg.poolLabel, hostLabels }).accept === true;
+    }
+
     /** Watcher callback. Must never throw into the watcher. */
     function onJob(rec, change) {
         try {
@@ -420,11 +440,19 @@ function createDispatcher(deps) {
             if (change === 'queued' || change === 'seen') {
                 if (rec.status === 'queued' && !rec.runnerName) evaluate(rec);
             } else if (change === 'pickup' || change === 'in_progress') {
+                const wasPool = tracked.has(rec.key) || running.has(rec.key);
                 tracked.delete(rec.key);
                 configRejected.delete(rec.key);
                 assignments.bindJob(rec, change);
+                if (wasPool || policyAccepts(rec)) {
+                    const prior = running.get(rec.key);
+                    running.delete(rec.key);
+                    running.set(rec.key, { rec, since: prior ? prior.since : now() });
+                    while (running.size > MAX_RUNNING) running.delete(running.keys().next().value);
+                }
             } else if (change === 'completed') {
                 tracked.delete(rec.key);
+                running.delete(rec.key);
                 configRejected.delete(rec.key);
                 rejected.delete(rec.key);
             }
@@ -656,13 +684,18 @@ function createDispatcher(deps) {
      * noCapSince only counts once it is alertable: live mode and waited >= NO_CAPACITY_AFTER_MS. In
      * shadow the persistent runners still serve the job, so a bare "no live host" is not an outage.
      */
+    /** The ONE gate for "no machine can take this job": live mode and waited >= NO_CAPACITY_AFTER_MS.
+     *  Used by noCapacity() AND queue()[].noEligibleMachine so the server summary and the per-job flag cannot disagree. */
+    function alertableNoCapSince(t, nowMs, live) {
+        return live && t.noCapSince !== null && nowMs - t.noCapSince >= NO_CAPACITY_AFTER_MS ? t.noCapSince : null;
+    }
     function noCapacity() {
         const nowMs = now();
         if (!isEnabled()) return derive.computeNoCapacity([], [], 0, plc.labelSetKey);
         const live = effectiveMode() === 'live';
         const jobs = [...tracked.values()].map((t) => ({
             rec: t.rec,
-            noCapSince: live && t.noCapSince !== null && nowMs - t.noCapSince >= NO_CAPACITY_AFTER_MS ? t.noCapSince : null,
+            noCapSince: alertableNoCapSince(t, nowMs, live),
         }));
         return derive.computeNoCapacity(jobs, queueAgeView(nowMs), queueAgeThresholdMs(), plc.labelSetKey);
     }
@@ -743,6 +776,7 @@ function createDispatcher(deps) {
                 ((a.boundJob ? a.boundJob.id : (a.intendedJob ? a.intendedJob.id : null)) === rec.jobId));
             return hit ? hit.machine : null;
         };
+        const liveMode = effectiveMode() === 'live';
         return [...tracked.values()].map((t) => ({
             key: t.rec.key,
             repo: `${t.rec.owner}/${t.rec.repo}`,
@@ -751,6 +785,10 @@ function createDispatcher(deps) {
             jobClass: plc.jobClass(t.rec.name, cfg.jobClasses),
             waitingMs: Math.max(0, nowMs - Date.parse(t.rec.firstSeenAt)),
             noCapacityMs: t.noCapSince === null ? 0 : nowMs - t.noCapSince,
+            // XACA-1444 PR #1101 r1 (additive): true only when noCapacity() would count this job as having no
+            // eligible machine (live mode AND >= NO_CAPACITY_AFTER_MS). Clients must use THIS, not noCapacityMs
+            // (raw and ungated: set in shadow mode and from the first tick).
+            noEligibleMachine: alertableNoCapSince(t, nowMs, liveMode) !== null,
             branch: t.rec.branch || null,
             workflow: t.rec.workflow || null,
             url: t.rec.url || null,
@@ -761,9 +799,49 @@ function createDispatcher(deps) {
         }));
     }
 
+    /**
+     * XACA-1444 PR #1101 r1 (additive): jobs a runner has picked up and not yet completed, from the watcher's
+     * own records, so jobs taken by PERSISTENT runners show as running too. `machine` is resolved from a
+     * non-terminal assignment with the same runner name, else from a runner name that starts with a pool
+     * machine id / host label followed by "-"; otherwise null (the UI then shows the runner name).
+     * The queue view dedupes against assignments[] by repo#jobId, so a JIT job never appears twice.
+     */
+    function runningJobs() {
+        if (!isEnabled()) return [];
+        const nowMs = now();
+        const machines = store.listMachines();
+        const prefixes = Object.keys(machines).map((id) => [id, [id.toLowerCase(), plc.hostLabelOf(Object.assign({ id }, machines[id]))].filter(Boolean)]);
+        const snap = assignments.snapshot();
+        const out = [];
+        for (const [jobKey, r] of [...running.entries()]) {
+            if (nowMs - r.since > MAX_TRACKED_MS) { running.delete(jobKey); continue; }
+            const rec = r.rec;
+            const runnerName = capStr(rec.runnerName, 200);
+            const repo = `${rec.owner}/${rec.repo}`;
+            let machine = null;
+            if (runnerName) {
+                const a = snap.find((x) => x.runnerName === runnerName && String(x.repo).toLowerCase() === repo.toLowerCase());
+                if (a && typeof a.machine === 'string') machine = a.machine;
+                else {
+                    const low = runnerName.toLowerCase();
+                    const hit = prefixes.find(([, ps]) => ps.some((p) => low.startsWith(`${p}-`)));
+                    if (hit) machine = hit[0];
+                }
+            }
+            out.push({
+                key: rec.key, repo, jobId: rec.jobId, name: capStr(rec.name, 200),
+                branch: rec.branch || null, workflow: rec.workflow || null, url: rec.url || null,
+                runnerName, machine,
+                startedAt: rec.inProgressAt || new Date(r.since).toISOString(),
+                status: 'running',
+            });
+        }
+        return out;
+    }
+
     const status = () => ({ enabled: isEnabled(), mode: effectiveMode(), decisionsRecorded, running: started, lastTickAt, tracked: tracked.size, notPoolSkipped, configRejected: configRejected.size });
 
-    return { start, stop, tick, isEnabled, alerts: () => alerts.list(), queue, queueAge, noCapacity, queueAgeThresholdSec: () => Math.round(queueAgeThresholdMs() / 1000), status, onJob, onDegraded, onConfigChanged };
+    return { start, stop, tick, isEnabled, alerts: () => alerts.list(), queue, running: runningJobs, queueAge, noCapacity, queueAgeThresholdSec: () => Math.round(queueAgeThresholdMs() / 1000), status, onJob, onDegraded, onConfigChanged };
 }
 
 // ============================================================================

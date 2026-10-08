@@ -34,12 +34,19 @@
  *        f. otherwise (marker 'paused', or no marker from an older agent, and zero busy slots)
  *                                                        -> paused
  *   3. paused !== true (accepting work is requested):
- *        a. no report ever                               -> unknown    (absent is not zero)
- *        b. report not fresh (poll lapsed)               -> resuming   (agent restarting / not back yet)
+ *        a. no report ever                               -> unknown    (reason no-report)
+ *        b. report not fresh (poll lapsed)               -> unknown    (reason stale-poll)
  *        c. pauseMarker 'corrupt'                        -> unknown
- *        d. pauseMarker 'resuming'|'paused'|'draining'   -> resuming   (host still shows the old pause)
- *        e. no online slot (empty or all broken)         -> resuming   (slots not up yet)
- *        f. otherwise                                    -> enabled
+ *        d. pauseMarker 'resuming'                       -> resuming   (the host itself says a resume is under way)
+ *        e. pauseMarker 'paused'|'draining'              -> unknown    (reason marker-paused|marker-draining: the host
+ *                                                                       still shows a pause the server no longer asks for)
+ *        f. no online slot (empty or all broken)         -> unknown    (reason no-online-slots)
+ *        g. otherwise                                    -> enabled
+ *
+ * `resuming` therefore means a resume is ACTUALLY in progress (rule 3d). An enabled, unpaused machine that
+ * has merely gone quiet, lost its slots or kept a stale marker is `unknown` (with a stateReason), never
+ * `resuming` (XACA-1444 PR #1101 round 1). The UI offers Pause for every enabled, unpaused machine whatever
+ * its derived state: controls follow the raw flags, not this read model.
  *
  * capability: what the host's agent REPORTED about itself ('dormant' | 'enabled'). Nothing reports
  * it today, so it is 'unknown' until an agent sends poll.capability; it is never inferred.
@@ -105,10 +112,11 @@ function deriveMachineState(machine, report, ctx) {
     }
 
     if (!have) return { state: 'unknown', reason: 'no-report' };
-    if (!fresh) return { state: 'resuming', reason: 'poll-stale' };
+    if (!fresh) return { state: 'unknown', reason: 'stale-poll' };
     if (marker === 'corrupt') return { state: 'unknown', reason: 'pause-marker-corrupt' };
-    if (marker === 'resuming' || marker === 'paused' || marker === 'draining') return { state: 'resuming', reason: `marker-${marker}` };
-    if (online === 0) return { state: 'resuming', reason: 'no-online-slots' };
+    if (marker === 'resuming') return { state: 'resuming', reason: 'marker-resuming' };
+    if (marker === 'paused' || marker === 'draining') return { state: 'unknown', reason: `marker-${marker}` };
+    if (online === 0) return { state: 'unknown', reason: 'no-online-slots' };
     return { state: 'enabled', reason: 'accepting' };
 }
 

@@ -423,6 +423,8 @@ function registerCiPoolRoutes(app, deps) {
                 assignments: assignments.snapshot(),
                 alerts: d.dispatcher && typeof d.dispatcher.alerts === 'function' ? d.dispatcher.alerts() : [],
                 queue: d.dispatcher && typeof d.dispatcher.queue === 'function' ? d.dispatcher.queue() : [],
+                // XACA-1444 PR #1101 r1 (additive): picked-up, not-yet-completed pool jobs (JIT AND persistent runners).
+                running: d.dispatcher && typeof d.dispatcher.running === 'function' ? d.dispatcher.running() : [],
                 // XACA-1444-001/011 (additive). Absent dispatcher => the empty/inactive shape, never an error.
                 noCapacity: d.dispatcher && typeof d.dispatcher.noCapacity === 'function'
                     ? d.dispatcher.noCapacity()
@@ -467,17 +469,27 @@ function registerCiPoolRoutes(app, deps) {
             // XACA-1444-001: refuse to pause/disable the LAST enabled-and-unpaused machine without confirm:true.
             // Only a real accepting -> not-accepting transition of THIS machine counts, so an idempotent
             // repeat (or touching an already-stopped machine) is never refused.
+            // The machine being stopped is judged by its stored flags (stopping a machine that was asked to
+            // accept work is always a capacity decision). The OTHERS must be actually AVAILABLE, i.e. derived
+            // state `enabled`: a stale/offline/slotless "other" cannot take jobs, so it does not count
+            // (PR #1101 r1, XACA-1444-014/016).
             const accepting = (m) => !!m && m.enabled === true && m.paused === false;
             if (accepting(before)) {
                 const nextEnabled = has(patch, 'enabled') ? patch.enabled : before.enabled;
                 const nextPaused = has(patch, 'paused') ? patch.paused : before.paused;
                 const stops = nextEnabled !== true || nextPaused !== false;
-                const others = Object.entries(store.listMachines()).filter(([k, m]) => k !== id && accepting(m)).length;
+                const cfgNow = store.getConfig();
+                const nowMs = clock();
+                const available = (k, m) => {
+                    const ms = Number.isFinite(m.thresholds && m.thresholds.pollStaleMs) ? m.thresholds.pollStaleMs : cfgNow.thresholds.pollStaleMs;
+                    return derive.deriveMachineState(m, reports.get(k) || null, { nowMs, pollStaleMs: ms }).state === 'enabled';
+                };
+                const others = Object.entries(store.listMachines()).filter(([k, m]) => k !== id && available(k, m)).length;
                 if (stops && others === 0 && !confirmed) {
                     const action = nextEnabled !== true ? 'disable' : 'pause';
                     audit(action === 'disable' ? 'enable' : 'pause', { machine: id, by: 'operator', action, outcome: 'refused-would-strand', confirmed: false });
                     return res.status(409).json({
-                        error: `refusing to ${action} ${id}: it is the last enabled, unpaused CI machine and the pool would have no capacity. Resend with confirm:true to proceed.`,
+                        error: `refusing to ${action} ${id}: it is the last available CI machine (no other machine is enabled, unpaused and reporting) and the pool would have no capacity. Resend with confirm:true to proceed.`,
                         wouldStrand: true, machine: id, action,
                     });
                 }
