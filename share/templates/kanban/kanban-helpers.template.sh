@@ -26039,6 +26039,13 @@ kb-release-promote() {
 _kb_release_verify_platform_stage() {
     local body="${1-}" target="${2-}" rid="${3-}"
     local bad jq_rc
+    # An empty / whitespace-only body (or a connection cut after the headers) gives jq NO input, so it
+    # prints nothing and exits 0 -- which the "no bad lines" branch below would read as success.
+    # (An empty platforms OBJECT, `{}`, deliberately passes: a release with no platforms has none left behind.)
+    if [[ -z "${body//[[:space:]]/}" ]]; then
+        echo "✗ Release $rid: server answered 200 with an empty response; cannot verify platforms are at $target" >&2
+        return 5
+    fi
     bad=$(printf '%s' "$body" | jq -r --arg t "$target" '
         if ((.release.platforms | type) == "object") then
             (.release.platforms | to_entries[]
