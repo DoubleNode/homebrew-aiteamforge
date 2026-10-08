@@ -108,6 +108,7 @@ for (const tree of ['v1', 'v2']) {
             assert.equal(s0.options[0].value, '', 'empty placeholder is the first option');
             assert.equal(s0.value, '', 'nothing preselected');
             s0.value = Array.from(s0.options).find((o) => o.textContent === 'Charlie-Nick').value;
+            s0.dispatchEvent(new s0.ownerDocument.defaultView.Event('change', { bubbles: true }));
             await pg.poll(71);   // new reading => data signature changes => rebuild
             assert.match(root().textContent, /71%/, 'poll applied the new reading');
             const s = root().querySelector(SEL);
@@ -140,6 +141,7 @@ for (const tree of ['v1', 'v2']) {
             const root = () => pg.d.getElementById(pg.T.content);
             const s = root().querySelector(SEL);
             s.value = Array.from(s.options).find((o) => o.textContent === 'host-bravo').value;
+            s.dispatchEvent(new s.ownerDocument.defaultView.Event('change', { bubbles: true }));
             pg.state.data.accessories[0].attached_machine_ids = [MID.b];
             await pg.poll(59);
             const s2 = root().querySelector(SEL);
@@ -252,6 +254,7 @@ for (const { tree, page } of PAGES) {
             const sent = []; stubFetch(pg, sent);
             const sA = cards(pg)[0].querySelector(SEL);
             sA.value = labelOpt(sA, 'Charlie-Nick').value;
+            sA.dispatchEvent(new sA.ownerDocument.defaultView.Event('change', { bubbles: true }));
             await pg.poll(71);
             assert.match(pg.d.getElementById(pg.T.content).textContent, /71%/);
             const sA2 = cards(pg)[0].querySelector(SEL);
@@ -269,6 +272,7 @@ for (const { tree, page } of PAGES) {
             const sent = []; stubFetch(pg, sent);
             const sA = cards(pg)[0].querySelector(SEL);
             sA.value = labelOpt(sA, 'host-bravo').value;
+            sA.dispatchEvent(new sA.ownerDocument.defaultView.Event('change', { bubbles: true }));
             sA.focus();
             assert.equal(pg.d.activeElement, sA);
             await pg.poll(64);
@@ -293,6 +297,7 @@ for (const { tree, page } of PAGES) {
             });
             const sA = cards(pg)[0].querySelector(SEL);
             sA.value = labelOpt(sA, 'Charlie-Nick').value;
+            sA.dispatchEvent(new sA.ownerDocument.defaultView.Event('change', { bubbles: true }));
             sA.focus();
             cards(pg)[1].querySelector('.accessory-detach, .accessory-detach-btn').click();   // write on card B
             assert.ok(await until(() => sent.length === 1));
@@ -330,6 +335,7 @@ for (const { tree, page } of PAGES) {
             const sent = []; stubFetch(pg, sent);
             const sA = cards(pg)[0].querySelector(SEL);
             sA.value = labelOpt(sA, 'Charlie-Nick').value;
+            sA.dispatchEvent(new sA.ownerDocument.defaultView.Event('change', { bubbles: true }));
             pg.state.data.fleet.machines = pg.state.data.fleet.machines.filter((m) => m.machine_id !== MID.c);
             await pg.poll(58);
             const sA2 = cards(pg)[0].querySelector(SEL);
@@ -347,6 +353,7 @@ for (const { tree, page } of PAGES) {
             const sent = []; stubFetch(pg, sent);
             const sA = cards(pg)[0].querySelector(SEL);
             sA.value = labelOpt(sA, 'host-bravo').value;
+            sA.dispatchEvent(new sA.ownerDocument.defaultView.Event('change', { bubbles: true }));
             pg.state.data.fleet.machines.reverse();
             await pg.poll(57);
             const sA2 = cards(pg)[0].querySelector(SEL);
@@ -359,11 +366,33 @@ for (const { tree, page } of PAGES) {
     });
 
     // Advisory: keyboard focus is restored to the same control after a rebuild.
+    test(tag + 'ATTACH is disabled until a real machine is picked (XACA-1393-021)', async () => {
+        const pg = await boot(tree, page, 2);
+        try {
+            const btn = () => cards(pg)[0].querySelector(BTN);
+            const sel = () => cards(pg)[0].querySelector(SEL);
+            const change = (el) => el.dispatchEvent(new pg.w.Event('change', { bubbles: true }));
+            assert.equal(btn().disabled, true, 'placeholder selected => ATTACH disabled');
+            sel().value = sel().options[1].value; change(sel());
+            assert.equal(btn().disabled, false, 'real pick => ATTACH enabled');
+            await pg.poll(55);
+            assert.equal(btn().disabled, false, 'restored pick survives a rebuild enabled');
+            sel().value = ''; change(sel());
+            assert.equal(btn().disabled, true, 'back to placeholder => disabled again');
+            await pg.poll(54);
+            assert.equal(btn().disabled, true, 'no pick => still disabled after a rebuild');
+        } finally { pg.close(); }
+    });
+
     test(tag + 'focus is restored to select / ATTACH / the same DETACH after a rebuild', async () => {
         const pg = await boot(tree, page, 2);
         try {
             pg.state.data.accessories[0].attached_machine_ids = [MID.a, MID.b];
             await pg.poll(90);
+            // ATTACH is disabled (unfocusable) until a machine is picked.
+            const pick = cards(pg)[0].querySelector(SEL);
+            pick.value = pick.options[1].value;
+            pick.dispatchEvent(new pg.w.Event('change', { bubbles: true }));
             const detachSel = '.accessory-detach, .accessory-detach-btn';
             const name = (el) => el.getAttribute('aria-label') || '';
             const focusCases = [

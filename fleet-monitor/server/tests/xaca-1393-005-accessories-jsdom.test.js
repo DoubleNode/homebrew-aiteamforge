@@ -230,6 +230,7 @@ for (const tree of ['v1', 'v2']) {
             const opt = Array.from(sel.options).find((o) => o.textContent === 'host-warn');
             assert.ok(opt, 'attach picker lists unattached machines');
             sel.value = opt.value;
+            sel.dispatchEvent(new sel.ownerDocument.defaultView.Event('change', { bubbles: true }));
             c.querySelector(pg.T.attachBtn).click();
             assert.ok(await until(() => sent.length === 1));
             assert.equal(sent[0].method, 'PUT');
@@ -257,6 +258,7 @@ for (const tree of ['v1', 'v2']) {
             c = card('Rack');
             const s2 = c.querySelector(pg.T.select);
             s2.value = Array.from(s2.options).find((o) => o.textContent === 'host-warn').value;
+            s2.dispatchEvent(new s2.ownerDocument.defaultView.Event('change', { bubbles: true }));
             c.querySelector(pg.T.attachBtn).click();
             assert.ok(await until(() => { const e = card('Rack').querySelector(pg.T.err); return e && /Too many attached machines/.test(e.textContent); }), '409 text shown');
             assert.match(card('UPS-One').querySelector(pg.T.err).textContent, /Accessory not found/, 'each error stays on its own card');

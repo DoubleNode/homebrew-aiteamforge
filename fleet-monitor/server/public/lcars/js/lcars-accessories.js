@@ -118,11 +118,16 @@
         }).map(function(m) {
             return '<option value="' + esc(m.machine_id) + '"' + (_sel[id] === m.machine_id ? ' selected' : '') + '>' + esc(machineName(m)) + '</option>';
         }).join('');
+        // ATTACH stays disabled until a real machine is picked (a placeholder click
+        // used to do nothing, silently); the change listener in init() enables it.
+        var picked = idx.list.some(function(m) {
+            return m && m.machine_id === _sel[id] && attached.indexOf(m.machine_id) === -1;
+        });
         var attachHtml = options ?
             '<div class="accessory-attach-row">' +
             '<select class="lcars-select accessory-attach-select" data-accessory-id="' + esc(id) + '" aria-label="Machine to attach to ' + esc(name) + '">' +
             '<option value="">SELECT MACHINE...</option>' + options + '</select>' +
-            '<button type="button" class="btn-lcars btn-lcars-primary accessory-attach-btn" data-accessory-id="' + esc(id) + '" aria-label="Attach selected machine to ' + esc(name) + '">ATTACH</button>' +
+            '<button type="button" class="btn-lcars btn-lcars-primary accessory-attach-btn" data-accessory-id="' + esc(id) + '" aria-label="Attach selected machine to ' + esc(name) + '"' + (picked ? '' : ' disabled') + '>ATTACH</button>' +
             '</div>' : '';
 
         var err = _errors[id];
@@ -271,11 +276,23 @@
         }
     }
 
+    // Enable this card's ATTACH only while a real machine is selected.
+    function onSelectChange(e) {
+        var sel = e.target;
+        if (!sel || !sel.classList || !sel.classList.contains('accessory-attach-select') || _busy) return;
+        var card = sel.closest('.accessory-card');
+        var btn = card && card.querySelector('.accessory-attach-btn');
+        if (btn) btn.disabled = !sel.value;
+    }
+
     window.LCARSAccessories = { render: render, stateInfo: stateInfo };
 
     function init() {
         var c = document.getElementById(CONTAINER_ID);
-        if (c) c.addEventListener('click', onClick);
+        if (c) {
+            c.addEventListener('click', onClick);
+            c.addEventListener('change', onSelectChange);
+        }
     }
 
     if (document.readyState === 'loading') {

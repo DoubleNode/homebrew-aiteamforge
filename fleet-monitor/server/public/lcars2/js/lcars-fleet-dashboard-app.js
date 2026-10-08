@@ -1382,8 +1382,10 @@
         if (!list) list = '<li class="accessory-machine accessory-none">NONE ATTACHED</li>';
 
         let options = '';
+        let picked = false;
         machines.forEach(function(m, mi) {
             if (!m || !m.machine_id || attached.indexOf(m.machine_id) !== -1) return;
+            if (accessoriesUi.sel[acc.id] === m.machine_id) picked = true;
             options += '<option value="' + mi + '"' +
                 (accessoriesUi.sel[acc.id] === m.machine_id ? ' selected' : '') + '>' +
                 escapeHtml(accessoryMachineLabel(m)) + '</option>';
@@ -1392,7 +1394,7 @@
             ? '<div class="accessory-attach"><select class="accessory-attach-select" data-acc-idx="' + accIdx +
               '"' + dis + '><option value="">SELECT MACHINE...</option>' + options + '</select>' +
               '<button type="button" class="btn-lcars btn-lcars-primary accessory-attach-btn" data-acc-idx="' +
-              accIdx + '"' + dis + '>ATTACH</button></div>'
+              accIdx + '"' + (dis || (picked ? '' : ' disabled')) + '>ATTACH</button></div>'
             : '';
 
         const err = accessoriesUi.errors[acc.id];
@@ -1500,6 +1502,14 @@
                 const m = sel && sel.value !== '' ? view.machines[Number(sel.value)] : null;
                 if (m && m.machine_id) accessoryMutate(acc.id, m.machine_id, 'PUT');
             }
+        });
+        // ATTACH is rendered disabled until a real machine is picked (a placeholder
+        // click used to do nothing, silently); enable/disable it as the pick changes.
+        container.addEventListener('change', function(e) {
+            const sel = e.target;
+            if (!sel || !sel.classList || !sel.classList.contains('accessory-attach-select') || sel.disabled) return;
+            const btn = sel.parentNode.querySelector('.accessory-attach-btn');
+            if (btn) btn.disabled = sel.value === '';
         });
     }
 
