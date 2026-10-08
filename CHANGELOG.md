@@ -7,6 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [0.20.33] - 2026-10-08
+
 - **XACA-1393** (Changed, PR #1107 round 4): `fleet-monitor/server/` re-mirrored. After an accessory attach/detach, keyboard focus moves to that card's machine picker (fallback: first DETACH, then the card) instead of dropping to the page top, and a polite live region announces "Attached/Detached X to/from Y" (v1 + lcars2, new `.accessory-sr-only`). Verbatim copies of canonical.
 - **XACA-1393** (Changed, PR #1107 round 3): `fleet-monitor/server/` re-mirrored. Accessories ATTACH is disabled until a real machine is picked (v1 + lcars2), toggled on the picker's change event; `xaca-1393-007` pins it per page. Verbatim copies of canonical.
 - **XACA-1393** (Changed, PR #1107 round 2): `fleet-monitor/server/` re-mirrored. Accessories view restores keyboard focus to the same control after each rebuild (v1 + lcars2); `xaca-1393-007-accessories-stable-selection.test.js` now runs the stable-selection matrix (reading change, focused picker, sibling-card write, placeholder, machine removed, reorder) across all five dashboard pages. Verbatim copies of canonical.
@@ -7919,7 +7921,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.32...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.33...HEAD
+[0.20.33]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.32...v0.20.33
 [0.20.32]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.31...v0.20.32
 [0.20.31]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.30...v0.20.31
 [0.20.30]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.29...v0.20.30
