@@ -617,6 +617,8 @@
     }
 
     function hidePool(mods) {
+        // XACA-1444-022: drop the pool's modal inert state BEFORE its container is cleared/hidden.
+        try { if (window.LCARSCIPool && typeof window.LCARSCIPool.teardown === 'function') window.LCARSCIPool.teardown(); } catch (e) { /* never block the hide */ }
         mods.forEach(function(m) { m.el.innerHTML = ''; m.el.hidden = true; });
     }
 
@@ -633,7 +635,10 @@
                     return null;
                 }
                 mods.forEach(function(m) {
-                    try { m.mod.render(body, m.el, { document: document }); } catch (e) { m.el.hidden = true; }
+                    try { m.mod.render(body, m.el, { document: document }); } catch (e) {
+                        try { if (m.mod.teardown) m.mod.teardown(); } catch (e2) { /* ignore */ }
+                        m.el.hidden = true;
+                    }
                 });
                 return null;
             });

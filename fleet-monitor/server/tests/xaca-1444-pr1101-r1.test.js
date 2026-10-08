@@ -281,3 +281,77 @@ describe('019: the pause dialog is modal', () => {
         assert.equal(doc.activeElement, el.querySelector('[data-cicd-pool-control="mx:pause"]'), 'focus returns to the invoking control');
     });
 });
+
+// ---- XACA-1444-022: the dialog's inert/aria-hidden is released on EVERY teardown path ----------------------
+const CICD_JS = fs.readFileSync(path.join(__dirname, '..', 'public', 'lcars', 'js', 'lcars-cicd.js'), 'utf8');
+const tick = () => new Promise((r) => setTimeout(r, 0));
+function dlgDom() {
+    const dom = new JSDOM('<!doctype html><body><nav id="nav"><button id="bg">bg</button></nav><aside id="pre" aria-hidden="true">x</aside>' +
+        '<div id="cicd-content"></div><div id="cicd-pool"></div><div id="cicd-queue" hidden></div></body>', { runScripts: 'outside-only', url: 'http://localhost/' });
+    dom.window.eval(POOL_JS);
+    const doc = dom.window.document, el = doc.getElementById('cicd-pool');
+    const okFetch = async () => ({ ok: true, status: 200, json: async () => ({}) });
+    dom.window.LCARSCIPool.render(poolBody({ mx: machine({}) }), el, { document: doc, fetch: okFetch });
+    el.querySelector('[data-cicd-pool-control="mx:pause"]').click();
+    assert.ok(el.querySelector('[role="dialog"]'), 'dialog open');
+    assert.equal(doc.getElementById('nav').hasAttribute('inert'), true, 'precondition: background inert');
+    return { dom, doc, el, okFetch };
+}
+// Nothing may still be inert, and aria-hidden may survive ONLY where it pre-existed (#pre); decorative glyph spans are ignored.
+function assertUsable(doc, why) {
+    assert.deepEqual(Array.from(doc.querySelectorAll('[inert]')).map((e) => e.id || e.tagName), [], why + ': nothing inert');
+    const hidden = Array.from(doc.querySelectorAll('[aria-hidden="true"]')).filter((e) => e.tagName !== 'SPAN').map((e) => e.id || e.tagName);
+    assert.deepEqual(hidden, ['pre'], why + ': only the pre-existing aria-hidden remains');
+}
+const goodBody = () => poolBody({ mx: machine({}) });
+const PATHS = [
+    ['cancel', async (c) => { c.el.querySelector('[data-cicd-pool-dlg="cancel"]').click(); }],
+    ['escape', async (c) => { c.el.querySelector('[data-cicd-pool-dlg="cancel"]').dispatchEvent(new c.dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); }],
+    ['normal confirm', async (c) => { c.el.querySelector('[data-cicd-pool-dlg="confirm"]').click(); await tick(); await tick(); }],
+    ['render(null)', async (c) => { c.dom.window.LCARSCIPool.render(null, c.el, { document: c.doc }); }],
+    ['render(malformed)', async (c) => { c.dom.window.LCARSCIPool.render({ machines: 'nope' }, c.el, { document: c.doc }); }],
+    ['render throwing', async (c) => {
+        const bad = { machines: { get mx() { throw new Error('boom'); } } };
+        assert.throws(() => c.dom.window.LCARSCIPool.render(bad, c.el, { document: c.doc }), /boom/);
+    }],
+    ['container cleared by the tab', async (c) => { c.el.innerHTML = ''; await tick(); }],
+    ['dialog node removed', async (c) => { c.el.querySelector('[data-cicd-pool-dialog-host]').innerHTML = ''; await tick(); }],
+    ['explicit teardown()', async (c) => { c.dom.window.LCARSCIPool.teardown(); }],
+];
+describe('022: inert is released on every teardown path', () => {
+    for (const [name, act] of PATHS) {
+        test(name + ': page usable afterwards, pre-existing aria-hidden kept, next render works', async () => {
+            const c = dlgDom();
+            await act(c);
+            assertUsable(c.doc, name);
+            c.dom.window.LCARSCIPool.render(goodBody(), c.el, { document: c.doc, fetch: c.okFetch });
+            assert.equal(c.el.hidden, false);
+            assert.ok(c.el.querySelector('[data-cicd-pool-control="mx:pause"]'), 'pool view rendered again');
+            assertUsable(c.doc, name + ' + re-render');
+        });
+    }
+    test('belt-and-braces: a render with recorded inert but no dialog in the container releases it', async () => {
+        const c = dlgDom();
+        const host = c.el.querySelector('[data-cicd-pool-dialog-host]');
+        host.removeChild(host.firstChild);   // synchronous: the observer has not run yet, the render must heal on its own
+        c.dom.window.LCARSCIPool.render(goodBody(), c.el, { document: c.doc });
+        assertUsable(c.doc, 'belt');
+    });
+    for (const failure of ['http500', 'http404', 'reject', 'badbody']) {
+        test('real lcars-cicd refresh failure (' + failure + ') releases the dashboard', async () => {
+            const c = dlgDom();
+            const w = c.dom.window;
+            w.eval(QUEUE_JS);
+            w.fetch = async (u) => {
+                if (String(u).indexOf('/api/ci-pool') === -1) return { ok: false, status: 500, json: async () => ({}) };
+                if (failure === 'reject') throw new Error('net');
+                if (failure === 'badbody') return { ok: true, status: 200, json: async () => ({ machines: null }) };
+                return { ok: false, status: failure === 'http404' ? 404 : 500, json: async () => ({}) };
+            };
+            w.eval(CICD_JS);
+            await w.LCARSCICD.refresh();
+            assert.equal(c.el.hidden, true, 'pool container hidden by the tab');
+            assertUsable(c.doc, failure);
+        });
+    }
+});

@@ -196,14 +196,25 @@
     }
 
     function render(body, container, opts) {
+        try {
+            renderInner(body, container, opts);
+        } catch (e) {
+            teardown();
+            throw e;
+        }
+    }
+    function renderInner(body, container, opts) {
         if (!container) return;
         opts = opts || {};
         var doc = opts.document || container.ownerDocument || root.document;
         if (!body || typeof body !== 'object' || !body.machines || typeof body.machines !== 'object') {
+            teardown();
             container.innerHTML = '';
             container.hidden = true;
             return;
         }
+        // Belt-and-braces: inert recorded but no dialog open in this container's DOM -> release.
+        if (held.length && !container.querySelector('[data-cicd-pool-dialog]')) releaseInert();
         container.hidden = false;
         var r = ensureRoot(container, doc);
         r._ctx = { opts: opts, body: body };
@@ -307,36 +318,61 @@
 
     // ---- confirm dialog -----------------------------------------------------
     // Everything outside the dialog host becomes inert (attribute + aria-hidden fallback) while it is open.
-    function setBackgroundInert(r, host, on) {
-        var doc = r.ownerDocument, node = host, list = r._inerted || [];
-        if (!on) {
-            list.forEach(function(e) { e.removeAttribute('inert'); if (e._wasAriaHidden !== true) e.removeAttribute('aria-hidden'); });
-            r._inerted = [];
-            return;
-        }
+    // ONE release function (XACA-1444-022). Every element the module makes inert is recorded here with the
+    // aria-hidden value it had BEFORE, so release restores exactly that (a pre-existing aria-hidden survives).
+    // Every teardown path funnels into releaseInert(): close, Escape, dialog node removed, render(null/malformed),
+    // a throwing render, teardown(), and the start of every render().
+    var held = [];
+    var observed = null;
+    function releaseInert() {
+        var list = held;
+        held = [];
+        list.forEach(function(h) {
+            try {
+                h.el.removeAttribute('inert');
+                if (h.prior === null) h.el.removeAttribute('aria-hidden'); else h.el.setAttribute('aria-hidden', h.prior);
+            } catch (e) { /* element gone: nothing to restore */ }
+        });
+        if (observed) { try { observed.disconnect(); } catch (e) { /* ignore */ } observed = null; }
+    }
+    function setBackgroundInert(r, host) {
+        var doc = r.ownerDocument, node = host;
+        releaseInert();
         while (node && node !== doc.documentElement && node.parentNode) {
             Array.prototype.slice.call(node.parentNode.children).forEach(function(sib) {
                 if (sib === node || sib.hasAttribute('inert') || sib.tagName === 'SCRIPT' || sib.tagName === 'STYLE') return;
                 if (sib.hasAttribute('data-cicd-pool-status')) return;   // the live region must keep announcing
-                sib._wasAriaHidden = sib.hasAttribute('aria-hidden');
+                held.push({ el: sib, prior: sib.hasAttribute('aria-hidden') ? sib.getAttribute('aria-hidden') : null });
                 sib.setAttribute('inert', '');
                 sib.setAttribute('aria-hidden', 'true');
-                list.push(sib);
             });
             node = node.parentNode;
         }
-        r._inerted = list;
+        // The dialog node leaving the DOM for ANY reason (container cleared, tab hid and rebuilt it) releases.
+        var View = doc.defaultView, MO = View && View.MutationObserver;
+        if (MO) {
+            observed = new MO(function() { if (!r.isConnected || !r.querySelector('[data-cicd-pool-dialog]')) releaseInert(); });
+            observed.observe(doc.documentElement, { childList: true, subtree: true });
+        }
     }
 
     function closeDialog(r, restore) {
         var host = r.querySelector('[data-cicd-pool-dialog-host]');
-        var d = host.firstChild, inv = d && d._invoker;
-        setBackgroundInert(r, host, false);
-        host.innerHTML = '';
+        var d = host && host.firstChild, inv = d && d._invoker;
+        releaseInert();
+        if (host) host.innerHTML = '';
         if (restore && inv) {
             var el = findControl(r, inv[0], inv[1]);
             if (el) el.focus(); else r._pendingFocus = inv[1];
         }
+    }
+    // Public: the host page calls this before it clears/hides the container.
+    function teardown() {
+        releaseInert();
+        try {
+            var hosts = root.document ? root.document.querySelectorAll('[data-cicd-pool-dialog-host]') : [];
+            for (var i = 0; i < hosts.length; i++) hosts[i].innerHTML = '';
+        } catch (e) { /* best effort */ }
     }
     function openDialog(r, id, invoker) {
         var host = r.querySelector('[data-cicd-pool-dialog-host]');
@@ -351,7 +387,7 @@
         d._invoker = [invoker.getAttribute('data-cicd-pool-action'), id];
         d._id = id;
         host.appendChild(d);
-        setBackgroundInert(r, host, true);
+        setBackgroundInert(r, host);
         setStep(d, 1);
     }
     function setStep(d, step) {
@@ -449,7 +485,7 @@
         }
     }
 
-    root.LCARSCIPool = { render: render };
+    root.LCARSCIPool = { render: render, teardown: teardown };
 
 })(typeof window !== 'undefined' ? window : this);
 
