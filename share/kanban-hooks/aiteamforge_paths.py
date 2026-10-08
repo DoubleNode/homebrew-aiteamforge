@@ -3480,6 +3480,54 @@ def get_team_working_dir(team: str, *, config: dict | None = None) -> Path:
     return Path(_wd).expanduser()
 
 
+def get_team_repo_root(team: str, *, config: dict | None = None) -> Path:
+    """Return the git work-tree root that holds the team's code (XACA-1477).
+
+    working_dir is the parent of kanban_dir, which for container-layout teams
+    is NOT a git repository: the repo is a child of it (MainEventApp-Android/
+    develop, MainEventApp-iOS/DEV, Bandwear/Android/develop). The child's name
+    varies, so it is discovered, never assumed. Order:
+
+      1. the entry's optional ``repo_dir`` — an explicit override, which must
+         itself be a git work-tree root (raises if not, never falls through);
+      2. working_dir, when it is a git work-tree root;
+      3. the ONE immediate child of working_dir that is a main work-tree
+         (``.git`` is a directory). Linked worktrees (``.git`` is a file) are
+         never candidates — picking one would cut from a feature checkout.
+
+    Anything else (no candidate, or several, e.g. the DNS umbrella) raises
+    ValueError naming what was found and the ``repo_dir`` override, so a caller
+    fails closed instead of running git in the wrong directory.
+    Raises KeyError exactly as get_team_working_dir does.
+    """
+    config = load_config() if config is None else config
+    working_dir = get_team_working_dir(team, config=config)
+    override = config["teams"][team].get("repo_dir")
+    if override not in (None, ""):
+        repo = Path(override).expanduser()
+        if not (repo / ".git").exists():
+            raise ValueError(
+                f"Team '{team}': repo_dir {repo} is not a git work-tree root "
+                f"(no .git) — fix repo_dir in {get_config_path()}."
+            )
+        return repo
+    if (working_dir / ".git").exists():
+        return working_dir
+    try:
+        candidates = sorted(c for c in working_dir.iterdir()
+                            if c.is_dir() and (c / ".git").is_dir())
+    except OSError:
+        candidates = []
+    if len(candidates) == 1:
+        return candidates[0]
+    found = ", ".join(c.name for c in candidates) if candidates else "none"
+    raise ValueError(
+        f"Team '{team}': working_dir {working_dir} is not a git repository and "
+        f"has {len(candidates)} main-repo children ({found}); set repo_dir for "
+        f"this team in {get_config_path()} to the repository to use."
+    )
+
+
 def get_team_lcars_port(team: str, *, config: dict | None = None) -> int | None:
     """Return the LCARS port for the given team, or None if not applicable.
 

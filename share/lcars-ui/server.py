@@ -1715,17 +1715,35 @@ def _cut_release_branch(release, board, dry_run=False):
     team = board.get('team') if isinstance(board, dict) else None
     repo_root = _resolve_team_repo_root(team)
     if repo_root is None:
-        raise RuntimeError("cannot resolve the git repository for team %r" % (team,))
+        reason = _REPO_ROOT_ERRORS.pop(team, None)
+        raise RuntimeError("cannot resolve the git repository for team %r%s"
+                           % (team, ": " + reason if reason else ""))
     return _release_branches.cut_release_branch(release, board, repo_root, dry_run=dry_run)
 
 
+# XACA-1477: why the last _resolve_team_repo_root(team) returned None, so the branch cut's refusal can
+# say what to fix. Keyed by team; a concurrent overwrite only changes which (equally true) reason is shown.
+_REPO_ROOT_ERRORS = {}
+
+
 def _resolve_team_repo_root(team):
-    """Team's git working dir (aiteamforge_paths registry), else kanban dir's parent, else None."""
+    """Team's git work-tree root, or None.
+
+    XACA-1477: resolved by aiteamforge_paths.get_team_repo_root, which looks INSIDE container-layout
+    working dirs (MainEventApp-iOS/DEV, Bandwear/Android/develop) instead of returning the non-git
+    container. A REGISTERED team whose repo cannot be resolved returns None with its reason recorded;
+    it never reaches the fallback below. The fallback (kanban dir's parent) is unchanged and serves
+    only teams the registry does not know.
+    """
     try:
-        from aiteamforge_paths import get_team_working_dir  # noqa: PLC0415
-        root = Path(get_team_working_dir(team))
+        from aiteamforge_paths import get_team_repo_root  # noqa: PLC0415
+        root = Path(get_team_repo_root(team))
         if root.is_dir():
+            _REPO_ROOT_ERRORS.pop(team, None)
             return root
+    except ValueError as e:
+        _REPO_ROOT_ERRORS[team] = str(e)
+        return None
     except Exception:
         pass
     kd = TEAM_KANBAN_DIRS.get(team)
@@ -9090,7 +9108,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 else _release_gate.CODE_LEADS_NOT_CONFIGURED)
 
     def _release_repo_root(self, team):
-        """Team's git working dir (aiteamforge_paths registry), else kanban dir's parent."""
+        """Team's git work-tree root (XACA-1477: same resolution as the branch cut), else None."""
         return _resolve_team_repo_root(team)
 
     def _release_branch_head(self, release, team):
