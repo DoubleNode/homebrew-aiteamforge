@@ -31500,7 +31500,7 @@ fi
 #   * Globals are typeset -g but NOT exported: a child shell sources its own
 #     copy and records its own identity.
 #   * Must stay bash 3.2 compatible in the bash branches (/bin/bash on macOS):
-#     no `typeset -g`, no assoc arrays, no ${var,,}.
+#     no `typeset -g`, no assoc arrays, no lowercase-expansion bashisms.
 # ─────────────────────────────────────────────────────────────────────────────
 
 # _kb_helpers_mtime <path>
