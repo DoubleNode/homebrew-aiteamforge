@@ -30598,6 +30598,9 @@ kb-help() {
     echo "  kb-ui                  Open LCARS web UI in browser"
     echo "  kb-browser [port]      Open LCARS at specific port"
     echo ""
+    echo "Shell:"
+    echo "  kb-reload              Re-source kb-* helpers in this shell (after an upgrade/pull)"
+    echo ""
     echo "Reporting / Analytics:"
     echo "  kb-variance [--json]   Estimate-vs-actual handicap report"
     echo ""
@@ -31437,7 +31440,11 @@ fi
 # variable is fatal in a way `|| true` does not catch. It would confer only the
 # appearance of robustness.
 unset _KB_CR_LOADED 2>/dev/null
-if ! typeset -f kb-cr >/dev/null 2>&1 && [[ -f "${AITEAMFORGE_DIR}/scripts/kb-cr.sh" ]]; then
+# XACA-1475: kb-reload sets _KB_HELPERS_RELOADING (function-local, never
+# exported) so this function-presence guard re-sources on an explicit reload.
+# A plain re-source still preserves a pre-existing kb-cr, as above.
+if { [[ -n "${_KB_HELPERS_RELOADING-}" ]] || ! typeset -f kb-cr >/dev/null 2>&1; } && \
+    [[ -f "${AITEAMFORGE_DIR}/scripts/kb-cr.sh" ]]; then
     source "${AITEAMFORGE_DIR}/scripts/kb-cr.sh"
 fi
 
@@ -31455,7 +31462,241 @@ fi
 # ${AITEAMFORGE_DIR}/scripts/ on fresh installs, same function that installs
 # kb-cr.sh above; aiteamforge-upgrade.sh's _xaca0673_mandatory_materialize_basenames
 # materializes both on upgrade.
-if ! typeset -f kb-release-config-validate >/dev/null 2>&1 && \
+# XACA-1475: re-sourced on kb-reload — see the kb-cr guard above.
+if { [[ -n "${_KB_HELPERS_RELOADING-}" ]] || ! typeset -f kb-release-config-validate >/dev/null 2>&1; } && \
     [[ -f "${AITEAMFORGE_DIR}/scripts/kb-release-config-validate.sh" ]]; then
     source "${AITEAMFORGE_DIR}/scripts/kb-release-config-validate.sh"
 fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# XACA-1475: stale-helpers notice + kb-reload
+#
+# PROBLEM: a tap upgrade or a dev `git pull` rewrites this file on disk, but
+# every shell that already sourced it keeps the OLD kb-* function bodies until
+# it is restarted. Nothing told the user, so stale helpers ran silently.
+#
+# WHAT THIS DOES (NOTIFY, NEVER AUTO-RELOAD):
+#   1. At source time, record this file's path + mtime (_KB_HELPERS_LOADED_*).
+#   2. A precmd/PROMPT_COMMAND hook compares that mtime against the file on
+#      disk and prints ONE stderr line, once per distinct new mtime.
+#   3. `kb-reload` re-sources the recorded path on demand. It is never called
+#      automatically: silently swapping function bodies under a running
+#      workflow is worse than a stale shell the user knows about.
+#
+# GOTCHAS (read before editing):
+#   * The load-identity capture below MUST stay at the TOP LEVEL of this file.
+#     zsh's ${(%):-%x} names the file currently being sourced only at top level
+#     of that source; BASH_SOURCE is EMPTY under zsh, so never rely on it there.
+#   * Path is recorded with :a (absolute, symlinks PRESERVED), not :A. If the
+#     shell sourced a symlink that an upgrade retargets, the :a path follows
+#     the new target and the change is seen; a :A path would pin the old,
+#     possibly-deleted target and the check would go silent.
+#   * zsh/stat is loaded with `-F ... b:zstat` so ONLY `zstat` is added. A bare
+#     `zmodload zsh/stat` also installs a `stat` builtin that shadows
+#     /usr/bin/stat and breaks every `stat -f %m` call elsewhere in this file.
+#   * The per-prompt check never forks under zsh. If zsh/stat cannot load it
+#     does nothing rather than fork `stat` on every prompt. Under bash no
+#     builtin reads an mtime, so bash pays one `stat` fork per prompt.
+#   * Globals are typeset -g but NOT exported: a child shell sources its own
+#     copy and records its own identity.
+#   * Must stay bash 3.2 compatible in the bash branches (/bin/bash on macOS):
+#     no `typeset -g`, no assoc arrays, no ${var,,}.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# _kb_helpers_mtime <path>
+# Sets REPLY to <path>'s mtime in epoch seconds and returns 0; returns 1 with
+# REPLY empty when the file is missing or the mtime cannot be read. Callers
+# that must not clobber the user's REPLY declare `local REPLY` first.
+_kb_helpers_mtime() {
+    REPLY=""
+    if [[ -z "${1-}" || ! -f "${1-}" ]]; then
+        return 1
+    fi
+    if [[ -n "${ZSH_VERSION-}" ]]; then
+        zmodload -F zsh/stat b:zstat 2>/dev/null || return 1
+        local -a _khm_st
+        zstat -A _khm_st +mtime -- "$1" 2>/dev/null || return 1
+        # ${arr[*]} rather than ${arr[1]}: correct under KSH_ARRAYS too.
+        REPLY="${_khm_st[*]}"
+    else
+        # GNU first: BSD stat rejects -c, while GNU `stat -f %m` would print
+        # filesystem info instead of failing.
+        REPLY="$(stat -c %Y -- "$1" 2>/dev/null || stat -f %m -- "$1" 2>/dev/null)"
+    fi
+    case "$REPLY" in
+        ''|*[!0-9]*) REPLY=""; return 1 ;;
+    esac
+    return 0
+}
+
+# _kb_helpers_fmt_mtime <epoch>
+# Prints a human-readable local timestamp for kb-reload's report. Not on the
+# per-prompt path, so a `date` fork is acceptable. Falls back to the raw epoch.
+_kb_helpers_fmt_mtime() {
+    local _kb_hf_e="${1-}"
+    if [[ -z "$_kb_hf_e" ]]; then
+        printf '%s\n' "unknown"
+        return 0
+    fi
+    date -r "$_kb_hf_e" '+%Y-%m-%d %H:%M:%S' 2>/dev/null \
+        || date -d "@$_kb_hf_e" '+%Y-%m-%d %H:%M:%S' 2>/dev/null \
+        || printf '%s\n' "$_kb_hf_e"
+    return 0
+}
+
+# _kb_helpers_record_load <path>
+# Records the load identity. Called from the top-level capture below (which
+# computes the path, since %x only means "this file" at top level) and resets
+# the notified marker so a future change can notify again after a (re)load.
+_kb_helpers_record_load() {
+    local REPLY
+    local _kb_hr_m=""
+    if _kb_helpers_mtime "${1-}"; then
+        _kb_hr_m="$REPLY"
+    fi
+    if [[ -n "${ZSH_VERSION-}" ]]; then
+        typeset -g _KB_HELPERS_LOADED_PATH="${1-}"
+        typeset -g _KB_HELPERS_LOADED_MTIME="$_kb_hr_m"
+        typeset -g _KB_HELPERS_NOTIFIED_MTIME=""
+    else
+        _KB_HELPERS_LOADED_PATH="${1-}"
+        _KB_HELPERS_LOADED_MTIME="$_kb_hr_m"
+        _KB_HELPERS_NOTIFIED_MTIME=""
+    fi
+    return 0
+}
+
+# _kb_helpers_stale_check
+# precmd / PROMPT_COMMAND hook. Interactive shells only. Prints one stderr
+# line the first time the on-disk mtime differs from the loaded one, and again
+# only if it changes to yet another value. Missing file, unreadable mtime, or
+# no recorded identity => silent. Preserves the incoming $? so prompts and
+# later PROMPT_COMMAND entries that display the last exit status still see it.
+_kb_helpers_stale_check() {
+    local _kb_sc_rc=$?
+    local REPLY
+    if [[ -n "${ZSH_VERSION-}" ]]; then
+        if [[ ! -o interactive ]]; then
+            return $_kb_sc_rc
+        fi
+    else
+        case "$-" in
+            *i*) ;;
+            *) return $_kb_sc_rc ;;
+        esac
+    fi
+    if [[ -z "${_KB_HELPERS_LOADED_PATH-}" || -z "${_KB_HELPERS_LOADED_MTIME-}" ]]; then
+        return $_kb_sc_rc
+    fi
+    if ! _kb_helpers_mtime "$_KB_HELPERS_LOADED_PATH"; then
+        return $_kb_sc_rc
+    fi
+    if [[ "$REPLY" != "$_KB_HELPERS_LOADED_MTIME" && "$REPLY" != "${_KB_HELPERS_NOTIFIED_MTIME-}" ]]; then
+        _KB_HELPERS_NOTIFIED_MTIME="$REPLY"
+        printf '%s\n' "⚠ kb-* helpers changed on disk since this shell loaded them — run kb-reload (or restart the team) to pick up the new version" >&2
+    fi
+    return $_kb_sc_rc
+}
+
+# kb-reload
+# Re-sources the helpers file this shell loaded, in the current shell.
+#
+# Include guards that would otherwise short-circuit the re-source, found by
+# grepping this file and every file it sources at load time
+# (grep -nE '_LOADED|typeset -f' kanban-helpers.sh scripts/kb-cr.sh
+#  scripts/kb-release-config-validate.sh libexec/lib/aiteamforge-paths.sh):
+#   _AITEAMFORGE_PATHS_LOADED     variable guard: this file (top, around line
+#                                 34) AND aiteamforge-paths.sh's own
+#                                 double-source guard -> unset below
+#   kb-cr.sh, kb-release-config-  function-presence guards (the two blocks
+#   validate.sh                   just above) -> they also honour
+#                                 _KB_HELPERS_RELOADING, set function-locally
+#                                 here so it is visible to the sourced file by
+#                                 dynamic scope and vanishes on return. That
+#                                 beats `unset -f`: a reload whose kb-cr.sh has
+#                                 gone missing keeps the old kb-cr instead of
+#                                 losing it.
+#   (_KB_CR_LOADED is already unset unconditionally by this file; the
+#    function-local _KB_TLWI_ZSELECT_LOADED caches a zmodload result and is
+#    not a source guard.)
+# If you add a new guarded source to this file, give it the same
+# _KB_HELPERS_RELOADING escape, or kb-reload silently keeps the old copy.
+#
+# Do NOT run this under `emulate -L` / LOCAL_OPTIONS: the file's top-level
+# setopts and aliases must land in the caller's shell exactly as a plain
+# `source` would leave them. Local names are _kb_rl_* so the sourced file's
+# top-level assignments can never land in one of them by dynamic scoping.
+kb-reload() {
+    local _kb_rl_path="${_KB_HELPERS_LOADED_PATH-}"
+    local _kb_rl_old="${_KB_HELPERS_LOADED_MTIME-}"
+    local _kb_rl_old_notified="${_KB_HELPERS_NOTIFIED_MTIME-}"
+    local _kb_rl_rc=0
+    if [[ -z "$_kb_rl_path" ]]; then
+        printf '%s\n' "kb-reload: this shell has no recorded helpers path (_KB_HELPERS_LOADED_PATH is unset) — source kanban-helpers.sh directly instead" >&2
+        return 1
+    fi
+    if [[ ! -f "$_kb_rl_path" || ! -r "$_kb_rl_path" ]]; then
+        printf '%s\n' "kb-reload: helpers file is missing or unreadable: $_kb_rl_path" >&2
+        return 1
+    fi
+
+    local _KB_HELPERS_RELOADING=1
+    unset _AITEAMFORGE_PATHS_LOADED
+
+    # Cleared so success is PROVEN by the re-source reaching the top-level
+    # capture at the end of the file, not inferred from source's exit code.
+    _KB_HELPERS_LOADED_PATH=""
+    # shellcheck disable=SC1090
+    source "$_kb_rl_path" || _kb_rl_rc=$?
+
+    if [[ $_kb_rl_rc -ne 0 || -z "${_KB_HELPERS_LOADED_PATH-}" ]]; then
+        if [[ -z "${_KB_HELPERS_LOADED_PATH-}" ]]; then
+            # Restore the old identity so the stale notice keeps working.
+            _KB_HELPERS_LOADED_PATH="$_kb_rl_path"
+            _KB_HELPERS_LOADED_MTIME="$_kb_rl_old"
+            _KB_HELPERS_NOTIFIED_MTIME="$_kb_rl_old_notified"
+        fi
+        if [[ $_kb_rl_rc -eq 0 ]]; then
+            _kb_rl_rc=1
+        fi
+        printf '%s\n' "kb-reload: re-sourcing $_kb_rl_path failed (rc $_kb_rl_rc) — this shell may hold a partial mix of old and new helpers; restart it" >&2
+        return $_kb_rl_rc
+    fi
+
+    printf '%s\n' "kb-reload: $_KB_HELPERS_LOADED_PATH mtime $(_kb_helpers_fmt_mtime "$_kb_rl_old") -> $(_kb_helpers_fmt_mtime "${_KB_HELPERS_LOADED_MTIME-}")"
+    return 0
+}
+
+# ── Load-identity capture (TOP LEVEL — see gotchas above) ───────────────────
+if [[ -n "${ZSH_VERSION-}" ]]; then
+    _kb_helpers_record_load "${${(%):-%x}:a}"
+else
+    _kb_helpers_self="${BASH_SOURCE[0]-}"
+    case "$_kb_helpers_self" in
+        ''|/*) ;;
+        *) _kb_helpers_self="${PWD%/}/${_kb_helpers_self}" ;;
+    esac
+    _kb_helpers_record_load "$_kb_helpers_self"
+    unset _kb_helpers_self
+fi
+
+# ── Hook registration (MUST stay at the very END of this file) ──────────────
+# Re-sourcing must never double-register.
+if [[ -n "${ZSH_VERSION-}" ]]; then
+    # typeset -ga keeps an existing array's contents and makes an unset one
+    # safe to subscript under `setopt nounset`.
+    typeset -ga precmd_functions
+    # Word-match on the joined array: correct with or without KSH_ARRAYS,
+    # unlike a (I)-subscript index test.
+    if [[ " ${precmd_functions[*]} " != *" _kb_helpers_stale_check "* ]]; then
+        precmd_functions+=(_kb_helpers_stale_check)
+    fi
+else
+    case "${PROMPT_COMMAND-}" in
+        *_kb_helpers_stale_check*) ;;
+        '') PROMPT_COMMAND="_kb_helpers_stale_check" ;;
+        # Newline separator: safe even when the existing value ends in `;`.
+        *) PROMPT_COMMAND="${PROMPT_COMMAND}"$'\n'"_kb_helpers_stale_check" ;;
+    esac
+fi
+:
