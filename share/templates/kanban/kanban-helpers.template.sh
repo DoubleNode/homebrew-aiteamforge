@@ -26027,6 +26027,47 @@ kb-release-promote() {
     esac
 }
 
+# XACA-1478-012: verify a 200 from /plan or /regress ACTUALLY left every platform at the
+# target stage. The server mirrors the release stage onto platforms.<p>.environment; a
+# server-side mirror bug (XACA-1478) once left platforms at DEV while answering 200, and the
+# CLI printed a green check on the status code alone. Reads .release.platforms from the
+# response (both endpoints return the full release snapshot as .release; /plan's top-level
+# .platforms is only a list of names, so it is NOT used).
+# Usage: _kb_release_verify_platform_stage <body> <TARGET> <release-id>
+# Returns 0 all platforms at TARGET; 5 mismatch OR platforms missing/unparseable (fail closed).
+# Prints per-platform error lines to stderr; prints nothing on success.
+_kb_release_verify_platform_stage() {
+    local body="${1-}" target="${2-}" rid="${3-}"
+    local bad jq_rc
+    bad=$(printf '%s' "$body" | jq -r --arg t "$target" '
+        if ((.release.platforms | type) == "object") then
+            (.release.platforms | to_entries[]
+             | select(((.value | type) == "object" and .value.environment == $t) | not)
+             | "\(.key)\t\(if (.value | type) == "object" then (.value.environment // "missing") else "invalid" end)")
+        else "__MALFORMED__\t" end' 2>/dev/null)
+    jq_rc=$?
+    if [[ $jq_rc -ne 0 ]]; then
+        echo "✗ Release $rid: server answered 200 but the response could not be parsed; cannot verify platforms are at $target" >&2
+        return 5
+    fi
+    if [[ -z "$bad" ]]; then
+        return 0
+    fi
+    if [[ "${bad%%$'\t'*}" == "__MALFORMED__" ]]; then
+        echo "✗ Release $rid: server answered 200 but returned no platforms block; cannot verify platforms are at $target" >&2
+        return 5
+    fi
+    local line plat penv
+    while IFS= read -r line; do
+        if [[ -z "$line" ]]; then continue; fi
+        plat="${line%%$'\t'*}"
+        penv="${line#*$'\t'}"
+        echo "✗ $plat: environment is $penv, expected $target (release $rid)" >&2
+    done <<< "$bad"
+    echo "  The server returned 200 but did not move every platform to $target; the release is NOT cleanly $target." >&2
+    return 5
+}
+
 # Move a release BACK to an earlier stage (server-audited).
 # Usage: kb-release regress <REL-ID> --to STAGE --reason "..." [--actor NAME]
 kb-release-regress() {
@@ -26051,7 +26092,8 @@ kb-release-regress() {
                 echo "the reason is recorded in the release history. The SERVER decides."
                 echo ""
                 echo "Exit codes: 0 ok, 1 server/transport error, 2 usage/rejected,"
-                echo "            3 refused, 4 release not found"
+                echo "            3 refused, 4 release not found,"
+                echo "            5 server said 200 but a platform is not at the PLANNED target (XACA-1478-012)"
                 return 0 ;;
             -*)
                 echo "Error: Unknown option: ${1-}" >&2; echo "$usage" >&2; return 2 ;;
@@ -26089,6 +26131,12 @@ kb-release-regress() {
         local from to
         from=$(printf '%s' "$_KB_REL_BODY" | jq -r '.from // empty' 2>/dev/null)
         to=$(printf '%s' "$_KB_REL_BODY" | jq -r '.to // empty' 2>/dev/null)
+        # XACA-1478-012: a 200 is not proof -- for PLANNED, confirm every platform really landed there.
+        if [[ "${to:-$opt_to}" == "PLANNED" ]]; then
+            if ! _kb_release_verify_platform_stage "$_KB_REL_BODY" "PLANNED" "$release_id"; then
+                return 5
+            fi
+        fi
         echo "✓ Regressed release: $release_id  ${from:-?} -> ${to:-$opt_to}"
         return 0
     fi
@@ -26437,7 +26485,8 @@ kb-release-plan() {
                 echo "  kb-release plan REL-2026-Q1-007 --reason \"created active by mistake\""
                 echo ""
                 echo "Exit codes: 0 ok, 1 server/transport error, 2 usage/rejected,"
-                echo "            3 refused, 4 release not found"
+                echo "            3 refused, 4 release not found,"
+                echo "            5 server said 200 but a platform is not at the PLANNED target (XACA-1478-012)"
                 return 0 ;;
             -*)
                 echo "Error: Unknown option: ${1-}" >&2; echo "$usage" >&2; return 2 ;;
@@ -26474,6 +26523,10 @@ kb-release-plan() {
 
     if [[ "$_KB_REL_CODE" == "200" ]]; then
         local platforms
+        # XACA-1478-012: a 200 is not proof -- confirm every platform really landed on PLANNED.
+        if ! _kb_release_verify_platform_stage "$_KB_REL_BODY" "PLANNED" "$release_id"; then
+            return 5
+        fi
         platforms=$(printf '%s' "$_KB_REL_BODY" | jq -r '.platforms // [] | join(", ")' 2>/dev/null)
         echo "✓ Release $release_id reset to PLANNED"
         [[ -n "$platforms" ]] && echo "  Platforms: $platforms"
