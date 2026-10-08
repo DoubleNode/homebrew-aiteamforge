@@ -22,7 +22,7 @@
  *   3. Cookie login + CSRF — login/logout/session routes, each CSRF layer
  *      rejecting on its own, header auth unaffected, cookie refused on the
  *      fleet tier, rate limit, no echo of the token.
- *   4. Route inventory (static, source-derived) — the 25 admin routes are on
+ *   4. Route inventory (static, source-derived) — the 28 admin routes are on
  *      requireAdminKey, the 9 fleet routes stay on the fleet gate, and every
  *      mutating route anywhere is gated or deliberately allowlisted.
  *   5. vault + engines (real route modules) — ALL 9 of their admin routes
@@ -578,7 +578,7 @@ describe('cookie on an admin route — each CSRF layer rejects on its own', () =
 // 4. Route inventory (static, source-derived)
 // ===========================================================================
 
-// The 25 admin-tier routes (19 from the design's §1 tier classification + 2 XACA-1441 + 4 XACA-1422 mint/revoke). This is
+// The 28 admin-tier routes (19 from the design's §1 tier classification + 2 XACA-1441 + 4 XACA-1422 mint/revoke + 3 XACA-1392 accessories). This is
 // the EXPECTED list — deliberately not derived from source, so a route moved
 // back to requireApiKey disappears from the source-derived admin set and the
 // equality assertion below fails.
@@ -610,6 +610,10 @@ const ADMIN_ROUTES = [
     { method: 'DELETE', path: '/api/ci-pool/machines/:machine/key',              file: 'lib/ci-pool-routes.js' },
     { method: 'POST',   path: '/api/ci-pool/machines/:machine/telemetry-key',    file: 'lib/ci-pool-routes.js' },
     { method: 'DELETE', path: '/api/ci-pool/machines/:machine/telemetry-key',    file: 'lib/ci-pool-routes.js' },
+    // XACA-1392: accessory attach / detach / nickname (GET /api/accessories is open, like /api/fleet).
+    { method: 'PUT',    path: '/api/accessories/:id/machines/:machineId',        file: 'lib/accessories-routes.js' },
+    { method: 'DELETE', path: '/api/accessories/:id/machines/:machineId',        file: 'lib/accessories-routes.js' },
+    { method: 'PUT',    path: '/api/accessories/:id/nickname',                   file: 'lib/accessories-routes.js' },
 ];
 
 // The 10 fleet-tier routes (XACA-1328 added the vault ciphertext GET; XACA-1422 moved ci-runners-push OUT to the
@@ -659,12 +663,12 @@ describe('route inventory — every admin route is on the admin gate (static)', 
     const regs = deriveRegistrations();
     const key = (r) => `${r.method} ${r.path}`;
 
-    test('exactly 25 expected admin routes, no duplicates', () => {
-        assert.equal(ADMIN_ROUTES.length, 25);
-        assert.equal(new Set(ADMIN_ROUTES.map(key)).size, 25);
+    test('exactly 28 expected admin routes, no duplicates', () => {
+        assert.equal(ADMIN_ROUTES.length, 28);
+        assert.equal(new Set(ADMIN_ROUTES.map(key)).size, 28);
     });
 
-    test('the source-derived requireAdminKey set equals the 25 expected admin routes exactly', () => {
+    test('the source-derived requireAdminKey set equals the 28 expected admin routes exactly', () => {
         const derived = regs.filter((r) => r.gate === 'requireAdminKey').map((r) => `${r.file} ${key(r)}`).sort();
         const expected = ADMIN_ROUTES.map((r) => `${r.file} ${key(r)}`).sort();
         assert.deepEqual(derived, expected);
@@ -691,10 +695,10 @@ describe('route inventory — every admin route is on the admin gate (static)', 
         assert.ok(!/checkAdminKey/.test(src));
     });
 
-    test('tier totals: 25 admin + 10 fleet + 2 ci-host + 1 ci-telemetry = 38 guarded', () => {
+    test('tier totals: 28 admin + 10 fleet + 2 ci-host + 1 ci-telemetry = 41 guarded', () => {
         const admin = regs.filter((r) => r.gate === 'requireAdminKey').length;
         const fleet = regs.filter((r) => r.gate === 'requireApiKey').length + FLEET_GUARD_ROUTES.length;
-        assert.equal(admin, 25);
+        assert.equal(admin, 28);
         assert.equal(fleet, 10);
         assert.equal(regs.filter((r) => r.gate === 'ciHostKey').length, 2);
         assert.equal(regs.filter((r) => r.gate === 'ciTelemetryKey').length, 1);

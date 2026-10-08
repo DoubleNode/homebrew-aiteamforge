@@ -43,6 +43,9 @@ const { registerTokenReportsRoutes } = require('./lib/token-reports-routes');
 const { registerCiRunnersRoutes } = require('./lib/ci-runners-routes');
 // XACA-1441-007: Fleet CI Pool dispatcher (dormant unless FLEET_CI_DISPATCHER=1 + GitHub App secrets).
 const { wireCiPool } = require('./lib/ci-dispatcher');
+// XACA-1392: accessory registry (UPS auto-discovery, attachment, derived power state).
+const { createRegistry: createAccessoryRegistry } = require('./lib/accessories');
+const { registerAccessoriesRoutes } = require('./lib/accessories-routes');
 
 // XACA-0395-005: shared API-key auth gate (kanban/plans/XACA-0395/
 // XACA-0395_auth_contract.md). requireApiKey is mounted as the second
@@ -411,6 +414,13 @@ function savePushedKnowledge() {
 
 // Load data on startup
 loadMachineData();
+// XACA-1392-001: accessory registry. FLEET_ACCESSORIES_FILE lets tests/ops redirect it; the
+// default is data/accessories.json. A missing or corrupt file loads EMPTY, never crashes boot.
+const accessoryRegistry = createAccessoryRegistry({
+    file: process.env.FLEET_ACCESSORIES_FILE || undefined,
+    log: (m) => console.log(m),
+});
+accessoryRegistry.load();
 loadRegisteredTeams();
 loadPushedBoards();
 loadPushedKnowledge();
@@ -1260,6 +1270,9 @@ function ensureRegisteredTeamBuckets(divisions) {
  */
 function parseFleetData() {
     updateMachineStatuses();
+    // XACA-1392-004/005: derive accessory + per-machine power state from the FRESH statuses
+    // above (read time, no timer, no cache to drift). Failure must never break /api/fleet.
+    const power = deriveAccessoryState();
 
     const divisions = {};
     let totalSessions = 0;
@@ -1393,7 +1406,13 @@ function parseFleetData() {
             // against `m.system` itself being undefined (a machines.json
             // record persisted by a pre-XACA-1031 server build, reloaded on
             // restart) as well as computing latest/outdated fresh per read.
-            system: projectSystemBlock(m.system)
+            system: projectSystemBlock(m.system),
+            // XACA-1392-005: ADDITIVE keys. `status` keeps its heartbeat meaning;
+            // display_status applies EPIC-0067 D2 precedence (offline > on_battery >
+            // warning > online). power_state is null when no accessory is attached.
+            power_state: (power.machines.get(m.machine_id) || {}).power_state || null,
+            display_status: (power.machines.get(m.machine_id) || {}).display_status || m.status,
+            power_reason: (power.machines.get(m.machine_id) || {}).power_reason || null
         }));
 
     return {
@@ -1406,8 +1425,38 @@ function parseFleetData() {
             machines: machineList
         },
         activityLog: activityLog,
+        // XACA-1392-005: additive top-level key (sibling of `fleet`, so the fleet shape is unchanged).
+        accessories: power.accessories,
         last_update: new Date().toISOString()
     };
+}
+
+/**
+ * XACA-1392-004: derive accessory state against the current machine statuses. Callers must
+ * have run updateMachineStatuses() first (parseFleetData and the accessory routes do).
+ * Never throws: on failure the fleet payload simply carries no power data.
+ * Transitions are logged to the activity log, and -- when on_battery is involved -- to the
+ * history of every attached machine (the "on_battery/ac entry" of the plan).
+ */
+function deriveAccessoryState() {
+    try {
+        return accessoryRegistry.derive(machines, {
+            onTransition(rec, from, to) {
+                const label = rec.nickname || rec.name;
+                const msg = `${label}: ${from} → ${to}`;
+                const host = machines.get(rec.dataLinkMachineId);
+                logActivity('POWER', host ? host.hostname : rec.dataLinkMachineId, host ? host.ip : null, 0, msg);
+                if (from === 'on_battery' || to === 'on_battery') {
+                    for (const mid of rec.attachedMachineIds) {
+                        logHistoryEntry(mid, 'power_state_change', from, to, `Accessory ${msg}`);
+                    }
+                }
+            }
+        });
+    } catch (error) {
+        console.error('Error deriving accessory state:', error);
+        return { accessories: [], machines: new Map() };
+    }
 }
 
 /**
@@ -1963,6 +2012,16 @@ app.post('/api/status', requireApiKey, (req, res) => {
             system: normalizeSystemBlock(system)
         });
 
+        // XACA-1392-002: UPS auto-discovery. Uses the SANITIZED power block that was just
+        // stored (never the raw body). Absent power / ups:null is a no-op inside
+        // upsertFromReport, so an unreadable cycle cannot create, detach or re-state anything.
+        try {
+            const storedPower = machines.get(machineKey).system.power;
+            if (storedPower) accessoryRegistry.upsertFromReport(machineKey, storedPower);
+        } catch (accErr) {
+            console.error('Accessory upsert failed (status update still accepted):', accErr.message);
+        }
+
         // Log to activity log
         logActivity(activityType, machine.hostname, machine.ip, sessionCount, activityExtra);
 
@@ -2022,6 +2081,13 @@ app.put('/api/machine/:machineId/nickname', requireAdminKey, (req, res) => {
         console.error('Error setting nickname:', error);
         res.status(500).json({ error: 'Internal server error' });
     }
+});
+
+// XACA-1392-003: accessory routes (GET open like /api/fleet; mutations admin tier).
+registerAccessoriesRoutes(app, {
+    registry: accessoryRegistry,
+    refresh: () => { updateMachineStatuses(); return deriveAccessoryState(); },
+    machineExists: (machineId) => machines.has(machineId)
 });
 
 /**
@@ -3201,6 +3267,9 @@ app.get('/api/machines/list', (req, res) => {
             nickname: m.nickname,
             display_name: m.nickname || m.hostname,
             status: m.status,
+            // XACA-1392-005: additive power fields (see parseFleetData).
+            display_status: m.display_status,
+            power_state: m.power_state,
             session_count: m.session_count
         })).sort((a, b) => {
             // Sort: online first, then by display name
@@ -4014,6 +4083,11 @@ setInterval(() => {
     saveMachineData();
 }, SAVE_INTERVAL_MS);
 
+// XACA-1392-001: persist accessory last-readings (dirty flag; no write when unchanged)
+setInterval(() => {
+    accessoryRegistry.flushIfDirty();
+}, SAVE_INTERVAL_MS);
+
 // Periodically save pushed boards to file
 setInterval(() => {
     savePushedBoards();
@@ -4155,6 +4229,7 @@ app.listen(PORT, () => {
 process.on('SIGTERM', () => {
     console.log('Received SIGTERM, shutting down gracefully...');
     saveMachineData();
+    accessoryRegistry.flushIfDirty();
     savePushedKnowledge();
     ciRunnersStore.save();
     ciPool.stop();
@@ -4165,6 +4240,7 @@ process.on('SIGTERM', () => {
 process.on('SIGINT', () => {
     console.log('Received SIGINT, shutting down gracefully...');
     saveMachineData();
+    accessoryRegistry.flushIfDirty();
     savePushedKnowledge();
     ciRunnersStore.save();
     ciPool.stop();
