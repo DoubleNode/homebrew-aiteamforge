@@ -3525,9 +3525,16 @@ def get_team_repo_root(team: str, *, config: dict | None = None) -> Path:
         return repo
     if (working_dir / ".git").exists():
         return working_dir
+    def _is_main_worktree(child: Path) -> bool:
+        # Per child: on Python 3.9 Path.is_dir() raises PermissionError for an
+        # unreadable sibling, which must not abort the scan of the others.
+        try:
+            return child.is_dir() and (child / ".git").is_dir()
+        except OSError:
+            return False
+
     try:
-        candidates = sorted(c for c in working_dir.iterdir()
-                            if c.is_dir() and (c / ".git").is_dir())
+        candidates = sorted(c for c in working_dir.iterdir() if _is_main_worktree(c))
     except OSError:
         candidates = []
     if len(candidates) == 1:
