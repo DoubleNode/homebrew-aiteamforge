@@ -194,6 +194,7 @@ FLEET_CONFIG_SRC="${FLEET_CONFIG_SRC:-}"   # --fleet-config / env; default resol
 # Fleet CI Pool agent (XACA-1442). Only used under --with-agent.
 WITH_AGENT=0
 NO_REGISTER=0
+SEND_PAUSE_MARKER=1       # XACA-1457: agent.json sendPauseMarker; --no-pause-marker sets 0
 REFUSE_IF_BUSY=0         # XACA-1443-015: `ci refresh` re-provisions an ENABLED host; refuse (rc 3) while a pool job runs
 AGENT_KEY_FILE=""
 TELEMETRY_KEY_FILE=""    # XACA-1422: per-host fct_ key for the reporter
@@ -254,6 +255,8 @@ Fleet CI Pool agent (XACA-1442, opt-in; nothing is installed without --with-agen
   --agent-key-file <p> per-host dispatch key file (must start fcp_); needs --with-agent
   --server-url <url>   Fleet Monitor base URL (https://...); needs --with-agent
                        (default: origin of the invoking user's centralServer.apiEndpoint)
+  --no-pause-marker    agent.json gets "sendPauseMarker": false (default true): the agent stops sending
+                       its XACA-1440 pause marker; for hosts polling an older server that rejects it.
 
 Development aid (runs as the CURRENT user, no daemons, no registration):
        bash provision-host.sh --host <name> --baseline-only --vm-name <vm>
@@ -293,6 +296,7 @@ while [ $# -gt 0 ]; do
     --no-register) NO_REGISTER=1; shift ;;
     --with-agent) WITH_AGENT=1; shift ;;
     --refuse-if-busy) REFUSE_IF_BUSY=1; shift ;;
+    --no-pause-marker) SEND_PAUSE_MARKER=0; shift ;;
     --agent-key-file) [ $# -ge 2 ] || { usage >&2; exit 2; }; [ -n "$2" ] || { echo "provision-host.sh: --agent-key-file needs a path, got ''" >&2; exit 2; }; AGENT_KEY_FILE="$2"; shift 2 ;;
     --telemetry-key-file) [ $# -ge 2 ] || { usage >&2; exit 2; }; [ -n "$2" ] || { echo "provision-host.sh: --telemetry-key-file needs a path, got ''" >&2; exit 2; }; TELEMETRY_KEY_FILE="$2"; shift 2 ;;
     --server-url) [ $# -ge 2 ] || { usage >&2; exit 2; }; [ -n "$2" ] || { echo "provision-host.sh: --server-url needs a URL, got ''" >&2; exit 2; }; SERVER_URL="$2"; shift 2 ;;
@@ -1202,12 +1206,14 @@ PY
 }
 
 # agent.json body (no secrets). Every interpolated value is validated: HOST by
-# the --host regex, VM_NAME by need_name, the URL by agent_url_ok, slots are ints.
+# the --host regex, VM_NAME by need_name, the URL by agent_url_ok, slots are ints;
+# sendPauseMarker is a bare JSON boolean picked from a fixed pair (true/false), never from input.
 agent_cfg_json() { # serverUrl
-  local mac=1
+  local mac=1 pm=true
   if [ "$NO_MACOS" = "1" ]; then mac=0; fi
-  printf '{"serverUrl": "%s", "machine": "%s", "vmName": "%s", "linuxSlots": %s, "macSlots": %s}\n' \
-    "$1" "$HOST" "$VM_NAME" "$LINUX_RUNNER_COUNT" "$mac"
+  if [ "$SEND_PAUSE_MARKER" = "0" ]; then pm=false; fi
+  printf '{"serverUrl": "%s", "machine": "%s", "vmName": "%s", "linuxSlots": %s, "macSlots": %s, "sendPauseMarker": %s}\n' \
+    "$1" "$HOST" "$VM_NAME" "$LINUX_RUNNER_COUNT" "$mac" "$pm"
 }
 
 stage_agent() {
@@ -1378,7 +1384,7 @@ do_dry_run() {
     fi
     url=$(agent_server_url)
     plan "agent (XACA-1442): install ${AGENT_SRC##*/} -> ${AGENT_DEST} (root, 755: $([ -f "$AGENT_DEST" ] && echo exists || echo absent)); runs as ROOT (no UserName)"
-    plan "  would: write ${AGENT_CFG} (root:wheel 644): serverUrl ${url:-<UNRESOLVED: pass --server-url>}, machine ${HOST}, vmName ${VM_NAME}, linuxSlots ${LINUX_RUNNER_COUNT}, macSlots $([ "$NO_MACOS" = "1" ] && echo 0 || echo 1)"
+    plan "  would: write ${AGENT_CFG} (root:wheel 644): serverUrl ${url:-<UNRESOLVED: pass --server-url>}, machine ${HOST}, vmName ${VM_NAME}, linuxSlots ${LINUX_RUNNER_COUNT}, macSlots $([ "$NO_MACOS" = "1" ] && echo 0 || echo 1), sendPauseMarker $([ "$SEND_PAUSE_MARKER" = "0" ] && echo false || echo true)"
     plan "  would: key -> ${AGENT_KEY} (root:wheel 600, via stdin, never argv): ${k}"
     plan "  would: guest ${GUEST_JIT_DEST} + ${GUEST_JOB_STARTED_DEST}; $([ "$NO_MACOS" = "1" ] && echo 'macOS JIT scripts SKIPPED (--no-macos)' || echo "host ${MAC_JIT_DEST} + ${MAC_JOB_STARTED_DEST}")"
     plan "  would: write ${PLIST_AGENT} ($([ -f "$PLIST_AGENT" ] && echo exists || echo absent)); daemon $(daemon_state "$LABEL_AGENT"); KeepAlive, state ${AGENT_STATE_DIR}, logs ${AGENT_LOG_DIR}"

@@ -76,7 +76,7 @@ def load_config(path=None):
         "logPath": raw.get("logPath") or DEFAULT_LOG_PATH,
         "keyPath": raw.get("keyPath") or DEFAULT_KEY_PATH,
         "statePath": raw.get("statePath") or DEFAULT_STATE_PATH,
-        # see build_poll_body: only an explicit JSON true enables it
+        # see build_poll_body: only an explicit JSON true enables it (default off)
         "sendPauseMarker": raw.get("sendPauseMarker") is True,
         # XACA-1445-012 persistent-runner switch (all optional)
         "persistentStatePath": raw.get("persistentStatePath") or DEFAULT_PERSIST_PATH,
@@ -332,8 +332,8 @@ def collect_capacity(config, slots_state, cache=None):
     slots_state: list of {"os","index","state","assignmentId"} (owned by the
     supervisor, XACA-1442-003; empty until then). The extra top-level key
     `pauseMarker` reports the XACA-1440 marker for drift detection
-    (EPIC-0070 decision 2026-10-06). It is NOT in the C3 example, so the
-    server's allowlist must accept it (flagged to XACA-1441).
+    (EPIC-0070 decision 2026-10-06). The server allowlist accepts it
+    (XACA-1441-025); build_poll_body decides whether it is sent.
     """
     cache = cache if cache is not None else TTLCache()
     cap = {}
@@ -475,12 +475,13 @@ def validate_server_url(url, allow_insecure=False):
 def build_poll_body(report, send_pause_marker=False):
     """C3 body from collect_capacity()'s report.
 
-    `pauseMarker` is collected for drift logging but is NOT in the C3 contract
-    and the XACA-1441 server answers 400 to any unknown field (the machine
-    would then read stale and ineligible). It is therefore dropped unless
-    agent.json sets "sendPauseMarker": true. OPEN CONTRACT QUESTION: XACA-1441
-    must add `pauseMarker` to its allowlist (validatePoll) before that flag is
-    safe to turn on.
+    `pauseMarker` is part of C3 (server allowlist, XACA-1441-025) and surfaces
+    as pauseMarker/pauseDrift in GET /api/ci-pool. It is sent only when
+    agent.json has "sendPauseMarker": true (JSON true only); provision-host.sh
+    writes that by default (opt out with --no-pause-marker). The agent's own
+    default stays False on purpose: a hand-built or legacy agent.json, or a
+    host polling an older server that still answers 400 to unknown fields,
+    fails safe (that 400 would make the machine read stale and ineligible).
     """
     body = dict(report)
     if not send_pause_marker:
