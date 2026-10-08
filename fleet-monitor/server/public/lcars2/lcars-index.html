@@ -30,11 +30,11 @@
     <link href="https://fonts.googleapis.com/css2?family=Antonio:wght@400;500;600;700&display=swap" rel="stylesheet">
 
     <!-- LCARS Fleet Core Framework -->
-    <link rel="stylesheet" href="css/lcars-fleet.css?v=20260825e">
+    <link rel="stylesheet" href="css/lcars-fleet.css?v=20261008a">
     <!-- LCARS Kiosk Mode Styles (shared) -->
     <link rel="stylesheet" href="../shared/css/lcars-kiosk.css?v=20260825e">
     <!-- LCARS Fleet Theme (Red/Blue Color Scheme) -->
-    <link rel="stylesheet" href="css/lcars-fleet-theme.css?v=20260904a">
+    <link rel="stylesheet" href="css/lcars-fleet-theme.css?v=20261008b">
     <!-- XACA-0989: collapsible divisions + compact session chips (shared) -->
     <link rel="stylesheet" href="../shared/css/lcars-division-collapse.css?v=20260827a">
 </head>
@@ -138,6 +138,11 @@
                      button and none below it (XACA-0953). -->
                 <div class="sidebar-button" data-section="engines">
                     <span>ENGINES</span>
+                </div>
+                <!-- ACCESSORIES button - UPS/accessory registry (XACA-1393). Appended last;
+                     .sidebar-button + .sidebar-spacer draws the closing bar (XACA-0953). -->
+                <div class="sidebar-button" data-section="accessories">
+                    <span>ACCESSORIES</span>
                 </div>
                 <div class="sidebar-spacer"></div>
                 <div class="sidebar-info stacked">
@@ -546,6 +551,22 @@
 
                 </div><!-- End AI ENGINES section -->
 
+                <!-- ═══════════════════════════════════════════════════════════════════ -->
+                <!-- SECTION: ACCESSORIES - UPS / fleet accessories (XACA-1393)          -->
+                <!-- ═══════════════════════════════════════════════════════════════════ -->
+                <div class="lcars-section" data-section="accessories">
+                    <section>
+                        <div class="section-header" style="border-color: var(--lcars-amber);">
+                            <span class="section-title" style="color: var(--lcars-amber);">ACCESSORIES</span>
+                            <div class="section-bar" style="background: var(--lcars-amber);"></div>
+                        </div>
+                        <!-- Renderer hook (XACA-1393-002): populates this container from fleet.accessories -->
+                        <div id="accessories-list" style="margin-top: 15px;">
+                            <p class="empty-message accessories-empty">NO ACCESSORIES DETECTED</p>
+                        </div>
+                    </section>
+                </div><!-- End ACCESSORIES section -->
+
             </div>
         </main>
     </div>
@@ -583,6 +604,6 @@
          the app script below, which calls window.LCARS_MACHINE_HEALTH.deriveMachineHealth(). -->
     <script src="js/lcars-machine-health.js?v=20260904a"></script>
     <script src="js/lcars-academy-config.js?v=20260906a"></script>
-    <script src="js/lcars-fleet-dashboard-app.js?v=20260906a"></script>
+    <script src="js/lcars-fleet-dashboard-app.js?v=20261008a"></script>
 </body>
 </html>

@@ -4550,3 +4550,40 @@
     opacity: 0.75;
     font-style: italic;
 }
+
+/* XACA-1393-003 (D2): server-derived display_status === 'on_battery'.
+   YELLOW like .warning but deliberately NOT the same look: amber (not pale
+   yellow) DOUBLE stripe, a tinted card, a square STEADY dot (warning is a
+   round pulsing one) and the mandatory ON UPS BATTERY pill. Appended at
+   end-of-file so it wins over all three .status-row blocks and their :hover
+   by source order (equal specificity); :hover is restated so the tint is not
+   lost on mouse-over. No other modifier class co-occurs on .status-row (the
+   version/health indicators are child spans), and an offline machine never
+   carries this class -- the server gives offline precedence. */
+.status-row.on-battery {
+    border-left: 8px double var(--lcars-amber);
+    background: linear-gradient(90deg, rgba(255, 204, 0, 0.14), var(--lcars-dark) 60%);
+}
+
+.status-row.on-battery:hover {
+    background: linear-gradient(90deg, rgba(255, 204, 0, 0.22), var(--lcars-surface) 60%);
+}
+
+.status-indicator.on-battery {
+    background: var(--lcars-amber);
+    box-shadow: 0 0 6px var(--lcars-yellow-glow);
+    border-radius: 2px;
+    animation: none;
+}
+
+.status-row-power-label {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    padding: 2px 10px;
+    border-radius: 10px;
+    background: var(--lcars-amber);
+    color: var(--lcars-black);
+    white-space: nowrap;
+    flex-shrink: 0;
+}

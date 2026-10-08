@@ -110,6 +110,8 @@
             });
         }
 
+        wireAccessories();   // XACA-1393-002: delegated attach/detach clicks
+
         // Initialize Kiosk Mode (auto-rotation on idle) — gated on the
         // persisted enabled/disabled preference. LCARS_KIOSK.init() already
         // gates internally (XACA-1154-003, the fail-closed choke point),
@@ -203,6 +205,7 @@
             // filterData(), which the ternary below only ever calls on
             // that (non-unbounded) path.
             renderDashboard(isUnbounded ? fleetData : filterData(fleetData));
+            renderAccessories();
             updateConnectionStatus(true);
         } catch (error) {
             console.error('[LCARS] Failed to fetch fleet data:', error);
@@ -1257,6 +1260,166 @@
             if (statusText) statusText.textContent = 'CONNECTION LOST';
             if (statusIndicator) statusIndicator.className = 'status-indicator offline';
         }
+    }
+
+    // ============================================================================
+    // XACA-1393-002: ACCESSORIES VIEW (UPS registry)
+    // ----------------------------------------------------------------------------
+    // Data source: the top-level `accessories[]` of the /api/fleet payload this
+    // app ALREADY polls (fetchFleetData) -- no second fetch. Per D1 the server
+    // derives `state`; this block only RENDERS it and never re-derives on_battery
+    // from percent/charging. Attach/detach go through window.fleetApiFetch
+    // (fleet-api-auth.js, the same admin-cookie + CSRF wrapper lcars-engines.js
+    // uses), then fetchFleetData() refreshes the view.
+    // Machines for the name lookup / ATTACH picker come from the UNFILTERED
+    // fleetData, because the filtered dashboards narrow fleet.machines to their
+    // own divisions and an accessory can span orgs.
+    // ============================================================================
+
+    // No server string is ever put in an attribute (this file's XACA-0416-004
+    // invariant; escapeAttr() stays undefined here): controls carry NUMERIC
+    // indexes into `view`, and the click handler resolves the real ids from it.
+    const accessoriesUi = { busy: {}, errors: {}, lastSig: null, view: { accessories: [], machines: [] } };
+
+    function accessoryMachineName(machines, id) {
+        for (let i = 0; i < machines.length; i++) {
+            if (machines[i] && machines[i].machine_id === id) {
+                return machines[i].display_name || machines[i].hostname || id;
+            }
+        }
+        return id;
+    }
+
+    function accessoryStateBadge(state) {
+        if (state === 'ac') return { cls: 'ac', label: 'AC' };
+        if (state === 'on_battery') return { cls: 'on-battery', label: 'ON BATTERY' };
+        return { cls: 'unknown', label: 'UNKNOWN' };
+    }
+
+    function buildAccessoryCardHtml(acc, accIdx, machines) {
+        const badge = accessoryStateBadge(acc.state);
+        const r = acc.last_reading || null;
+        const busy = !!accessoriesUi.busy[acc.id];
+        const dis = busy ? ' disabled' : '';
+        const attached = Array.isArray(acc.attached_machine_ids) ? acc.attached_machine_ids : [];
+        
+        let facts = '';
+        const fact = function(label, value) {
+            facts += '<div class="accessory-fact"><span class="accessory-fact-label">' + label +
+                '</span><span class="accessory-fact-value">' + value + '</span></div>';
+        };
+        const hasPct = r && typeof r.percent === 'number';
+        fact('BATTERY', hasPct ? escapeHtml(String(Math.round(r.percent))) + '%' +
+            (r.charging ? ' <span class="accessory-charging">CHARGING</span>' : '') : '&mdash;');
+        fact('RUNTIME', r && typeof r.minutes_remaining === 'number'
+            ? '~' + escapeHtml(String(Math.round(r.minutes_remaining))) + ' MIN' : '&mdash;');
+        fact('DATA LINK', acc.data_link_machine_id
+            ? escapeHtml(accessoryMachineName(machines, acc.data_link_machine_id)) : '&mdash;');
+        fact('LAST OBSERVED', r && r.observedAt ? escapeHtml(formatTimestamp(r.observedAt)) : '&mdash;');
+
+        let list = '';
+        attached.forEach(function(mid, mi) {
+            list += '<li class="accessory-machine"><span class="accessory-machine-name">' +
+                escapeHtml(accessoryMachineName(machines, mid)) + '</span>' +
+                '<button type="button" class="btn-lcars btn-lcars-danger accessory-detach" data-acc-idx="' +
+                accIdx + '" data-attached-idx="' + mi + '"' + dis + '>DETACH</button></li>';
+        });
+        if (!list) list = '<li class="accessory-machine accessory-none">NONE ATTACHED</li>';
+
+        let options = '';
+        machines.forEach(function(m, mi) {
+            if (!m || !m.machine_id || attached.indexOf(m.machine_id) !== -1) return;
+            options += '<option value="' + mi + '">' +
+                escapeHtml(m.display_name || m.hostname || m.machine_id) + '</option>';
+        });
+        const attach = options
+            ? '<div class="accessory-attach"><select class="accessory-attach-select" data-acc-idx="' + accIdx +
+              '"' + dis + '>' + options + '</select>' +
+              '<button type="button" class="btn-lcars btn-lcars-primary accessory-attach-btn" data-acc-idx="' +
+              accIdx + '"' + dis + '>ATTACH</button></div>'
+            : '';
+
+        const err = accessoriesUi.errors[acc.id];
+        const errHtml = err ? '<div class="accessory-error" role="alert">' + escapeHtml(err) + '</div>' : '';
+
+        return '<div class="accessory-card ' + badge.cls + '">' +
+            '<div class="accessory-card-header"><span class="accessory-name">' +
+            escapeHtml(acc.display_name || acc.name || acc.id) + '</span>' +
+            '<span class="accessory-type">' + escapeHtml(String(acc.type || 'ups').toUpperCase()) + '</span>' +
+            '<span class="accessory-state-badge ' + badge.cls + '">' + badge.label + '</span></div>' +
+            '<div class="accessory-card-body">' + facts +
+            '<div class="accessory-machines-title">ATTACHED MACHINES</div><ul class="accessory-machines">' + list +
+            '</ul>' + attach + errHtml + '</div></div>';
+    }
+
+    function renderAccessories() {
+        const container = document.getElementById('accessories-list');
+        if (!container) return;
+        const accessories = fleetData && Array.isArray(fleetData.accessories) ? fleetData.accessories : [];
+        const machines = (fleetData && fleetData.fleet && Array.isArray(fleetData.fleet.machines))
+            ? fleetData.fleet.machines : [];
+        // Don't rebuild under the operator's hands: the 30s poll would reset an
+        // open <select> or drop focus mid-request. Re-render only on change.
+        const sig = JSON.stringify([accessories, machines.map(function(m) {
+            return m && [m.machine_id, m.display_name, m.hostname];
+        }), accessoriesUi.busy, accessoriesUi.errors]);
+        if (sig === accessoriesUi.lastSig) return;
+        accessoriesUi.lastSig = sig;
+
+        if (!accessories.length) {
+            accessoriesUi.view = { accessories: [], machines: machines };
+            container.innerHTML = '<p class="empty-message accessories-empty">NO ACCESSORIES DETECTED</p>';
+            return;
+        }
+        accessoriesUi.view = { accessories: accessories, machines: machines };
+        container.innerHTML = accessories.map(function(acc, i) {
+            return acc && acc.id ? buildAccessoryCardHtml(acc, i, machines) : '';
+        }).join('');
+    }
+
+    async function accessoryMutate(accId, machineId, method) {
+        if (accessoriesUi.busy[accId] || typeof window.fleetApiFetch !== 'function') return;
+        accessoriesUi.busy[accId] = true;
+        delete accessoriesUi.errors[accId];
+        renderAccessories();
+        try {
+            const resp = await window.fleetApiFetch(
+                CONFIG.apiBase + '/api/accessories/' + encodeURIComponent(accId) +
+                '/machines/' + encodeURIComponent(machineId), { method: method });
+            if (!resp.ok) {
+                let msg = 'HTTP ' + resp.status;
+                try {
+                    const body = await resp.json();
+                    if (body && (body.error || body.message)) msg = String(body.error || body.message);
+                } catch (e) { /* non-JSON body: keep the status text */ }
+                accessoriesUi.errors[accId] = msg;
+            }
+        } catch (e) {
+            accessoriesUi.errors[accId] = 'REQUEST FAILED: ' + (e && e.message ? e.message : e);
+        }
+        delete accessoriesUi.busy[accId];
+        await fetchFleetData();   // re-renders (incl. accessories) from fresh server state
+        renderAccessories();      // also covers a failed fetch / error-only change
+    }
+
+    function wireAccessories() {
+        const container = document.getElementById('accessories-list');
+        if (!container) return;
+        container.addEventListener('click', function(e) {
+            const btn = e.target.closest ? e.target.closest('button[data-acc-idx]') : null;
+            if (!btn || btn.disabled) return;
+            const view = accessoriesUi.view;
+            const acc = view.accessories[Number(btn.getAttribute('data-acc-idx'))];
+            if (!acc || !acc.id) return;
+            if (btn.classList.contains('accessory-detach')) {
+                const mid = (acc.attached_machine_ids || [])[Number(btn.getAttribute('data-attached-idx'))];
+                if (mid) accessoryMutate(acc.id, mid, 'DELETE');
+            } else if (btn.classList.contains('accessory-attach-btn')) {
+                const sel = btn.parentNode.querySelector('select');
+                const m = sel ? view.machines[Number(sel.value)] : null;
+                if (m && m.machine_id) accessoryMutate(acc.id, m.machine_id, 'PUT');
+            }
+        });
     }
 
     // ============================================================================

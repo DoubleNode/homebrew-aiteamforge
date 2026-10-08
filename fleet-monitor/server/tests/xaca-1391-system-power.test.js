@@ -285,9 +285,15 @@ test('UI consumers of machine.system never reference system.power (no leak into 
     const vm = require('node:vm');
     const pub = path.join(__dirname, '..', 'public');
     for (const rel of ['lcars/js/lcars-dashboard-app.js', 'lcars2/js/lcars-fleet-core.js',
-        'lcars2/js/lcars-fleet-dashboard-app.js', 'lcars2/js/lcars-machine-health.js']) {
+        'lcars2/js/lcars-fleet-dashboard-app.js', 'lcars2/js/lcars-machine-health.js',
+        'lcars/js/lcars-accessories.js']) {
         const src = fs.readFileSync(path.join(pub, rel), 'utf8');
-        assert.equal(/power/i.test(src), false, `${rel} mentions "power"`);
+        // XACA-1393: the derived top-level machine.power_reason / power_state
+        // contract (XACA-1392, NOT machine.system.power) is deliberately
+        // rendered as the ON UPS BATTERY label. Strip exactly those names so
+        // any OTHER mention of power -- notably system.power -- still fails.
+        const stripped = src.replace(/power_reason|power_state|powerEl|[a-z-]*-power-label/g, '');
+        assert.equal(/power/i.test(stripped), false, `${rel} mentions "power"`);
     }
     const sandbox = { window: {} };
     vm.runInNewContext(fs.readFileSync(path.join(pub, 'lcars2/js/lcars-machine-health.js'), 'utf8'), sandbox);

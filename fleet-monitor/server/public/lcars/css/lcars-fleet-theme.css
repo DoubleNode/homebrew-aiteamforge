@@ -3596,6 +3596,130 @@
     border-left-color: var(--lcars-alert-red);
 }
 
+/* XACA-1393-004 (D2): server-derived display_status === 'on_battery'.
+   YELLOW like .warning, but deliberately NOT the same look: amber (not pale
+   yellow) wide stripe, a tinted card, a square steady indicator (warning is a
+   pulsing round dot) and the mandatory ON UPS BATTERY label. Placed after
+   .warning/.outdated so equal specificity resolves by source order; an offline
+   machine never gets this class (the server gives offline precedence). */
+.machine-row.on-battery {
+    border-left: 10px double var(--lcars-amber);
+    background: linear-gradient(90deg, rgba(255, 204, 0, 0.14), var(--lcars-dark) 60%);
+}
+
+.status-indicator.on-battery {
+    background: var(--lcars-amber);
+    box-shadow: 0 0 6px var(--lcars-yellow-glow);
+    border-radius: 2px;
+    animation: none;
+}
+
+.machine-power-label {
+    font-family: 'Antonio', sans-serif;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    padding: 2px 10px;
+    margin-right: 10px;
+    border-radius: 10px;
+    background: var(--lcars-amber);
+    color: var(--lcars-black);
+    white-space: nowrap;
+}
+
+/* XACA-1393-004: ACCESSORIES section (UPS cards) */
+.accessory-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 14px;
+    margin-top: 14px;
+}
+
+.accessory-card {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px 16px;
+    background: var(--lcars-dark);
+    border-radius: 0 12px 12px 0;
+    border-left: 8px solid var(--lcars-tan);
+}
+
+.accessory-card.ac { border-left-color: var(--lcars-green); }
+.accessory-card.on-battery { border-left: 10px double var(--lcars-amber); }
+
+.accessory-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.accessory-name {
+    font-family: 'Antonio', sans-serif;
+    font-size: 16px;
+    letter-spacing: 1px;
+    color: var(--lcars-peach);
+}
+
+.accessory-state {
+    font-family: 'Antonio', sans-serif;
+    font-size: 12px;
+    letter-spacing: 1px;
+    padding: 2px 10px;
+    border-radius: 10px;
+    color: var(--lcars-black);
+    background: var(--lcars-tan);
+    white-space: nowrap;
+}
+
+.accessory-state-ac { background: var(--lcars-green); }
+.accessory-state-on-battery { background: var(--lcars-amber); }
+
+.accessory-reading {
+    display: flex;
+    gap: 24px;
+}
+
+.accessory-metric { display: flex; flex-direction: column; }
+
+.accessory-metric-label {
+    font-size: 11px;
+    letter-spacing: 1px;
+    color: var(--lcars-lavender);
+}
+
+.accessory-metric-value {
+    font-family: 'Antonio', sans-serif;
+    font-size: 20px;
+    color: var(--lcars-peach);
+}
+
+.accessory-link { font-size: 13px; color: var(--lcars-peach); }
+
+.accessory-attached-list {
+    list-style: none;
+    margin: 4px 0 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.accessory-attached-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    color: var(--lcars-peach);
+    font-size: 13px;
+}
+
+.accessory-none { color: var(--lcars-lavender); }
+
+.accessory-attach-row { display: flex; gap: 8px; align-items: center; }
+.accessory-attach-select { flex: 1; min-width: 0; }
+
 /* Top line: status dot + hostname + sessions */
 .machine-row-header {
     display: flex;

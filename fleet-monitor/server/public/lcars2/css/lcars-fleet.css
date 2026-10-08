@@ -1765,3 +1765,92 @@ body {
     }
 }
 
+
+/* ==========================================================================
+   ACCESSORIES (XACA-1393-002) — UPS cards. The state badge renders the
+   server-derived `state` only. ON BATTERY is yellow; UNKNOWN is muted.
+   ========================================================================== */
+.accessory-card {
+    background: var(--lcars-darker);
+    border: 1px solid var(--lcars-surface);
+    border-left: 8px solid var(--lcars-green-dark);
+    border-radius: 8px;
+    overflow: hidden;
+    margin-bottom: 20px;
+}
+.accessory-card.on-battery { border-left-color: var(--lcars-amber); }
+.accessory-card.unknown    { border-left-color: var(--lcars-brown); }
+.accessory-card-header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 20px;
+    background: var(--lcars-dark);
+    border-bottom: 2px solid var(--lcars-amber);
+}
+.accessory-name {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--lcars-amber);
+    letter-spacing: 3px;
+    text-transform: uppercase;
+}
+.accessory-type {
+    font-size: 11px;
+    letter-spacing: 2px;
+    color: var(--lcars-tan);
+}
+.accessory-state-badge {
+    margin-left: auto;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    padding: 2px 10px;
+    border-radius: 10px;
+    border: 1px solid currentColor;
+}
+.accessory-state-badge.ac         { color: var(--lcars-green); }
+.accessory-state-badge.on-battery { color: var(--lcars-darker); background: var(--lcars-amber); border-color: var(--lcars-amber); }
+.accessory-state-badge.unknown    { color: var(--lcars-brown); }
+.accessory-card-body { padding: 14px 20px; }
+.accessory-fact {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 3px 0;
+    font-size: 13px;
+}
+.accessory-fact-label { color: var(--lcars-tan); letter-spacing: 2px; font-size: 11px; }
+.accessory-fact-value { color: var(--lcars-peach); text-align: right; word-break: break-word; }
+.accessory-charging   { color: var(--lcars-green); font-size: 10px; letter-spacing: 1px; margin-left: 6px; }
+.accessory-machines-title { margin-top: 12px; font-size: 11px; letter-spacing: 2px; color: var(--lcars-tan); }
+.accessory-machines { list-style: none; margin: 6px 0 0; padding: 0; }
+.accessory-machine {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    padding: 4px 0;
+    font-size: 13px;
+    color: var(--lcars-peach);
+}
+.accessory-machine.accessory-none { color: var(--lcars-brown); font-size: 12px; }
+.accessory-attach { display: flex; gap: 10px; margin-top: 12px; }
+.accessory-attach-select {
+    flex: 1;
+    min-width: 0;
+    background: var(--lcars-dark);
+    color: var(--lcars-peach);
+    border: 1px solid var(--lcars-tan);
+    border-radius: 4px;
+    padding: 4px 8px;
+}
+.accessory-error {
+    margin-top: 10px;
+    padding: 6px 10px;
+    border: 1px solid var(--lcars-alert-red);
+    border-radius: 4px;
+    color: var(--lcars-alert-red);
+    font-size: 12px;
+}

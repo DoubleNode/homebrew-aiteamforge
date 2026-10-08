@@ -356,6 +356,9 @@
                 throw new Error('HTTP ' + response.status + ': ' + response.statusText);
             }
             fleetData = await response.json();
+            // XACA-1393-004: accessories[] rides on the same payload; render is
+            // never-throw and independent of the team/machine filter.
+            if (window.LCARSAccessories) window.LCARSAccessories.render(fleetData);
             await Promise.all([fetchBackupStatus(), fetchWorkingItems()]);
             const filteredData = filterData(fleetData);
             renderDashboard(filteredData);
@@ -2066,7 +2069,12 @@
             : { state: 'unknown', metrics: {} };
 
         const item = document.createElement('div');
-        item.className = 'machine-row ' + machine.status;
+        // XACA-1393-004 (D2): colour from the server-derived display_status, falling
+        // back to the heartbeat status. on_battery gets its own class so it can never
+        // be mistaken for the heartbeat-late `.warning`. Closed set: no server string
+        // reaches a class name.
+        const displayStatus = machineDisplayStatus(machine);
+        item.className = 'machine-row ' + displayStatus.cls;
 
         const machineGuid = machine.machine_id || 'N/A';
         const lastSeenRelative = formatRelativeTime(machine.last_seen);
@@ -2268,8 +2276,9 @@
         item.innerHTML =
             '<div class="machine-row-header">' +
                 '<span class="machine-expand-indicator' + (isExpanded ? ' expanded' : '') + '">▶</span>' +
-                '<span class="status-indicator ' + machine.status + '"></span>' +
+                '<span class="status-indicator ' + displayStatus.cls + '"></span>' +
                 '<span class="machine-hostname">' + escapeHtml(machine.hostname) + '</span>' +
+                displayStatus.labelHtml +
                 '<span class="machine-sessions">' + machine.session_count + ' sessions</span>' +
             '</div>' +
             '<div class="machine-nickname-row">' +
@@ -2793,6 +2802,25 @@
         const div = document.createElement('div');
         div.textContent = text;
         return div.innerHTML;
+    }
+
+    // XACA-1393-004: display_status (server, D2 precedence offline > on_battery >
+    // warning > online) -> row class + mandatory on-battery label. D1: never
+    // re-derive on_battery here; absent/unknown display_status falls back to status.
+    function machineDisplayStatus(machine) {
+        const raw = machine.display_status || machine.status;
+        if (raw === 'on_battery') {
+            const r = machine.power_reason || {};
+            const parts = ['ON UPS BATTERY'];
+            if (typeof r.percent === 'number' && isFinite(r.percent)) parts.push(Math.round(r.percent) + '%');
+            if (typeof r.minutes_remaining === 'number' && isFinite(r.minutes_remaining)) parts.push('~' + Math.round(r.minutes_remaining) + ' MIN');
+            return {
+                cls: 'on-battery',
+                labelHtml: '<span class="machine-power-label" role="status">' + escapeHtml(parts.join(' \u00b7 ')) + '</span>'
+            };
+        }
+        const cls = (raw === 'online' || raw === 'offline' || raw === 'warning') ? raw : (machine.status || 'offline');
+        return { cls: cls, labelHtml: '' };
     }
 
     function escapeAttr(text) {

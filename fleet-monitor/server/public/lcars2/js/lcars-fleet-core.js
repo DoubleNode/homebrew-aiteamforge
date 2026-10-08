@@ -596,8 +596,8 @@ window.LCARS_CORE = window.LCARS_CORE || {};
     // =========================================================================
 
     LCARS.sections = {
-        // Available sections in order (XACA-0540: added 'engines')
-        list: ['overview', 'organizations', 'machines', 'settings', 'engines'],
+        // Available sections in order (XACA-0540: added 'engines'; XACA-1393: 'accessories')
+        list: ['overview', 'organizations', 'machines', 'settings', 'engines', 'accessories'],
 
         // Current state
         active: 'overview',
@@ -770,6 +770,14 @@ window.LCARS_CORE = window.LCARS_CORE || {};
                         if (self.list.length > 4) {
                             e.preventDefault();
                             self.switchSection(self.list[4]);
+                        }
+                        return;
+                    }
+                    // XACA-1393: Digit6 → accessories
+                    if (e.code === 'Digit6' || e.code === 'Numpad6') {
+                        if (self.list.length > 5) {
+                            e.preventDefault();
+                            self.switchSection(self.list[5]);
                         }
                         return;
                     }
@@ -1203,6 +1211,30 @@ window.LCARS_CORE = window.LCARS_CORE || {};
 
     LCARS.machines = {
         /**
+         * XACA-1393-003: map a machine to its card class + optional label.
+         * D1: the SERVER derives display_status (D2 precedence offline >
+         * on_battery > warning > online); this only renders it. Absent or
+         * unrecognised display_status falls back to the heartbeat `status`
+         * (old server / no UPS), and a missing power_reason or null parts
+         * never crash or invent an on-battery state.
+         *
+         * @param {Object} machine
+         * @returns {{cls: string, label: string}} label is '' unless on_battery
+         */
+        displayStatus: function(machine) {
+            const raw = machine.display_status || machine.status;
+            if (raw === 'on_battery') {
+                const r = machine.power_reason || {};
+                const parts = ['ON UPS BATTERY'];
+                if (typeof r.percent === 'number' && isFinite(r.percent)) parts.push(Math.round(r.percent) + '%');
+                if (typeof r.minutes_remaining === 'number' && isFinite(r.minutes_remaining)) parts.push('~' + Math.round(r.minutes_remaining) + ' MIN');
+                return { cls: 'on-battery', label: parts.join(' \u00b7 ') };
+            }
+            const cls = (raw === 'online' || raw === 'offline' || raw === 'warning') ? raw : (machine.status || 'offline');
+            return { cls: cls, label: '' };
+        },
+
+        /**
          * Build the machine status-row DOM fragment (status indicator,
          * hostname, session count, version indicator, health badge, and the
          * SYSTEM disclosure detail panel) for one machine entry.
@@ -1246,7 +1278,12 @@ window.LCARS_CORE = window.LCARS_CORE || {};
                 : { state: 'unknown', metrics: {} };
 
             const item = document.createElement('div');
-            item.className = 'status-row ' + machine.status;
+            // XACA-1393-003 (D2): class/dot/label come from the server-derived
+            // display_status (offline > on_battery > warning > online), never
+            // re-derived here (D1). The class is chosen from a closed set so
+            // no server string can reach a class name.
+            const displayStatus = LCARS.machines.displayStatus(machine);
+            item.className = 'status-row ' + displayStatus.cls;
 
             // XACA-1031-006 (EPIC-0061 Decision 8): version lives at
             // machine.system.versions.*, not machine.versions.*. An OLD reporter
@@ -1320,9 +1357,22 @@ window.LCARS_CORE = window.LCARS_CORE || {};
             // is deliberately NOT defined here -- do not add a helper with no
             // call site.
             item.innerHTML =
-                '<span class="status-indicator ' + machine.status + '"></span>' +
+                '<span class="status-indicator ' + displayStatus.cls + '"></span>' +
                 '<span class="lcars-text-sm status-row-hostname" style="flex: 1;">' + LCARS.utils.escapeHtml(machine.hostname) + '</span>' +
                 '<span class="lcars-text-xs" style="color: var(--lcars-tan);">' + machine.session_count + ' sessions</span>';
+
+            // XACA-1393-003: the mandatory ON UPS BATTERY label, built with the
+            // DOM API (textContent) so power_reason's strings need no escaping.
+            // Inserted right after the hostname, BEFORE the version indicator
+            // below -- the version insertBefore(lastElementChild) is unaffected
+            // because the session-count span is still last.
+            if (displayStatus.label) {
+                const powerEl = document.createElement('span');
+                powerEl.className = 'status-row-power-label';
+                powerEl.setAttribute('role', 'status');
+                powerEl.textContent = displayStatus.label;
+                item.insertBefore(powerEl, item.lastElementChild);
+            }
 
             if (hasInstalledVersion) {
                 // XACA-1031-018 ([UX] NICE-TO-HAVE): a bare title="..." on a
