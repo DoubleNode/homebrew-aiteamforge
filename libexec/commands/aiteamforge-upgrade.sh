@@ -32,6 +32,9 @@ source "${LIBEXEC_DIR}/lib/msg-client-deps.sh"
 # XACA-1443-001: DORMANT Fleet CI Pool bundle placement, shared verbatim with
 # install-shell.sh (fresh installs). Files only -- see lib/ci-runner-bundle.sh.
 source "${LIBEXEC_DIR}/lib/ci-runner-bundle.sh"
+# XACA-1394-005: power-guard bundle placement + stale-root-payload notice, shared
+# verbatim with install-shell.sh. Files and text only -- see lib/power-guard-bundle.sh.
+source "${LIBEXEC_DIR}/lib/power-guard-bundle.sh"
 # XACA-0931: shared nested-project persona deploy-target enumerator — the
 # SAME enumerator aiteamforge-persona-parity-check.sh's S3 surface uses
 # (XACA-0931-003), so the upgrade-path fixer and the drift detector can never
@@ -3461,6 +3464,11 @@ update_runtime_helpers() {
   _aitf_install_ci_runner_bundle "$scripts_source" "$scripts_dest" "$([ "$DRY_RUN" = true ] && echo dry)"
   updated=$((updated + AITF_CI_BUNDLE_COUNT))
 
+  # XACA-1394-005: power-guard bundle (scripts/power-guard/). A subdirectory, like the CI
+  # bundle above, so only this step reaches it; always (re)written, materialised when absent.
+  _aitf_install_power_guard_bundle "$scripts_source" "$scripts_dest" "$([ "$DRY_RUN" = true ] && echo dry)"
+  updated=$((updated + AITF_PG_BUNDLE_COUNT))
+
   if [ $updated -eq 0 ]; then
     print_success "All runtime helper scripts up to date"
   elif [ "$DRY_RUN" = true ]; then
@@ -3481,6 +3489,13 @@ update_runtime_helpers() {
       . "$_aitf_pv_lib" || exit 0
       ci_provision_upgrade_notice "${WORKING_DIR}" "${scripts_dest}/ci-runner"
     ) 2>/dev/null || true
+  fi
+
+  # XACA-1394-005: an INSTALLED power-guard daemon executes a ROOT-OWNED payload copy that this
+  # (non-root) upgrade cannot refresh. Print the exact sudo re-run when it is stale. Advisory:
+  # never runs sudo, never blocks the upgrade, silent when the daemon is not installed.
+  if [ "$DRY_RUN" != true ]; then
+    _aitf_power_guard_upgrade_notice "${scripts_dest}" || true
   fi
 
   # XACA-0677: Refresh the root-level iterm2_window_manager.py copy.

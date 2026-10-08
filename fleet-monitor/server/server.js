@@ -1438,21 +1438,25 @@ function parseFleetData() {
  * Transitions are logged to the activity log, and -- when on_battery is involved -- to the
  * history of every attached machine (the "on_battery/ac entry" of the plan).
  */
-function deriveAccessoryState() {
-    try {
-        return accessoryRegistry.derive(machines, {
-            onTransition(rec, from, to) {
-                const label = rec.nickname || rec.name;
-                const msg = `${label}: ${from} → ${to}`;
-                const host = machines.get(rec.dataLinkMachineId);
-                logActivity('POWER', host ? host.hostname : rec.dataLinkMachineId, host ? host.ip : null, 0, msg);
-                if (from === 'on_battery' || to === 'on_battery') {
-                    for (const mid of rec.attachedMachineIds) {
-                        logHistoryEntry(mid, 'power_state_change', from, to, `Accessory ${msg}`);
-                    }
+function deriveAccessoryStateOrThrow() {
+    return accessoryRegistry.derive(machines, {
+        onTransition(rec, from, to) {
+            const label = rec.nickname || rec.name;
+            const msg = `${label}: ${from} → ${to}`;
+            const host = machines.get(rec.dataLinkMachineId);
+            logActivity('POWER', host ? host.hostname : rec.dataLinkMachineId, host ? host.ip : null, 0, msg);
+            if (from === 'on_battery' || to === 'on_battery') {
+                for (const mid of rec.attachedMachineIds) {
+                    logHistoryEntry(mid, 'power_state_change', from, to, `Accessory ${msg}`);
                 }
             }
-        });
+        }
+    });
+}
+
+function deriveAccessoryState() {
+    try {
+        return deriveAccessoryStateOrThrow();
     } catch (error) {
         console.error('Error deriving accessory state:', error);
         return { accessories: [], machines: new Map() };
@@ -2027,10 +2031,22 @@ app.post('/api/status', requireApiKey, (req, res) => {
 
         console.log(`✓ Status update from ${machine.hostname} (${machineKey.substring(0, 8)}...): ${sessions.length} sessions`);
 
+        // XACA-1394-001: the machine's own accessories, from server-DERIVED state (D1). Fail
+        // closed: if building it throws, the key is OMITTED (never [] and never a 500) so the
+        // client leaves its state file untouched, it goes stale, and the power-guard takes no action.
+        let statusAccessories;
+        try {
+            updateMachineStatuses();
+            statusAccessories = accessoryRegistry.statusAccessoriesFor(deriveAccessoryStateOrThrow().accessories, machineKey);
+        } catch (accErr) {
+            console.error('Accessory status build failed (heartbeat still accepted):', accErr.message);
+        }
+
         res.status(200).json({
             success: true,
             message: 'Status received',
-            sessions_count: sessions.length
+            sessions_count: sessions.length,
+            ...(statusAccessories ? { accessories: statusAccessories } : {})
         });
     } catch (error) {
         console.error('Error processing status update:', error);

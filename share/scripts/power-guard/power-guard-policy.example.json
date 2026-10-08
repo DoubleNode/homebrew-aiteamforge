@@ -1,0 +1,20 @@
+{
+  "_comment": "power-guard policy (XACA-1394, EPIC-0067 D4). Copy to ~/.aiteamforge/power-guard-policy.json on a UPS-attached machine.",
+  "_safety": "Ships DISARMED: enabled false, dry_run true. Set dry_run false only after the supervised unplug drill (XACA-1395). Missing, unparseable or invalid policy => NO_ACTION, never a default threshold.",
+  "_fields": {
+    "enabled": "Must be exactly true for any verdict other than NO_ACTION. Default false.",
+    "dry_run": "true => worst verdict is WOULD_SHUTDOWN (logged, never acted on). Only an explicit false allows SHUTDOWN. Default true.",
+    "min_percent": "Shut down when battery percent is BELOW this (0-100). null/absent => this criterion never triggers.",
+    "min_minutes": "Shut down when minutes_remaining is BELOW this (>= 0). null/absent => this criterion never triggers.",
+    "freshness_s": "REQUIRED, (0, 3600]. Both receivedAt and the accessory's observedAt must be at most this old. Keep it a few reporter intervals (reporting.interval, default 60s).",
+    "consecutive": "REQUIRED, integer 1-100. Number of DISTINCT readings (new seq/observedAt) in a row that must qualify.",
+    "accessory_ids": "Optional list of accessory ids to watch. Omit to watch every accessory in the state file."
+  },
+
+  "enabled": false,
+  "dry_run": true,
+  "min_percent": 30,
+  "min_minutes": 10,
+  "freshness_s": 180,
+  "consecutive": 3
+}

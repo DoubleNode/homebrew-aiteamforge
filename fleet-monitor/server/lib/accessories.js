@@ -127,6 +127,8 @@ function cleanRecord(id, r) {
         upsId: r.upsId,
         attachedMachineIds: attached,
         lastReading,
+        // XACA-1394-001: monotonic reading counter. A legacy record without one starts at 0.
+        seq: Number.isSafeInteger(r.seq) && r.seq >= 0 ? r.seq : 0,
         state: STATES.includes(r.state) ? r.state : 'unknown',
         stateSince: typeof r.stateSince === 'string' ? r.stateSince : null,
         history,
@@ -274,7 +276,7 @@ function createRegistry(opts) {
                 id, type: 'ups', name: u.name, vendor: null, nickname: null,
                 dataLinkMachineId: machineId, upsId,
                 attachedMachineIds: [machineId],
-                lastReading: null, state: 'unknown', stateSince: observedAt, history: [],
+                lastReading: null, seq: 0, state: 'unknown', stateSince: observedAt, history: [],
                 createdAt: observedAt, updatedAt: observedAt,
             };
             records.set(id, rec);
@@ -292,6 +294,7 @@ function createRegistry(opts) {
             minutes_remaining: u.minutes_remaining, present: u.present,
             observedAt,
         };
+        rec.seq = (Number.isSafeInteger(rec.seq) && rec.seq >= 0 ? rec.seq : 0) + 1; // XACA-1394-001
         rec.updatedAt = observedAt;
         dirty = true;
         if (flushNow) save();
@@ -461,6 +464,33 @@ function createRegistry(opts) {
         return { accessories: views, machines };
     }
 
+    /**
+     * XACA-1394-001: the `accessories` array of the POST /api/status response -- every
+     * accessory `machineId` is attached to, from the already-DERIVED views (the server
+     * derives, clients never do: D1). Reads derive()'s output; never re-derives state. `seq` is
+     * read from the record, NOT view(): the public view's key set is pinned by XACA-1392.
+     * No reading yet => null fields, never fabricated.
+     */
+    function statusAccessoriesFor(views, machineId) {
+        const out = [];
+        for (const v of views) {
+            if (!v.attached_machine_ids.includes(machineId)) continue;
+            const l = v.last_reading;
+            out.push({
+                id: v.id,
+                type: v.type,
+                name: v.name,
+                nickname: v.nickname,
+                state: v.state,
+                percent: l ? l.percent : null,
+                minutes_remaining: l ? l.minutes_remaining : null,
+                observedAt: l ? l.observedAt : null,
+                seq: records.has(v.id) ? (records.get(v.id).seq || 0) : null,
+            });
+        }
+        return out;
+    }
+
     /** Public projection of a record (explicit allowlist; no internals). */
     function view(rec) {
         return {
@@ -483,7 +513,7 @@ function createRegistry(opts) {
         load, save, flushIfDirty, toJSON,
         get, list, size,
         upsertFromReport, attach, detach, setNickname,
-        derive, view,
+        derive, view, statusAccessoriesFor,
         _records: records,
         _markDirty() { dirty = true; },
         _now: nowFn,

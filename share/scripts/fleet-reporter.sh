@@ -2123,6 +2123,59 @@ _SYSTEM_LOAD_EMIT_EOF
 EOF
 }
 
+# XACA-1394-002: persist the heartbeat response's top-level accessories[] to a
+# local state file that the per-machine power-guard agent reads (EPIC-0067 D3/D4).
+#
+# FAIL-CLOSED: the consumer treats a stale/absent file as "do nothing", so NOT
+# writing is always the safe choice. The file is touched ONLY when the response
+# is a JSON object whose `accessories` key is an array (an empty array is a
+# legitimate "no attached accessories" and IS written). Old server (no key),
+# non-array, unparseable body, or no jq -> file untouched. Never fails the
+# heartbeat: the caller does `|| true` and every path here returns 0.
+#
+# Path: $AITEAMFORGE_ACCESSORY_STATE_FILE, else $HOME/.aiteamforge/run/accessory-state.json
+# (the same run dir kb-msg-pull-status / token-report-status already use).
+# NOTE: tests extract this function with awk '/^_persist_accessory_state\(\)/,/^}/'
+# - keep the opening line and closing brace at column 0.
+_persist_accessory_state() {
+    local body="$1"
+    local state_file="${AITEAMFORGE_ACCESSORY_STATE_FILE:-$HOME/.aiteamforge/run/accessory-state.json}"
+    local kind dir tmp received_at
+
+    command -v jq >/dev/null 2>&1 || return 0
+
+    kind=$(printf '%s' "$body" | jq -r '
+        if type != "object" then "invalid"
+        elif has("accessories") | not then "missing"
+        else (.accessories | type) end' 2>/dev/null) || kind="invalid"
+
+    case "$kind" in
+        array) ;;
+        missing) return 0 ;;   # old server: nothing to persist
+        invalid) return 0 ;;   # unparseable / non-object body
+        *)
+            echo "  ! accessory state not written: accessories is $kind, not an array" >&2
+            return 0
+            ;;
+    esac
+
+    dir=$(dirname "$state_file")
+    mkdir -p "$dir" 2>/dev/null || { echo "  ! accessory state: cannot create $dir" >&2; return 0; }
+    tmp=$(mktemp "$dir/.accessory-state.XXXXXX" 2>/dev/null) || { echo "  ! accessory state: cannot create temp file in $dir" >&2; return 0; }
+    received_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+    if printf '%s' "$body" | jq -c --arg r "$received_at" --arg m "${MACHINE_ID:-}" \
+            '{schema:1, receivedAt:$r, machine:$m, accessories:.accessories}' > "$tmp" 2>/dev/null \
+        && chmod 644 "$tmp" 2>/dev/null \
+        && mv -f "$tmp" "$state_file" 2>/dev/null; then
+        return 0
+    fi
+    # Failure: leave no partial temp file behind (state file itself untouched).
+    unlink "$tmp" 2>/dev/null
+    echo "  ! accessory state: write to $state_file failed" >&2
+    return 0
+}
+
 # Send status to a single endpoint with retry logic
 send_to_endpoint() {
     local payload="$1"
@@ -2166,6 +2219,8 @@ send_to_endpoint() {
 
         if [ "$http_code" = "200" ] || [ "$http_code" = "201" ]; then
             echo "  ✓ Reported to $endpoint"
+            # XACA-1394-002: best-effort; must never fail the heartbeat.
+            _persist_accessory_state "$body" || true
             return 0
         else
             if [ $attempt -lt $max_retries ]; then

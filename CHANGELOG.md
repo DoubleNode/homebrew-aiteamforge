@@ -7,6 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- **XACA-1394** (Added): UPS power-guard root LaunchDaemon bundle shipped to `share/scripts/power-guard/` (`install-power-guard.sh`, `power-guard-daemon.template.plist`, DISARMED `power-guard-policy.example.json`, `client/power-guard-runner.py` + `client/power-guard.py`), and `share/scripts/fleet-reporter.sh` + `fleet-monitor/server/` re-mirrored (accessory state file, `/api/status` accessories). New tap-native `libexec/lib/power-guard-bundle.sh` is the one shared installer for `install-shell.sh` (fresh install) and `aiteamforge-upgrade.sh` (upgrade): it COPIES the bundle to `$AITEAMFORGE_DIR/scripts/power-guard/` and only PRINTS commands. Fresh install offers the daemon with the exact one-time `sudo bash .../install-power-guard.sh install` (installs disarmed; a drill arms it). Upgrade is silent unless `/Library/LaunchDaemons/com.aiteamforge.power-guard.plist` exists AND the root-owned payload in `/usr/local/libexec/aiteamforge/power-guard` differs, then prints the same re-run command. Neither path ever runs sudo, launchctl or the installer, or prompts for a password.
+
 ## [0.20.33] - 2026-10-08
 
 - **XACA-1393** (Changed, PR #1107 round 4): `fleet-monitor/server/` re-mirrored. After an accessory attach/detach, keyboard focus moves to that card's machine picker (fallback: first DETACH, then the card) instead of dropping to the page top, and a polite live region announces "Attached/Detached X to/from Y" (v1 + lcars2, new `.accessory-sr-only`). Verbatim copies of canonical.

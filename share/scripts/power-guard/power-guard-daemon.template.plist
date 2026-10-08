@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  power-guard LaunchDaemon - XACA-1394-005 (EPIC-0067 D4, option (a))
+  ===================================================================
+  Rendered by scripts/power-guard/install-power-guard.sh. NEVER hand-copied:
+  the placeholders below are substituted at install time.
+
+    {{INSTALL_DIR}}  root-owned dir holding power-guard-runner.py + power-guard.py
+    {{USER_HOME}}    home of the INVOKING (consuming) user, never root's
+    {{USERNAME}}     that user; the runner uses it to notify the desktop session
+    {{LOG_DIR}}      /Library/Logs/aiteamforge
+
+  WHY A DAEMON (not a LaunchAgent): it must work with nobody logged in, and a
+  shutdown needs root. It runs as root (no UserName key) every 30 s.
+
+  WHY INSTALL_DIR IS ROOT-OWNED: root executes the runner. A path inside the
+  user's home or the user-writable install tree would let any process running
+  as the user get code executed as root. The installer therefore COPIES the two
+  scripts into a root:wheel dir and points the daemon there.
+
+  FAIL-CLOSED: the runner decides from the accessory state file and the policy
+  file. Missing, stale or malformed input means NO ACTION. The seeded policy
+  ships enabled=false, dry_run=true; arming is a deliberate edit after the
+  supervised drill (XACA-1395).
+
+  No KeepAlive: this is a periodic one-shot (StartInterval), not a server.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.aiteamforge.power-guard</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>{{INSTALL_DIR}}/power-guard-runner.py</string>
+        <string>--state-file</string>
+        <string>{{USER_HOME}}/.aiteamforge/run/accessory-state.json</string>
+        <string>--policy-file</string>
+        <string>{{USER_HOME}}/.aiteamforge/power-guard-policy.json</string>
+        <string>--counter-file</string>
+        <string>{{USER_HOME}}/.aiteamforge/run/power-guard-counter.json</string>
+        <string>--log-file</string>
+        <string>{{LOG_DIR}}/power-guard.log</string>
+        <string>--notify-user</string>
+        <string>{{USERNAME}}</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StartInterval</key>
+    <integer>30</integer>
+
+    <key>StandardOutPath</key>
+    <string>{{LOG_DIR}}/power-guard.stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>{{LOG_DIR}}/power-guard.stderr.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>LANG</key>
+        <string>en_US.UTF-8</string>
+    </dict>
+</dict>
+</plist>

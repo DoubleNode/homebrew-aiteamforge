@@ -16,6 +16,10 @@ source "$SCRIPT_DIR/../lib/msg-client-deps.sh"
 # XACA-1443-001: DORMANT Fleet CI Pool bundle placement (files only; nothing is
 # executed or activated). Shared verbatim with aiteamforge-upgrade.sh.
 source "$SCRIPT_DIR/../lib/ci-runner-bundle.sh"
+# XACA-1394-005: power-guard root LaunchDaemon bundle placement + the printed
+# one-time sudo offer (files and text only; nothing is run). Shared verbatim with
+# aiteamforge-upgrade.sh.
+source "$SCRIPT_DIR/../lib/power-guard-bundle.sh"
 
 #──────────────────────────────────────────────────────────────────────────────
 # Constants
@@ -340,6 +344,11 @@ install_helper_scripts() {
     # `find -maxdepth 1` copy never reach it. `aiteamforge ci enable` activates it.
     _aitf_install_ci_runner_bundle "$scripts_src" "$scripts_dest"
 
+    # XACA-1394-005: power-guard bundle -> scripts/power-guard/. Files only: the
+    # root daemon is NOT installed here (it needs a password); install_shell_environment
+    # prints the one-time sudo command at the end via _aitf_power_guard_offer.
+    _aitf_install_power_guard_bundle "$scripts_src" "$scripts_dest"
+
     success "Installed helper scripts"
 }
 
@@ -526,6 +535,10 @@ install_shell_environment() {
     info "  3. Populate secrets.env with your credentials"
     info "  4. Reload your shell: source ~/.zshrc"
     info ""
+
+    # XACA-1394-005: OFFER the UPS power-guard daemon. Prints the exact one-time
+    # `sudo bash .../install-power-guard.sh install`; never runs sudo, never prompts.
+    _aitf_power_guard_offer "$AITEAMFORGE_DIR/scripts"
 
     return 0
 }
