@@ -1826,7 +1826,7 @@ _system_collect_power() {
     [ "$pw_rc" -eq 0 ] || return 0
     [ -n "$pw_out" ] || return 0
 
-    local pw_source="" pw_ups="null" pw_line="" pw_tok=""
+    local pw_source="" pw_ups="null" pw_line="" pw_tok="" pw_dev_seen=false
     while IFS= read -r pw_line; do
         case "$pw_line" in
             "Now drawing from '"*)
@@ -1841,10 +1841,14 @@ _system_collect_power() {
                 esac
                 ;;
             " -"*)
-                [ "$pw_ups" = "null" ] || continue   # first non-internal device wins
+                # The FIRST non-internal device line is the only UPS candidate
+                # (XACA-1391-011): if it is malformed, ups stays null -- a later
+                # line may be a different device, so it never stands in for it.
+                [ "$pw_dev_seen" = false ] || continue
                 case "$pw_line" in
                     " -InternalBattery"*) continue ;;   # laptop battery is not a UPS
                 esac
+                pw_dev_seen=true
                 local pw_name="" pw_id="" pw_rest="" pw_pct="" pw_state="" pw_seg=""
                 local pw_charging=false pw_mins="null" pw_present="" pw_ok=true
                 case "$pw_line" in

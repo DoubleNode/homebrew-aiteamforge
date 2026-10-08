@@ -7,6 +7,7 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- **XACA-1391-010/011** (Changed, PR #1103 round 1): `share/scripts/fleet-reporter.sh` and `fleet-monitor/server/` re-mirrored. `sanitizePowerBlock` rejects negative/unsafe ids, non-token string ids and control characters in `ups.name`; the reporter treats only the first non-internal device line as the UPS candidate. Verbatim copies of canonical.
 - **XACA-1391** (Added): `share/scripts/fleet-reporter.sh` and `fleet-monitor/server/` re-mirrored. The reporter collects UPS/power-source telemetry from one `pmset -g ps` call per cycle into a new `system.power` block (`source` ac|ups|battery, `ups` {name,id,percent,charging,minutes_remaining,present} or null); the block is omitted when pmset cannot be read, never defaulted to AC. The server validates it (`sanitizePowerBlock`) in `normalizeSystemBlock`/`projectSystemBlock`; no UI renders it yet. New `tests/xaca-1391-system-power.test.js`. Verbatim copies of canonical.
 
 ## [0.20.32] - 2026-10-08

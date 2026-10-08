@@ -74,8 +74,9 @@ for (const bad of ['ac', 7, true, [], null]) {
 }
 
 const badFields = {
-    name: ['', 42, null, 'x'.repeat(65)],
-    id: [null, '', 1.5, 'y'.repeat(33), {}, true],
+    // XACA-1391-010: control chars in name; negative / unsafe / non-token ids
+    name: ['', 42, null, 'x'.repeat(65), 'UPS\u0000', 'a\nb', 'x\u007f'],
+    id: [null, '', 1.5, 'y'.repeat(33), {}, true, -7, 1e21, Number.MAX_SAFE_INTEGER + 2, 'a b', 'id"x'],
     percent: [-1, 101, 55.5, '80', null],
     charging: ['true', 1, null],
     present: ['yes', 0, null],
@@ -98,6 +99,18 @@ for (const bad of ['str', 5, [], true]) {
         assert.deepEqual(out.power, { source: 'ups', ups: null });
     });
 }
+
+test('XACA-1391-010: ids the reporter can emit are still accepted (0, MAX_SAFE_INTEGER, 0123 string)', () => {
+    for (const id of [0, Number.MAX_SAFE_INTEGER, '0123', '12345678901234567', 'a_b.c:d-1']) {
+        const out = normalizeSystemBlock({ power: { source: 'ups', ups: goodUps({ id }) } });
+        assert.equal(out.power.ups.id, id);
+    }
+});
+
+test('XACA-1391-010: printable unicode name is accepted', () => {
+    const out = normalizeSystemBlock({ power: { source: 'ups', ups: goodUps({ name: 'UPS\u00e9\u2122' }) } });
+    assert.equal(out.power.ups.name, 'UPS\u00e9\u2122');
+});
 
 test('string ups.id (short) is accepted', () => {
     const out = normalizeSystemBlock({ power: { source: 'ups', ups: goodUps({ id: 'abc-123' }) } });
@@ -253,8 +266,10 @@ test('huge nested payload under power/ups is stripped, output stays tiny', () =>
 
 test('over-long hostile string id rejected; markup in a short name passes as inert data', () => {
     assert.equal(normalizeSystemBlock({ power: { source: 'ups', ups: goodUps({ id: '<script>'.repeat(10) }) } }).power.ups, null);
-    const out = normalizeSystemBlock({ power: { source: 'ups', ups: goodUps({ name: '<b>"x"\u0000' }) } });
-    assert.equal(out.power.ups.name, '<b>"x"\u0000');
+    const out = normalizeSystemBlock({ power: { source: 'ups', ups: goodUps({ name: '<b>"x"' }) } });
+    assert.equal(out.power.ups.name, '<b>"x"');
+    // XACA-1391-010: a control character (NUL) is no longer inert data -- ups:null
+    assert.equal(normalizeSystemBlock({ power: { source: 'ups', ups: goodUps({ name: '<b>"x"\u0000' }) } }).power.ups, null);
 });
 
 // ---- UI tolerance: system.power must not leak into the machine cards ----

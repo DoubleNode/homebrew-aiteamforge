@@ -286,6 +286,12 @@ const POWER_SOURCES = ['ac', 'ups', 'battery'];
 const POWER_UPS_NAME_MAX = 64;
 const POWER_UPS_ID_MAX = 32;
 const POWER_MINUTES_MAX = 525600; // one year -- beyond this is a bogus estimate, not data
+// Same character rules the reporter enforces (XACA-1391-010): ids are
+// safe non-negative integers or short [0-9A-Za-z_.:-] tokens, and names carry
+// no control characters, so a hand-crafted POST cannot store what the
+// reporter would never send.
+const POWER_UPS_ID_RE = /^[0-9A-Za-z_.:-]{1,32}$/;
+const POWER_UPS_NAME_BAD_RE = /[\u0000-\u001f\u007f]/;
 
 function sanitizePowerBlock(power) {
     if (!power || typeof power !== 'object' || Array.isArray(power)) return null;
@@ -294,8 +300,10 @@ function sanitizePowerBlock(power) {
     let ups = null;
     const u = power.ups;
     if (u && typeof u === 'object' && !Array.isArray(u)) {
-        const nameOk = typeof u.name === 'string' && u.name.length > 0 && u.name.length <= POWER_UPS_NAME_MAX;
-        const idOk = Number.isInteger(u.id) || (typeof u.id === 'string' && u.id.length > 0 && u.id.length <= POWER_UPS_ID_MAX);
+        const nameOk = typeof u.name === 'string' && u.name.length > 0 && u.name.length <= POWER_UPS_NAME_MAX
+            && !POWER_UPS_NAME_BAD_RE.test(u.name);
+        const idOk = (Number.isSafeInteger(u.id) && u.id >= 0)
+            || (typeof u.id === 'string' && u.id.length <= POWER_UPS_ID_MAX && POWER_UPS_ID_RE.test(u.id));
         const percentOk = Number.isInteger(u.percent) && u.percent >= 0 && u.percent <= 100;
         const chargingOk = typeof u.charging === 'boolean';
         const presentOk = typeof u.present === 'boolean';
