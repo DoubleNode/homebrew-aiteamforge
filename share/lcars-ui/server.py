@@ -9391,6 +9391,17 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                                                        cr_support_enabled=cr_on is True))
         elif not cr_on:
             usable.discard('CR')
+        # XACA-1478: PLANNED is a valid mirror target for stage PLANNED whatever the (frozen) legacy
+        # list says. Releases created before PLANNED existed carry environments = DEV..PROD, so the
+        # forward walk below used to land a PLANNED release on DEV and LCARS showed it ACTIVE.
+        # PLANNED is release_gate.ALWAYS_ENABLED (flowConfig cannot disable it), so there is no
+        # enablement to respect; every other stage keeps the XACA-1375 rules unchanged.
+        # Deliberately NOT prepending PLANNED to release['environments'] (self-heal): no view reads
+        # that list -- lcars-ui/js/lcars.js getReleaseEnvironments() (:15117) ignores the per-release
+        # snapshot (XACA-0163) and uses CANONICAL_STAGES (:15095, no PLANNED), and
+        # daily-overview-popup.js _envChips() reads a different dict. So it would be a dead write.
+        if stage == 'PLANNED':
+            usable.add('PLANNED')
         if stage in usable:
             return stage
         idx = _release_schema.STAGES.index(stage)
