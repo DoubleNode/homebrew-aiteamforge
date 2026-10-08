@@ -1000,6 +1000,14 @@ cmd_refresh() {
     lane="$(_state_get lane)"
     case "$lane" in linux|both|macos) ;; *) _err "state file: lane='${lane}' is not linux, both or macos"; bad=1 ;; esac
   fi
+  # The same lane/with_macos agreement ci-status.sh's classifier enforces (XACA-1461-012/014): linux means NO
+  # macOS lane, both means a macOS lane. A contradiction is refused (rc 17) before any command is built.
+  if [ "$lane" = linux ] && [ "$wmac" = 1 ]; then
+    _err "state file: lane=linux contradicts with_macos=1"; return $RC_STATE
+  fi
+  if [ "$lane" = both ] && [ "$wmac" != 1 ]; then
+    _err "state file: lane=both needs with_macos=1 (got '${wmac}')"; return $RC_STATE
+  fi
   if [ "$lane" = macos ]; then
     [ "$wmac" = 1 ] || { _err "state file: lane=macos needs with_macos=1 (got '${wmac}')"; bad=1; }
   else

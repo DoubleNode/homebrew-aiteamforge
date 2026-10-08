@@ -20,7 +20,8 @@
 #      no lima-vm plist AND ~ci-runner/.lima/<vm> is positively absent (root can read it). The flag is
 #      recorded intent; it is not trusted over evidence: if a lima-vm plist exists, --no-linux is
 #      ignored with a WARN and the VM is torn down as usual (deleting the plist of a live VM would orphan
-#      it). FAILURE HERE STOPS THE SCRIPT
+#      it). The same holds when ~ci-runner/.lima/<vm> is present OR cannot be read (anything but
+#      positively absent): the flag is cancelled, never trusted over a possible VM. FAILURE HERE STOPS THE SCRIPT
 #      BEFORE THE PLISTS ARE REMOVED: the plists are the "teardown finished" marker that
 #      `aiteamforge ci disable --confirm` reads, so a half teardown can never read as done.
 #   5. remove the secrets and config: agent key + agent.json + slots.json + agent log dir,
@@ -82,7 +83,8 @@ Usage: sudo bash teardown-host.sh --host <name> [--remove-user] [--kill-running]
                     (Without the flag an absent ~ci-runner/.lima/<vm> directory is accepted on its own;
                     an unreadable directory never is.)
   --no-linux        the host has no Linux lane (lane=macos, XACA-1461): skip the VM stop/delete and never run limactl.
-                    Ignored with a WARN when a lima-vm daemon plist exists for this host (that VM must not be orphaned).
+                    Ignored with a WARN when a lima-vm daemon plist exists for this host, or ~ci-runner/.lima/<vm> is present
+                    or unreadable (that VM must not be orphaned).
                     Without the flag the VM step is ALSO a no-op, with no limactl needed, when there is no lima-vm
                     plist and the VM directory is positively absent.
   --dry-run         print the plan and what exists now; change nothing (no root needed)
@@ -192,10 +194,20 @@ if [ "$REMOVE_USER" = 1 ] && [ "$OTHERS" -gt 0 ]; then
   result REFUSED_OTHER_HOSTS 4; exit 4
 fi
 
-# XACA-1461: --no-linux is intent, evidence wins. A lima-vm plist of THIS host means a VM may exist.
-if [ "$NO_LINUX" = 1 ] && { [ -e "$(plist_of lima-vm)" ] || [ -L "$(plist_of lima-vm)" ]; }; then
-  warn "--no-linux given but $(plist_of lima-vm) exists: tearing the VM down as usual (a VM must not be orphaned)"
-  NO_LINUX=0
+# XACA-1461: --no-linux is intent, evidence wins. A VM may exist when THIS host has a lima-vm plist OR when
+# ~ci-runner/.lima/<vm> is anything other than positively absent (present, or unknown = unreadable: fail toward
+# NOT orphaning a VM). Either one cancels the flag and the VM is torn down as usual.
+if [ "$NO_LINUX" = 1 ]; then
+  if [ -e "$(plist_of lima-vm)" ] || [ -L "$(plist_of lima-vm)" ]; then
+    warn "--no-linux given but $(plist_of lima-vm) exists: tearing the VM down as usual (a VM must not be orphaned)"
+    NO_LINUX=0
+  else
+    _nl_vs="$(vm_dir_state)"
+    if [ "$_nl_vs" != absent ]; then
+      warn "--no-linux given but ${CI_HOME}/.lima/${VM_NAME} is ${_nl_vs}, not positively absent: tearing the VM down as usual (a VM must not be orphaned)"
+      NO_LINUX=0
+    fi
+  fi
 fi
 log "plan: host=${HOST} vm=${VM_NAME} user=${CI_USER} remove-user=${REMOVE_USER} kill-running=${KILL_RUNNING} no-linux=${NO_LINUX} dry-run=${DRY} other-hosts-plists=${OTHERS}"
 

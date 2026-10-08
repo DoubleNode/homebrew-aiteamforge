@@ -159,7 +159,7 @@ ci_headroom_size() {
 # Free bytes on the volume holding <path> (default: the ci-runner home, else nearest existing
 # parent, else /). Fails closed: any unreadable/unparseable reading is rc 3, never a pass.
 ci_headroom_disk() {
-    local p="${1:-${CI_RUNNER_HOME:-/Users/ci-runner}}" out data rows kib
+    local p="${1:-${CI_RUNNER_HOME:-/Users/ci-runner}}" out data rows kib size
     CI_HR_DISK_PATH=""; CI_HR_DISK_FREE_BYTES=""; CI_HR_REASONS=""
     case "$p" in /*) ;; *) p="/" ;; esac
     while [ ! -e "$p" ] && [ "$p" != "/" ]; do
@@ -172,9 +172,22 @@ ci_headroom_disk() {
         CI_HR_REASONS="disk free space could not be measured (unexpected df output for $p)"; return 3
     fi
     data="$(printf '%s\n' "$out" | awk 'NF{n++; if(n==2) print}')"
-    kib="$(printf '%s\n' "$data" | sed -nE 's/.* ([0-9]+) +([0-9]+) +([0-9]+) +[0-9]+%.*/\3/p')"
-    if ! _cihr_uint "$kib" || [ "${#kib}" -gt 15 ]; then
+    # POSIX `df -Pk` row: <filesystem> <total> <used> <avail> <N>% <mount point>. The filesystem name (field 1,
+    # e.g. "map auto_home") and the mount point (e.g. "/Volumes/Disk 1 2 3 4% x") may both contain spaces and
+    # digits, so no column index and no greedy regex is safe. Anchor on the LEFTMOST run of
+    # <digits> <digits> <digits> <digits>% starting at field 2 or later (field 1 is always the filesystem): that
+    # is the real numeric block, and anything a mount point can hold sits to the right of it. Prints
+    # "<total> <avail>" in KiB, or nothing when there is no such run.
+    kib="$(printf '%s\n' "$data" | awk '{
+        for (i = 2; i + 3 <= NF; i++)
+            if ($i ~ /^[0-9]+$/ && $(i+1) ~ /^[0-9]+$/ && $(i+2) ~ /^[0-9]+$/ && $(i+3) ~ /^[0-9]+%$/) { print $i, $(i+2); exit }
+    }')"
+    size="${kib%% *}"; kib="${kib##* }"
+    if ! _cihr_uint "$size" || ! _cihr_uint "$kib" || [ "${#kib}" -gt 15 ] || [ "${#size}" -gt 15 ]; then
         CI_HR_REASONS="disk free space could not be measured (unparseable df output for $p)"; return 3
+    fi
+    if [ "$size" -eq 0 ]; then   # autofs/synthetic rows report a zero-size volume: not a measurement
+        CI_HR_REASONS="disk free space could not be measured (zero-size volume reported for $p)"; return 3
     fi
     CI_HR_DISK_FREE_BYTES=$((kib * 1024))
     if [ "$CI_HR_DISK_FREE_BYTES" -lt "$CI_HR_MACOS_DISK_MIN_BYTES" ]; then
