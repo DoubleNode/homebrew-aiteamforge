@@ -184,6 +184,39 @@
         }
     }
 
+    // Visually-hidden polite live region, a SIBLING of the container so the
+    // innerHTML rebuild never replaces it (a region that is recreated with its
+    // text already in place is not announced). textContent only.
+    function liveRegion(container) {
+        var live = container.parentNode && container.parentNode.querySelector('.accessory-sr-only');
+        if (live || !container.parentNode) return live;
+        live = document.createElement('div');
+        live.className = 'accessory-sr-only';
+        live.setAttribute('role', 'status');
+        live.setAttribute('aria-live', 'polite');
+        live.setAttribute('aria-atomic', 'true');
+        container.parentNode.insertBefore(live, container.nextSibling);
+        return live;
+    }
+
+    // WCAG 2.4.3: the control that fired the write is disabled/rebuilt, so focus
+    // would fall to <body>. After the post-write refresh put it on the card's
+    // picker, else its first DETACH, else the card itself (tabindex=-1).
+    function focusCardAfterWrite(container, accId) {
+        var cards = container.querySelectorAll('.accessory-card');
+        for (var i = 0; i < cards.length; i++) {
+            if (cards[i].getAttribute('data-accessory-id') !== accId) continue;
+            var sel = cards[i].querySelector('.accessory-attach-select');
+            var target = (sel && !sel.disabled) ? sel : cards[i].querySelector('.accessory-detach-btn:not([disabled])');
+            if (!target) {
+                cards[i].setAttribute('tabindex', '-1');
+                target = cards[i];
+            }
+            target.focus();
+            return;
+        }
+    }
+
     function render(data, container) {
         try {
             container = container || document.getElementById(CONTAINER_ID);
@@ -239,12 +272,37 @@
     }
 
     // After a write, re-pull /api/fleet so state + attach lists are server truth.
-    async function refreshAfterWrite() {
+    async function refreshAfterWrite(w) {
         try {
             var resp = await window.fetch('/api/fleet', { credentials: 'same-origin' });
             if (resp && resp.ok) _lastData = await resp.json();
         } catch (e) { /* fall through: re-render the last snapshot with any error text */ }
         render(_lastData);
+        var c = document.getElementById(CONTAINER_ID);
+        if (!c || !w) return;
+        if (w.hadFocus) focusCardAfterWrite(c, w.accId);
+        // Errors are already announced by the card's role=alert text.
+        var live = w.ok ? liveRegion(c) : null;
+        if (live) {
+            live.textContent = '';
+            live.textContent = w.method === 'PUT'
+                ? 'Attached ' + w.machine + ' to ' + w.accessory
+                : 'Detached ' + w.machine + ' from ' + w.accessory;
+        }
+    }
+
+    // Snapshot what the announcement/focus need BEFORE the write rebuilds the DOM.
+    function writeContext(method, el, card, machineLabel) {
+        var c = document.getElementById(CONTAINER_ID);
+        var nameEl = card && card.querySelector('.accessory-name');
+        return {
+            method: method,
+            accId: card ? card.getAttribute('data-accessory-id') : null,
+            accessory: nameEl ? nameEl.textContent : 'accessory',
+            machine: machineLabel,
+            hadFocus: !!(c && document.activeElement && c.contains(document.activeElement)),
+            ok: false
+        };
     }
 
     // In-flight guard: a double-click must not send the write twice (the second
@@ -262,17 +320,22 @@
         var detach = t.closest('.accessory-detach-btn');
         var attach = t.closest('.accessory-attach-btn');
         if (detach) {
+            var dli = detach.closest('li');
+            var dname = dli && dli.querySelector('.accessory-attached-name');
+            var wd = writeContext('DELETE', detach, detach.closest('.accessory-card'), dname ? dname.textContent : 'machine');
             var p = mutate('DELETE', detach.getAttribute('data-accessory-id'), detach.getAttribute('data-machine-id'));
             lockControls();
-            p.then(refreshAfterWrite);
+            p.then(function(ok) { wd.ok = ok; return refreshAfterWrite(wd); });
         } else if (attach) {
             var card = attach.closest('.accessory-card');
             var sel = card && card.querySelector('.accessory-attach-select');
             var accId = attach.getAttribute('data-accessory-id');
             if (!sel || !sel.value) return;
+            var opt = sel.options[sel.selectedIndex];
+            var wa = writeContext('PUT', attach, card, opt ? opt.textContent : 'machine');
             var p2 = mutate('PUT', accId, sel.value);
             lockControls();
-            p2.then(refreshAfterWrite);
+            p2.then(function(ok) { wa.ok = ok; return refreshAfterWrite(wa); });
         }
     }
 
@@ -292,6 +355,7 @@
         if (c) {
             c.addEventListener('click', onClick);
             c.addEventListener('change', onSelectChange);
+            liveRegion(c);   // present BEFORE the first announcement
         }
     }
 

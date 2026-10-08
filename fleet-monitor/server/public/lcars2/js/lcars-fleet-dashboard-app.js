@@ -1400,7 +1400,7 @@
         const err = accessoriesUi.errors[acc.id];
         const errHtml = err ? '<div class="accessory-error" role="alert">' + escapeHtml(err) + '</div>' : '';
 
-        return '<div class="accessory-card ' + badge.cls + '">' +
+        return '<div class="accessory-card ' + badge.cls + '" data-acc-idx="' + accIdx + '">' +
             '<div class="accessory-card-header"><span class="accessory-name">' +
             escapeHtml(acc.display_name || acc.name || acc.id) + '</span>' +
             '<span class="accessory-type">' + escapeHtml(String(acc.type || 'ups').toUpperCase()) + '</span>' +
@@ -1458,8 +1458,47 @@
         restoreAccessoryFocus(container, focused, accessories);
     }
 
+    // Visually-hidden polite live region, a SIBLING of the list so the innerHTML
+    // rebuild never replaces it. textContent only.
+    function accessoryLiveRegion(container) {
+        let live = container.parentNode && container.parentNode.querySelector('.accessory-sr-only');
+        if (live || !container.parentNode) return live;
+        live = document.createElement('div');
+        live.className = 'accessory-sr-only';
+        live.setAttribute('role', 'status');
+        live.setAttribute('aria-live', 'polite');
+        live.setAttribute('aria-atomic', 'true');
+        container.parentNode.insertBefore(live, container.nextSibling);
+        return live;
+    }
+
+    // WCAG 2.4.3: the control that fired the write was rebuilt disabled, so focus
+    // fell to <body>. Put it on the card's picker, else its first DETACH, else the
+    // card itself (tabindex=-1).
+    function focusAccessoryCardAfterWrite(container, accId) {
+        const ai = accessoriesUi.view.accessories.findIndex(function(a) { return a && a.id === accId; });
+        if (ai === -1) return;
+        const card = container.querySelector('.accessory-card[data-acc-idx="' + ai + '"]');
+        if (!card) return;
+        const sel = card.querySelector('.accessory-attach-select');
+        let target = (sel && !sel.disabled) ? sel : card.querySelector('.accessory-detach:not([disabled])');
+        if (!target) {
+            card.setAttribute('tabindex', '-1');
+            target = card;
+        }
+        target.focus();
+    }
+
     async function accessoryMutate(accId, machineId, method) {
         if (accessoriesUi.busy[accId] || typeof window.fleetApiFetch !== 'function') return;
+        // Snapshot for focus + announcement BEFORE the busy rebuild replaces the DOM.
+        const listEl = document.getElementById('accessories-list');
+        const hadFocus = !!(listEl && document.activeElement && listEl.contains(document.activeElement));
+        const accRec = (fleetData && Array.isArray(fleetData.accessories) ? fleetData.accessories : [])
+            .find(function(a) { return a && a.id === accId; });
+        const accLabel = accRec ? (accRec.display_name || accRec.name || accRec.id) : 'accessory';
+        const machLabel = accessoryMachineName(
+            (fleetData && fleetData.fleet && Array.isArray(fleetData.fleet.machines)) ? fleetData.fleet.machines : [], machineId);
         accessoriesUi.busy[accId] = true;
         delete accessoriesUi.errors[accId];
         renderAccessories();
@@ -1481,11 +1520,24 @@
         delete accessoriesUi.busy[accId];
         await fetchFleetData();   // re-renders (incl. accessories) from fresh server state
         renderAccessories();      // also covers a failed fetch / error-only change
+        if (!listEl) return;
+        if (hadFocus) focusAccessoryCardAfterWrite(listEl, accId);
+        // Errors are already announced by the card's role=alert text.
+        if (!accessoriesUi.errors[accId]) {
+            const live = accessoryLiveRegion(listEl);
+            if (live) {
+                live.textContent = '';
+                live.textContent = method === 'PUT'
+                    ? 'Attached ' + machLabel + ' to ' + accLabel
+                    : 'Detached ' + machLabel + ' from ' + accLabel;
+            }
+        }
     }
 
     function wireAccessories() {
         const container = document.getElementById('accessories-list');
         if (!container) return;
+        accessoryLiveRegion(container);   // present BEFORE the first announcement
         container.addEventListener('click', function(e) {
             const btn = e.target.closest ? e.target.closest('button[data-acc-idx]') : null;
             if (!btn || btn.disabled) return;

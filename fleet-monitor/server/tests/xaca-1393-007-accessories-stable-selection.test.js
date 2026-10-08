@@ -365,7 +365,6 @@ for (const { tree, page } of PAGES) {
         } finally { pg.close(); }
     });
 
-    // Advisory: keyboard focus is restored to the same control after a rebuild.
     test(tag + 'ATTACH is disabled until a real machine is picked (XACA-1393-021)', async () => {
         const pg = await boot(tree, page, 2);
         try {
@@ -384,6 +383,7 @@ for (const { tree, page } of PAGES) {
         } finally { pg.close(); }
     });
 
+    // Advisory: keyboard focus is restored to the same control after a rebuild.
     test(tag + 'focus is restored to select / ATTACH / the same DETACH after a rebuild', async () => {
         const pg = await boot(tree, page, 2);
         try {
@@ -411,6 +411,70 @@ for (const { tree, page } of PAGES) {
                 assert.notEqual(now, before, what + ': the control really was rebuilt');
                 assert.ok(ok(now), what + ': focus on the equivalent control, got ' + name(now));
             }
+        } finally { pg.close(); }
+    });
+
+    // Round 4 (UX advisory, WCAG 2.4.3): after a write the focus must land on the
+    // card (picker, else first DETACH, else the card), never on <body>, and the
+    // outcome is announced through a polite live region that survives rebuilds.
+    const live = (pg) => pg.d.getElementById(pg.T.content).parentNode.querySelector('.accessory-sr-only[aria-live="polite"]');
+    const inCard0 = (pg, el) => cards(pg)[0] && cards(pg)[0].contains(el);
+
+    test(tag + 'DETACH: focus stays on the card (not body) and the result is announced', async () => {
+        const pg = await boot(tree, page, 2);
+        try {
+            pg.state.data.accessories[0].attached_machine_ids = [MID.a];
+            await pg.poll(90);
+            const sent = [];
+            stubFetch(pg, sent, (url, method) => { if (method === 'DELETE') pg.state.data.accessories[0].attached_machine_ids = []; });
+            const btn = cards(pg)[0].querySelector('.accessory-detach, .accessory-detach-btn');
+            btn.focus();
+            assert.equal(pg.d.activeElement, btn);
+            btn.click();
+            assert.ok(await until(() => sent.length === 1));
+            assert.ok(await until(() => /Detached .* from UPS-One/.test((live(pg) || {}).textContent || '')), 'live region announced');
+            const now = pg.d.activeElement;
+            assert.notEqual(now, pg.d.body, 'focus not dropped to body');
+            assert.equal(now, cards(pg)[0].querySelector(SEL), 'focus on the card\'s machine select');
+            assert.match(live(pg).textContent, /Detached host-alpha from UPS-One/);
+            assert.equal(pg.d.getElementById(pg.T.content).contains(live(pg)), false, 'live region is outside the rebuilt list');
+        } finally { pg.close(); }
+    });
+
+    test(tag + 'ATTACH after picking: focus stays on the card (not body) and the result is announced', async () => {
+        const pg = await boot(tree, page, 2);
+        try {
+            const sent = [];
+            stubFetch(pg, sent, (url, method) => { if (method === 'PUT') pg.state.data.accessories[0].attached_machine_ids = [MID.c]; });
+            const sA = cards(pg)[0].querySelector(SEL);
+            sA.value = labelOpt(sA, 'Charlie-Nick').value;
+            sA.dispatchEvent(new pg.w.Event('change', { bubbles: true }));   // ATTACH is disabled until picked
+            const btn = cards(pg)[0].querySelector(BTN);
+            assert.equal(btn.disabled, false);
+            btn.focus();
+            assert.equal(pg.d.activeElement, btn);
+            btn.click();
+            assert.ok(await until(() => sent.length === 1));
+            assert.ok(await until(() => /Attached .* to UPS-One/.test((live(pg) || {}).textContent || '')), 'live region announced');
+            const now = pg.d.activeElement;
+            assert.notEqual(now, pg.d.body, 'focus not dropped to body');
+            assert.equal(now, cards(pg)[0].querySelector(SEL), 'focus on the card\'s machine select');
+            assert.match(live(pg).textContent, /Attached Charlie-Nick to UPS-One/);
+        } finally { pg.close(); }
+    });
+
+    test(tag + 'write while focus is elsewhere does not steal focus', async () => {
+        const pg = await boot(tree, page, 2);
+        try {
+            pg.state.data.accessories[0].attached_machine_ids = [MID.a];
+            await pg.poll(90);
+            const sent = [];
+            stubFetch(pg, sent, (url, method) => { if (method === 'DELETE') pg.state.data.accessories[0].attached_machine_ids = []; });
+            const outside = pg.d.createElement('button'); pg.d.body.appendChild(outside); outside.focus();
+            cards(pg)[0].querySelector('.accessory-detach, .accessory-detach-btn').click();
+            assert.ok(await until(() => /Detached/.test((live(pg) || {}).textContent || '')));
+            assert.equal(pg.d.activeElement, outside, 'focus left alone');
+            assert.equal(inCard0(pg, pg.d.activeElement), false);
         } finally { pg.close(); }
     });
 }
