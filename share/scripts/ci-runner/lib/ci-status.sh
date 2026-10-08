@@ -16,6 +16,8 @@
 #   CI_STATUS_STATE   exactly one of: dormant | enable-pending | enabled | paused | disable-pending | misconfigured
 #   CI_STATUS_LEVEL   ok | warn | fail
 #   CI_STATUS_HOST    host named by the state file, empty when there is no usable state file
+#   CI_STATUS_LANE    linux | both | macos (XACA-1461), empty when there is no usable state file. Absent `lane` key =
+#                     legacy file: derived from with_macos (0 -> linux, 1 -> both). NEVER inferred from missing artefacts.
 #   CI_STATUS_REASONS why (every probe that contributed; also notes that do not change the verdict)
 #   CI_STATUS_SKEW    in-sync | skewed | unknown | n/a     (n/a: only an `enabled`/`paused` host is compared)
 #   CI_STATUS_SKEW_REASONS / CI_STATUS_SKEW_UNSEEN / CI_STATUS_SKEW_BLIND   copied from ci_provision_skew
@@ -50,6 +52,13 @@
 #  7. Dev-team source machine (ci_enable_guard rc 10): the CI capability is disabled by design, so the shipped
 #     bundle is not required. A clean machine is `dormant`; ANY state file or CI artefact there is
 #     `misconfigured` (the M3Pro stray-LaunchAgent history, XACA-0212).
+#
+#  8. LANE (XACA-1461). The state file records which lanes the host runs: linux (VM only) | both | macos (macOS only,
+#     NO Lima VM). The required daemon plists follow the lane: linux = agent+reporter+lima-vm; both = + macos;
+#     macos = agent+reporter+macos and NO lima-vm plist (one on a macos host is a state/artefact disagreement). A
+#     macos-lane host never calls limactl and never claims to have looked at a VM. lane=macos needs with_macos=1; an
+#     unknown lane, or a lane that contradicts with_macos, is `misconfigured`. The lane is RECORDED, never inferred:
+#     a linux/both host whose lima-vm plist is missing is `misconfigured`, not "macOS-only".
 #
 # HOOK for XACA-1443-014 (actions/runner binary lifecycle): if a function named ci_status_runner_probe exists
 # when an `enabled`/`paused` host is classified, it is called as `ci_status_runner_probe <host>` and may call
@@ -110,7 +119,8 @@ ci_capability_state() {
     _CIS_MIS=0; _CIS_WARN=0
 
     local rel f rc d
-    local have_state=0 state_ok=0 state_val="" s_host="" with_macos="0" recorded_pv=""
+    local have_state=0 state_ok=0 state_val="" s_host="" with_macos="0" recorded_pv="" lane=""
+    CI_STATUS_LANE=""
     local plists="" nplists=0 own=0 other=0 user=unseen art_list="" bundle_ok=1 bn
 
     # ---- 0. dev-team source machine (guard rc 10). Guard output is not wanted here.
@@ -162,9 +172,21 @@ ci_capability_state() {
                 s_host="$(_cis_get host "$sf")"
                 _cis_host_ok "$s_host" || { _cis_bad "state: invalid host '${s_host}'"; state_ok=0; }
                 with_macos="$(_cis_get with_macos "$sf")"
+                # XACA-1461: the lane. Absent key = legacy file (derive from with_macos); a PRESENT key must be a known lane
+                # (an empty `lane=` is not "absent"), and it must agree with with_macos.
+                if awk -F= '$1=="lane" { f = 1 } END { exit f ? 0 : 1 }' "$sf" 2>/dev/null; then
+                    lane="$(_cis_get lane "$sf")"
+                    case "$lane" in
+                        linux) [ "$with_macos" != 1 ] || { _cis_bad "state: lane=linux contradicts with_macos=1"; state_ok=0; } ;;
+                        both)  [ "$with_macos" = 1 ] || { _cis_bad "state: lane=both needs with_macos=1 (got '${with_macos}')"; state_ok=0; } ;;
+                        macos) [ "$with_macos" = 1 ] || { _cis_bad "state: lane=macos needs with_macos=1 (got '${with_macos}')"; state_ok=0; } ;;
+                        *) _cis_bad "state: unknown lane '${lane}' (want linux, both or macos)"; state_ok=0 ;;
+                    esac
+                elif [ "$with_macos" = 1 ]; then lane=both
+                else lane=linux; fi
                 recorded_pv="$(_cis_get provision_version "$sf")"
             fi
-            [ "$state_ok" = 1 ] && CI_STATUS_HOST="$s_host"
+            [ "$state_ok" = 1 ] && { CI_STATUS_HOST="$s_host"; CI_STATUS_LANE="$lane"; }
         fi
     elif [ -d "$aitf" ] && [ -r "$aitf" ] && [ -x "$aitf" ]; then
         :   # looked: no state file
@@ -274,8 +296,11 @@ EOF_B
         [ "$nplists" = 0 ] || _cis_add CI_STATUS_REASONS "daemon plists on disk: ${nplists}"
     else
         # (c) a usable state file: it must agree with the artefacts
-        local need="agent reporter lima-vm" k
-        [ "$with_macos" != 1 ] || need="${need} macos"
+        local need="agent reporter lima-vm" k lane_txt=""
+        case "$lane" in
+            both)  need="${need} macos" ;;
+            macos) need="agent reporter macos"; lane_txt=" (macOS-only lane)" ;;
+        esac
         local agent_plist=0
         _cis_present "$ld/com.doublenode.ci-runner.${s_host}.agent.plist" && agent_plist=1
         if [ "$other" != 0 ]; then
@@ -307,6 +332,9 @@ EOF_C
                 for k in $need; do
                     _cis_present "$ld/com.doublenode.ci-runner.${s_host}.${k}.plist" || { _cis_bad "enabled: the ${k} daemon plist for ${s_host} is missing from ${ld}"; }
                 done
+                if [ "$lane" = macos ] && _cis_present "$ld/com.doublenode.ci-runner.${s_host}.lima-vm.plist"; then
+                    _cis_bad "enabled: lane=macos records no Linux VM, but the lima-vm daemon plist for ${s_host} exists in ${ld} (state and artefacts disagree)"
+                fi
                 if [ "$_CIS_MIS" = 1 ]; then
                     :
                 else
@@ -326,7 +354,7 @@ EOF_C
                              CI_STATUS_NEXT="bash ${bundle}/ci-host.sh resume --host ${s_host}   (see ci-host.sh --help)"; fi
                     fi
                     if [ "$_CIS_MIS" != 1 ]; then
-                        [ "$CI_STATUS_STATE" != enabled ] || _cis_reason "enabled: host ${s_host}: ${cuser} user and the $(echo $need | tr ' ' ',') daemon plists exist (loaded state is not inspected)"
+                        [ "$CI_STATUS_STATE" != enabled ] || _cis_reason "enabled: host ${s_host}${lane_txt}: ${cuser} user and the $(echo $need | tr ' ' ',') daemon plists exist (loaded state is not inspected)"
                         # skew (013): only for an enabled/paused host
                         local pv_lib="${bundle}/lib/ci-provision-version.sh" src=0
                         if [ -r "$pv_lib" ]; then
@@ -362,6 +390,8 @@ EOF_C
                                 CI_STATUS_LEVEL="warn"
                                 [ -n "$CI_STATUS_NEXT" ] || CI_STATUS_NEXT="aiteamforge ci refresh --dry-run   (could not verify the host against this release)" ;;
                         esac
+                        # a macos-lane host has no VM: never claim one was (not) inspected
+                        [ "$lane" != macos ] || [ -z "$CI_STATUS_SKEW_BLIND" ] || CI_STATUS_SKEW_BLIND="this host has no Linux VM (lane=macos); loaded daemons and plist contents are not inspected"
                         [ -z "$CI_STATUS_SKEW_BLIND" ] || _cis_add CI_STATUS_REASONS "not inspected: ${CI_STATUS_SKEW_BLIND}"
                         if [ "$(type -t ci_status_runner_probe 2>/dev/null)" = function ]; then
                             ci_status_runner_probe "$s_host" || true

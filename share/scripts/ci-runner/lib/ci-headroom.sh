@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# ci-headroom.sh - memory headroom check + VM sizing for `aiteamforge ci enable` (XACA-1443-002).
+# ci-headroom.sh - memory headroom check, macOS-lane disk floor and VM sizing for
+# `aiteamforge ci enable` (XACA-1443-002, XACA-1461-002).
 #
 # SOURCEABLE LIBRARY. Sourcing defines functions and constants only: no output, no `exit`, no
 # change to the caller's `set` options. Read-only: the only commands it runs are
-# `memory_pressure`, `vm_stat` and `sysctl -n hw.memsize|hw.ncpu`. Never sudo, never writes.
+# `memory_pressure`, `vm_stat`, `sysctl -n hw.memsize|hw.ncpu` and `df -Pk <path>`. Never sudo,
+# never writes.
 #
 # THRESHOLDS (MEMORY ONLY, XACA-1443-012; measured on M1Mini, see kanban/plans/XACA-1443/
 # XACA-1443-012_headroom.md). There is deliberately NO swap rule: macOS swap is elastic
@@ -22,8 +24,33 @@
 #       rc 0 pass | 1 free% below floor | 2 free+inactive+purgeable below floor | 3 not measured
 #       (both low => 1 and CI_HR_REASONS names both)
 #       sets CI_HR_REASONS (human text per failed rule)
+#   ci_headroom_disk [path]      disk-free floor for the macOS lane (independent of measure).
+#       path default: ${CI_RUNNER_HOME:-/Users/ci-runner}; if absent, its nearest existing parent,
+#       else /. Reads `df -Pk <path>` (POSIX output, Available column, KiB x 1024).
+#       rc 0 free >= CI_HR_MACOS_DISK_MIN_BYTES | 5 below the floor | 3 unreadable (fail closed:
+#       df missing/failing, not exactly header+one row, non-numeric or zero-size reading)
+#       sets CI_HR_DISK_PATH, CI_HR_DISK_FREE_BYTES, CI_HR_REASONS
 #   ci_headroom_size             needs a successful measure. Proposes the guest size.
+#       ONLY meaningful when a Linux VM is planned (lane linux|both); a macOS-only lane (no VM)
+#       must NOT call it - it has no guest to size. Memory thresholds above apply to every lane.
 #       rc 0 fits | 4 no size fits. sets CI_HR_VM_GIB, CI_HR_VM_CPUS, CI_HR_LINUX_SLOTS
+#
+# MACOS-LANE DISK FLOOR (XACA-1461-002): CI_HR_MACOS_DISK_MIN_BYTES = 54 GiB free. The macOS lane
+# is to host Main Event Android CI plus the macOS shell/bats/pytest jobs. Derivation (measured on
+# M3Pro 2026-10-07, read-only `du -sk`; "est" = no local evidence, stated estimate):
+#   Android SDK without system images (platform-tools, 5 build-tools, 5 platforms, emulator,
+#     sources, skins)                          6.61 - 2.89            =  3.72 GiB  measured
+#   2 x arm64-v8a system image (1 measured at 2.89 GiB, google_apis_playstore_ps16k)  =  5.79 GiB
+#   2 x AVD at the heaviest measured size (Medium_Phone_API_35: 6.71 GiB data qcow2 +
+#     0.78 GiB sdcard = 7.53 GiB; its config caps the data partition at 6 GiB)       = 15.06 GiB
+#   ~/.gradle (caches 2.5 GiB of 3.3 GiB)                                            =  3.32 GiB  measured
+#   Actions runner install: osx-arm64 tarball v2.338.0 = 128,562,863 B (0.12 GiB, GitHub
+#     releases API), kept + extracted, rounded                                       =  0.50 GiB  est
+#   runner _work (repo checkouts + build outputs + artifacts)                        =  5.00 GiB  est
+#   macOS shell/bats/pytest jobs (dev-team checkout, tool caches)                    =  2.00 GiB  est
+#   SUM 35.39 GiB; safety margin +50% = 53.09 GiB; rounded UP to a whole GiB         = 54 GiB
+# This is a floor, not a promise: re-measure on M1Pro (XACA-1462-005) and adjust. Full table and
+# sources: kanban/plans/XACA-1461/XACA-1461-002_macos_disk_floor.md
 #
 # SIZING (judgement, NOT measured - calibrated on one 16 GiB / 8 core host; re-measure after
 # a week of real CI load, 012 doc):
@@ -40,6 +67,7 @@
 
 CI_HR_MIN_FREE_PCT=25
 CI_HR_MIN_FIP_BYTES=1610612736      # 1.5 GiB
+CI_HR_MACOS_DISK_MIN_BYTES=57982058496   # 54 GiB, derivation in the header
 CI_HR_VM_GIB_CAP=4
 CI_HR_VM_CPU_CAP=4
 CI_HR_VM_GIB_MIN=2
@@ -125,5 +153,33 @@ ci_headroom_size() {
         return 4
     fi
     if [ "$CI_HR_VM_GIB" -ge 3 ]; then CI_HR_LINUX_SLOTS=2; else CI_HR_LINUX_SLOTS=1; fi
+    return 0
+}
+
+# Free bytes on the volume holding <path> (default: the ci-runner home, else nearest existing
+# parent, else /). Fails closed: any unreadable/unparseable reading is rc 3, never a pass.
+ci_headroom_disk() {
+    local p="${1:-${CI_RUNNER_HOME:-/Users/ci-runner}}" out data rows kib
+    CI_HR_DISK_PATH=""; CI_HR_DISK_FREE_BYTES=""; CI_HR_REASONS=""
+    case "$p" in /*) ;; *) p="/" ;; esac
+    while [ ! -e "$p" ] && [ "$p" != "/" ]; do
+        p="${p%/*}"; [ -n "$p" ] || p="/"
+    done
+    CI_HR_DISK_PATH="$p"
+    out="$(df -Pk "$p" 2>/dev/null)" || { CI_HR_REASONS="disk free space could not be measured (df failed on $p)"; return 3; }
+    rows="$(printf '%s\n' "$out" | awk 'NF{n++} END{print n+0}')"
+    if [ "$rows" -ne 2 ]; then
+        CI_HR_REASONS="disk free space could not be measured (unexpected df output for $p)"; return 3
+    fi
+    data="$(printf '%s\n' "$out" | awk 'NF{n++; if(n==2) print}')"
+    kib="$(printf '%s\n' "$data" | sed -nE 's/.* ([0-9]+) +([0-9]+) +([0-9]+) +[0-9]+%.*/\3/p')"
+    if ! _cihr_uint "$kib" || [ "${#kib}" -gt 15 ]; then
+        CI_HR_REASONS="disk free space could not be measured (unparseable df output for $p)"; return 3
+    fi
+    CI_HR_DISK_FREE_BYTES=$((kib * 1024))
+    if [ "$CI_HR_DISK_FREE_BYTES" -lt "$CI_HR_MACOS_DISK_MIN_BYTES" ]; then
+        CI_HR_REASONS="disk free ${CI_HR_DISK_FREE_BYTES} B on $p < ${CI_HR_MACOS_DISK_MIN_BYTES} B (54 GiB macOS-lane floor)"
+        return 5
+    fi
     return 0
 }

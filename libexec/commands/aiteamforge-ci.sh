@@ -2,7 +2,7 @@
 # aiteamforge-ci.sh - `aiteamforge ci ...` (XACA-1443). TAP-NATIVE: edit it here, it has no
 # canonical source in dev-team (commit with the trailer `Tap-Only-Edit: intentional`).
 #
-#   aiteamforge ci enable [flags]    XACA-1443-002 (this file)
+#   aiteamforge ci enable [flags]    XACA-1443-002 (this file); --macos-only (no Linux VM, lane=macos): XACA-1461-003
 #   aiteamforge ci disable           XACA-1443-003 (this file; root half: bundle teardown-host.sh)
 #   aiteamforge ci refresh           XACA-1443-013/-015 (this file; root half: bundle provision-host.sh again;
 #                                    skew logic: bundle lib/ci-provision-version.sh, sourceable by 004)
@@ -35,6 +35,7 @@ RC_HEADROOM=12 RC_NO_FIT=13 RC_NO_LIMA=14 RC_PROBE=16 RC_STATE=17 RC_NOT_PROVISI
 RC_LEFTOVERS=19   # disable --confirm: teardown artefacts remain
 RC_REFRESH_PENDING=20   # refresh --confirm: the host does not match the keg yet (or cannot be verified)
 RC_STATUS_USAGE=21      # ci status: bad option (status itself exits 0 ok | 1 warn | 2 fail, the doctor's levels)
+RC_DISK=22              # enable --macos-only (XACA-1461): free disk below the macOS-lane floor
 # 10 / 11 are ci_enable_guard's own codes, passed through unchanged.
 
 _err()  { echo "ERROR: $*" >&2; }
@@ -59,7 +60,7 @@ enable_usage() {
   cat <<'EOF'
 Usage: aiteamforge ci enable --github-app-install-id <id> --repo <owner/repo> [--repo ...]
                              --agent-key-file <path> --telemetry-key-file <path>
-                             [--server-url <https-url>] [--host <name>] [--with-macos]
+                             [--server-url <https-url>] [--host <name>] [--with-macos | --macos-only]
                              [--no-pause-marker] [--dry-run]
        aiteamforge ci enable --confirm
        aiteamforge ci enable --help
@@ -85,6 +86,11 @@ are an error.
                                 provisioned with sendPauseMarker=false (default: it sends the marker).
                                 Recorded as send_pause_marker=0 in the state file so `ci refresh`
                                 keeps the opt-out.
+  --macos-only                  (XACA-1461) the macOS runner lane ONLY: no Linux Lima VM, no limactl, no VM
+                                sizing. Implies --with-macos (giving both is fine). Records lane=macos and
+                                prints a provisioning line that passes --no-linux. Checks free DISK instead of
+                                VM size (see below). Not combinable with VM sizing flags (--vm-cpus,
+                                --vm-memory, --linux-count): exit 2.
   --dry-run                     do every check and print the plan and the command, but write
                                 NOTHING (no state file)
   --confirm                     AFTER you ran the sudo command: verify the host is provisioned
@@ -92,17 +98,21 @@ are an error.
 
 Refuses (nothing written) when: this is the dev-team source machine or a git work-tree install
 (10/11), memory headroom is short (12), no VM size fits (13), limactl is missing (14), the
-probe cannot read memory (16), CI is already enabled (17).
+probe cannot read memory (16), CI is already enabled (17). With --macos-only 13 and 14 never
+fire; instead free disk below the macOS-lane floor refuses (22) and an unreadable `df` refuses
+(16: an unreadable probe is a refusal, not a pass).
 
 Headroom (memory only; swap is elastic and never gates): refuse if memory free < 25% or
 free+inactive+purgeable < 1.5 GiB. Guest sizing (a judgement calibrated on one 16 GiB host):
 RAM = min(4 GiB, host RAM/4, headroom above the 1.5 GiB floor); vCPU = min(4, cores/2);
-refuse below 2 GiB or 2 vCPU.
+refuse below 2 GiB or 2 vCPU. --macos-only skips the guest sizing and requires free disk of at
+least the macOS-lane floor on the ci-runner volume (54 GiB; derivation in lib/ci-headroom.sh).
 
 Exit codes: 0 ok | 1 environment (not configured, bundle missing) | 2 usage / invalid input
   10 dev-team source machine | 11 git work-tree install | 12 headroom refusal | 13 no VM size fits
   14 limactl missing (run `brew install lima` as yourself first) | 16 memory probe unreadable
   17 CI already enabled | 18 --confirm: host not provisioned yet
+  22 --macos-only: free disk below the macOS-lane floor (the disk probe being unreadable is 16)
 EOF
 }
 
@@ -173,9 +183,11 @@ _sha256() { shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'; }
 # XACA-1443-016: the client payload the root half installs must be in the bundle BEFORE the sudo line is printed:
 # the line starts with create-ci-runner-user.sh, so a payload that is missing only at install time would leave a
 # created user and a half-provisioned host. provision-host.sh re-checks (payload_preflight) before any change.
-# usage: _ci_payload_check <with_macos 0|1>; rc 0 ok | RC_ENV (names what is missing)
+# usage: _ci_payload_check <with_macos 0|1> [no_linux 0|1]; rc 0 ok | RC_ENV (names what is missing)
+# no_linux=1 (XACA-1461, lane=macos): the guest JIT script is not needed; mirrors provision-host.sh payload_preflight.
 _ci_payload_check() {
-  local f missing="" need="ci-runner-reporter.sh ci-pool-agent.py ci-runner-jit-guest.sh ci-runner-job-started.sh"
+  local f missing="" need="ci-runner-reporter.sh ci-pool-agent.py ci-runner-job-started.sh"
+  [ "${2:-0}" = 1 ] || need="$need ci-runner-jit-guest.sh"
   [ "${1:-1}" = 1 ] && need="$need ci-runner-jit-macos.sh"
   for f in $need; do [ -f "$CI_BUNDLE_DIR/client/$f" ] || missing="${missing} client/${f}"; done
   [ -z "$missing" ] && return 0
@@ -263,7 +275,7 @@ cmd_enable() {
 
   # ---- 2. flags
   local install_id="" repos_raw="" agent_key="" tele_key="" server_url="" host="" with_macos=0
-  local dry=0 confirm=0 spm=1
+  local dry=0 confirm=0 spm=1 macos_only=0 vm_flag=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --github-app-install-id) [ $# -ge 2 ] || { _err "$1 needs a value"; return $RC_USAGE; }; install_id="$2"; shift 2 ;;
@@ -274,11 +286,23 @@ cmd_enable() {
       --host)                  [ $# -ge 2 ] || { _err "$1 needs a name"; return $RC_USAGE; }; host="$2"; shift 2 ;;
       --with-macos) with_macos=1; shift ;;
       --no-pause-marker) spm=0; shift ;;
+      --macos-only) macos_only=1; with_macos=1; shift ;;
+      # VM sizing flags are not `ci enable` flags (the size is measured); they are only recognised so that
+      # --macos-only can say WHY they are refused. Without --macos-only they stay unknown options.
+      --vm-cpus|--vm-memory|--linux-count) [ -n "$vm_flag" ] || vm_flag="$1"; shift; [ $# -eq 0 ] || shift ;;
       --dry-run)    dry=1; shift ;;
       --confirm)    confirm=1; shift ;;
       *) _err "unknown option: $1"; enable_usage >&2; return $RC_USAGE ;;
     esac
   done
+  if [ -n "$vm_flag" ]; then
+    if [ "$macos_only" = 1 ]; then
+      _err "$vm_flag is a Linux VM sizing flag and cannot be combined with --macos-only (a macOS-only host has no VM)"
+    else
+      _err "unknown option: $vm_flag"; enable_usage >&2
+    fi
+    return $RC_USAGE
+  fi
 
   if [ ! -f "$AITEAMFORGE_DIR/.aiteamforge-config" ]; then
     _err "AITeamForge is not configured ($AITEAMFORGE_DIR/.aiteamforge-config missing). Run: aiteamforge setup"
@@ -286,7 +310,7 @@ cmd_enable() {
   fi
 
   if [ "$confirm" = 1 ]; then
-    [ -z "$install_id$repos_raw$agent_key$tele_key$server_url$host" ] && [ "$with_macos" = 0 ] && [ "$dry" = 0 ] && [ "$spm" = 1 ] \
+    [ -z "$install_id$repos_raw$agent_key$tele_key$server_url$host" ] && [ "$with_macos" = 0 ] && [ "$macos_only" = 0 ] && [ "$dry" = 0 ] && [ "$spm" = 1 ] \
       || { _err "--confirm takes no other options"; return $RC_USAGE; }
     cmd_enable_confirm
     return $?
@@ -348,8 +372,8 @@ cmd_enable() {
   [ "$bad" = 0 ] || { echo "Run: aiteamforge ci enable --help" >&2; return $RC_USAGE; }
   agent_key="$(_abs_path "$agent_key")"; tele_key="$(_abs_path "$tele_key")"
 
-  # ---- 4. limactl (D4: never install software; tell the operator, stop)
-  if [ ! -x "$CI_LIMACTL_PATH" ]; then
+  # ---- 4. limactl (D4: never install software; tell the operator, stop). --macos-only has no VM: never needed.
+  if [ "$macos_only" = 0 ] && [ ! -x "$CI_LIMACTL_PATH" ]; then
     _err "limactl not found at $CI_LIMACTL_PATH."
     echo "Step 0, as yourself (Homebrew refuses root):  brew install lima" >&2
     echo "Then re-run: aiteamforge ci enable ..." >&2
@@ -384,20 +408,43 @@ cmd_enable() {
     _err "not enough memory headroom: ${CI_HR_REASONS}. Free some memory and re-run."
     return $RC_HEADROOM
   fi
-  ci_headroom_size || srcc=$?
-  if [ "$srcc" -ne 0 ]; then
-    _err "headroom passes but no guest size fits (needs >= ${CI_HR_VM_GIB_MIN} GiB RAM and >= ${CI_HR_VM_CPU_MIN} vCPU; computed ${CI_HR_VM_GIB} GiB / ${CI_HR_VM_CPUS} vCPU)."
-    return $RC_NO_FIT
+  local lane vm_cpus_v vm_mem_v slots_v
+  if [ "$macos_only" = 1 ]; then
+    # XACA-1461: no VM, so no guest to size (rc 13 never fires) - but the macOS lane has a disk floor of its own.
+    # An unreadable disk probe is rc 16 (same class as an unreadable memory probe): a refusal, never a pass.
+    local drc=0
+    ci_headroom_disk || drc=$?
+    echo "  disk free              : $(_gib "${CI_HR_DISK_FREE_BYTES:-0}") GiB on ${CI_HR_DISK_PATH}   (refuse below $(_gib "$CI_HR_MACOS_DISK_MIN_BYTES") GiB, the macOS-lane floor)"
+    case "$drc" in
+      0) ;;
+      5) _err "not enough free disk for the macOS lane: ${CI_HR_REASONS}. Free some space and re-run."; return $RC_DISK ;;
+      *) _err "could not read this machine's free disk space (${CI_HR_REASONS}). Refusing: an unreadable probe is a refusal, not a pass."; return $RC_PROBE ;;
+    esac
+    echo "  lane                   : macOS only (no Linux VM)"
+    lane=macos; vm_cpus_v=""; vm_mem_v=""; slots_v=0
+  else
+    ci_headroom_size || srcc=$?
+    if [ "$srcc" -ne 0 ]; then
+      _err "headroom passes but no guest size fits (needs >= ${CI_HR_VM_GIB_MIN} GiB RAM and >= ${CI_HR_VM_CPU_MIN} vCPU; computed ${CI_HR_VM_GIB} GiB / ${CI_HR_VM_CPUS} vCPU)."
+      return $RC_NO_FIT
+    fi
+    echo "  proposed guest         : ${CI_HR_VM_GIB} GiB RAM / ${CI_HR_VM_CPUS} vCPU / ${CI_HR_LINUX_SLOTS} Linux job slot(s)   (judgement, calibrated on one 16 GiB host)"
+    if [ "$with_macos" = 1 ]; then lane=both; else lane=linux; fi
+    vm_cpus_v="$CI_HR_VM_CPUS"; vm_mem_v="$CI_HR_VM_GIB"; slots_v="$CI_HR_LINUX_SLOTS"
   fi
-  echo "  proposed guest         : ${CI_HR_VM_GIB} GiB RAM / ${CI_HR_VM_CPUS} vCPU / ${CI_HR_LINUX_SLOTS} Linux job slot(s)   (judgement, calibrated on one 16 GiB host)"
 
-  _ci_payload_check "$with_macos" || return $?
+  _ci_payload_check "$with_macos" "$macos_only" || return $?
 
   # ---- 7. the ONE sudo command
   local create_sh="$CI_BUNDLE_DIR/create-ci-runner-user.sh" prov_sh="$CI_BUNDLE_DIR/provision-host.sh"
-  local pargs=(--host "$host" --no-register --vm-cpus "$CI_HR_VM_CPUS" --vm-memory "$CI_HR_VM_GIB"
-               --linux-count "$CI_HR_LINUX_SLOTS")
-  [ "$with_macos" = 1 ] || pargs=("${pargs[@]}" --no-macos)
+  local pargs
+  if [ "$macos_only" = 1 ]; then
+    pargs=(--host "$host" --no-register --no-linux)
+  else
+    pargs=(--host "$host" --no-register --vm-cpus "$CI_HR_VM_CPUS" --vm-memory "$CI_HR_VM_GIB"
+           --linux-count "$CI_HR_LINUX_SLOTS")
+    [ "$with_macos" = 1 ] || pargs=("${pargs[@]}" --no-macos)
+  fi
   pargs=("${pargs[@]}" --with-agent --agent-key-file "$agent_key" --telemetry-key-file "$tele_key")
   [ -z "$server_url" ] || pargs=("${pargs[@]}" --server-url "$server_url")
   [ "$spm" = 1 ] || pargs=("${pargs[@]}" --no-pause-marker)
@@ -422,9 +469,10 @@ cmd_enable() {
       echo "schema=1"
       echo "state=enabled-pending"
       echo "host=$host"
-      echo "vm_cpus=$CI_HR_VM_CPUS"
-      echo "vm_memory_gib=$CI_HR_VM_GIB"
-      echo "linux_slots=$CI_HR_LINUX_SLOTS"
+      echo "lane=$lane"
+      echo "vm_cpus=$vm_cpus_v"
+      echo "vm_memory_gib=$vm_mem_v"
+      echo "linux_slots=$slots_v"
       echo "with_macos=$with_macos"
       echo "send_pause_marker=$spm"
       echo "github_app_install_id=$install_id"
@@ -434,6 +482,7 @@ cmd_enable() {
       echo "has_telemetry_key_file=1"
       echo "headroom_free_pct=$CI_HR_FREE_PCT"
       echo "headroom_fip_bytes=$CI_HR_FIP_BYTES"
+      [ "$macos_only" = 0 ] || echo "headroom_disk_free_bytes=$CI_HR_DISK_FREE_BYTES"
       echo "headroom_checked_at=$ts"
       echo "bundle_dir=$CI_BUNDLE_DIR"
       echo "provision_version="
@@ -465,6 +514,7 @@ cmd_enable() {
   echo "Preview, no root, changes nothing:"
   echo "$dry_line"
   echo
+  [ "$macos_only" = 0 ] || echo "(lane: macOS only - the command passes --no-linux: no Lima VM is created or needed)"
   echo "Then run this ONE command yourself (creates the ci-runner user, then provisions the host):"
   echo "$sudo_line"
   echo
@@ -752,7 +802,10 @@ cmd_disable() {
     _err "teardown script missing ($td_sh). Run: aiteamforge upgrade"
     return $RC_ENV
   fi
-  local targs=(--host "$host")
+  local targs=(--host "$host") dlane=""
+  # XACA-1461: a macOS-only host has no VM; the teardown is told so and never calls limactl. Absent lane = legacy.
+  [ "$healthy" = 0 ] || dlane="$(_state_get lane)"
+  [ "$dlane" != macos ] || targs=("${targs[@]}" --no-linux)
   [ "$rm_user" = 0 ] || targs=("${targs[@]}" --remove-user)
   [ "$kill_run" = 0 ] || targs=("${targs[@]}" --kill-running)
   [ "$vm_gone" = 0 ] || targs=("${targs[@]}" --vm-gone)
@@ -771,8 +824,13 @@ cmd_disable() {
   fi
 
   echo
-  echo "Host ${host}: this removes the agent/reporter/VM daemons, the Lima VM ci-linux-${host}, the agent key and"
-  echo "config, the telemetry key file, the pause marker, the installed copies and the plists."
+  if [ "$dlane" = macos ]; then
+    echo "Host ${host} (lane: macOS only, no Linux VM): this removes the agent/reporter/macOS daemons, the agent key and"
+    echo "config, the telemetry key file, the pause marker, the installed copies and the plists. No VM is touched (--no-linux)."
+  else
+    echo "Host ${host}: this removes the agent/reporter/VM daemons, the Lima VM ci-linux-${host}, the agent key and"
+    echo "config, the telemetry key file, the pause marker, the installed copies and the plists."
+  fi
   if [ "$rm_user" = 1 ]; then echo "  ALSO: the ${CI_RUNNER_USER} user, its group and its home (--remove-user)."
   else echo "  KEPT: the ${CI_RUNNER_USER} user and its home (add --remove-user to delete them)."; fi
   echo "  No GitHub runner registration persists (JIT runners are single-use; ci enable used --no-register)."
@@ -923,7 +981,7 @@ cmd_refresh() {
     _err "state file $CI_STATE_FILE is unreadable or has an unknown schema/state/host. Not guessing."
     return $RC_STATE
   fi
-  local st host vcpu vmem slots wmac surl spm
+  local st host vcpu vmem slots wmac surl spm lane=""
   st="$(_state_get state)"; host="$(_state_get host)"
   case "$st" in
     enabled) ;;
@@ -936,10 +994,20 @@ cmd_refresh() {
   vcpu="$(_state_get vm_cpus)"; vmem="$(_state_get vm_memory_gib)"; slots="$(_state_get linux_slots)"
   wmac="$(_state_get with_macos)"; surl="$(_state_get server_url)"
   local bad=0
-  _is_uint "$vcpu" && [ "$vcpu" -ge 1 ] || { _err "state file: vm_cpus='${vcpu}' is not a positive integer"; bad=1; }
-  _is_uint "$vmem" && [ "$vmem" -ge 1 ] || { _err "state file: vm_memory_gib='${vmem}' is not a positive integer"; bad=1; }
-  _is_uint "$slots" && [ "$slots" -ge 1 ] || { _err "state file: linux_slots='${slots}' is not a positive integer"; bad=1; }
-  case "$wmac" in 0|1) ;; *) _err "state file: with_macos='${wmac}' is not 0 or 1"; bad=1 ;; esac
+  # XACA-1461: `lane` (linux|both|macos) is recorded by `ci enable`; an ABSENT key is a legacy file. A PRESENT
+  # but unknown value is damage: refuse. lane=macos has no VM, so its (empty) VM size is not validated.
+  if grep -q '^lane=' "$CI_STATE_FILE" 2>/dev/null; then
+    lane="$(_state_get lane)"
+    case "$lane" in linux|both|macos) ;; *) _err "state file: lane='${lane}' is not linux, both or macos"; bad=1 ;; esac
+  fi
+  if [ "$lane" = macos ]; then
+    [ "$wmac" = 1 ] || { _err "state file: lane=macos needs with_macos=1 (got '${wmac}')"; bad=1; }
+  else
+    _is_uint "$vcpu" && [ "$vcpu" -ge 1 ] || { _err "state file: vm_cpus='${vcpu}' is not a positive integer"; bad=1; }
+    _is_uint "$vmem" && [ "$vmem" -ge 1 ] || { _err "state file: vm_memory_gib='${vmem}' is not a positive integer"; bad=1; }
+    _is_uint "$slots" && [ "$slots" -ge 1 ] || { _err "state file: linux_slots='${slots}' is not a positive integer"; bad=1; }
+    case "$wmac" in 0|1) ;; *) _err "state file: with_macos='${wmac}' is not 0 or 1"; bad=1 ;; esac
+  fi
   if [ -n "$surl" ] && ! _valid_url "$surl"; then _err "state file: server_url is not an acceptable https URL"; bad=1; fi
   # send_pause_marker (XACA-1457-010): ABSENT = 1 (older state files); present must be exactly 0 or 1.
   spm=1
@@ -975,9 +1043,15 @@ cmd_refresh() {
     _err "provisioning scripts missing from $CI_BUNDLE_DIR. Run: aiteamforge upgrade"
     return $RC_ENV
   fi
-  _ci_payload_check "$wmac" || return $?
-  local pargs=(--host "$host" --no-register --vm-cpus "$vcpu" --vm-memory "$vmem" --linux-count "$slots")
-  [ "$wmac" = 1 ] || pargs=("${pargs[@]}" --no-macos)
+  local nolin=0; [ "$lane" != macos ] || nolin=1
+  _ci_payload_check "$wmac" "$nolin" || return $?
+  local pargs
+  if [ "$nolin" = 1 ]; then
+    pargs=(--host "$host" --no-register --no-linux)      # macOS-only host: no VM size to carry (XACA-1461)
+  else
+    pargs=(--host "$host" --no-register --vm-cpus "$vcpu" --vm-memory "$vmem" --linux-count "$slots")
+    [ "$wmac" = 1 ] || pargs=("${pargs[@]}" --no-macos)
+  fi
   pargs=("${pargs[@]}" --with-agent)
   [ -z "$surl" ] || pargs=("${pargs[@]}" --server-url "$surl")
   [ "$busy_ok" = 1 ] || pargs=("${pargs[@]}" --refuse-if-busy)
@@ -993,6 +1067,7 @@ cmd_refresh() {
   [ "$dry" = 0 ] || echo "[dry-run] nothing is written by 'ci refresh' (it writes only on --confirm)."
   echo
   echo "Host ${host}: this re-runs the provisioning with the flags 'ci enable' recorded. It is idempotent: the"
+  [ "$nolin" = 0 ] || echo "  (lane: macOS only - no Linux VM; --no-linux)"
   echo "  ci-runner user, the VM and the installed keys are kept; changed root-owned copies, plists and guest"
   echo "  scripts are replaced; a changed daemon plist restarts that daemon."
   if [ "$busy_ok" = 1 ]; then
@@ -1100,6 +1175,11 @@ cmd_status() {
   case "$CI_STATUS_LEVEL" in ok) lvl=OK ;; warn) lvl=WARN ;; *) lvl=FAIL ;; esac
   echo "CI capability: ${CI_STATUS_STATE}   [${lvl}]"
   [ -z "$CI_STATUS_HOST" ] || echo "Host: ${CI_STATUS_HOST}"
+  case "${CI_STATUS_LANE:-}" in
+    macos) echo "Lane: macOS only (no Linux VM)" ;;
+    both)  echo "Lane: Linux VM + macOS" ;;
+    linux) echo "Lane: Linux VM only" ;;
+  esac
   if [ -n "$CI_STATUS_REASONS" ]; then
     echo "Why:"
     while IFS= read -r line; do

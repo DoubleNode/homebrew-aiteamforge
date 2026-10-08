@@ -3,7 +3,7 @@
 # (XACA-1443-003). The root half of `aiteamforge ci disable`.
 #
 # Run ON the host, under sudo, by an operator who read it (the CLI prints the one line):
-#   sudo bash teardown-host.sh --host <name> [--remove-user] [--kill-running] [--vm-gone] [--dry-run]
+#   sudo bash teardown-host.sh --host <name> [--remove-user] [--kill-running] [--vm-gone] [--no-linux] [--dry-run]
 #
 # It is the mirror of provision-host.sh, in the REVERSE order, and idempotent: every step
 # checks what is on disk first, so a second run (or a run on a half-provisioned host) is safe.
@@ -14,7 +14,13 @@
 #      touched, with the agent stopped and the way to resume printed. Then reporter, macos, lima-vm
 #   3. (--kill-running) kill the macOS Runner.Listener and clean the macOS slot directories
 #   4. delete the Lima VM `ci-linux-<host>` as ci-runner (`limactl delete -f`); it carries the
-#      Linux runners, so no registration survives inside it. FAILURE HERE STOPS THE SCRIPT
+#      Linux runners, so no registration survives inside it. NO-LINUX HOSTS (XACA-1461): `--no-linux`
+#      (what `ci disable` passes for a lane=macos host) skips the VM stop and delete and NEVER invokes
+#      limactl. Independently of the flag, the step is a clean no-op, limactl or not, when the host has
+#      no lima-vm plist AND ~ci-runner/.lima/<vm> is positively absent (root can read it). The flag is
+#      recorded intent; it is not trusted over evidence: if a lima-vm plist exists, --no-linux is
+#      ignored with a WARN and the VM is torn down as usual (deleting the plist of a live VM would orphan
+#      it). FAILURE HERE STOPS THE SCRIPT
 #      BEFORE THE PLISTS ARE REMOVED: the plists are the "teardown finished" marker that
 #      `aiteamforge ci disable --confirm` reads, so a half teardown can never read as done.
 #   5. remove the secrets and config: agent key + agent.json + slots.json + agent log dir,
@@ -50,7 +56,7 @@
 
 set -u
 
-HOST=""; REMOVE_USER=0; KILL_RUNNING=0; DRY=0; VM_GONE=0
+HOST=""; REMOVE_USER=0; KILL_RUNNING=0; DRY=0; VM_GONE=0; NO_LINUX=0
 CI_USER="${CI_RUNNER_USER:-ci-runner}"
 LD_DIR="${CI_LAUNCHDAEMONS_DIR:-/Library/LaunchDaemons}"
 LIBEXEC_DIR="${CI_LIBEXEC_DIR:-/usr/local/libexec}"
@@ -65,7 +71,7 @@ FAILS=0
 
 usage() {
   cat <<'EOF'
-Usage: sudo bash teardown-host.sh --host <name> [--remove-user] [--kill-running] [--vm-gone] [--dry-run]
+Usage: sudo bash teardown-host.sh --host <name> [--remove-user] [--kill-running] [--vm-gone] [--no-linux] [--dry-run]
 
   --host <name>     the host name used at provisioning (runner/VM/daemon suffix)
   --remove-user     ALSO delete the ci-runner user, its group and /Users/ci-runner (default: keep)
@@ -75,6 +81,10 @@ Usage: sudo bash teardown-host.sh --host <name> [--remove-user] [--kill-running]
                     you state the Lima VM is gone and accept that it is not verified or deleted.
                     (Without the flag an absent ~ci-runner/.lima/<vm> directory is accepted on its own;
                     an unreadable directory never is.)
+  --no-linux        the host has no Linux lane (lane=macos, XACA-1461): skip the VM stop/delete and never run limactl.
+                    Ignored with a WARN when a lima-vm daemon plist exists for this host (that VM must not be orphaned).
+                    Without the flag the VM step is ALSO a no-op, with no limactl needed, when there is no lima-vm
+                    plist and the VM directory is positively absent.
   --dry-run         print the plan and what exists now; change nothing (no root needed)
 EOF
 }
@@ -92,6 +102,7 @@ while [ $# -gt 0 ]; do
     --remove-user) REMOVE_USER=1; shift ;;
     --kill-running) KILL_RUNNING=1; shift ;;
     --vm-gone) VM_GONE=1; shift ;;
+    --no-linux) NO_LINUX=1; shift ;;
     --dry-run) DRY=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) usage_err "unknown option: $1" ;;
@@ -181,7 +192,12 @@ if [ "$REMOVE_USER" = 1 ] && [ "$OTHERS" -gt 0 ]; then
   result REFUSED_OTHER_HOSTS 4; exit 4
 fi
 
-log "plan: host=${HOST} vm=${VM_NAME} user=${CI_USER} remove-user=${REMOVE_USER} kill-running=${KILL_RUNNING} dry-run=${DRY} other-hosts-plists=${OTHERS}"
+# XACA-1461: --no-linux is intent, evidence wins. A lima-vm plist of THIS host means a VM may exist.
+if [ "$NO_LINUX" = 1 ] && { [ -e "$(plist_of lima-vm)" ] || [ -L "$(plist_of lima-vm)" ]; }; then
+  warn "--no-linux given but $(plist_of lima-vm) exists: tearing the VM down as usual (a VM must not be orphaned)"
+  NO_LINUX=0
+fi
+log "plan: host=${HOST} vm=${VM_NAME} user=${CI_USER} remove-user=${REMOVE_USER} kill-running=${KILL_RUNNING} no-linux=${NO_LINUX} dry-run=${DRY} other-hosts-plists=${OTHERS}"
 
 # ---- 2. daemons -----------------------------------------------------------------------------------
 boot_one() { # key
@@ -210,7 +226,9 @@ if [ "$DRY" = 0 ] && [ -e "$SLOTS" ] && [ "$KILL_RUNNING" = 0 ]; then
   fi
 fi
 for k in $LABELS_ORDER; do
-  [ "$k" = agent ] || boot_one "$k"
+  [ "$k" != agent ] || continue
+  [ "$k" != lima-vm ] || [ "$NO_LINUX" = 0 ] || { log "no Linux lane: no lima-vm daemon to stop"; continue; }
+  boot_one "$k"
 done
 
 # ---- 3. running macOS work ---------------------------------------------------------------------------
@@ -228,7 +246,12 @@ fi
 
 # ---- 4. the VM (must succeed before the plists go) ---------------------------------------------------
 VM_FAILED=0
-if user_exists && [ -x "$LIMACTL" ]; then
+if [ "$NO_LINUX" = 1 ]; then
+  log "no Linux lane (--no-linux): no VM to stop or delete; limactl is not used"
+elif [ ! -e "$(plist_of lima-vm)" ] && [ ! -L "$(plist_of lima-vm)" ] && [ "$(vm_dir_state)" = absent ]; then
+  # no daemon plist and root can see that the VM directory is not there: nothing to delete, and limactl is not needed
+  log "VM ${VM_NAME}: no lima-vm plist and ${CI_HOME}/.lima/${VM_NAME} is absent; nothing to delete (limactl not consulted)"
+elif user_exists && [ -x "$LIMACTL" ]; then
   st=""
   if [ "$DRY" = 0 ]; then st="$(as_ci "$LIMACTL" list --format '{{.Status}}' "$VM_NAME" 2>/dev/null)" || st=""; fi
   if [ "$DRY" = 1 ]; then

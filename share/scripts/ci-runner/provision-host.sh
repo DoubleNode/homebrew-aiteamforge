@@ -16,6 +16,10 @@
 #   --linux-count <N>    Linux runners in the VM (default 2).
 #   --vm-cpus <N> / --vm-memory <GiB>   VM size (default 4 / 6; disk fixed 60GiB).
 #   --no-macos           Linux side only: no macOS runner, no macOS daemon.
+#   --no-linux           macOS side only (XACA-1461): no Lima, no VM, no guest stages,
+#                        no lima-vm daemon, no guest JIT scripts. The ci-runner user,
+#                        macOS runner + daemon, pool agent and reporter stay. Combining
+#                        it with --no-macos leaves nothing to provision: usage error (rc 2).
 #   --label <extra>      Extra runner label, repeatable (default: none).
 #   --legacy-names       Keep the pre-XACA-1436 unsuffixed VM/daemon names
 #                        (ci-linux, com.doublenode.ci-runner.*). Only for the
@@ -137,6 +141,7 @@ MANIFEST_DIR="${CIH_STATE_DIR:-/usr/local/etc/ci-runner}"   # XACA-1440 pause ma
 HOST=""
 LEGACY_NAMES=0
 NO_MACOS=0
+NO_LINUX=0
 EXTRA_LABELS=""        # comma-joined --label values
 VM_NAME=""             # derived unless --vm-name
 VM_CPUS=4
@@ -243,6 +248,8 @@ Host shape (all optional except --host):
   --vm-memory <GiB>    VM memory in GiB (default 6)
   --vm-name <name>     override the derived VM name (ci-linux-<host>)
   --no-macos           skip the macOS runner (and its daemon) entirely
+  --no-linux           skip the Lima VM, the guest and its runners entirely (macOS side only);
+                       not combinable with --no-macos or --baseline-only
   --label <extra>      extra runner label, repeatable
   --legacy-names       unsuffixed VM/daemon names (M1Mini wrapper only)
   --no-register        register no GitHub runner (VM + baseline + cache + reporter only);
@@ -292,6 +299,7 @@ while [ $# -gt 0 ]; do
     --vm-memory) [ $# -ge 2 ] || { usage >&2; exit 2; }; need_uint "$1" "$2"; VM_MEMORY_GIB="$2"; shift 2 ;;
     --label) [ $# -ge 2 ] || { usage >&2; exit 2; }; need_name "$1" "$2"; EXTRA_LABELS="${EXTRA_LABELS:+${EXTRA_LABELS},}$2"; shift 2 ;;
     --no-macos) NO_MACOS=1; shift ;;
+    --no-linux) NO_LINUX=1; shift ;;
     --legacy-names) LEGACY_NAMES=1; shift ;;
     --no-register) NO_REGISTER=1; shift ;;
     --with-agent) WITH_AGENT=1; shift ;;
@@ -312,6 +320,19 @@ case "$HOST" in
   '') echo "provision-host.sh: --host <name> is required" >&2; usage >&2; exit 2 ;;
   [!a-z0-9]*|*[!a-z0-9-]*|*-) echo "provision-host.sh: --host must match [a-z0-9]([a-z0-9-]*[a-z0-9])?, got '${HOST}'" >&2; exit 2 ;;
 esac
+
+# XACA-1461: --no-linux --no-macos leaves nothing to provision, and --baseline-only is the
+# Linux guest baseline only. Both are usage errors, checked before any side effect (dry-run too).
+if [ "$NO_LINUX" = "1" ] && [ "$NO_MACOS" = "1" ]; then
+  echo "provision-host.sh: --no-linux and --no-macos together leave nothing to provision" >&2
+  usage >&2
+  exit 2
+fi
+if [ "$NO_LINUX" = "1" ] && [ "$MODE" = "baseline-only" ]; then
+  echo "provision-host.sh: --no-linux cannot be combined with --baseline-only (the guest baseline is the Linux side)" >&2
+  usage >&2
+  exit 2
+fi
 
 # --legacy-names reproduces M1Mini's live unsuffixed VM/daemon names. On any
 # other host it would plan a colliding `ci-linux` VM (and its 6 GiB default),
@@ -515,11 +536,14 @@ resolve_runner_try() {
   # shellcheck source=/dev/null
   . "$lib"
   # A runner staged earlier lets a refresh that cannot reach GitHub KEEP it rather than fall back to an older pin.
-  if ci_runner_manifest_record "$HOST" 2>/dev/null && [ -n "$CI_RR_LINUX" ]; then
-    set -- $CI_RR_LINUX; kv="$1"; ksl="$2"
+  if ci_runner_manifest_record "$HOST" 2>/dev/null && { [ -n "$CI_RR_LINUX" ] || { [ "$NO_LINUX" = "1" ] && [ -n "$CI_RR_OSX" ]; }; }; then
+    if [ "$NO_LINUX" = "1" ]; then set -- $CI_RR_OSX; else set -- $CI_RR_LINUX; fi
+    kv="$1"; ksl="$2"
     if [ -n "$CI_RR_OSX" ]; then set -- $CI_RR_OSX; if [ "$1" = "$kv" ]; then kso="$2"; fi; fi
     # --no-macos hosts record no macOS runner; the macOS digest is unused there, so any valid digest will do.
     if [ "$NO_MACOS" = "1" ] && [ -z "$kso" ]; then kso="$ksl"; fi
+    # --no-linux hosts record no Linux runner: the kept digest is the macOS one, and the unused Linux digest mirrors it.
+    if [ "$NO_LINUX" = "1" ]; then kso="$ksl"; fi
     kat="$CI_RR_CHECKED_AT"
   fi
   ci_runner_resolve "${_PH_DIR}/runner-pin.conf" "${RUNNER_VERSION:-}" "$kv" "$ksl" "$kso" "$kat" || return 1
@@ -676,6 +700,21 @@ reporter_linux_runners() { # "<host>-linux-1=/opt/actions-runner-1 ..."
 # The plist <dict> body for the macOS side. Under --no-macos the reporter gets
 # an explicitly EMPTY CI_RUNNER_MAC_RUNNER (set-but-empty = "no macOS runner";
 # unset would fall back to the M1Mini default and report a phantom runner).
+# The Linux side of the plist (XACA-1461). Under --no-linux the reporter gets an explicitly EMPTY
+# CI_RUNNER_VM_NAME (set-but-empty = "this host has no VM"; unset would fall back to `ci-linux`) and an
+# empty CI_RUNNER_LINUX_RUNNERS / CI_RUNNER_LABELS_LINUX, the Linux twin of reporter_mac_env's override.
+reporter_linux_env() { # linux_runners
+  if [ "$NO_LINUX" = "1" ]; then
+    printf '    <key>CI_RUNNER_VM_NAME</key><string></string>\n'
+    printf '    <key>CI_RUNNER_LINUX_RUNNERS</key><string></string>\n'
+    printf '    <key>CI_RUNNER_LABELS_LINUX</key><string></string>\n'
+  else
+    printf '    <key>CI_RUNNER_VM_NAME</key><string>%s</string>\n' "$VM_NAME"
+    printf '    <key>CI_RUNNER_LINUX_RUNNERS</key><string>%s</string>\n' "$1"
+    printf '    <key>CI_RUNNER_LABELS_LINUX</key><string>self-hosted,Linux,ARM64,%s</string>\n' "$RUNNER_LABELS"
+  fi
+}
+
 reporter_mac_env() {
   if [ "$NO_REGISTER" = "1" ]; then
     # XACA-1442: nothing is registered, so there is no persistent macOS runner
@@ -692,8 +731,8 @@ reporter_mac_env() {
 }
 
 plist_reporter() {
-  local linux_runners mac_env
-  linux_runners=$(reporter_linux_runners)
+  local linux_env mac_env
+  linux_env=$(reporter_linux_env "$(reporter_linux_runners)")
   mac_env=$(reporter_mac_env)
   cat <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -714,9 +753,7 @@ plist_reporter() {
     <key>HOME</key><string>${CI_HOME}</string>
     <key>PATH</key><string>${CI_PATH}</string>
     <key>CI_RUNNER_MACHINE</key><string>${REPORTER_MACHINE}</string>
-    <key>CI_RUNNER_VM_NAME</key><string>${VM_NAME}</string>
-    <key>CI_RUNNER_LINUX_RUNNERS</key><string>${linux_runners}</string>
-    <key>CI_RUNNER_LABELS_LINUX</key><string>self-hosted,Linux,ARM64,${RUNNER_LABELS}</string>
+${linux_env}
     <key>CI_RUNNER_DISK_PATH</key><string>${CI_HOME}</string>
 ${mac_env}
   </dict>
@@ -873,6 +910,7 @@ GUEST
 # ── Stages ────────────────────────────────────────────────────────────────
 check_no_host_mounts() {
   local cfg mounts
+  if [ "$NO_LINUX" = "1" ]; then log "VM isolation check skipped (--no-linux)"; return 0; fi
   cfg=$(as_ci "$LIMACTL" list --format '{{len .Config.Mounts}}' "$VM_NAME")
   [ "$cfg" = "0" ] || die "VM ${VM_NAME} has ${cfg} host mount(s) configured; refusing to continue. Delete it (limactl delete -f ${VM_NAME}) and re-run."
   mounts=$(guest_sh 'mount | grep -Ei "virtiofs|9p|sshfs" || true')
@@ -882,6 +920,7 @@ check_no_host_mounts() {
 
 stage_vm() {
   local state
+  if [ "$NO_LINUX" = "1" ]; then log "Lima VM skipped (--no-linux)"; return 0; fi
   state=$(vm_state)
   if [ "$state" = "absent" ]; then
     log "creating Lima VM ${VM_NAME} (${VM_CPUS} CPU / ${VM_MEMORY} / ${VM_DISK}, no mounts)"
@@ -893,6 +932,7 @@ stage_vm() {
 
 stage_vm_running() {
   local i state
+  if [ "$NO_LINUX" = "1" ]; then log "Lima VM start/daemon skipped (--no-linux)"; return 0; fi
   if [ "$MODE" = "baseline-only" ]; then
     state=$(vm_state)
     [ "$state" = "Running" ] || as_ci "$LIMACTL" start --tty=false "$VM_NAME"
@@ -925,12 +965,14 @@ stage_vm_running() {
 }
 
 stage_guest_baseline() {
+  if [ "$NO_LINUX" = "1" ]; then log "guest baseline skipped (--no-linux)"; return 0; fi
   log "guest baseline (apt packages, runner user, sudoers)"
   guest_baseline_script | guest sudo bash -s
 }
 
 stage_linux_runners() {
   local version="$1" register="$2" i name
+  if [ "$NO_LINUX" = "1" ]; then log "Linux runners skipped (--no-linux)"; return 0; fi
   guest_runner_script | guest sudo install -m 755 /dev/stdin "$GUEST_SCRIPT"
   i=1
   while [ "$i" -le "$LINUX_RUNNER_COUNT" ]; do
@@ -1163,6 +1205,7 @@ stage_reporter() {
 # stage_linux_runners: the file travels on stdin, never in argv.
 stage_guest_jit() {
   local f
+  if [ "$NO_LINUX" = "1" ]; then log "guest JIT scripts skipped (--no-linux)"; return 0; fi
   [ -f "$GUEST_JIT_SRC" ] || die "guest JIT script source not found: ${GUEST_JIT_SRC}"
   [ -f "$JOB_STARTED_SRC" ] || die "job-started hook source not found: ${JOB_STARTED_SRC}"
   log "guest JIT scripts: ${GUEST_JIT_DEST}, ${GUEST_JOB_STARTED_DEST}"
@@ -1209,11 +1252,12 @@ PY
 # the --host regex, VM_NAME by need_name, the URL by agent_url_ok, slots are ints;
 # sendPauseMarker is a bare JSON boolean picked from a fixed pair (true/false), never from input.
 agent_cfg_json() { # serverUrl
-  local mac=1 pm=true
+  local mac=1 pm=true lin="$LINUX_RUNNER_COUNT" vm="$VM_NAME"
   if [ "$NO_MACOS" = "1" ]; then mac=0; fi
+  if [ "$NO_LINUX" = "1" ]; then lin=0; vm=""; fi
   if [ "$SEND_PAUSE_MARKER" = "0" ]; then pm=false; fi
   printf '{"serverUrl": "%s", "machine": "%s", "vmName": "%s", "linuxSlots": %s, "macSlots": %s, "sendPauseMarker": %s}\n' \
-    "$1" "$HOST" "$VM_NAME" "$LINUX_RUNNER_COUNT" "$mac" "$pm"
+    "$1" "$HOST" "$vm" "$lin" "$mac" "$pm"
 }
 
 stage_agent() {
@@ -1257,10 +1301,11 @@ do_status() {
   log "== macOS daemons =="
   for l in "$LABEL_VM" "$LABEL_MAC"; do
     [ "$nomac" = "0" ] || [ "$l" != "$LABEL_MAC" ] || continue
+    [ "$NO_LINUX" = "0" ] || [ "$l" != "$LABEL_VM" ] || continue
     st=$(daemon_state "$l"); log "  ${l}: ${st}"
   done
-  # lima-vm job is run-once: loaded-idle is its healthy state.
-  [ "$(daemon_state "$LABEL_VM")" != "not-loaded" ] || rc=1
+  # lima-vm job is run-once: loaded-idle is its healthy state. (--no-linux: no such daemon exists.)
+  [ "$NO_LINUX" = "1" ] || [ "$(daemon_state "$LABEL_VM")" != "not-loaded" ] || rc=1
   if [ "$nomac" = "1" ]; then
     log "  macOS runner: not provisioned ($([ "$NO_MACOS" = "1" ] && echo --no-macos || echo --no-register))"
   else
@@ -1284,6 +1329,12 @@ do_status() {
     if [ -f "$AGENT_DEST" ]; then log "  script: ${AGENT_DEST}"; else log "  script MISSING: ${AGENT_DEST}"; rc=1; fi
     if [ -f "$AGENT_CFG" ]; then log "  config: ${AGENT_CFG} present"; else log "  config MISSING: ${AGENT_CFG}"; rc=1; fi
     if [ -f "$AGENT_KEY" ]; then log "  key: ${AGENT_KEY} present (value never shown)"; else log "  key MISSING: ${AGENT_KEY}"; rc=1; fi
+  fi
+  if [ "$NO_LINUX" = "1" ]; then
+    log "== Linux VM =="
+    log "  not provisioned (--no-linux)"
+    log "GitHub-side view:  gh api repos/DoubleNode/dev-team/actions/runners --jq '.runners[]|[.name,.status,([.labels[].name]|join(\",\"))]|@tsv'"
+    return "$rc"
   fi
   log "== Linux VM ${VM_NAME} =="
   if ! can_as_ci; then
@@ -1318,7 +1369,8 @@ do_status() {
 payload_preflight() {
   local f missing="" need="$REPORTER_SRC"
   if [ "$WITH_AGENT" = "1" ]; then
-    need="$need $AGENT_SRC $GUEST_JIT_SRC $JOB_STARTED_SRC"
+    need="$need $AGENT_SRC $JOB_STARTED_SRC"
+    [ "$NO_LINUX" = "1" ] || need="$need $GUEST_JIT_SRC"
     [ "$NO_MACOS" = "1" ] || need="$need $MAC_JIT_SRC"
   fi
   for f in $need; do [ -f "$f" ] || missing="${missing} ${f}"; done
@@ -1333,18 +1385,22 @@ do_dry_run() {
     linux_idx="${linux_idx:+${linux_idx},}${i}"
     i=$((i + 1))
   done
-  plan "preflight: macOS arm64, user ${CI_USER} exists: $(id -u "$CI_USER" >/dev/null 2>&1 && echo yes || echo 'NO (run create-ci-runner-user.sh first)'); limactl at ${LIMACTL}: $([ -x "$LIMACTL" ] && echo yes || echo NO)"
+  plan "preflight: macOS arm64, user ${CI_USER} exists: $(id -u "$CI_USER" >/dev/null 2>&1 && echo yes || echo 'NO (run create-ci-runner-user.sh first)'); $([ "$NO_LINUX" = "1" ] && echo 'no Linux side (--no-linux)' || echo "limactl at ${LIMACTL}: $([ -x "$LIMACTL" ] && echo yes || echo NO)")"
   if [ -n "$TOKEN_FILE" ]; then plan "token file ${TOKEN_FILE}: $([ -s "$TOKEN_FILE" ] && echo present || echo MISSING) (would be deleted on exit)"; else plan "token file: none given (fine when every runner is already registered; required to register a missing one)"; fi
   plan "resolve actions/runner: \$RUNNER_VERSION, else GitHub latest + its published sha256 (no credentials); if GitHub cannot be asked: keep the staged runner, else the PINNED fallback in runner-pin.conf (announced, sha256-verified); refuse if nothing can be verified. Would use: $( if resolve_runner_try; then echo "${VERSION} (${RUNNER_SOURCE})${CI_RUNNER_NOTICE:+ - NOTICE: ${CI_RUNNER_NOTICE}}"; else echo "REFUSED: ${CI_RUNNER_WHY}"; fi )"
-  st=$(vm_state)
-  plan "VM ${VM_NAME}: current state ${st}$([ "$st" = unknown ] && echo ' (needs sudo to read)')"
-  plan "  would: if absent, limactl create ${VM_NAME} --mount-none (vz, ${VM_CPUS} CPU / ${VM_MEMORY} / ${VM_DISK}, containerd off)"
-  plan "  would: write ${PLIST_VM} ($([ -f "$PLIST_VM" ] && echo exists || echo absent)); daemon $(daemon_state "$LABEL_VM"); load it, wait Running, hold 60 s if freshly loaded"
-  plan "  would: verify 0 host mounts in config and in guest (virtiofs/9p/sshfs)"
-  # The package list lives only in the guest script (single copy, pinned by the
-  # XACA-1386 parity check), so read it from there rather than restating it.
-  plan "guest: apt baseline $(guest_baseline_script | sed -n 's/^PKGS="\(.*\)"$/\1/p') (skips if present); user runner + /etc/sudoers.d/90-runner"
-  plan "guest: ${linux_names} in /opt/actions-runner-{${linux_idx}}: download+sha256 verify, installdependencies.sh, config.sh --labels ${RUNNER_LABELS} (skip if .runner exists), svc.sh install/start"
+  if [ "$NO_LINUX" = "1" ]; then
+    plan "Linux: SKIPPED (--no-linux): no Lima VM, no ${LABEL_VM} daemon, no guest packages or runners"
+  else
+    st=$(vm_state)
+    plan "VM ${VM_NAME}: current state ${st}$([ "$st" = unknown ] && echo ' (needs sudo to read)')"
+    plan "  would: if absent, limactl create ${VM_NAME} --mount-none (vz, ${VM_CPUS} CPU / ${VM_MEMORY} / ${VM_DISK}, containerd off)"
+    plan "  would: write ${PLIST_VM} ($([ -f "$PLIST_VM" ] && echo exists || echo absent)); daemon $(daemon_state "$LABEL_VM"); load it, wait Running, hold 60 s if freshly loaded"
+    plan "  would: verify 0 host mounts in config and in guest (virtiofs/9p/sshfs)"
+    # The package list lives only in the guest script (single copy, pinned by the
+    # XACA-1386 parity check), so read it from there rather than restating it.
+    plan "guest: apt baseline $(guest_baseline_script | sed -n 's/^PKGS="\(.*\)"$/\1/p') (skips if present); user runner + /etc/sudoers.d/90-runner"
+    plan "guest: ${linux_names} in /opt/actions-runner-{${linux_idx}}: download+sha256 verify, installdependencies.sh, config.sh --labels ${RUNNER_LABELS} (skip if .runner exists), svc.sh install/start"
+  fi
   if [ "$NO_MACOS" = "1" ]; then
     plan "macOS: SKIPPED (--no-macos): no macOS runner, no ${LABEL_MAC} daemon"
   else
@@ -1366,12 +1422,14 @@ do_dry_run() {
   lint=$(mktemp /tmp/ci-runner-dryrun.XXXXXX)
   for f in plist_vm plist_mac plist_reporter; do
     [ "$NO_MACOS" = "0" ] || [ "$f" != "plist_mac" ] || continue
+    [ "$NO_LINUX" = "0" ] || [ "$f" != "plist_vm" ] || continue
     "$f" >"$lint"
     if plutil -lint "$lint" >/dev/null; then plan "${f}: generated plist passes plutil -lint"; else plan "${f}: plist LINT FAILED"; fi
   done
   rm -f "$lint"
   if [ "$NO_REGISTER" = "1" ]; then
     plan "--no-register: register NO runner (no token needed): guest runner scripts/tarball cache only, no macOS runner extract/daemon; reporter reports no macOS runner"
+    [ "$NO_LINUX" != "1" ] || plan "--no-register with --no-linux: macOS tarball cache only; reporter reports neither a VM nor a Linux runner"
   fi
   if [ "$WITH_AGENT" = "1" ]; then
     local k="none given (keeps an existing ${AGENT_KEY})" kc=0 url alint
@@ -1384,9 +1442,9 @@ do_dry_run() {
     fi
     url=$(agent_server_url)
     plan "agent (XACA-1442): install ${AGENT_SRC##*/} -> ${AGENT_DEST} (root, 755: $([ -f "$AGENT_DEST" ] && echo exists || echo absent)); runs as ROOT (no UserName)"
-    plan "  would: write ${AGENT_CFG} (root:wheel 644): serverUrl ${url:-<UNRESOLVED: pass --server-url>}, machine ${HOST}, vmName ${VM_NAME}, linuxSlots ${LINUX_RUNNER_COUNT}, macSlots $([ "$NO_MACOS" = "1" ] && echo 0 || echo 1), sendPauseMarker $([ "$SEND_PAUSE_MARKER" = "0" ] && echo false || echo true)"
+    plan "  would: write ${AGENT_CFG} (root:wheel 644): serverUrl ${url:-<UNRESOLVED: pass --server-url>}, machine ${HOST}, vmName $([ "$NO_LINUX" = "1" ] && echo '' || echo "$VM_NAME"), linuxSlots $([ "$NO_LINUX" = "1" ] && echo 0 || echo "$LINUX_RUNNER_COUNT"), macSlots $([ "$NO_MACOS" = "1" ] && echo 0 || echo 1), sendPauseMarker $([ "$SEND_PAUSE_MARKER" = "0" ] && echo false || echo true)"
     plan "  would: key -> ${AGENT_KEY} (root:wheel 600, via stdin, never argv): ${k}"
-    plan "  would: guest ${GUEST_JIT_DEST} + ${GUEST_JOB_STARTED_DEST}; $([ "$NO_MACOS" = "1" ] && echo 'macOS JIT scripts SKIPPED (--no-macos)' || echo "host ${MAC_JIT_DEST} + ${MAC_JOB_STARTED_DEST}")"
+    plan "  would: $([ "$NO_LINUX" = "1" ] && echo 'guest JIT scripts SKIPPED (--no-linux)' || echo "guest ${GUEST_JIT_DEST} + ${GUEST_JOB_STARTED_DEST}"); $([ "$NO_MACOS" = "1" ] && echo 'macOS JIT scripts SKIPPED (--no-macos)' || echo "host ${MAC_JIT_DEST} + ${MAC_JOB_STARTED_DEST}")"
     plan "  would: write ${PLIST_AGENT} ($([ -f "$PLIST_AGENT" ] && echo exists || echo absent)); daemon $(daemon_state "$LABEL_AGENT"); KeepAlive, state ${AGENT_STATE_DIR}, logs ${AGENT_LOG_DIR}"
     alint=$(mktemp /tmp/ci-runner-dryrun.XXXXXX)
     plist_agent >"$alint"
@@ -1419,15 +1477,19 @@ write_provision_manifest() {
   ci_provision_entry libexec client/ci-runner-reporter.sh "$REPORTER_DEST" "$REPORTER_SRC" || ok=0
   if [ "$WITH_AGENT" = "1" ]; then
     ci_provision_entry libexec client/ci-pool-agent.py "$AGENT_DEST" "$AGENT_SRC" || ok=0
-    ci_provision_entry guest client/ci-runner-jit-guest.sh "$GUEST_JIT_DEST" "$GUEST_JIT_SRC" || ok=0
-    ci_provision_entry guest client/ci-runner-job-started.sh "$GUEST_JOB_STARTED_DEST" "$JOB_STARTED_SRC" || ok=0
+    if [ "$NO_LINUX" != "1" ]; then
+      ci_provision_entry guest client/ci-runner-jit-guest.sh "$GUEST_JIT_DEST" "$GUEST_JIT_SRC" || ok=0
+      ci_provision_entry guest client/ci-runner-job-started.sh "$GUEST_JOB_STARTED_DEST" "$JOB_STARTED_SRC" || ok=0
+    fi
     if [ "$NO_MACOS" != "1" ]; then
       ci_provision_entry libexec client/ci-runner-jit-macos.sh "$MAC_JIT_DEST" "$MAC_JIT_SRC" || ok=0
       ci_provision_entry libexec client/ci-runner-job-started.sh "$MAC_JOB_STARTED_DEST" "$JOB_STARTED_SRC" || ok=0
     fi
   fi
   # XACA-1443-014: the staged actions/runner. R lines are part of provision_version; runner_checked_at is not.
-  ci_provision_runner_entry linux-arm64 "$VERSION" "$RUNNER_SHA_LINUX" "$RUNNER_SOURCE" || ok=0
+  if [ "$NO_LINUX" != "1" ]; then
+    ci_provision_runner_entry linux-arm64 "$VERSION" "$RUNNER_SHA_LINUX" "$RUNNER_SOURCE" || ok=0
+  fi
   if [ "$NO_MACOS" != "1" ]; then
     ci_provision_runner_entry osx-arm64 "$VERSION" "$RUNNER_SHA_OSX" "$RUNNER_SOURCE" || ok=0
   fi
@@ -1461,7 +1523,7 @@ esac
 [ "$MODE" = "baseline-only" ] || payload_preflight
 [ "$(uname -s)" = "Darwin" ] || die "macOS only"
 [ "$(uname -m)" = "arm64" ] || die "Apple Silicon only"
-[ -x "$LIMACTL" ] || die "limactl not found at ${LIMACTL}"
+[ "$NO_LINUX" = "1" ] || [ -x "$LIMACTL" ] || die "limactl not found at ${LIMACTL}"
 id "$CI_USER" >/dev/null 2>&1 || die "user ${CI_USER} missing; run create-ci-runner-user.sh first"
 
 REGISTER=1
@@ -1506,7 +1568,7 @@ else
     # Fail fast on the cases readable without booting the VM; an unregistered
     # Linux runner inside an existing VM fails later with the same advice.
     [ "$NO_MACOS" = "1" ] || [ -f "${MAC_RUNNER_DIR}/.runner" ] || die "${MAC_RUNNER_NAME} is not registered; a registration token is required (--token-file)"
-    [ "$(vm_state)" != "absent" ] || die "VM ${VM_NAME} does not exist; a fresh provision needs --token-file"
+    [ "$NO_LINUX" = "1" ] || [ "$(vm_state)" != "absent" ] || die "VM ${VM_NAME} does not exist; a fresh provision needs --token-file"
     log "no --token-file: converging existing runners only (nothing will be registered)"
   fi
 fi

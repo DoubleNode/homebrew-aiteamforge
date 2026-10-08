@@ -2416,8 +2416,10 @@ check_ci_capability() {
     return 0
   fi
 
-  local rc=0 line first detail
+  local rc=0 line first detail lane_note=""
   ci_capability_state || rc=$?
+  # XACA-1461: a macOS-only host (lane=macos) has no Linux VM by design; say so, so "enabled" is not read as "VM + runners".
+  [ "${CI_STATUS_LANE:-}" != macos ] || lane_note=" (macOS-only lane)"
   # first non-note reason (the verdict line); notes and detail stay in --verbose
   first=$(printf '%s\n' "${CI_STATUS_REASONS}" | grep -v '^note:' | head -n 1 || true)
   [ -n "$first" ] || first="${CI_STATUS_REASONS%%
@@ -2431,12 +2433,12 @@ check_ci_capability() {
       elif [ "$CI_STATUS_STATE" = dormant ]; then
         check_result pass "CI capability: dormant (shipped default; 'aiteamforge ci enable' turns it on)" "$detail"
       else
-        check_result pass "CI capability: ${CI_STATUS_STATE}, provision ${CI_STATUS_SKEW} with this release" "$detail"
+        check_result pass "CI capability: ${CI_STATUS_STATE}${lane_note}, provision ${CI_STATUS_SKEW} with this release" "$detail"
       fi
       ;;
     warn)
       if [ "$CI_STATUS_STATE" = enabled ] || [ "$CI_STATUS_STATE" = paused ]; then
-        check_result warn "CI capability: ${CI_STATUS_STATE}, provision ${CI_STATUS_SKEW} (${first})" "$detail"
+        check_result warn "CI capability: ${CI_STATUS_STATE}${lane_note}, provision ${CI_STATUS_SKEW} (${first})" "$detail"
       else
         check_result warn "CI capability: ${CI_STATUS_STATE} (${first})" "$detail"
       fi

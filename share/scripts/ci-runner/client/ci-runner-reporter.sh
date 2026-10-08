@@ -74,9 +74,12 @@ GUEST_SUDO="${CI_RUNNER_GUEST_SUDO-sudo -n}"
 MAC_RUNNER="${CI_RUNNER_MAC_RUNNER-m1mini-macos-1=/Users/ci-runner/actions-runner-macos}"
 MAC_LABEL="${CI_RUNNER_MAC_LABEL:-com.doublenode.ci-runner.macos}"
 MAC_USER="${CI_RUNNER_MAC_USER:-ci-runner}"
-LINUX_RUNNERS="${CI_RUNNER_LINUX_RUNNERS:-m1mini-linux-1=/opt/actions-runner-1 m1mini-linux-2=/opt/actions-runner-2}"
+# `-` not `:-` (XACA-1461): provision-host.sh --no-linux writes these as set-but-EMPTY ("no Linux side"); `:-` would turn
+# that back into the m1mini defaults and report two phantom guest runners. Unset still gets the defaults.
+LINUX_RUNNERS="${CI_RUNNER_LINUX_RUNNERS-m1mini-linux-1=/opt/actions-runner-1 m1mini-linux-2=/opt/actions-runner-2}"
+[ -n "$VM_NAME" ] || LINUX_RUNNERS=""   # no VM => no guest runners, whatever else says
 LABELS_MAC="${CI_RUNNER_LABELS_MAC:-self-hosted,macOS,ARM64,m1mini}"
-LABELS_LINUX="${CI_RUNNER_LABELS_LINUX:-self-hosted,Linux,ARM64,m1mini}"
+LABELS_LINUX="${CI_RUNNER_LABELS_LINUX-self-hosted,Linux,ARM64,m1mini}"
 DEFAULT_REPO="${CI_RUNNER_REPO:-DoubleNode/dev-team}"
 BUSY_MAX_AGE="${CI_RUNNER_BUSY_MAX_AGE:-21600}"
 
