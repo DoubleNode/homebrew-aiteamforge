@@ -34,18 +34,19 @@ const PUB = path.join(__dirname, '..', 'public');
 const OLD_V1 = process.env.XACA1393_OLD_V1;
 const OLD_V2 = process.env.XACA1393_OLD_V2;
 const ACC = 'acc_0000000000000001';
+const ACC2 = 'acc_0000000000000002';
 const MID = { a: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', b: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', c: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc' };
 
-function payload(pct) {
+function payload(pct, n) {
     const m = (id, host, nick) => ({ machine_id: id, hostname: host, nickname: nick, status: 'online', display_status: 'online',
         power_state: null, power_reason: null, session_count: 0, sessions: [], uptime_history: [], system: {} });
     return {
         fleet: { total_machines: 3, online_machines: 3, offline_machines: 0, total_sessions: 0, divisions: {},
             machines: [m(MID.a, 'host-alpha', null), m(MID.b, 'host-bravo', null), m(MID.c, 'host-charlie', 'Charlie-Nick')] },
         activityLog: [],
-        accessories: [{ id: ACC, type: 'ups', name: 'UPS-One', nickname: null, display_name: 'UPS-One', data_link_machine_id: null,
+        accessories: [[ACC, 'UPS-One'], [ACC2, 'UPS-Two']].slice(0, n || 1).map((p) => ({ id: p[0], type: 'ups', name: p[1], nickname: null, display_name: p[1], data_link_machine_id: null,
             attached_machine_ids: [], state: 'ac', state_since: null, history: [],
-            last_reading: { source: 'ups', percent: pct, charging: false, minutes_remaining: 40, present: true, observedAt: '2026-10-08T12:00:00.000Z' } }],
+            last_reading: { source: 'ups', percent: pct, charging: false, minutes_remaining: 40, present: true, observedAt: '2026-10-08T12:00:00.000Z' } })),
         last_update: '2026-10-08T12:00:00.000Z'
     };
 }
@@ -62,9 +63,9 @@ async function until(fn, ms) {
     return false;
 }
 
-async function boot(tree, htmlOverride) {
+async function boot(tree, htmlOverride, nAcc) {
     const T = Object.assign({}, TREES[tree], htmlOverride ? { html: htmlOverride } : {});
-    const state = { data: payload(85) };
+    const state = { data: payload(85, nAcc) };
     const dom = new JSDOM(fs.readFileSync(path.join(PUB, T.html), 'utf8'),
         { url: 'http://localhost:1/' + T.html, runScripts: 'outside-only', pretendToBeVisual: true });
     const w = dom.window;
@@ -224,3 +225,163 @@ test('v1: shows type, CHARGING and LAST OBSERVED like lcars2', async () => {
         assert.ok(pg.d.querySelector('.accessory-detach-btn, .accessory-card') !== null);
     } finally { pg.close(); }
 });
+
+// ---------------------------------------------------------------------------
+// Round 2 (review): the stable-selection class over ALL 5 pages, table-driven.
+// Rows: (a) changed-reading poll, (b) picker focused during the rebuild,
+// (c) TWO accessories: a write on card B, then ATTACH on card A must send card
+// A's own pick (never machine[0], never card B's machine), (d) placeholder.
+// ---------------------------------------------------------------------------
+const PAGES = A11Y_PAGES.map((p) => ({ tree: p[0], page: p[1] }));
+const labelOpt = (sel, label) => Array.from(sel.options).find((o) => o.textContent === label);
+const cards = (pg) => Array.from(pg.d.getElementById(pg.T.content).querySelectorAll('.accessory-card'));
+const stubFetch = (pg, sent, onWrite) => {
+    pg.w.fleetApiFetch = async (url, init) => {
+        sent.push({ url: String(url), method: init.method });
+        if (onWrite) onWrite(String(url), init.method);
+        return { ok: true, status: 200, json: async () => ({}) };
+    };
+};
+
+for (const { tree, page } of PAGES) {
+    const tag = page + ': ';
+
+    test(tag + '(a) changed-reading poll keeps the pick; ATTACH sends it', async () => {
+        const pg = await boot(tree, page, 2);
+        try {
+            const sent = []; stubFetch(pg, sent);
+            const sA = cards(pg)[0].querySelector(SEL);
+            sA.value = labelOpt(sA, 'Charlie-Nick').value;
+            await pg.poll(71);
+            assert.match(pg.d.getElementById(pg.T.content).textContent, /71%/);
+            const sA2 = cards(pg)[0].querySelector(SEL);
+            assert.equal(sA2.options[sA2.selectedIndex].textContent, 'Charlie-Nick');
+            cards(pg)[0].querySelector(BTN).click();
+            assert.ok(await until(() => sent.length === 1));
+            assert.ok(sent[0].url.endsWith('/api/accessories/' + ACC + '/machines/' + MID.c), sent[0].url);
+            await sleep(250);
+        } finally { pg.close(); }
+    });
+
+    test(tag + '(b) picker focused during the rebuild keeps the pick', async () => {
+        const pg = await boot(tree, page, 2);
+        try {
+            const sent = []; stubFetch(pg, sent);
+            const sA = cards(pg)[0].querySelector(SEL);
+            sA.value = labelOpt(sA, 'host-bravo').value;
+            sA.focus();
+            assert.equal(pg.d.activeElement, sA);
+            await pg.poll(64);
+            const sA2 = cards(pg)[0].querySelector(SEL);
+            assert.equal(sA2.options[sA2.selectedIndex].textContent, 'host-bravo');
+            cards(pg)[0].querySelector(BTN).click();
+            assert.ok(await until(() => sent.length === 1));
+            assert.ok(sent[0].url.endsWith('/machines/' + MID.b), sent[0].url);
+            await sleep(250);
+        } finally { pg.close(); }
+    });
+
+    test(tag + '(c) write on card B, poll, then ATTACH on card A sends A\'s own pick', async () => {
+        const pg = await boot(tree, page, 2);
+        try {
+            pg.state.data.accessories[1].attached_machine_ids = [MID.a];
+            await pg.poll(80);
+            await until(() => cards(pg).length === 2 && cards(pg)[1].querySelector('.accessory-detach, .accessory-detach-btn'));
+            const sent = [];
+            stubFetch(pg, sent, (url, method) => {
+                if (method === 'DELETE') pg.state.data.accessories[1].attached_machine_ids = [];
+            });
+            const sA = cards(pg)[0].querySelector(SEL);
+            sA.value = labelOpt(sA, 'Charlie-Nick').value;
+            sA.focus();
+            cards(pg)[1].querySelector('.accessory-detach, .accessory-detach-btn').click();   // write on card B
+            assert.ok(await until(() => sent.length === 1));
+            await sleep(400);                      // post-write refresh settles
+            await pg.poll(55);                     // then a changed-reading poll
+            const sA2 = cards(pg)[0].querySelector(SEL);
+            assert.equal(sA2.options[sA2.selectedIndex].textContent, 'Charlie-Nick', 'card A pick survived card B write + poll');
+            cards(pg)[0].querySelector(BTN).click();
+            assert.ok(await until(() => sent.length === 2));
+            assert.equal(sent[0].method, 'DELETE');
+            assert.ok(sent[0].url.includes('/' + ACC2 + '/machines/' + MID.a), sent[0].url);
+            assert.equal(sent[1].method, 'PUT');
+            assert.ok(sent[1].url.endsWith('/api/accessories/' + ACC + '/machines/' + MID.c), 'card A -> charlie, got ' + sent[1].url);
+            await sleep(250);
+            assert.equal(sent.filter((x) => x.method === 'PUT').length, 1, 'exactly one PUT, none for another machine');
+        } finally { pg.close(); }
+    });
+
+    test(tag + '(d) placeholder selected: ATTACH sends nothing, before and after a poll', async () => {
+        const pg = await boot(tree, page, 2);
+        try {
+            const sent = []; stubFetch(pg, sent);
+            cards(pg)[0].querySelector(BTN).click();
+            await pg.poll(61);
+            assert.equal(cards(pg)[0].querySelector(SEL).value, '');
+            cards(pg)[0].querySelector(BTN).click();
+            await sleep(100);
+            assert.equal(sent.length, 0);
+        } finally { pg.close(); }
+    });
+
+    test(tag + '(e) picked machine leaves the fleet: falls back to the placeholder, ATTACH sends nothing', async () => {
+        const pg = await boot(tree, page, 2);
+        try {
+            const sent = []; stubFetch(pg, sent);
+            const sA = cards(pg)[0].querySelector(SEL);
+            sA.value = labelOpt(sA, 'Charlie-Nick').value;
+            pg.state.data.fleet.machines = pg.state.data.fleet.machines.filter((m) => m.machine_id !== MID.c);
+            await pg.poll(58);
+            const sA2 = cards(pg)[0].querySelector(SEL);
+            assert.equal(sA2.value, '', 'placeholder, not a silently-different machine');
+            assert.equal(labelOpt(sA2, 'Charlie-Nick'), undefined, 'departed machine no longer offered');
+            cards(pg)[0].querySelector(BTN).click();
+            await sleep(100);
+            assert.equal(sent.length, 0);
+        } finally { pg.close(); }
+    });
+
+    test(tag + '(f) machines array reverses between polls: pick survives by machine id', async () => {
+        const pg = await boot(tree, page, 2);
+        try {
+            const sent = []; stubFetch(pg, sent);
+            const sA = cards(pg)[0].querySelector(SEL);
+            sA.value = labelOpt(sA, 'host-bravo').value;
+            pg.state.data.fleet.machines.reverse();
+            await pg.poll(57);
+            const sA2 = cards(pg)[0].querySelector(SEL);
+            assert.equal(sA2.options[sA2.selectedIndex].textContent, 'host-bravo', 'followed the id, not the position');
+            cards(pg)[0].querySelector(BTN).click();
+            assert.ok(await until(() => sent.length === 1));
+            assert.ok(sent[0].url.endsWith('/api/accessories/' + ACC + '/machines/' + MID.b), sent[0].url);
+            await sleep(250);
+        } finally { pg.close(); }
+    });
+
+    // Advisory: keyboard focus is restored to the same control after a rebuild.
+    test(tag + 'focus is restored to select / ATTACH / the same DETACH after a rebuild', async () => {
+        const pg = await boot(tree, page, 2);
+        try {
+            pg.state.data.accessories[0].attached_machine_ids = [MID.a, MID.b];
+            await pg.poll(90);
+            const detachSel = '.accessory-detach, .accessory-detach-btn';
+            const name = (el) => el.getAttribute('aria-label') || '';
+            const focusCases = [
+                ['select', () => cards(pg)[0].querySelector(SEL), (el) => /Machine to attach to UPS-One/.test(name(el))],
+                ['attach', () => cards(pg)[0].querySelector(BTN), (el) => /Attach selected machine to UPS-One/.test(name(el))],
+                ['detach b', () => cards(pg)[0].querySelectorAll(detachSel)[1], (el) => /Detach host-bravo from UPS-One/.test(name(el))]
+            ];
+            let pct = 40;
+            for (const [what, find, ok] of focusCases) {
+                const before = find();
+                before.focus();
+                assert.equal(pg.d.activeElement, before, what + ' focused');
+                await pg.poll(pct--);
+                const now = pg.d.activeElement;
+                assert.notEqual(now, pg.d.body, what + ': focus not dropped to body');
+                assert.notEqual(now, before, what + ': the control really was rebuilt');
+                assert.ok(ok(now), what + ': focus on the equivalent control, got ' + name(now));
+            }
+        } finally { pg.close(); }
+    });
+}

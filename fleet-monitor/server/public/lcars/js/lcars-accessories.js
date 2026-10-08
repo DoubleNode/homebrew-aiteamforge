@@ -152,6 +152,33 @@
         }
     }
 
+    // Keyboard focus: innerHTML replaces the focused control, which drops focus
+    // to <body>. Record which control had it (accessory id + kind, + machine id
+    // for DETACH) and put it back on the equivalent control after the rebuild.
+    function captureFocus(container) {
+        var a = document.activeElement;
+        if (!a || !container.contains(a) || !a.getAttribute) return null;
+        var kind = a.classList.contains('accessory-attach-select') ? 'select'
+            : a.classList.contains('accessory-attach-btn') ? 'attach'
+            : a.classList.contains('accessory-detach-btn') ? 'detach' : null;
+        var accId = a.getAttribute('data-accessory-id');
+        if (!kind || !accId) return null;
+        return { kind: kind, accId: accId, machineId: kind === 'detach' ? a.getAttribute('data-machine-id') : null };
+    }
+
+    function restoreFocus(container, f) {
+        if (!f) return;
+        var cls = f.kind === 'select' ? 'accessory-attach-select'
+            : f.kind === 'attach' ? 'accessory-attach-btn' : 'accessory-detach-btn';
+        var els = container.querySelectorAll('.' + cls);
+        for (var i = 0; i < els.length; i++) {
+            if (els[i].getAttribute('data-accessory-id') !== f.accId) continue;
+            if (f.kind === 'detach' && els[i].getAttribute('data-machine-id') !== f.machineId) continue;
+            if (typeof els[i].focus === 'function') els[i].focus();
+            return;
+        }
+    }
+
     function render(data, container) {
         try {
             container = container || document.getElementById(CONTAINER_ID);
@@ -162,6 +189,7 @@
             // captured below and restored, so UPS readings stay live.
             if (_busy) return;
             captureSelections(container);
+            var focused = captureFocus(container);
 
             var list = (data && Array.isArray(data.accessories)) ? data.accessories : [];
             if (!list.length) {
@@ -172,6 +200,7 @@
             container.innerHTML = '<div class="accessory-grid">' +
                 list.filter(function(a) { return a && typeof a === 'object' && a.id; })
                     .map(function(a) { return cardHtml(a, idx); }).join('') + '</div>';
+            restoreFocus(container, focused);
         } catch (e) {
             if (typeof console !== 'undefined' && console.warn) console.warn('[ACCESSORIES] render failed:', e && e.message);
         }

@@ -1301,6 +1301,41 @@
         });
     }
 
+    // Keyboard focus survives a rebuild too: record the focused control (accessory
+    // id + kind, + machine id for DETACH) via the OLD view, then focus its twin in
+    // the NEW markup if it still exists.
+    function captureAccessoryFocus(container) {
+        const a = document.activeElement;
+        if (!a || !container.contains(a) || !a.getAttribute) return null;
+        const old = accessoriesUi.view;
+        const acc = old.accessories[Number(a.getAttribute('data-acc-idx'))];
+        if (!acc || !acc.id) return null;
+        if (a.classList.contains('accessory-attach-select')) return { accId: acc.id, kind: 'select' };
+        if (a.classList.contains('accessory-attach-btn')) return { accId: acc.id, kind: 'attach' };
+        if (a.classList.contains('accessory-detach')) {
+            const mid = (acc.attached_machine_ids || [])[Number(a.getAttribute('data-attached-idx'))];
+            return mid ? { accId: acc.id, kind: 'detach', machineId: mid } : null;
+        }
+        return null;
+    }
+
+    function restoreAccessoryFocus(container, f, accessories) {
+        if (!f) return;
+        const ai = accessories.findIndex(function(a) { return a && a.id === f.accId; });
+        if (ai === -1) return;
+        const cls = f.kind === 'select' ? 'accessory-attach-select'
+            : f.kind === 'attach' ? 'accessory-attach-btn' : 'accessory-detach';
+        const els = container.querySelectorAll('.' + cls + '[data-acc-idx="' + ai + '"]');
+        for (let i = 0; i < els.length; i++) {
+            if (f.kind === 'detach') {
+                const mid = (accessories[ai].attached_machine_ids || [])[Number(els[i].getAttribute('data-attached-idx'))];
+                if (mid !== f.machineId) continue;
+            }
+            els[i].focus();
+            return;
+        }
+    }
+
     function accessoryMachineName(machines, id) {
         for (let i = 0; i < machines.length; i++) {
             if (machines[i] && machines[i].machine_id === id) {
@@ -1406,6 +1441,7 @@
         if (sig === accessoriesUi.lastSig) return;
         accessoriesUi.lastSig = sig;
         captureAccessorySelections(container);
+        const focused = captureAccessoryFocus(container);
 
         if (!accessories.length) {
             accessoriesUi.view = { accessories: [], machines: machines };
@@ -1417,6 +1453,7 @@
             return acc && acc.id ? buildAccessoryCardHtml(acc, i, machines) : '';
         }).join('');
         labelAccessoryControls(container, accessories, machines);
+        restoreAccessoryFocus(container, focused, accessories);
     }
 
     async function accessoryMutate(accId, machineId, method) {
