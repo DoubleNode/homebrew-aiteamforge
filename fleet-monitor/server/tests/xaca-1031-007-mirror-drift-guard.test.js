@@ -164,6 +164,7 @@ const DRIFT_GUARDED_FUNCTIONS = [
     'isValidPercent',
     'isValidLoadAverageComponent',
     'isValidPositiveInteger',
+    'sanitizePowerBlock', // XACA-1391-004
 ];
 
 for (const fnName of DRIFT_GUARDED_FUNCTIONS) {

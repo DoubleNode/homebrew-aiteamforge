@@ -1773,6 +1773,167 @@ _system_volatile_get() {
     return 0
 }
 
+# ---------------------------------------------------------------------------
+# POWER tier (XACA-1391-002): system.power -- power source plus, when a UPS is
+# visible to pmset, its charge state. ONE `pmset -g ps` call per cycle.
+#
+#   {"source":"ac"|"ups"|"battery",
+#    "ups": {"name","id","percent","charging","minutes_remaining","present"} | null}
+#
+# ABSENT vs NULL (CONTRACT-system-block.md, D7a): the whole `power` block is
+# OMITTED (cache left empty) whenever pmset is missing, exits nonzero, times
+# out, or prints a source string we do not recognise. "Could not read" must
+# NEVER look like "on AC", so an unknown source is NOT defaulted to "ac".
+# `ups: null` is a successful read that found no UPS (no device line, or only
+# a laptop InternalBattery-*, which is not a UPS). A malformed UPS line drops
+# the ups object to null rather than emitting garbage; the source stays valid.
+#
+# `pmset -g ups` has no live status line and is deliberately NOT used.
+# A collected zero (minutes_remaining 0 on a charged battery) is data, not
+# null; null means pmset printed no estimate.
+#
+# Like the other collectors this sets a MODULE-LEVEL cache; call it as a plain
+# statement (not inside $( )) and read it back with _system_power_get.
+_SYSTEM_POWER_JSON=""
+
+_system_collect_power() {
+    _SYSTEM_POWER_JSON=""
+    command -v pmset >/dev/null 2>&1 || return 0
+
+    local pw_tmp="" pw_pid="" pw_i=0 pw_rc=0 pw_out=""
+    pw_tmp="$(mktemp "${TMPDIR:-/tmp}/fleet-power.XXXXXX" 2>/dev/null)" || return 0
+    pmset -g ps >"$pw_tmp" 2>/dev/null &
+    pw_pid=$!
+    # 3s ceiling (30 x 0.1s). pmset normally returns in ~10ms, so the loop
+    # body almost never runs. No `timeout(1)` on stock macOS.
+    while kill -0 "$pw_pid" 2>/dev/null; do
+        if [ "$pw_i" -ge 30 ]; then
+            # SIGKILL, and no `wait`: a pmset that ignores TERM (or sits in
+            # an uninterruptible IOKit call) would otherwise block the whole
+            # reporter for as long as pmset runs. bash reaps the child itself.
+            # disown first so bash prints no "Killed: 9" job notice.
+            disown "$pw_pid" 2>/dev/null || true
+            kill -9 "$pw_pid" 2>/dev/null || true
+            rm "$pw_tmp" 2>/dev/null || true
+            return 0
+        fi
+        sleep 0.1
+        pw_i=$((pw_i + 1))
+    done
+    wait "$pw_pid" 2>/dev/null || pw_rc=$?
+    pw_out="$(cat "$pw_tmp" 2>/dev/null || true)"
+    rm "$pw_tmp" 2>/dev/null || true
+    [ "$pw_rc" -eq 0 ] || return 0
+    [ -n "$pw_out" ] || return 0
+
+    local pw_source="" pw_ups="null" pw_line="" pw_tok=""
+    while IFS= read -r pw_line; do
+        case "$pw_line" in
+            "Now drawing from '"*)
+                [ -z "$pw_source" ] || continue
+                pw_tok="${pw_line#*\'}"
+                pw_tok="${pw_tok%%\'*}"
+                case "$pw_tok" in
+                    "AC Power") pw_source="ac" ;;
+                    "UPS Power") pw_source="ups" ;;
+                    "Battery Power") pw_source="battery" ;;
+                    *) return 0 ;;   # unknown source: absent, never guess "ac"
+                esac
+                ;;
+            " -"*)
+                [ "$pw_ups" = "null" ] || continue   # first non-internal device wins
+                case "$pw_line" in
+                    " -InternalBattery"*) continue ;;   # laptop battery is not a UPS
+                esac
+                local pw_name="" pw_id="" pw_rest="" pw_pct="" pw_state="" pw_seg=""
+                local pw_charging=false pw_mins="null" pw_present="" pw_ok=true
+                case "$pw_line" in
+                    *" (id="*")"$'\t'*) ;;
+                    *) continue ;;
+                esac
+                pw_name="${pw_line#" -"}"
+                pw_name="${pw_name%% (id=*}"
+                pw_id="${pw_line#*(id=}"
+                pw_id="${pw_id%%)*}"
+                pw_rest="${pw_line#*$'\t'}"
+                case "$pw_name" in ''|*[[:cntrl:]]*|*\\*|*\"*) pw_ok=false ;; esac
+                case "$pw_id" in
+                    ''|*[!0-9A-Za-z_.:-]*) pw_ok=false ;;
+                esac
+                pw_pct="${pw_rest%%\%*}"
+                case "$pw_pct" in
+                    ''|*[!0-9]*) pw_ok=false ;;
+                    *) if [ "${#pw_pct}" -gt 3 ] || [ "$((10#$pw_pct))" -gt 100 ]; then pw_ok=false; fi ;;
+                esac
+                # present: true|false must be the trailing field.
+                case "$pw_rest" in
+                    *" present: true") pw_present=true; pw_state="${pw_rest% present: true}" ;;
+                    *" present: false") pw_present=false; pw_state="${pw_rest% present: false}" ;;
+                    *) pw_ok=false ;;
+                esac
+                if [ "$pw_ok" = true ]; then
+                    pw_state="${pw_state#*%}"
+                    local pw_oldifs="$IFS"
+                    IFS=';'
+                    # shellcheck disable=SC2086
+                    set -f; set -- $pw_state; set +f
+                    IFS="$pw_oldifs"
+                    for pw_seg in "$@"; do
+                        pw_seg="$(_system_trim "$pw_seg")"
+                        case "$pw_seg" in
+                            # exact match: "not charging" must stay false
+                            # "finishing charge" = still charging (top-off)
+                            "charging"|"finishing charge") pw_charging=true ;;
+                            *" remaining")
+                                pw_tok="${pw_seg% remaining}"
+                                case "$pw_tok" in
+                                    [0-9]*:[0-9][0-9])
+                                        local pw_h="${pw_tok%%:*}" pw_m="${pw_tok#*:}"
+                                        # Both halves must be pure digits, H at most 4 digits, M < 60:
+                                        # anything else would reach $(( )) as a syntax error / overflow,
+                                        # which aborts a bash 3.2 reporter (set -e) or emits garbage.
+                                        case "$pw_h$pw_m" in
+                                            *[!0-9]*) ;;
+                                            *)
+                                                if [ "${#pw_h}" -le 4 ] && [ "$((10#$pw_m))" -lt 60 ]; then
+                                                    pw_mins=$(( 10#$pw_h * 60 + 10#$pw_m ))
+                                                fi
+                                                ;;
+                                        esac
+                                        ;;
+                                esac
+                                ;;
+                        esac
+                    done
+                    # id: bare integer stays a JSON number, anything else a string.
+                    # A leading zero (0123) is not a valid JSON number, and more
+                    # than 15 digits loses precision in a JS Number -- both go
+                    # out as strings.
+                    case "$pw_id" in
+                        *[!0-9]*|0?*) pw_id="\"${pw_id}\"" ;;
+                        *) [ "${#pw_id}" -le 15 ] || pw_id="\"${pw_id}\"" ;;
+                    esac
+                    pw_ups="{\"name\":\"${pw_name}\",\"id\":${pw_id},\"percent\":$((10#$pw_pct)),\"charging\":${pw_charging},\"minutes_remaining\":${pw_mins},\"present\":${pw_present}}"
+                fi
+                ;;
+        esac
+    done <<_SYSTEM_POWER_EOF
+$pw_out
+_SYSTEM_POWER_EOF
+
+    [ -n "$pw_source" ] || return 0
+    _SYSTEM_POWER_JSON="{\"source\":\"${pw_source}\",\"ups\":${pw_ups}}"
+    return 0
+}
+
+# Prints the cached power JSON, or nothing if it could not be collected
+# (absence convention). Does NOT trigger collection. Always exits 0.
+_system_power_get() {
+    [ -n "$_SYSTEM_POWER_JSON" ] || return 0
+    printf '%s' "$_SYSTEM_POWER_JSON"
+    return 0
+}
+
 # Build status payload
 build_payload() {
     # Prime the live-process sweep in THIS scope so the two command
@@ -1796,6 +1957,8 @@ build_payload() {
     # volatile pass total, no matter how many keys are read out of them.
     _system_build_static_map
     _system_collect_volatile
+    # XACA-1391-003: power (pmset) -- same plain-statement rule as above.
+    _system_collect_power
 
     local sessions=$(get_tmux_sessions)
     local lcars_services=$(get_lcars_services)
@@ -1930,6 +2093,11 @@ _SYSTEM_LOAD_EMIT_EOF
             system_extra_json="${system_extra_json},\"load_average\":[${la_l1},${la_l2},${la_l3}]"
         fi
     fi
+
+    # power -- {"source":..,"ups":..}; key OMITTED (not null/{}) when absent.
+    local power_val=""
+    power_val="$(_system_power_get)"
+    [ -n "$power_val" ] && system_extra_json="${system_extra_json},\"power\":${power_val}"
 
     cat <<EOF
 {

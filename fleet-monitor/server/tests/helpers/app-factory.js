@@ -272,6 +272,49 @@ function isValidPositiveInteger(n) {
     return Number.isInteger(n) && n > 0;
 }
 
+// XACA-1391-004: mirrored VERBATIM from server.js -- `system.power` (reporter collector _system_collect_power).
+// Wire shape: {source: "ac"|"ups"|"battery", ups: null | {name, id, percent,
+// charging, minutes_remaining, present}}. Semantics (contract §8):
+//   - `power` ABSENT means UNKNOWN (reporter could not read, or an old
+//     reporter). It is NEVER synthesized as "ac" here.
+//   - Bad `source` drops the WHOLE power leaf (we cannot vouch for it).
+//   - A bad `ups` (non-object, or ANY invalid field inside) becomes
+//     `ups: null` with `source` retained -- never a half-validated UPS.
+//   - `minutes_remaining` null = no estimate; 0 is real data and survives.
+//   - Unknown extra keys are stripped (explicit rebuild, no spreading).
+const POWER_SOURCES = ['ac', 'ups', 'battery'];
+const POWER_UPS_NAME_MAX = 64;
+const POWER_UPS_ID_MAX = 32;
+const POWER_MINUTES_MAX = 525600; // one year -- beyond this is a bogus estimate, not data
+
+function sanitizePowerBlock(power) {
+    if (!power || typeof power !== 'object' || Array.isArray(power)) return null;
+    if (!POWER_SOURCES.includes(power.source)) return null;
+
+    let ups = null;
+    const u = power.ups;
+    if (u && typeof u === 'object' && !Array.isArray(u)) {
+        const nameOk = typeof u.name === 'string' && u.name.length > 0 && u.name.length <= POWER_UPS_NAME_MAX;
+        const idOk = Number.isInteger(u.id) || (typeof u.id === 'string' && u.id.length > 0 && u.id.length <= POWER_UPS_ID_MAX);
+        const percentOk = Number.isInteger(u.percent) && u.percent >= 0 && u.percent <= 100;
+        const chargingOk = typeof u.charging === 'boolean';
+        const presentOk = typeof u.present === 'boolean';
+        const minutesOk = u.minutes_remaining === null
+            || (Number.isInteger(u.minutes_remaining) && u.minutes_remaining >= 0 && u.minutes_remaining <= POWER_MINUTES_MAX);
+        if (nameOk && idOk && percentOk && chargingOk && presentOk && minutesOk) {
+            ups = {
+                name: u.name,
+                id: u.id,
+                percent: u.percent,
+                charging: u.charging,
+                minutes_remaining: u.minutes_remaining,
+                present: u.present
+            };
+        }
+    }
+    return { source: power.source, ups: ups };
+}
+
 // XACA-1091-005: telemetry leaves mirrored VERBATIM from server.js's own
 // extension of this function -- same drift-guard discipline as the
 // pre-existing pair above.
@@ -320,6 +363,11 @@ function normalizeSystemBlock(system) {
     if (Array.isArray(system.load_average) && system.load_average.length === 3 && system.load_average.every((n) => isValidLoadAverageComponent(n))) {
         out.load_average = system.load_average.slice();
     }
+
+
+    const power = sanitizePowerBlock(system.power);
+
+    if (power) out.power = power; // absent stays absent -- NEVER synthesized as "ac"
 
     return out;
 }
@@ -428,6 +476,11 @@ function createApp(opts = {}) {
         if (Array.isArray(storedSystem.load_average) && storedSystem.load_average.length === 3 && storedSystem.load_average.every((n) => isValidLoadAverageComponent(n))) {
             out.load_average = storedSystem.load_average.slice();
         }
+
+
+        const power = sanitizePowerBlock(storedSystem.power);
+
+        if (power) out.power = power; // absent stays absent -- NEVER synthesized as "ac"
 
         return out;
     }
@@ -1482,6 +1535,7 @@ module.exports = {
         // per-createApp()-instance; see createApp()'s return value for that
         // one).
         isVersionOutdated,
-        normalizeSystemBlock
+        normalizeSystemBlock,
+        sanitizePowerBlock
     }
 };
