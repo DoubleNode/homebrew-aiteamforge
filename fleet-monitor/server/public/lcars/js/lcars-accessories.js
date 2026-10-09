@@ -284,10 +284,15 @@
         var c = document.getElementById(CONTAINER_ID);
         if (!c || !w) return;
         // XACA-1480: hadFocus is a pre-write snapshot; re-check at refresh time so
-        // focus the operator moved elsewhere mid-write is not yanked back. Refocus
-        // only if it was lost to the re-render (body/null) or is still in the grid.
+        // focus the operator moved elsewhere mid-write (another card included) is
+        // not yanked back. Refocus only if it was lost to the re-render (body/null)
+        // or is still in the card that was written.
         var ae = document.activeElement;
-        if (w.hadFocus && (!ae || ae === document.body || c.contains(ae))) focusCardAfterWrite(c, w.accId);
+        var wc = null, cards = c.querySelectorAll('.accessory-card');
+        for (var i = 0; i < cards.length; i++) {
+            if (cards[i].getAttribute('data-accessory-id') === w.accId) { wc = cards[i]; break; }
+        }
+        if (w.hadFocus && (!ae || ae === document.body || (wc && wc.contains(ae)))) focusCardAfterWrite(c, w.accId);
         // Errors are already announced by the card's role=alert text.
         var live = w.ok ? liveRegion(c) : null;
         if (live) {

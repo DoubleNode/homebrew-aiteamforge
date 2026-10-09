@@ -1526,10 +1526,12 @@
         renderAccessories();      // also covers a failed fetch / error-only change
         if (!listEl) return;
         // XACA-1480: decide at refresh time. Refocus only if focus was lost to the
-        // re-render (body/null) or is still inside the list; if the operator moved
-        // it elsewhere mid-write, leave it alone.
+        // re-render (body/null) or is still in the card that was written; if the
+        // operator moved it elsewhere mid-write (another card included), leave it.
         const active = document.activeElement;
-        if (hadFocus && (!active || active === document.body || listEl.contains(active))) {
+        const ai = accessoriesUi.view.accessories.findIndex(function(a) { return a && a.id === accId; });
+        const writtenCard = ai === -1 ? null : listEl.querySelector('.accessory-card[data-acc-idx="' + ai + '"]');
+        if (hadFocus && (!active || active === document.body || (writtenCard && writtenCard.contains(active)))) {
             focusAccessoryCardAfterWrite(listEl, accId);
         }
         // Errors are already announced by the card's role=alert text.

@@ -178,17 +178,32 @@ for (const tree of ['v1', 'v2']) {
         } finally { pg.close(); }
     });
 
-    test(tag + '(c) focus still inside the container (sibling card) at refresh: the written card is refocused', async () => {
+    test(tag + '(c) focus moved to a SIBLING card mid-write stays on that card (not pulled across cards)', async () => {
         const pg = await boot(tree);
         try {
             const pend = await detachScenario(pg);
+            // v1 locks every accessory control in flight, so focus the sibling CARD (works on both trees)
             const other = card(pg, 1);
             other.setAttribute('tabindex', '-1');
             other.focus();
             assert.equal(pg.d.activeElement, other, 'sibling card focused mid-write');
             pend.release(true);
             await settled(pg, true);
-            assert.equal(pg.root().contains(pg.d.activeElement), true, 'focus still inside the container');
+            // the rebuild restores focus to the (rebuilt) sibling card; the write must not steal it
+            assert.equal(pg.d.activeElement, card(pg, 1), 'focus stayed on the sibling card');
+        } finally { pg.close(); }
+    });
+
+    test(tag + '(c) focus still inside the WRITTEN card at refresh: the card is refocused', async () => {
+        const pg = await boot(tree);
+        try {
+            const pend = await detachScenario(pg);
+            const own = card(pg, 0);
+            own.setAttribute('tabindex', '-1');
+            own.focus();
+            assert.equal(pg.d.activeElement, own, 'written card focused mid-write');
+            pend.release(true);
+            await settled(pg, true);
             assert.equal(pg.d.activeElement, card(pg, 0).querySelector(SEL), 'refocused the written card\'s picker');
         } finally { pg.close(); }
     });
@@ -261,3 +276,12 @@ for (const tree of ['v1', 'v2']) {
         } finally { pg.close(); }
     });
 }
+
+test('accessory card has a designed :focus-visible ring in both dashboard themes (XACA-1480-011)', () => {
+    for (const css of ['lcars/css/lcars-fleet-theme.css', 'lcars2/css/lcars-fleet-theme.css']) {
+        const src = fs.readFileSync(path.join(PUB, css), 'utf8');
+        const m = src.match(/([^{}]*\.accessory-card:focus-visible[^{}]*)\{([^}]*)\}/);
+        assert.ok(m, css + ': .accessory-card:focus-visible rule exists');
+        assert.match(m[2], /outline:\s*2px solid var\(--lcars-cyan\)/, css + ': same ring as the other focusable cards');
+    }
+});

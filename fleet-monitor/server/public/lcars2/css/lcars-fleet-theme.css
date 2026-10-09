@@ -3266,7 +3266,8 @@
 .sidebar-button:focus-visible,
 .lcars-button:focus-visible,
 .org-nav-button:focus-visible,
-.team-card:focus-visible {
+.team-card:focus-visible,
+.accessory-card:focus-visible {   /* XACA-1480: post-write card-fallback focus */
     outline: 2px solid var(--lcars-cyan);
     outline-offset: 2px;
 }
