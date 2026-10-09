@@ -17472,23 +17472,41 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     _GATE_ENFORCEMENT_ALLOWED_KEYS = {'team', 'mode', 'actor'}
     _GATE_ENFORCEMENT_AUDIT_TARGET = 'RELEASE-CONFIG'   # activity/<this>.json in the team's kanban dir
 
-    def _gate_enforcement_fields(self, team, release_config):
-        """The GET payload for `release_config` (a dict, {} when the board has none)."""
+    @staticmethod
+    def _lead_names(release_config):
+        """releaseConfig.leads as the list of names that would PASS _actor_is_lead (XACA-1482-011).
+        Same normalization as release_gate.actor_is_lead (strings only, stripped, non-empty);
+        de-duplicated in first-seen order. [] when absent/malformed/empty (= nobody is a lead)."""
+        leads = release_config.get('leads') if isinstance(release_config, dict) else None
+        if not isinstance(leads, list):
+            return []
+        names = []
+        for x in leads:
+            if isinstance(x, str) and x.strip() and x.strip() not in names:
+                names.append(x.strip())
+        return names
+
+    def _gate_enforcement_fields(self, team, release_config, writable=True):
+        """The GET payload for `release_config` (a dict, {} when the board has none).
+        `writable` is False only when releaseConfig is present but not an object (the POST
+        always 409s then); `leads` is the list of names the POST would accept as actor."""
         mode, warning = self._gate_mode(release_config)
         return {
             'team': team,
             'mode': mode,
             'explicit': 'gateEnforcement' in release_config,
             'configWarning': warning,
+            'writable': writable,
+            'leads': self._lead_names(release_config),
         }
 
-    def _read_release_config_shared(self, team):
-        """(release_config_dict, error, status). Raw releaseConfig under a SHARED lock on the
-        board's sidecar. Missing releaseConfig -> {} (the resolver then says enforce). Missing
-        board -> 404, as the writer answers: a default for a board that does not exist would be
-        a confident answer about nothing. A releaseConfig that is present but not an object
-        yields {} (enforce, which is what the gate does) and the GET adds a configWarning, since
-        the writer refuses it with a 409."""
+    def _read_board_shared_for_gate(self, team):
+        """(board, error, status). The WHOLE board dict under a SHARED lock on the board's
+        sidecar (the caller extracts releaseConfig, so it can tell absent from non-object).
+        Missing board -> 404, as the writer answers: a default for a board that does not exist
+        would be a confident answer about nothing. A releaseConfig that is present but not an
+        object resolves to {} via _release_cfg (enforce, which is what the gate does) and the
+        GET adds a configWarning and writable=false, since the writer refuses it with a 409."""
         import fcntl
         board_file = self._get_board_file(team)
         if not board_file.exists():
@@ -17513,7 +17531,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     def serve_release_gate_enforcement(self, query_string: str):
         """GET /api/release-gate-enforcement?team=<team> (XACA-1482).
 
-        Response: {team, mode, explicit, configWarning}. `mode` is what the promote gate will
+        Response: {team, mode, explicit, configWarning, writable, leads}. `mode` is what the promote gate will
         do (_gate_mode: absent -> enforce, malformed -> enforce + configWarning), never the raw
         field. `explicit` is False when the key is absent. Unknown/missing team -> 400.
         """
@@ -17523,13 +17541,15 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             if not team or team not in TEAM_KANBAN_DIRS:
                 self._send_json_response({'error': 'Unknown team: %s' % (team,)}, status=400)
                 return
-            board, err, status = self._read_release_config_shared(team)
+            board, err, status = self._read_board_shared_for_gate(team)
             if err:
                 self._send_json_response({'error': err}, status=status)
                 return
-            payload = self._gate_enforcement_fields(team, self._release_cfg(board))
+            # Mirrors the POST's 409 test exactly: key PRESENT and not an object (null included).
             raw_rc = board.get('releaseConfig') if isinstance(board, dict) else None
-            if raw_rc is not None and not isinstance(raw_rc, dict) and payload['configWarning'] is None:
+            writable = not (isinstance(board, dict) and 'releaseConfig' in board) or isinstance(raw_rc, dict)
+            payload = self._gate_enforcement_fields(team, self._release_cfg(board), writable=writable)
+            if not writable and payload['configWarning'] is None:
                 payload['configWarning'] = (
                     "releaseConfig is %s, not an object; the gate treats it as enforce, and this "
                     "setter refuses to write until the board is repaired" % type(raw_rc).__name__)

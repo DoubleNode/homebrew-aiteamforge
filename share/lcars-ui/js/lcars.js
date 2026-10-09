@@ -21242,8 +21242,22 @@ function _setReleaseGatesStatus(text, cls) {
     el.className = 'team-config-status' + (cls ? ' ' + cls : '');
 }
 
-/** Pull a human-readable reason out of an error body ("error" or "message"). */
+// XACA-1482-012: plain-language text for the server's machine-readable 403 `code`s
+// (release_gate.CODE_LEADS_NOT_CONFIGURED / CODE_NOT_IN_LEADS). Unknown or absent
+// codes fall back to the server's own error text.
+const _RELEASE_GATES_CODE_MESSAGES = {
+    LEADS_NOT_CONFIGURED: "No release leads are configured for this team, so gates can't be turned off. Ask an Academy admin to configure release leads.",
+    NOT_IN_LEADS: "That name isn't a release lead for this team.",
+};
+const _RELEASE_GATES_NO_LEADS_HINT = "No release leads are configured for this team \u2014 gates can't be turned off here.";
+const _RELEASE_GATES_UNCHANGED_NOTE = 'Unchanged \u2014 gates still enforced.';
+
+/** Pull a human-readable reason out of an error body (`code` map, then "error", then "message"). */
 function _releaseGatesReason(body, status) {
+    if (body && typeof body.code === 'string' &&
+        Object.prototype.hasOwnProperty.call(_RELEASE_GATES_CODE_MESSAGES, body.code)) {
+        return _RELEASE_GATES_CODE_MESSAGES[body.code];
+    }
     if (body && typeof body.error === 'string' && body.error) return body.error;
     if (body && typeof body.message === 'string' && body.message) return body.message;
     return `HTTP ${status}`;
@@ -21287,19 +21301,31 @@ function _renderReleaseGateEnforcement(data) {
     const badge = _relGateEl('release-gates-default');
     const explicit = data.explicit === true;
 
+    // XACA-1482-015: the server says `writable: false` when releaseConfig is present but not
+    // an object (every POST would 409). ONLY an explicit false disables the box: an absent or
+    // non-boolean `writable` means an older server that predates the field, and that server's
+    // POST is the authority, so the box stays enabled (the 409 path still reverts + explains).
+    const writable = data.writable !== false;
+
     checkbox.checked = (mode === 'enforce');
-    checkbox.disabled = false;
-    checkbox.onchange = onReleaseGatesChange;
+    checkbox.disabled = !writable;
+    checkbox.onchange = writable ? onReleaseGatesChange : null;
     if (badge) badge.style.display = explicit ? 'none' : 'inline-block';
 
-    const label = mode === 'enforce' ? 'Gates enforced' : 'Gates report-only';
-    _setReleaseGatesStatus(`${label} (${explicit ? 'explicit' : 'default'})`, '');
+    // The (default) badge carries default-ness; the status text must not repeat it.
+    _setReleaseGatesStatus(_releaseGatesLabel(mode), '');
 
     if (typeof data.configWarning === 'string' && data.configWarning) {
         _showReleaseGatesError(data.configWarning);
+    } else if (!writable) {
+        _showReleaseGatesError('releaseConfig is malformed, so release gates cannot be changed here until the board is repaired.');
     } else {
         _hideReleaseGatesError();
     }
+}
+
+function _releaseGatesLabel(mode) {
+    return mode === 'enforce' ? 'Gates enforced' : 'Gates report-only';
 }
 
 function _renderReleaseGatesFailClosed(message) {
@@ -21315,10 +21341,91 @@ function _renderReleaseGatesFailClosed(message) {
     _showReleaseGatesError(message);
 }
 
+function _focusReleaseGatesCheckbox() {
+    const cb = _relGateEl('release-gates-checkbox');
+    if (cb && !cb.disabled && typeof cb.focus === 'function') cb.focus();
+}
+
 /**
- * Checkbox change handler. Check -> POST enforce (no actor). Uncheck -> ask
- * for the lead's name first (window.prompt; no existing modal pattern in
- * lcars.js for actor input); cancel/empty -> re-check, no request.
+ * XACA-1482-011: ask WHICH release lead authorizes turning gates off. Resolves the chosen
+ * name (a member of `leads`), or null on Cancel / close button / Escape / backdrop. Fails
+ * closed (null) if the modal markup is missing. Conventions follow the other lcars-modal-*
+ * dialogs: overlay display flex/none, pause/resume auto-refresh, backdrop + Escape close;
+ * additionally Tab is trapped inside the dialog and focus moves in on open.
+ */
+function _pickReleaseGatesLead(leads) {
+    return new Promise((resolve) => {
+        const overlay = _relGateEl('release-gates-lead-modal');
+        const select = _relGateEl('release-gates-lead-select');
+        const confirmBtn = _relGateEl('release-gates-lead-confirm');
+        const cancelBtn = _relGateEl('release-gates-lead-cancel');
+        const closeBtn = _relGateEl('release-gates-lead-close');
+        if (!overlay || !select || !confirmBtn || !cancelBtn) { resolve(null); return; }
+
+        select.textContent = '';
+        leads.forEach((name) => {
+            const opt = document.createElement('option');
+            opt.value = name;
+            opt.textContent = name;
+            select.appendChild(opt);
+        });
+        select.value = leads[0];
+
+        let done = false;
+        const finish = (value) => {
+            if (done) return;
+            done = true;
+            overlay.style.display = 'none';
+            overlay.onclick = null;
+            overlay.onkeydown = null;
+            confirmBtn.onclick = null;
+            cancelBtn.onclick = null;
+            if (closeBtn) closeBtn.onclick = null;
+            if (typeof resumeAutoRefresh === 'function') resumeAutoRefresh();
+            resolve(value);
+        };
+
+        confirmBtn.onclick = () => finish(select.value ? select.value : null);
+        cancelBtn.onclick = () => finish(null);
+        if (closeBtn) closeBtn.onclick = () => finish(null);
+        overlay.onclick = (e) => { if (e && e.target === overlay) finish(null); };
+        overlay.onkeydown = (e) => {
+            if (!e) return;
+            if (e.key === 'Escape') { finish(null); return; }
+            if (e.key === 'Tab') {
+                const ring = [closeBtn, select, cancelBtn, confirmBtn].filter(Boolean);
+                const idx = ring.indexOf(e.target);
+                const next = ring[(idx + (e.shiftKey ? ring.length - 1 : 1)) % ring.length];
+                if (typeof e.preventDefault === 'function') e.preventDefault();
+                if (next && typeof next.focus === 'function') next.focus();
+            }
+        };
+
+        if (typeof pauseAutoRefresh === 'function') pauseAutoRefresh();
+        overlay.style.display = 'flex';
+        if (typeof select.focus === 'function') select.focus();
+    });
+}
+
+/** XACA-1482-013: transient "Saved" confirmation, same element/class/2 s pattern as saveBoardSettingsFlag. */
+function _flashReleaseGatesSaved() {
+    const el = _relGateEl('release-gates-status');
+    if (!el) return;
+    el.textContent = 'Saved';
+    el.className = 'team-config-status saved';
+    setTimeout(() => {
+        if (el.className === 'team-config-status saved') {
+            const m = _lastGoodReleaseGates && _lastGoodReleaseGates.mode;
+            el.textContent = (m === 'enforce' || m === 'report') ? _releaseGatesLabel(m) : '';
+            el.className = 'team-config-status';
+        }
+    }, 2000);
+}
+
+/**
+ * Checkbox change handler. Check -> POST enforce (no actor). Uncheck -> choose the
+ * authorizing release lead from the server-supplied `leads` list (modal). No leads ->
+ * no modal, no request, a hint. Cancel -> box re-checked, no request.
  */
 async function onReleaseGatesChange() {
     const checkbox = _relGateEl('release-gates-checkbox');
@@ -21327,12 +21434,18 @@ async function onReleaseGatesChange() {
     const payload = { team: CONFIG.team, mode: wantEnforce ? 'enforce' : 'report' };
 
     if (!wantEnforce) {
-        const answer = (typeof prompt === 'function')
-            ? prompt('Turning release gates OFF requires a release lead. Enter the lead name:')
-            : null;
-        const actor = typeof answer === 'string' ? answer.trim() : '';
+        const leads = (_lastGoodReleaseGates && Array.isArray(_lastGoodReleaseGates.leads))
+            ? _lastGoodReleaseGates.leads.filter((n) => typeof n === 'string' && n.trim()) : [];
+        if (!leads.length) {
+            checkbox.checked = true; // nobody can authorize: stay enforced, send nothing
+            _setReleaseGatesStatus(_RELEASE_GATES_NO_LEADS_HINT, '');
+            return;
+        }
+        const actor = await _pickReleaseGatesLead(leads);
         if (!actor) {
             checkbox.checked = true; // cancelled: stay enforced, send nothing
+            _setReleaseGatesStatus(_RELEASE_GATES_UNCHANGED_NOTE, '');
+            _focusReleaseGatesCheckbox();
             return;
         }
         payload.actor = actor;
@@ -21356,6 +21469,7 @@ async function onReleaseGatesChange() {
             throw new Error('malformed response from server');
         }
         _renderReleaseGateEnforcement(result); // from the response, never the request
+        _flashReleaseGatesSaved();
     } catch (err) {
         console.error('[release-gates] Save failed:', err);
         if (_lastGoodReleaseGates) {
@@ -21366,6 +21480,7 @@ async function onReleaseGatesChange() {
         _showReleaseGatesError(`Save failed: ${err.message}`);
         _setReleaseGatesStatus('Save failed', 'error');
     }
+    _focusReleaseGatesCheckbox();
 }
 
 // =============================================================================

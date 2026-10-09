@@ -973,7 +973,7 @@
                         <!-- XACA-1482-003: Release Gates — releaseConfig.gateEnforcement.
                              Reads/writes /api/release-gate-enforcement. Fail-closed: any load
                              problem renders the box CHECKED + DISABLED with a visible error.
-                             Unchecking (gates off) asks for a release lead first. -->
+                             Unchecking (gates off) asks which release lead authorizes it (modal below). -->
                         <div class="team-config-section-divider"></div>
                         <div class="team-config-row team-config-row-header" id="release-gates-header">
                             <div class="team-config-row-left">
@@ -2188,6 +2188,27 @@
         </div>
     </div>
 
+    <!-- XACA-1482-011: pick the release lead who authorizes turning release gates OFF -->
+    <div class="lcars-modal-overlay" id="release-gates-lead-modal" style="display: none;" role="dialog" aria-modal="true" aria-labelledby="release-gates-lead-title">
+        <div class="lcars-modal">
+            <div class="lcars-modal-header">
+                <span class="lcars-modal-title" id="release-gates-lead-title">TURN RELEASE GATES OFF</span>
+                <button class="lcars-modal-close" id="release-gates-lead-close" type="button" aria-label="Cancel">&times;</button>
+            </div>
+            <div class="lcars-modal-body">
+                <div class="modal-field">
+                    <label class="modal-label" for="release-gates-lead-select">RELEASE LEAD AUTHORIZING THIS CHANGE</label>
+                    <select class="modal-select" id="release-gates-lead-select"></select>
+                </div>
+            </div>
+            <div class="lcars-modal-footer">
+                <div class="modal-footer-spacer"></div>
+                <button class="modal-btn modal-btn-cancel" id="release-gates-lead-cancel" type="button">CANCEL</button>
+                <button class="modal-btn modal-btn-confirm" id="release-gates-lead-confirm" type="button">CONFIRM</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Create Release Modal -->
     <div class="lcars-modal-overlay" id="release-create-modal" style="display: none;">
         <div class="lcars-modal lcars-modal-wide">
@@ -2773,7 +2794,7 @@
     <script src="js/vendor/jspdf.umd.min.js?v=1"></script>
 <!-- XACA-0292-005: Reusable filter-bar component — must load before lcars.js -->
 <script src="js/lcars-filter-bar.js?v=1.2"></script>
-<script src="js/lcars.js?v=4.08"></script>
+<script src="js/lcars.js?v=4.09"></script>
 <!-- XACA-0293-001: CR cycle-time compute module — must load before lcars-cr-tab.js (no DOM/network deps) -->
 <script src="js/lcars-cr-metrics.js"></script>
 <!-- XACA-0293-013: Shared poll bus — single 5s interval for all tile modules; must load after lcars-cr-metrics.js and before tile scripts -->
