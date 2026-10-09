@@ -54,13 +54,15 @@
 .cicd-pool-dialog h4 { margin: 0 0 6px; }
 .cicd-pool-dialog input { max-width: 100%; box-sizing: border-box; min-height: 24px; }
 .cicd-pool-dlg-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
-/* XACA-1476-005: collapsible details. Toggle = the head row (role=button); ▸/▾ is a static glyph, no animation. */
-.cicd-pool-toggle { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; cursor: pointer; border-radius: 6px;
-    margin: -2px -4px; padding: 2px 4px; }
+/* XACA-1476-005/018: collapsible details. Toggle = a native <button> inside the h4 (APG disclosure); the h4 keeps
+   heading semantics. ▸/▾ is a static glyph, no animation. The button is reset to look like the old head row. */
+.cicd-pool-toggle { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px;
+    cursor: pointer; border-radius: 6px; background: none; border: 0; color: inherit; font: inherit;
+    width: calc(100% + 8px); box-sizing: border-box; text-align: left; margin: -2px -4px; padding: 2px 4px; }
 .cicd-pool-toggle:hover { background: var(--lcars-darker); }
 .cicd-pool-toggle:focus-visible { outline: 3px solid var(--lcars-cyan); outline-offset: 2px; }
 .cicd-pool-chev { flex: 0 0 auto; width: 1em; color: var(--lcars-cyan); text-align: center; }
-.cicd-pool-toggle .cicd-pool-name { flex: 1 1 8ch; min-width: 0; }
+.cicd-pool-toggle .cicd-pool-name-text { flex: 1 1 8ch; min-width: 0; }
 .cicd-pool-toggle .cicd-pool-badge { flex: 0 0 auto; }
 .cicd-pool-details { margin-top: 4px; }
 .cicd-pool-details[hidden] { display: none; }

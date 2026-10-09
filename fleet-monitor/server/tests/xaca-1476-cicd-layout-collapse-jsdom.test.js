@@ -132,8 +132,9 @@ test('pool cards are collapsed by default: aria-expanded=false, details hidden, 
         const id = c.getAttribute('data-cicd-pool-machine-card');
         const t = toggle(env, id), d = details(env, id);
         assert.equal(t.getAttribute('aria-expanded'), 'false', id);
-        assert.equal(t.getAttribute('role'), 'button');
-        assert.equal(t.getAttribute('tabindex'), '0');
+        assert.equal(t.tagName, 'BUTTON', 'native button (Enter/Space for free)');
+        assert.equal(t.getAttribute('type'), 'button');
+        assert.equal(t.hasAttribute('role'), false, 'no ARIA role needed on a native button');
         assert.ok(d.hasAttribute('hidden'), id + ' details hidden');
         assert.equal(env.document.getElementById(t.getAttribute('aria-controls')), d, id + ' aria-controls -> details');
         assert.equal(glyph(env, id), CLOSED);
@@ -162,25 +163,42 @@ test('toggle: a click on the badge inside the header toggles (delegated closest(
     assert.equal(expanded(env, 'm4mini'), 'true');
 });
 
-test('toggle: Enter toggles once, Space toggles once and is defaultPrevented', () => {
+test('toggle: a native <button type=button> inside the h4.cicd-pool-name (APG disclosure); .click() toggles it', () => {
     const env = setupPool();
-    const enter = press(env, toggle(env, 'm4mini'), 'Enter');
-    assert.equal(expanded(env, 'm4mini'), 'true', 'Enter expands');
-    assert.equal(enter.defaultPrevented, true, 'Enter is prevented so it cannot also synthesize a click');
-    const space = press(env, toggle(env, 'm4mini'), ' ');
-    assert.equal(space.defaultPrevented, true, 'Space must not scroll the page');
-    assert.equal(expanded(env, 'm4mini'), 'false', 'Space collapses');
-    assert.equal(glyph(env, 'm4mini'), CLOSED);
-    press(env, toggle(env, 'm4mini'), ' ');
+    ['m4mini', 'm1mini'].forEach((id) => {
+        const t = toggle(env, id);
+        assert.equal(t.tagName, 'BUTTON');
+        assert.equal(t.getAttribute('type'), 'button');
+        const h = t.closest('h4.cicd-pool-name');
+        assert.ok(h, id + ' toggle sits inside the h4');
+        assert.equal(h.parentElement.classList.contains('cicd-pool-header'), true);
+        assert.match(h.textContent, new RegExp(id), 'heading text contains the machine name');
+    });
+    toggle(env, 'm4mini').click();
     assert.equal(expanded(env, 'm4mini'), 'true');
-    assert.equal(glyph(env, 'm4mini'), OPEN);
+    toggle(env, 'm4mini').click();
+    assert.equal(expanded(env, 'm4mini'), 'false');
+    assert.equal(glyph(env, 'm4mini'), CLOSED);
 });
 
-test('toggle: other keys and modified Enter do nothing', () => {
+test('machine names stay in the heading outline and name their card (li aria-labelledby -> h4 with the name)', () => {
     const env = setupPool();
-    press(env, toggle(env, 'm4mini'), 'a');
-    press(env, toggle(env, 'm4mini'), 'Enter', { ctrlKey: true });
-    assert.equal(expanded(env, 'm4mini'), 'false');
+    const heads = Array.from(env.el.querySelectorAll('h4')).map((h) => h.textContent);
+    ['m4mini', 'm1mini'].forEach((id) => {
+        assert.ok(heads.some((t) => t.indexOf(id) >= 0), id + ' is in a heading-role element');
+        const li = card(env, id);
+        const target = env.document.getElementById(li.getAttribute('aria-labelledby'));
+        assert.ok(target, id + ' aria-labelledby resolves');
+        assert.equal(target.tagName, 'H4');
+        assert.ok(target.textContent.indexOf(id) >= 0, 'accessible name contains the machine name');
+    });
+});
+
+test('toggle: the h4 holds only the button; Enter/Space handling is native (no custom keydown branch prevents it)', () => {
+    const env = setupPool();
+    const ev = press(env, toggle(env, 'm4mini'), 'Enter');
+    assert.equal(ev.defaultPrevented, false, 'the page leaves Enter/Space to the native button');
+    assert.equal(expanded(env, 'm4mini'), 'false', 'keydown alone does not toggle; the browser synthesizes the click');
 });
 
 test('toggle: Enter on a control INSIDE the details does not toggle the card or get prevented', () => {
@@ -273,24 +291,22 @@ test('focus restore: focus on the toggle itself survives a signature-changing re
     assert.equal(now.getAttribute('data-cicd-pool-toggle'), 'm4mini');
 });
 
-test('focus restore: expanded + focused toggle survives a signature change and the keyboard still works', () => {
+test('focus restore: expanded + focused toggle survives a signature change and still toggles', () => {
     const env = setupPool();
     toggle(env, 'm4mini').click();
     toggle(env, 'm4mini').focus();
     env.render(poolFixture('mixed', (d) => { d.machines.m4mini.capacity.load5 = 6.66; }));
     assert.equal(env.document.activeElement, toggle(env, 'm4mini'));
-    press(env, env.document.activeElement, 'Enter');
+    env.document.activeElement.click();   // native button: Enter/Space become a click in a real browser
     assert.equal(expanded(env, 'm4mini'), 'false');
 });
 
-test('inert while the Pause dialog is open: the toggle (click, Enter, Space) does nothing, then works after close', () => {
+test('inert while the Pause dialog is open: the toggle click does nothing, then works after close', () => {
     const env = setupPool();
     toggle(env, 'm4mini').click();   // expand so Pause is reachable
     card(env, 'm4mini').querySelector('[data-cicd-pool-action="pause"]').click();
     assert.ok(env.el.querySelector('[role="dialog"]'), 'dialog opened');
     toggle(env, 'm1mini').click();
-    press(env, toggle(env, 'm1mini'), 'Enter');
-    press(env, toggle(env, 'm1mini'), ' ');
     toggle(env, 'm4mini').click();
     assert.equal(expanded(env, 'm1mini'), 'false', 'collapsed card did not open');
     assert.equal(expanded(env, 'm4mini'), 'true', 'expanded card did not collapse');
@@ -351,4 +367,27 @@ test('404 clears #cicd-summary entirely and shows the not-available state in con
     await env.api.refresh();
     assert.equal(env.summary.innerHTML, '', '#cicd-summary cleared');
     assert.ok(env.content.querySelector('[data-cicd-unavailable]'));
+});
+
+test('022: machine ids equal to Object.prototype names are removed when gone and come back collapsed', () => {
+    const mk = (ids) => poolFixture('mixed', (d) => {
+        const base = d.machines.m4mini;
+        d.machines = { m4mini: base };
+        ids.forEach((i) => { d.machines[i] = JSON.parse(JSON.stringify(base)); });
+    });
+    const env = setupPool(mk(['toString', 'constructor']));
+    ['toString', 'constructor'].forEach((id) => {
+        assert.ok(card(env, id), id + ' rendered');
+        toggle(env, id).click();
+        assert.equal(expanded(env, id), 'true');
+    });
+    env.render(mk([]));
+    ['toString', 'constructor'].forEach((id) => {
+        assert.equal(card(env, id), null, id + ' removed from the DOM');
+        assert.equal(env.api.isExpanded(id), false, id + ' expand state pruned');
+    });
+    env.render(mk(['toString', 'constructor']));
+    ['toString', 'constructor'].forEach((id) => {
+        assert.equal(expanded(env, id), 'false', id + ' returns collapsed');
+    });
 });

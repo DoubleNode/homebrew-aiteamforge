@@ -446,7 +446,7 @@
     function bodyHtml(data) {
         var machines = Array.isArray(data.machines) ? data.machines : [];
         var html = '';
-        html += '<h3 class="cicd-subhead">MACHINES</h3>';
+        html += '<h3 class="cicd-subhead">RUNNER STATES</h3>';
         if (!machines.length) {
             html += emptyStateHtml('NO CI RUNNERS REPORTING',
                 'No machine has pushed runner telemetry yet. See docs/ci-runner-runbook.md (runbook) to enroll a runner.',

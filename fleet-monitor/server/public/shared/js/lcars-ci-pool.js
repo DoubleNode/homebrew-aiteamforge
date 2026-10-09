@@ -123,12 +123,13 @@
         var st = STATES[state], key = safeId(id);
         var detailsId = 'cicd-pool-details-' + key;
         var h = '<div class="cicd-pool-header">' +
-            '<div class="cicd-pool-head cicd-pool-toggle" role="button" tabindex="0" data-cicd-pool-toggle="' + esc(id) + '"' +
+            '<h4 class="cicd-pool-name" id="cicd-pool-name-' + esc(key) + '">' +
+            '<button type="button" class="cicd-pool-head cicd-pool-toggle" data-cicd-pool-toggle="' + esc(id) + '"' +
             ' aria-expanded="' + (expanded ? 'true' : 'false') + '" aria-controls="' + esc(detailsId) + '">' +
             '<span class="cicd-pool-chev" aria-hidden="true" data-cicd-pool-chev>' + (expanded ? CHEV_OPEN : CHEV_CLOSED) + '</span>' +
-            '<h4 class="cicd-pool-name" id="cicd-pool-name-' + esc(key) + '">' + esc(id) + '</h4>' +
+            '<span class="cicd-pool-name-text">' + esc(id) + '</span>' +
             '<span class="cicd-pool-badge" data-cicd-pool-state="' + esc(state) + '">' +
-            '<span aria-hidden="true" class="cicd-pool-glyph">' + st.glyph + '</span> ' + esc(st.label) + '</span></div>';
+            '<span aria-hidden="true" class="cicd-pool-glyph">' + st.glyph + '</span> ' + esc(st.label) + '</span></button></h4>';
         if (m.stateReason) h += '<p class="cicd-pool-reason" data-cicd-pool-reason>' + esc(m.stateReason) + '</p>';
         if (m.paused === true || m.pauseReason) {
             h += '<p class="cicd-pool-pause" data-cicd-pool-pause>Paused' +
@@ -247,7 +248,7 @@
         r._ctx = { opts: opts, body: body };
         var list = r.querySelector('[data-cicd-pool-list]');
         var ids = Object.keys(body.machines).sort();
-        var active = doc.activeElement, refocus = null, refocusToggle = null, seen = {}, pos = 0;
+        var active = doc.activeElement, refocus = null, refocusToggle = null, seen = Object.create(null), pos = 0;
         ids.forEach(function(id) {
             var m = body.machines[id];
             if (!m || typeof m !== 'object') return;
@@ -525,15 +526,7 @@
     }
 
     function onKey(r, e) {
-        if ((e['key'] === 'Enter' || e['key'] === ' ' || e['key'] === 'Spacebar') && !e.altKey && !e.ctrlKey && !e.metaKey) {
-            var tg = cardToggle(r, e);
-            if (tg && e.target === tg) {
-                e.preventDefault();   // Space must not scroll the page; Enter must not also fire a click
-                var tcard = tg.closest('[data-cicd-pool-machine-card]');
-                if (tcard) toggleCard(tcard, tg.getAttribute('data-cicd-pool-toggle'));
-                return;
-            }
-        }
+        // The card toggle is a native <button>: Enter/Space activate it as a click, so no key branch here.
         var d = e.target && e.target.closest ? e.target.closest('[data-cicd-pool-dialog]') : null;
         if (!d) return;
         if (e.key === 'Escape') { e.preventDefault(); closeDialog(r, true); return; }

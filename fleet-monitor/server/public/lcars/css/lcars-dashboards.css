@@ -1417,9 +1417,18 @@
 .cicd-summary-group { display: contents; }
 
 /* XACA-1476-001: after a failed poll the summary keeps its last numbers but must
-   not read as live; mute it like a dimmed runner. UPDATE FAILED sits just below. */
-[data-cicd-slot="summary"][data-cicd-stale] .cicd-summary { opacity: 0.55; }
-[data-cicd-slot="summary"][data-cicd-stale] .cicd-val { color: var(--lcars-tan); }
+   not read as live. No opacity (it pushed the small labels below WCAG AA 4.5:1): the
+   values swap to tan (~6.7:1 on --lcars-dark) and a STALE tag heads the row.
+   UPDATE FAILED still sits just below. */
+[data-cicd-slot="summary"][data-cicd-stale] .summary-value { color: var(--lcars-tan); }
+[data-cicd-slot="summary"][data-cicd-stale]::before {
+    content: "STALE \2014  LAST GOOD DATA";
+    display: block;
+    margin-top: 15px;
+    font-size: 12px;
+    letter-spacing: 2px;
+    color: var(--lcars-amber);
+}
 
 .cicd-subhead {
     margin: 22px 0 10px;
