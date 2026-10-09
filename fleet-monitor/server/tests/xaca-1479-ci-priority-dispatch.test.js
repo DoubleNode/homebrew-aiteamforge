@@ -27,7 +27,7 @@ const assert = require('node:assert/strict');
 
 const {
     createGithubClient, createPriorityResolver, priorityOfLabels, GithubError,
-    PRIORITY_TTL_MS, PRIORITY_FAIL_AUDIT_EVERY_MS, PURPOSE_PERMISSIONS,
+    PRIORITY_TTL_MS, PRIORITY_TIMEOUT_TTL_MS, PRIORITY_FAIL_AUDIT_EVERY_MS, PURPOSE_PERMISSIONS,
 } = require('../lib/ci-dispatch-github');
 const { createWatcher } = require('../lib/ci-dispatch-watcher');
 const { createPoolStore } = require('../lib/ci-pool-store');
@@ -169,6 +169,34 @@ describe('005 resolver: every failure resolves NORMAL and writes an audit line',
         assert.equal(await p, 'normal');
         assert.ok(h.auditRows.some((a) => a.reason === 'timeout'));
         release([pr(9, 'ci-priority:critical')]);
+        await new Promise((r) => setImmediate(r));
+        assert.equal(h.r.peek({ owner: OWNER, repo: REPO_NAME, branch: BRANCH }), 'critical');
+    });
+
+    test('XACA-1479-021: after a timeout, normal is cached for a SHORT ttl: no new request, no new wait; then it asks again', async () => {
+        const h = resolverHarness({ timeoutMs: 5000 });
+        let release;
+        h.gh.answer = () => new Promise((res) => { release = res; });
+        const p1 = h.resolve();
+        await Promise.resolve();
+        h.fireTimers();
+        assert.equal(await p1, 'normal');
+        assert.equal(h.calls.length, 1);
+        // Within the short window: immediate normal, no timer armed, no request.
+        h.clock.t += PRIORITY_TIMEOUT_TTL_MS - 1;
+        assert.equal(await h.resolve(), 'normal');
+        assert.equal(h.timers.size, 0, 'a cached timeout must not arm another wait');
+        assert.equal(h.calls.length, 1);
+        assert.ok(PRIORITY_TIMEOUT_TTL_MS < PRIORITY_TTL_MS, 'the timeout entry is shorter-lived than a real answer');
+        // Past it: the resolver is consulted again (joins the still-hung request, so no pile-up of requests).
+        h.clock.t += 2;
+        const p2 = h.resolve();
+        await Promise.resolve();
+        assert.equal(h.timers.size, 1, 'after the short ttl a lookup waits again');
+        assert.equal(h.calls.length, 1, 'but shares the in-flight request instead of issuing another');
+        h.fireTimers();
+        assert.equal(await p2, 'normal');
+        release([pr(9, 'ci-priority:critical')]);   // the late real answer still overwrites the negative entry
         await new Promise((r) => setImmediate(r));
         assert.equal(h.r.peek({ owner: OWNER, repo: REPO_NAME, branch: BRANCH }), 'critical');
     });
@@ -379,6 +407,42 @@ describe('005 watcher: rec.priority on first sight, refreshed per TTL, never thr
         assert.ok(pri.every((e) => e.rec.priority === 'high'));
         await s.w.runCycle();      // unchanged -> silent
         assert.equal(s.events.filter((e) => e.change === 'priority').length, 2);
+    });
+
+    test('XACA-1479-017: N distinct branches are looked up CONCURRENTLY, at first sight and on refresh', async () => {
+        const N = 4;
+        let hang = false;
+        const waiting = [];
+        const resolver = (a) => (hang ? new Promise((res) => { waiting.push({ a, res }); }) : Promise.resolve('normal'));
+        const tick = async () => { for (let i = 0; i < 20; i++) await new Promise((res) => setImmediate(res)); };
+
+        // First sight: queued runs, as the real queued list returns them (status: 'queued').
+        hang = true;
+        const s = watcherSetup(resolver);
+        s.world.queued = Array.from({ length: N }, (_, i) => wrun(i + 1, { status: 'queued', head_branch: `feature/b${i}` }));
+        for (let i = 1; i <= N; i++) s.world.jobs[i] = [wjob(i * 10)];
+        const c1 = s.w.runCycle();
+        await tick();
+        assert.equal(waiting.length, N, 'all N lookups are in flight at once (serial would show 1)');
+        waiting.splice(0).forEach((w) => w.res('normal'));
+        await c1;
+        assert.equal(s.events.filter((e) => e.change === 'queued').length, N);
+
+        // Refresh: runs without a status field skip the first-sight prefetch, so only the
+        // refresh path can be issuing these lookups.
+        hang = false;
+        const s2 = watcherSetup(resolver);
+        s2.world.queued = Array.from({ length: N }, (_, i) => wrun(i + 1, { head_branch: `feature/b${i}` }));
+        for (let i = 1; i <= N; i++) s2.world.jobs[i] = [wjob(i * 10)];
+        await s2.w.runCycle();
+        hang = true;
+        s2.clock.t += PRIORITY_TTL_MS + 1;
+        const c2 = s2.w.runCycle();
+        await tick();
+        assert.equal(waiting.length, N, 'refresh also looks up every distinct branch at once');
+        waiting.splice(0).forEach((w) => w.res('high'));
+        await c2;
+        assert.equal(s2.events.filter((e) => e.change === 'priority').length, N);
     });
 
     test('without a resolver the record shape is unchanged (no priority key)', async () => {

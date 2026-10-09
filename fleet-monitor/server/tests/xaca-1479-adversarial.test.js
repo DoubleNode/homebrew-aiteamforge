@@ -34,7 +34,7 @@ const OWNER = 'DoubleNode';
 const REPO_NAME = 'dev-team';
 const REPO = `${OWNER}/${REPO_NAME}`;
 const POOL = ['self-hosted', 'Linux', 'ARM64', 'fleet-pool'];
-const POOL_B = POOL.concat(['other-set']);
+const POOL_B = POOL.concat(['m1mini']);   // a second VALID label set: pool labels + the host label (an unknown extra label makes the job ineligible)
 const ENV_ON = { FLEET_CI_DISPATCHER: '1', GITHUB_APP_CLIENT_ID: 'Iv-test-client', GITHUB_APP_PRIVATE_KEY: 'not-a-real-key-fixture' };
 let seq = 0;
 
@@ -55,7 +55,7 @@ function rec(jobId, over = {}) {
     }, over);
 }
 
-function setup() {
+function setup({ failMint = false } = {}) {
     const dir = path.join(TMP, `d${++seq}`);
     fs.mkdirSync(dir, { recursive: true });
     const clock = { t: T0 + 60000 };
@@ -66,7 +66,7 @@ function setup() {
     const reports = new Map();
     const ghCalls = [];
     const gh = {
-        async generateJitConfig(a) { ghCalls.push(['mint', a]); return { runnerId: 9000 + ghCalls.length, encodedJitConfig: `JITSENTINEL-${ghCalls.length}` }; },
+        async generateJitConfig(a) { ghCalls.push(['mint', a]); if (failMint) throw Object.assign(new Error('mint refused'), { code: 'boom', status: 500 }); return { runnerId: 9000 + ghCalls.length, encodedJitConfig: `JITSENTINEL-${ghCalls.length}` }; },
         async deleteRunner(a) { ghCalls.push(['delete', a]); return { deleted: true }; },
     };
     const auditRows = [];
@@ -116,6 +116,16 @@ describe('009 decide(): edges', () => {
         assert.equal(s.mints().length, 2);
         await s.d.tick();
         assert.equal(s.mints().length, 2, 'a second tick adds nothing');
+    });
+
+    test('a mint failure stops that label set for the tick: one GitHub mint call per set, not one per queued job', async () => {
+        const s = setup({ failMint: true });
+        s.report('m1mini', 6);
+        for (let i = 1; i <= 3; i++) s.d.onJob(rec(i, { priority: 'normal' }), 'queued');
+        s.d.onJob(rec(4, { priority: 'critical' }), 'queued');
+        for (let i = 5; i <= 6; i++) s.d.onJob(rec(i, { labels: POOL_B, priority: 'high' }), 'queued');
+        await s.d.tick();
+        assert.equal(s.mints().length, 2, 'exactly one attempt per label set');
     });
 
     test('equal priority keeps FIFO by first sight, regardless of arrival order of the events', async () => {

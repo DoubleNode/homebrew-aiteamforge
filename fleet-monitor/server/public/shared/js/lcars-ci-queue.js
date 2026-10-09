@@ -309,9 +309,13 @@
         if (cell.getAttribute('data-ciq-null') === '1') { cell.textContent = ''; cell.removeAttribute('data-ciq-null'); }
         var t = cell.firstChild;
         if (!t || t.nodeType !== 3) { cell.textContent = ''; t = doc.createTextNode(''); cell.appendChild(t); }
-        if (t.nodeValue !== text) t.nodeValue = text;
-        var badge = cell.querySelector('.ciq-prio');
         var key = typeof priority === 'string' && Object.prototype.hasOwnProperty.call(PRIO, priority) ? priority : null;
+        // XACA-1479-020: a real trailing space in the text node (only when badged) so the accessible text reads
+        // 'queued CRITICAL priority', not 'queuedCRITICAL priority'. Trailing whitespace before the inline-block badge
+        // collapses to one normal space; the badge's own margin-left is unchanged.
+        var want = key === null ? text : text + ' ';
+        if (t.nodeValue !== want) t.nodeValue = want;
+        var badge = cell.querySelector('.ciq-prio');
         if (key === null) { if (badge) cell.removeChild(badge); return; }
         if (badge && badge.getAttribute('data-ciq-priority') === key) return;
         if (badge) cell.removeChild(badge);
@@ -323,6 +327,10 @@
         badge.appendChild(el(doc, 'span', 'ciq-prio-text', PRIO[key].label));
         badge.appendChild(el(doc, 'span', 'ciq-sr', ' priority'));
         cell.appendChild(badge);
+    }
+
+    function prioRank(p) {
+        return typeof p === 'string' && Object.prototype.hasOwnProperty.call(PRIO, p) ? (p === 'critical' ? 0 : 1) : 2;
     }
 
     function fillJob(doc, cell, name, url) {
@@ -351,7 +359,15 @@
         running.forEach(function(a) { runIds[a.repo + '#' + a.id] = true; });
         var shown = 0;
         var wanted = [];
-        queue.forEach(function(item, idx) {
+        // XACA-1479-019: queued rows are shown in DISPATCH order (what ci-dispatcher decide() does): priority rank
+        // (critical > high > normal; missing/unknown = normal) then the server's own queue[] order (its FIFO / first-seen
+        // order), so a badged job never sits below normal jobs it is dispatched ahead of. Only queued rows are reordered;
+        // running rows stay after them (they are not competing for a slot). The explicit index tiebreak keeps the sort
+        // stable. Rows are still patched in place and moved by the insertBefore pass below (no rebuild, no focus theft).
+        var order = queue.map(function(item, idx) { return { item: item, idx: idx }; });
+        order.sort(function(x, y) { return (prioRank(x.item.priority) - prioRank(y.item.priority)) || (x.idx - y.idx); });
+        order.forEach(function(o) {
+            var item = o.item, idx = o.idx;
             var hasJob = isStr(item.repo) && isNum(item.jobId);
             var id = hasJob ? item.repo + '#' + item.jobId
                 : (isStr(item.key) ? item.key : (isStr(item.repo) ? item.repo : '') + '#' + (item.jobId !== undefined ? item.jobId : idx));

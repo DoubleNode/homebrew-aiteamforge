@@ -136,16 +136,44 @@ function createWatcher(opts = {}) {
 
     /** Fold one GitHub job into the lifecycle table, emitting changes in order. */
     /** XACA-1479-005: never throws, never blocks past the resolver's own timeout, unknown => 'normal'. */
-    async function priorityFor(owner, repo, branch, headRepoFullName) {
-        if (!resolvePriority) return null;
+    // XACA-1479-017: lookups for one cycle are memoised by (owner, repo, headOwner, branch) so distinct
+    // entries can be started together (prefetchPriorities / refreshPriorities) and a repeat inside the
+    // cycle shares the one promise. Cleared when pollRepo ends; the resolver's own cache spans cycles.
+    const prioMemo = new Map();
+
+    function priorityFor(owner, repo, branch, headRepoFullName) {
+        if (!resolvePriority) return Promise.resolve(null);
         const headOwner = typeof headRepoFullName === 'string' && headRepoFullName.includes('/') ? headRepoFullName.split('/')[0] : owner;
-        try {
-            const p = await resolvePriority({ owner, repo, branch, headOwner });
-            return p === 'critical' || p === 'high' ? p : 'normal';
-        } catch (e) {
-            log('warn', `watcher: priority resolver threw (${(e && (e.code || e.message)) || 'error'}); NORMAL`);
-            return 'normal';
+        const mk = `${owner}/${repo}|${headOwner}:${branch}`;
+        let p = prioMemo.get(mk);
+        if (!p) {
+            p = (async () => {
+                try {
+                    const v = await resolvePriority({ owner, repo, branch, headOwner });
+                    return v === 'critical' || v === 'high' ? v : 'normal';
+                } catch (e) {
+                    log('warn', `watcher: priority resolver threw (${(e && (e.code || e.message)) || 'error'}); NORMAL`);
+                    return 'normal';
+                }
+            })();
+            prioMemo.set(mk, p);
         }
+        return p;
+    }
+
+    /**
+     * XACA-1479-017: start every distinct queued run's lookup at once and wait for them together, so a
+     * hung GitHub costs one resolver timeout per cycle, not one per branch. Never throws.
+     */
+    async function prefetchPriorities(r, listed) {
+        if (!resolvePriority) return;
+        const work = [];
+        for (const wr of listed.values()) {
+            if (wr && wr.status === 'queued' && typeof wr.head_branch === 'string') {
+                work.push(priorityFor(r.owner, r.repo, capStr(wr.head_branch), (wr.head_repository && wr.head_repository.full_name) ?? null));
+            }
+        }
+        await Promise.allSettled(work);
     }
 
     function observeJob(owner, repo, run, j, nowMs, touch, priority) {
@@ -321,6 +349,15 @@ function createWatcher(opts = {}) {
             for (const wr of items) if (wr && Number.isInteger(wr.id)) listed.set(wr.id, wr);
         }
 
+        try {
+            await prefetchPriorities(r, listed);
+            return await pollListed(r, nowMs, listed);
+        } finally {
+            prioMemo.clear();
+        }
+    }
+
+    async function pollListed(r, nowMs, listed) {
         let active = listed.size > 0;
         for (const [id, wr] of listed) {
             const rk = `${r.slug}#${id}`;
@@ -379,9 +416,12 @@ function createWatcher(opts = {}) {
             if (!byBranch.has(k)) byBranch.set(k, []);
             byBranch.get(k).push(rec);
         }
-        for (const recs of byBranch.values()) {
-            const p = await priorityFor(r.owner, r.repo, recs[0].branch, recs[0].run.headRepoFullName);
-            for (const rec of recs) {
+        // XACA-1479-017: distinct branches concurrently (each already bounded by the resolver timeout).
+        const groups = [...byBranch.values()];
+        const answers = await Promise.all(groups.map((recs) => priorityFor(r.owner, r.repo, recs[0].branch, recs[0].run.headRepoFullName)));
+        for (let i = 0; i < groups.length; i++) {
+            const p = answers[i];
+            for (const rec of groups[i]) {
                 if (rec.priority === p) continue;
                 rec.priority = p;
                 emit(rec, 'priority');

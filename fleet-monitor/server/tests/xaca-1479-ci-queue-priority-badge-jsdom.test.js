@@ -71,3 +71,30 @@ test('badge CSS uses tokens only', () => {
     assert.match(css, /\.ciq-prio-critical/);
     assert.ok(!/#[0-9a-fA-F]{3,8}\b|rgb\(|hsl\(/.test(css));
 });
+
+const rowIds = (env) => Array.from(env.el.querySelectorAll('tbody tr')).map((r) => r.getAttribute('data-ciq-job'));
+
+test('XACA-1479-019: queued rows render in priority rank then server order; running rows stay last', () => {
+    const env = loadImpl();
+    const running = [{ key: 'o/r#9#1', repo: 'o/r', jobId: 9, name: 'unit-9', machine: 'm1', startedAt: '2026-10-07T18:00:00.000Z' }];
+    const mk = (q) => Object.assign(body(q), { running });
+    env.render(mk([job(1), job(2, { priority: 'high' }), job(3), job(4, { priority: 'critical' }), job(5, { priority: 'bogus' }), job(6, { priority: 'high' })]));
+    assert.deepEqual(rowIds(env), ['o/r#4', 'o/r#2', 'o/r#6', 'o/r#1', 'o/r#3', 'o/r#5', 'o/r#9']);
+    const nodes = {};
+    env.el.querySelectorAll('tbody tr').forEach((r) => { nodes[r.getAttribute('data-ciq-job')] = r; });
+    // job 3 becomes critical: its row moves to the top, same node, no rebuild.
+    env.render(mk([job(1), job(2, { priority: 'high' }), job(3, { priority: 'critical' }), job(4, { priority: 'critical' }), job(5), job(6, { priority: 'high' })]));
+    assert.deepEqual(rowIds(env), ['o/r#3', 'o/r#4', 'o/r#2', 'o/r#6', 'o/r#1', 'o/r#5', 'o/r#9']);
+    env.el.querySelectorAll('tbody tr').forEach((r) => assert.equal(r, nodes[r.getAttribute('data-ciq-job')], 'node reused'));
+});
+
+test('XACA-1479-020: status cell accessible text has real spaces', () => {
+    const env = loadImpl();
+    env.render(body([job(1, { priority: 'critical' }), job(2, { priority: 'high' }), job(3)]));
+    assert.equal(statusCell(env, 1).textContent, 'queued ▲▲CRITICAL priority');
+    assert.match(statusCell(env, 1).textContent, /^queued \S*CRITICAL priority$/);
+    assert.match(statusCell(env, 2).textContent, /^queued \S*HIGH priority$/);
+    assert.equal(statusCell(env, 3).textContent, 'queued');
+    env.render(body([job(1)]));
+    assert.equal(statusCell(env, 1).textContent, 'queued');
+});

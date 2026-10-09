@@ -382,7 +382,12 @@ const PRIORITIES = Object.freeze(['critical', 'high', 'normal']);
 const PRIORITY_TTL_MS = 60 * 1000;                   // a removed label takes effect within ~1 min
 const PRIORITY_FAIL_AUDIT_EVERY_MS = 15 * 60 * 1000; // one failure audit line per (repo|branch|reason) per window
 const PRIORITY_CACHE_MAX = 1000;
-const PRIORITY_TIMEOUT_MS = 5000;                    // a hung lookup must never stall the watcher
+const PRIORITY_TIMEOUT_MS = 5000;
+// XACA-1479-021: after a timeout, 'normal' is cached this long. 15 s: long enough that a stalled
+// endpoint costs one 5 s wait per branch per window instead of one per watcher cycle (cycles are a few
+// seconds apart), short enough that a recovered GitHub is retried well inside the 60 s success TTL so
+// a critical label is not hidden for a full minute. A late real answer overwrites it.
+const PRIORITY_TIMEOUT_TTL_MS = 15 * 1000;                    // a hung lookup must never stall the watcher
 
 /**
  * Priority of ONE PR's label names: 'critical' | 'high' | 'normal', or {malformed:true} when any label
@@ -434,6 +439,7 @@ function createPriorityResolver(opts = {}) {
     const timeoutMs = Number.isFinite(opts.timeoutMs) && opts.timeoutMs > 0 ? opts.timeoutMs : PRIORITY_TIMEOUT_MS;
     const setTimer = opts.setTimer || ((fn, ms) => { const h = setTimeout(fn, ms); if (h && h.unref) h.unref(); return h; });
     const clearTimer = opts.clearTimer || clearTimeout;
+    const timeoutTtlMs = Math.min(ttlMs, PRIORITY_TIMEOUT_TTL_MS);
 
     const cache = new Map();         // key -> {priority, expiresAtMs}
     const inflight = new Map();      // key -> Promise<priority>
@@ -525,6 +531,13 @@ function createPriorityResolver(opts = {}) {
             const h = setTimer(() => {
                 if (settled) return;
                 settled = true;
+                // Negative-cache so the next resolves do not each re-wait the timeout (never upward).
+                const cur = cache.get(key);
+                if (!cur || now() >= cur.expiresAtMs) {
+                    cache.delete(key);
+                    cache.set(key, { priority: 'normal', expiresAtMs: now() + timeoutTtlMs });
+                    while (cache.size > PRIORITY_CACHE_MAX) cache.delete(cache.keys().next().value);
+                }
                 done(fail(owner, repo, branch, 'timeout'));
             }, timeoutMs);
             p.then((v) => { if (!settled) { settled = true; clearTimer(h); done(v); } },
@@ -543,6 +556,6 @@ function createPriorityResolver(opts = {}) {
 
 module.exports = {
     createGithubClient, GithubError, PURPOSE_PERMISSIONS,
-    createPriorityResolver, priorityOfLabels, PRIORITY_TTL_MS, PRIORITY_FAIL_AUDIT_EVERY_MS, PRIORITY_LABEL_PREFIX,
+    createPriorityResolver, priorityOfLabels, PRIORITY_TTL_MS, PRIORITY_TIMEOUT_TTL_MS, PRIORITY_FAIL_AUDIT_EVERY_MS, PRIORITY_LABEL_PREFIX,
     TOKEN_REFRESH_MARGIN_MS, SLOW_BELOW, SUSPEND_BELOW, JWT_BACKDATE_S, JWT_LIFETIME_S,
 };

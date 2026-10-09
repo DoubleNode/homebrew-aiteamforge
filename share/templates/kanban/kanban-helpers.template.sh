@@ -4232,6 +4232,62 @@ _kb_ci_priority_target() {
     printf '%s\t%s\n' "$item" "$board_file"
 }
 
+# _kb_ci_priority_resolve_repo <item-id> <board-file> <board-index>   (XACA-1479-018)
+# Echo "<owner>/<repo>" of the repository that holds the item's PR (rc 0), or print the
+# reason on stderr and return 1 (the caller then touches NO PR). The item's repo is NOT
+# the cwd's repo when an explicit ID belongs to another team (an XIOS-n id run from
+# dev-team), so a bare `gh repo view` would query/label the wrong repo or report a
+# false "no open PR". Resolution, in order:
+#   1. the item's recorded worktree path (item.worktree, if the dir exists here) -
+#      `gh repo view` run INSIDE it;
+#   2. foreign-team item only: the team registry's repo, via
+#      aiteamforge_paths.get_team_repo_root (read-only config view; XACA-1477 resolves
+#      container-layout teams whose working_dir is not itself a repo);
+#   3. same-team item only (or team unknown): the cwd, as before.
+# A foreign-team item that resolves by neither 1 nor 2 is refused, never guessed.
+_kb_ci_priority_resolve_repo() {
+    local item="${1-}" board_file="${2-}" idx="${3-}"
+    local ctx cur_team item_team wt dir="" bs hooks repo="" foreign=0
+    ctx=$(_kb_detect_context 2>/dev/null) || ctx=""
+    cur_team="${ctx%%:*}"
+    item_team=$(_kb_get_team_from_code "$item" 2>/dev/null)
+    if [[ -n "$item_team" && "$item_team" != "ERROR" && -n "$cur_team" && "$cur_team" != "ERROR" && "$item_team" != "$cur_team" ]]; then
+        foreign=1
+    fi
+    wt=$(_kb_jq_read "$board_file" ".backlog[$idx].worktree // empty" -r 2>/dev/null)
+    if [[ -n "$wt" && -d "$wt" ]]; then
+        dir="$wt"
+    elif (( foreign == 1 )) && command -v python3 >/dev/null 2>&1; then
+        bs=$(_kb_board_settings_script 2>/dev/null) && hooks=$(dirname "$bs")
+        if [[ -n "$hooks" ]]; then
+            dir=$(python3 -I -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+from aiteamforge_paths import get_team_repo_root, read_config_view
+try:
+    print(get_team_repo_root(sys.argv[2], config=read_config_view()))
+except Exception:
+    sys.exit(1)
+' "$hooks" "$item_team" 2>/dev/null)
+            [[ -n "$dir" && -d "$dir" ]] || dir=""
+        fi
+    fi
+    if [[ -z "$dir" ]] && (( foreign == 1 )); then
+        echo "❌ kb-ci-priority: $item belongs to team '$item_team' but this session is team '$cur_team', and its repository cannot be determined (no usable worktree recorded on the item, no resolvable repo in the team registry) - PR label NOT changed; the priority stays recorded locally. Re-run it from the $item_team repo." >&2
+        return 1
+    fi
+    if [[ -n "$dir" ]]; then
+        repo=$(cd "$dir" 2>/dev/null && gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null)
+    else
+        repo=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null)
+    fi
+    if ! [[ "$repo" == */* ]]; then
+        echo "❌ kb-ci-priority: could not resolve the repository (gh repo view failed${dir:+ in $dir}) - PR label NOT changed" >&2
+        return 1
+    fi
+    printf '%s\n' "$repo"
+}
+
 # _kb_ci_priority_apply_pr <item-id> <board-file> <critical|high|normal> [from-kb-pr]
 # Make the item's open PR(s) carry exactly the label for <level>. Reports what it did.
 # rc 0: applied, already correct, or no open PR (recorded only)
@@ -4262,12 +4318,7 @@ _kb_ci_priority_apply_pr() {
         return 0
     fi
 
-    repo=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null)
-    rc=$?
-    if (( rc != 0 )) || ! [[ "$repo" == */* ]]; then
-        echo "❌ kb-ci-priority: could not resolve the repository (gh repo view failed) - PR label NOT changed" >&2
-        return 1
-    fi
+    repo=$(_kb_ci_priority_resolve_repo "$item" "$board_file" "$idx") || return 1
     prs=$(gh pr list --repo "$repo" --head "$branch" --state open --json number,labels 2>/dev/null)
     rc=$?
     if (( rc != 0 )); then
