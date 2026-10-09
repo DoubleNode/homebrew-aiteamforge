@@ -437,7 +437,14 @@ def build_notify_commands(user, title, message, kb_msg_to):
 
 
 def notify(log_file, user, title, message, kb_msg_to):
-    """Best-effort. Every failure is logged and swallowed. Never raises."""
+    """Best-effort. Every attempt and its outcome is logged. Never raises.
+
+    Logs "notify: attempting <names>" once, then exactly one outcome line per
+    command (ok / exited / timed out / failed). CAVEAT: "ok (rc=0)" means the
+    command succeeded, NOT that a human saw the alert. macOS can accept a
+    `display notification` and still suppress it (Focus mode, or the
+    notification settings of the script host).
+    """
     try:
         cmds = build_notify_commands(user, title, message, kb_msg_to)
     except Exception as exc:
@@ -447,6 +454,8 @@ def notify(log_file, user, title, message, kb_msg_to):
         log_line(log_file, "notify: user %r not resolvable; no notifications sent" % user)
     if not any(n == "kb-msg" for n, _ in cmds) and cmds:
         log_line(log_file, "notify: kanban-helpers.sh not found; kb-msg skipped")
+    if cmds:
+        log_line(log_file, "notify: attempting %s" % ",".join(n for n, _ in cmds))
     for name, argv in cmds:
         try:
             rc = _spawn(argv, NOTIFY_TIMEOUT_S)
@@ -454,6 +463,8 @@ def notify(log_file, user, title, message, kb_msg_to):
                 log_line(log_file, "notify: %s timed out after %ss (killed)" % (name, NOTIFY_TIMEOUT_S))
             elif rc != 0:
                 log_line(log_file, "notify: %s exited %s" % (name, rc))
+            else:
+                log_line(log_file, "notify: %s ok (rc=0)" % name)
         except Exception as exc:
             log_line(log_file, "notify: %s failed: %s: %s" % (name, type(exc).__name__, exc))
 
