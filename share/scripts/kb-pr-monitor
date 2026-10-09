@@ -91,6 +91,11 @@
 # `gh pr edit <N> --base <expected>`, then re-run BOTH gates in full (a
 # retarget changes the diff, so both approvals are stale, as with
 # RESPAWN_BOTH). It runs under --once and --no-merge like every other gate.
+# A retarget changes the diff but NOT the head SHA or its committer date, so
+# the gate also ENFORCES that staleness: the newest `base_ref_changed` event on
+# the PR raises the review cutoff (an approval submitted before the retarget
+# cannot satisfy Gate 1/2; an unreadable event list fails closed), and a base
+# change observed between two polls of one run resets both gate latches.
 # KBPM_PR_BASE overrides the resolver path (tests); default is the kb-pr-base
 # sibling of this script.
 #
@@ -139,7 +144,9 @@
 #                  that cannot positively prove a linear, merge-commit-free
 #                  ancestor range for the "already approved, just stale" bot
 #   XACA-1483      PR-base gate: baseRefName must equal kb-pr-base <ITEM>;
-#                  mismatch / unresolvable / unreadable all fail CLOSED
+#                  mismatch / unresolvable / unreadable all fail CLOSED;
+#                  base_ref_changed raises the review cutoff + base change
+#                  between polls resets the gate latches (XACA-1483-012)
 # ============================================================================
 
 PR_NUM=""
@@ -855,6 +862,7 @@ ZERO_ROWS_RETRIES=0     # gh exited 0 but the classifier saw no rows
 # contradiction it actually saw instead of asserting one shape for both.
 CI_ABSENCE_CONTRADICTED=""   # non-empty => this head contradicted "no CI here"
 PREV_HEAD_SHA=""
+PREV_PR_BASE=""        # XACA-1483-012: base observed on the previous poll
 FORCE_PUSH_CUTOFF=""
 
 # ── round-limit circuit breaker + delta re-review mode hints (XACA-1299-004) ─
@@ -1072,8 +1080,21 @@ while true; do
     if [ "$PR_BASE" != "$EXPECTED_BASE" ]; then
         printf '%s\n' "x PR #$PR_NUM targets '$PR_BASE' but $ITEM_ID must target '$EXPECTED_BASE' (kb-pr-base). Not merging, not updating the branch."
         printf '%s\n' "  Fix: gh pr edit $PR_NUM --repo $REPO --base $EXPECTED_BASE — then re-run BOTH gates in full (tester_mode=full reviewer_mode=full): the retarget changes the diff, so both approvals are stale."
-        verdict BLOCKED "PR base mismatch: PR #$PR_NUM base is '$PR_BASE', expected '$EXPECTED_BASE' (kb-pr-base $ITEM_ID); remedy: gh pr edit $PR_NUM --repo $REPO --base $EXPECTED_BASE, then re-run BOTH gates in full (tester_mode=full reviewer_mode=full)"
+        printf '%s\n' "  If the branch was CUT from '$PR_BASE', retargeting pulls that base's commits into the diff — rebase first: git rebase --onto $EXPECTED_BASE $PR_BASE <branch>, then retarget."
+        verdict BLOCKED "PR base mismatch: PR #$PR_NUM base is '$PR_BASE', expected '$EXPECTED_BASE' (kb-pr-base $ITEM_ID); remedy: gh pr edit $PR_NUM --repo $REPO --base $EXPECTED_BASE, then re-run BOTH gates in full (tester_mode=full reviewer_mode=full); if the branch was CUT from '$PR_BASE', rebase first (git rebase --onto $EXPECTED_BASE $PR_BASE <branch>) or the retarget pulls '$PR_BASE' commits into the diff"
     fi
+    # XACA-1483-012: a base change BETWEEN polls of one run (a retarget, or a
+    # release reassignment followed by a retarget) voids both latches exactly
+    # like a head change: the approvals were given against a different diff.
+    # LAST_*_AT are cleared too so the next read is judged afresh — the
+    # base_ref_changed cutoff below is then the guard that rejects the
+    # pre-retarget reviews (the same "first poll" footing as XACA-1285).
+    if [ -n "$PREV_PR_BASE" ] && [ "$PR_BASE" != "$PREV_PR_BASE" ]; then
+        printf 'PR base changed (%s -> %s) — the diff changed. Resetting both gate latches.\n' "$PREV_PR_BASE" "$PR_BASE"
+        TEST_OK="false"; REVIEW_OK="false"; NO_CHECKS_RETRIES=0; ZERO_ROWS_RETRIES=0
+        LAST_TEST_AT=""; LAST_REVIEW_AT=""
+    fi
+    PREV_PR_BASE="$PR_BASE"
     # NOTE: `gh api --jq` is gh's OWN jq evaluator — it has NO --arg flag
     # (`--jq --arg head "$X"` exits 1 "unknown flag", output empty, gates never
     # flip, loop polls to its timeout). Bind the SHA with the quote-dance below.
@@ -1139,6 +1160,37 @@ while true; do
     # bash-only test would pass a broken version of this line.
     if [[ -n "$FORCE_PUSH_CUTOFF" && "$FORCE_PUSH_CUTOFF" > "$EFFECTIVE_CUTOFF" ]]; then
         EFFECTIVE_CUTOFF="$FORCE_PUSH_CUTOFF"
+    fi
+
+    # XACA-1483-012: retarget floor. `gh pr edit --base` changes the merged
+    # diff but not HEAD_SHA, its committer date, or FORCE_PUSH_CUTOFF, so
+    # without this an APPROVED given before the retarget still satisfies the
+    # gates. The newest `base_ref_changed` event raises the cutoff. One
+    # created_at per line, across ALL pages (`--paginate --jq` evaluates per
+    # page, so a `last` inside the jq would only be the last of EACH page);
+    # the max is taken here. Every line must be a well-formed `Z` stamp; a
+    # missing created_at emits the token "null", NOT "" — `$(...)` strips a
+    # trailing empty line, so "" on the only event would read as "no event".
+    # FAILS CLOSED (sentinel, as for the committer date): gh rc!=0 or any
+    # unparseable line. No event at all leaves the cutoff unchanged.
+    BASE_CHANGED_RAW=$(gh api --paginate "repos/$REPO/issues/$PR_NUM/events" \
+        --jq '.[] | select(.event == "base_ref_changed") | (.created_at // "null")' 2>/dev/null)
+    BASE_CHANGED_RC=$?   # capture-first
+    BASE_CHANGED_AT=""
+    _bc_iso='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'
+    if [ "$BASE_CHANGED_RC" -ne 0 ]; then
+        printf '%s\n' "! could not read base_ref_changed events (gh rc=$BASE_CHANGED_RC) — failing closed for this poll."
+        BASE_CHANGED_AT="9999-99-99T99:99:99Z"
+    elif [ -n "$BASE_CHANGED_RAW" ]; then
+        if printf '%s\n' "$BASE_CHANGED_RAW" | grep -v -E -q "$_bc_iso"; then
+            printf '%s\n' "! unparseable base_ref_changed event time(s) — failing closed for this poll."
+            BASE_CHANGED_AT="9999-99-99T99:99:99Z"
+        else
+            BASE_CHANGED_AT=$(printf '%s\n' "$BASE_CHANGED_RAW" | LC_ALL=C sort | tail -1)
+        fi
+    fi
+    if [[ -n "$BASE_CHANGED_AT" && "$BASE_CHANGED_AT" > "$EFFECTIVE_CUTOFF" ]]; then
+        EFFECTIVE_CUTOFF="$BASE_CHANGED_AT"
     fi
 
     # ── Gate 1: tester ──────────────────────────────────────────────────────

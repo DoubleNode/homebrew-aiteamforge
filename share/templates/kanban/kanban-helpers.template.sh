@@ -4189,7 +4189,7 @@ _kb_pr_base_resolve() {
     if [[ -n "$root" && -x "$root/scripts/kb-pr-base" ]]; then
         bin="$root/scripts/kb-pr-base"
     else
-        bin=$(command -v kb-pr-base 2>/dev/null) || bin=""
+        bin=$(command -v "kb-pr-base" 2>/dev/null) || bin=""
     fi
     [[ -n "$bin" ]] || return 1
     base=$("$bin" "$item" 2>/dev/null)
