@@ -26631,6 +26631,181 @@ kb-release-waive() {
 }
 
 # ---------------------------------------------------------------------------
+# XACA-1482-002: kb-release enforcement -- supported setter/reader for
+# releaseConfig.gateEnforcement (enforce|report), a thin client of
+#   GET  /api/release-gate-enforcement?team=<t>
+#   POST /api/release-gate-enforcement   {team, mode[, actor]}
+# The SERVER validates and decides (lead check on enforce->report); the CLI
+# never writes board JSON and has no offline fallback.
+#
+# Exit codes (deliberately NOT the promote/waive scheme -- this command has a
+# smaller surface): 0 ok   2 usage, or HTTP 400 (request rejected)
+#   3 refused (HTTP 403 not a lead / 409 releaseConfig not an object)
+#   4 transport failure, HTTP 5xx / any other status, or an unparseable reply
+# ---------------------------------------------------------------------------
+
+# Send one request to the caller team's LCARS release-gate-enforcement endpoint.
+# Usage: _kb_release_enf_request <GET|POST> <team|""> [json-payload]
+# Sets _KB_REL_CODE / _KB_REL_BODY. rc 0 = HTTP response received, 1 = no response.
+_kb_release_enf_request() {
+    local method="${1-}" team="${2-}" payload="${3-}"
+    _KB_REL_CODE=""
+    _KB_REL_BODY=""
+
+    local context ctx_team port response curl_exit url
+    local _kb_reason cause remedy
+    local _KB_LCARS_AUTH_ARGS=() _KB_LCARS_AUTH_STDIN=""
+
+    context=$(_kb_detect_context 2>/dev/null)
+    ctx_team="${context%%:*}"
+    if [[ -z "$ctx_team" || "$ctx_team" == "ERROR:"* ]]; then
+        echo "Error: Could not determine team context" >&2
+        return 1
+    fi
+    port=$(_kb_team_lcars_port "$ctx_team") || {
+        echo "Warning: no LCARS port known for team '$ctx_team', falling back to 8080" >&2
+        port="8080"
+    }
+    url="http://localhost:${port}/api/release-gate-enforcement"
+
+    _kb_lcars_auth_args
+    if [[ "$method" == "GET" ]]; then
+        response=$(printf '%s' "$_KB_LCARS_AUTH_STDIN" | curl -s -w "\n%{http_code}" \
+            --max-time "${KB_RELEASE_HTTP_TIMEOUT:-30}" \
+            -G --data-urlencode "team=${team}" \
+            "${_KB_LCARS_AUTH_ARGS[@]}" \
+            "$url" 2>/dev/null)
+    else
+        response=$(printf '%s' "$_KB_LCARS_AUTH_STDIN" | curl -s -w "\n%{http_code}" \
+            --max-time "${KB_RELEASE_HTTP_TIMEOUT:-30}" \
+            -X POST \
+            -H "Content-Type: application/json" \
+            "${_KB_LCARS_AUTH_ARGS[@]}" \
+            -d "$payload" \
+            "$url" 2>/dev/null)
+    fi
+    curl_exit=$?
+    _KB_REL_CODE=$(printf '%s' "$response" | tail -n1)
+    _KB_REL_BODY=$(printf '%s' "$response" | sed '$d')
+
+    if [[ "$_KB_REL_CODE" == "000" || -z "$_KB_REL_CODE" ]]; then
+        _kb_reason=$(_kb_curl_failure_reason "$curl_exit" "$port")
+        cause="${_kb_reason%%$'\n'*}"
+        remedy="${_kb_reason#*$'\n'}"
+        echo "Error: LCARS server on port $port — $cause." >&2
+        echo "  $remedy" >&2
+        if [[ "$method" == "POST" ]]; then
+            case "$curl_exit" in
+                18|28|52|55|56)
+                    echo "  the request may have been applied on the server — re-run \`kb-release enforcement ${team}\` to check" >&2
+                    ;;
+            esac
+        fi
+        echo "  (gateEnforcement is only changed by the server; there is no offline fallback)" >&2
+        return 1
+    fi
+    return 0
+}
+
+# kb-release enforcement <team> [enforce|report] [--actor <lead>]
+kb-release-enforcement() {
+    local team="" mode="" opt_actor=""
+    local usage="Usage: kb-release enforcement <team> [enforce|report] [--actor <lead>]"
+
+    while [[ $# -gt 0 ]]; do
+        case "${1-}" in
+            --actor|--by)
+                if [[ $# -lt 2 ]]; then echo "Error: ${1-} needs a value" >&2; echo "$usage" >&2; return 2; fi
+                opt_actor="${2-}"; shift 2 ;;
+            --help|-h)
+                echo "$usage"
+                echo ""
+                echo "Show (no mode) or set releaseConfig.gateEnforcement for a team."
+                echo "  enforce  the release gate blocks promotion (the default when the key is absent)"
+                echo "  report   the gate only reports what it would refuse"
+                echo "Loosening enforce -> report needs a listed release lead (--actor); the SERVER decides."
+                echo ""
+                echo "Exit codes: 0 ok, 2 usage/rejected (400), 3 refused (403 not a lead, 409),"
+                echo "            4 transport/server error (curl failure, 5xx, unparseable reply)"
+                return 0 ;;
+            -*)
+                echo "Error: Unknown option: ${1-}" >&2; echo "$usage" >&2; return 2 ;;
+            *)
+                if [[ -z "$team" ]]; then
+                    team="${1-}"
+                elif [[ -z "$mode" ]]; then
+                    mode="${1-}"
+                else
+                    echo "Error: Unexpected argument: ${1-}" >&2; echo "$usage" >&2; return 2
+                fi
+                shift ;;
+        esac
+    done
+
+    if [[ -z "$team" ]]; then
+        echo "Error: team is required" >&2; echo "$usage" >&2; return 2
+    fi
+    if ! _kb_release_valid_token "$team"; then
+        echo "Error: invalid team: $team" >&2; return 2
+    fi
+    if [[ -n "$mode" && "$mode" != "enforce" && "$mode" != "report" ]]; then
+        echo "Error: mode must be exactly 'enforce' or 'report' (got: $mode)" >&2; echo "$usage" >&2; return 2
+    fi
+    if [[ -n "$opt_actor" && -z "$mode" ]]; then
+        echo "Error: --actor only applies when setting a mode" >&2; echo "$usage" >&2; return 2
+    fi
+
+    local payload="" err rc
+    if [[ -z "$mode" ]]; then
+        _kb_release_enf_request GET "$team" || return 4
+    else
+        payload=$(jq -n --arg team "$team" --arg mode "$mode" --arg actor "$opt_actor" \
+            'if $actor == "" then {team: $team, mode: $mode} else {team: $team, mode: $mode, actor: $actor} end') || return 4
+        _kb_release_enf_request POST "$team" "$payload" || return 4
+    fi
+
+    if [[ "$_KB_REL_CODE" != "200" ]]; then
+        err=$(printf '%s' "$_KB_REL_BODY" | jq -r '.error // .message // empty' 2>/dev/null)
+        case "$_KB_REL_CODE" in
+            400) rc=2; echo "Error: request rejected (HTTP 400)" >&2 ;;
+            403) rc=3; echo "Refused: not a release lead — gateEnforcement unchanged (HTTP 403)" >&2 ;;
+            409) rc=3; echo "Refused: releaseConfig is not an object — gateEnforcement unchanged (HTTP 409)" >&2 ;;
+            *)   rc=4; echo "Error: enforcement request failed (HTTP ${_KB_REL_CODE:-?})" >&2 ;;
+        esac
+        if [[ -n "$err" ]]; then
+            echo "  $err" >&2
+        elif [[ "$rc" == "4" && -n "$_KB_REL_BODY" ]]; then
+            echo "  $_KB_REL_BODY" >&2
+        fi
+        return $rc
+    fi
+
+    local r_mode r_explicit r_warn r_changed
+    r_mode=$(printf '%s' "$_KB_REL_BODY" | jq -r '.mode // empty' 2>/dev/null)
+    r_explicit=$(printf '%s' "$_KB_REL_BODY" | jq -r '.explicit // empty' 2>/dev/null)
+    if [[ "$r_mode" != "enforce" && "$r_mode" != "report" ]]; then
+        echo "Error: unparseable response from LCARS (no valid mode): $_KB_REL_BODY" >&2
+        return 4
+    fi
+    r_warn=$(printf '%s' "$_KB_REL_BODY" | jq -r '.configWarning // empty' 2>/dev/null)
+    local how="(default — key absent)"
+    [[ "$r_explicit" == "true" ]] && how="(explicit)"
+
+    if [[ -z "$mode" ]]; then
+        echo "$team: gate enforcement = $r_mode $how"
+    else
+        r_changed=$(printf '%s' "$_KB_REL_BODY" | jq -r '.changed // empty' 2>/dev/null)
+        if [[ "$r_changed" == "true" ]]; then
+            echo "✓ $team: gate enforcement set to $r_mode $how"
+        else
+            echo "✓ $team: gate enforcement already $r_mode $how — no change"
+        fi
+    fi
+    [[ -n "$r_warn" ]] && echo "Warning: $r_warn"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # XACA-1347-007: stage test runner wiring.  test / walkthrough / new-sha.
 #
 # `test` and `walkthrough` are thin shells around kanban-hooks/release_stage_cli.py
@@ -27810,6 +27985,10 @@ kb-release() {
             # XACA-1346-006: lead-approved gate waiver (server checks the lead list)
             kb-release-waive "$@"
             ;;
+        enforcement)
+            # XACA-1482-002: show/set releaseConfig.gateEnforcement (server decides)
+            kb-release-enforcement "$@"
+            ;;
         test)
             # XACA-1347-007: run the current stage's automated providers
             kb-release-test "$@"
@@ -27874,6 +28053,8 @@ kb-release() {
             echo "                                              Move back to an earlier stage (reason required)"
             echo "  kb-release waive <id> --stage STAGE --reason \"...\" --tests t1,t2 [--by NAME]"
             echo "                                              Lead-approved gate waiver"
+            echo "  kb-release enforcement <team> [enforce|report] [--actor <lead>]"
+            echo "                                              Show/set gateEnforcement via the server (XACA-1482)"
             echo "  kb-release test <id> [--repo-dir PATH] [--include-scheduled] [--dry-run] [--only-missing] [--provider NAME]..."
             echo "                                              Run the current stage's automated test providers (XACA-1347)"
             echo "  kb-release walkthrough <id> [--provider NAME] [--lead NAME]"
@@ -27923,6 +28104,10 @@ kb-release() {
             echo ""
             echo "Gate exit codes: 0 ok, 1 server/transport, 2 usage/rejected, 3 refused (409),"
             echo "                 4 not found, 5 not a release lead (waive)"
+            echo ""
+            echo "Enforcement (XACA-1482): kb-release enforcement <team> [enforce|report] [--actor <lead>]"
+            echo "  Show or set releaseConfig.gateEnforcement. Exit: 0 ok, 2 usage/400, 3 refused (403/409),"
+            echo "  4 transport/server error."
             ;;
         *)
             echo "Unknown subcommand: $subcmd"

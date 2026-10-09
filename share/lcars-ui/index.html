@@ -970,6 +970,43 @@
                             </div>
                         </div>
 
+                        <!-- XACA-1482-003: Release Gates — releaseConfig.gateEnforcement.
+                             Reads/writes /api/release-gate-enforcement. Fail-closed: any load
+                             problem renders the box CHECKED + DISABLED with a visible error.
+                             Unchecking (gates off) asks for a release lead first. -->
+                        <div class="team-config-section-divider"></div>
+                        <div class="team-config-row team-config-row-header" id="release-gates-header">
+                            <div class="team-config-row-left">
+                                <label class="team-config-label">Release Gates</label>
+                                <span class="team-config-hint">
+                                    Applies to team <strong id="release-gates-team-label">--</strong>.
+                                    Controls whether a failing gate refuses a release promotion or only logs it.
+                                </span>
+                            </div>
+                        </div>
+
+                        <div class="team-config-row" id="release-gates-row">
+                            <div class="team-config-row-left">
+                                <label class="team-config-label" for="release-gates-checkbox">
+                                    Enforce release promotion gates
+                                    <span class="team-config-default-badge" id="release-gates-default" style="display:none;">(default)</span>
+                                </label>
+                                <span class="team-config-hint">
+                                    Turning gates OFF requires a release lead.
+                                </span>
+                            </div>
+                            <div class="team-config-row-right">
+                                <input type="checkbox" id="release-gates-checkbox" class="team-config-checkbox" />
+                                <span class="team-config-status" id="release-gates-status" role="status" aria-live="polite"></span>
+                            </div>
+                        </div>
+
+                        <div class="team-config-row board-settings-error-row" id="release-gates-error-row" style="display:none;">
+                            <div class="team-config-row-left">
+                                <span class="team-config-hint board-settings-error-text" id="release-gates-error-text" role="alert" aria-live="assertive"></span>
+                            </div>
+                        </div>
+
                         <!-- XACA-0332: Copyright configuration (read/write from ~/.aiteamforge/team-paths.json schema v2) -->
                         <div class="team-config-section-divider"></div>
                         <div class="team-config-row team-config-row-header">
@@ -2736,7 +2773,7 @@
     <script src="js/vendor/jspdf.umd.min.js?v=1"></script>
 <!-- XACA-0292-005: Reusable filter-bar component — must load before lcars.js -->
 <script src="js/lcars-filter-bar.js?v=1.2"></script>
-<script src="js/lcars.js?v=4.07"></script>
+<script src="js/lcars.js?v=4.08"></script>
 <!-- XACA-0293-001: CR cycle-time compute module — must load before lcars-cr-tab.js (no DOM/network deps) -->
 <script src="js/lcars-cr-metrics.js"></script>
 <!-- XACA-0293-013: Shared poll bus — single 5s interval for all tile modules; must load after lcars-cr-metrics.js and before tile scripts -->

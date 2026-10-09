@@ -7,6 +7,7 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- **XACA-1482** (Added): supported setter for `releaseConfig.gateEnforcement`. `share/lcars-ui/server.py`, `index.html`, `js/lcars.js` re-mirrored (new `GET`/`POST /api/release-gate-enforcement` -- literal enforce|report, locked board write, activity audit, enforce->report needs a `releaseConfig.leads` actor -- and an "Enforce release promotion gates" checkbox on SETTINGS > TEAM CONFIG that fails closed; `lcars.js?v=4.08`), plus new `share/lcars-ui/tests/test-xaca-1482-release-gates-render.js`. `share/templates/kanban/kanban-helpers.template.sh` hand-ported from `kanban-helpers.sh`: new `kb-release enforcement <team> [enforce|report] [--actor <lead>]` (`kb-release-enforcement`, `_kb_release_enf_request`) routed through the endpoint, plus the `kb-release` dispatcher case and help text.
 - **XACA-1483** (Fixed): `share/scripts/kb-pr-monitor` re-mirrored with a fail-closed PR-base gate (PR `baseRefName` must equal `kb-pr-base <ITEM>`; a mismatch, an unreadable base or a resolver failure gives 22 BLOCKED with remedy `gh pr edit <N> --base <b>`). `share/templates/kanban/kanban-helpers.template.sh` hand-ported: the work prompt names the resolved base (or STOP) instead of "target develop", and `kb-pr` warns non-fatally on a base mismatch (new `_kb_pr_base_resolve`, `_kb_pr_base_check`). `share/skills/Project Planner/SKILL.md` and `docs/USER_GUIDE.md` re-mirrored with the `kb-pr-base` wording.
 
 ## [0.21.1] - 2026-10-09

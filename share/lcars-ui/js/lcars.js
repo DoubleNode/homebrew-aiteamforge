@@ -85,6 +85,7 @@ const TEAM_SCOPED_PREFIXES = [
     '/api/calendar/items',
     '/api/daily-overview',   // XACA-0334: Daily Overview aggregator
     '/api/board-settings',   // XACA-1083-005: per-team requireEpicOnStart/requireReleaseOnStart
+    '/api/release-gate-enforcement', // XACA-1482-003: per-team releaseConfig.gateEnforcement
 ];
 
 function apiUrl(path, extraParams) {
@@ -10697,6 +10698,7 @@ function switchSection(sectionName, skipAnimation = false) {
     if (sectionName === 'team-config') {
         loadTeamConfig();
         loadBoardSettings(); // XACA-1083-005
+        loadReleaseGateEnforcement(); // XACA-1482-003
     }
 
     // Render CR list when switching to change-req section (XACA-0292-007)
@@ -21202,6 +21204,167 @@ async function saveTeamConfigCRSupport(checkbox, statusEl) {
             statusEl.textContent = (err && err.message) ? 'Save failed: ' + err.message : 'Save failed';
             statusEl.className = 'team-config-status error';
         }
+    }
+}
+
+// =============================================================================
+// RELEASE GATES — XACA-1482-003
+// Loads and persists releaseConfig.gateEnforcement for CONFIG.team via
+// /api/release-gate-enforcement. Fail-closed: anything other than a clean
+// {mode: 'enforce'|'report'} response renders the box CHECKED + DISABLED with
+// a visible error — the box is only ever unchecked when the server said
+// mode === 'report'. Server text is rendered via textContent only.
+// =============================================================================
+
+// Last known-good server response; used to revert after a refused/failed POST.
+let _lastGoodReleaseGates = null;
+
+function _relGateEl(id) { return document.getElementById(id); }
+
+function _showReleaseGatesError(message) {
+    const row = _relGateEl('release-gates-error-row');
+    const text = _relGateEl('release-gates-error-text');
+    if (text) text.textContent = message;
+    if (row) row.style.display = '';
+}
+
+function _hideReleaseGatesError() {
+    const row = _relGateEl('release-gates-error-row');
+    const text = _relGateEl('release-gates-error-text');
+    if (text) text.textContent = '';
+    if (row) row.style.display = 'none';
+}
+
+function _setReleaseGatesStatus(text, cls) {
+    const el = _relGateEl('release-gates-status');
+    if (!el) return;
+    el.textContent = text;
+    el.className = 'team-config-status' + (cls ? ' ' + cls : '');
+}
+
+/** Pull a human-readable reason out of an error body ("error" or "message"). */
+function _releaseGatesReason(body, status) {
+    if (body && typeof body.error === 'string' && body.error) return body.error;
+    if (body && typeof body.message === 'string' && body.message) return body.message;
+    return `HTTP ${status}`;
+}
+
+/**
+ * Fetch the resolved gate enforcement mode for CONFIG.team and render.
+ * Safe to call repeatedly (re-reads server state each visit).
+ */
+async function loadReleaseGateEnforcement() {
+    const checkbox = _relGateEl('release-gates-checkbox');
+    if (!checkbox) return; // section not present in this build
+
+    const teamLabelEl = _relGateEl('release-gates-team-label');
+    if (teamLabelEl) teamLabelEl.textContent = CONFIG.team || '--';
+
+    try {
+        const response = await apiFetch(apiUrl('/api/release-gate-enforcement'));
+        const data = await response.json().catch(() => null);
+        if (!response.ok) {
+            throw new Error(_releaseGatesReason(data, response.status));
+        }
+        _renderReleaseGateEnforcement(data);
+    } catch (err) {
+        console.error('[release-gates] Failed to load:', err);
+        _renderReleaseGatesFailClosed(`Failed to load release gate setting: ${err.message}`);
+    }
+}
+
+/** Render from a GET/POST response body. Malformed body or mode -> fail-closed. */
+function _renderReleaseGateEnforcement(data) {
+    const mode = data && typeof data === 'object' ? data.mode : undefined;
+    if (mode !== 'enforce' && mode !== 'report') {
+        _renderReleaseGatesFailClosed('Release gate setting returned an unrecognised value; gates assumed enforced.');
+        return;
+    }
+
+    _lastGoodReleaseGates = data;
+    const checkbox = _relGateEl('release-gates-checkbox');
+    if (!checkbox) return;
+    const badge = _relGateEl('release-gates-default');
+    const explicit = data.explicit === true;
+
+    checkbox.checked = (mode === 'enforce');
+    checkbox.disabled = false;
+    checkbox.onchange = onReleaseGatesChange;
+    if (badge) badge.style.display = explicit ? 'none' : 'inline-block';
+
+    const label = mode === 'enforce' ? 'Gates enforced' : 'Gates report-only';
+    _setReleaseGatesStatus(`${label} (${explicit ? 'explicit' : 'default'})`, '');
+
+    if (typeof data.configWarning === 'string' && data.configWarning) {
+        _showReleaseGatesError(data.configWarning);
+    } else {
+        _hideReleaseGatesError();
+    }
+}
+
+function _renderReleaseGatesFailClosed(message) {
+    const checkbox = _relGateEl('release-gates-checkbox');
+    if (checkbox) {
+        checkbox.checked = true;
+        checkbox.disabled = true;
+        checkbox.onchange = null;
+    }
+    const badge = _relGateEl('release-gates-default');
+    if (badge) badge.style.display = 'none';
+    _setReleaseGatesStatus('', '');
+    _showReleaseGatesError(message);
+}
+
+/**
+ * Checkbox change handler. Check -> POST enforce (no actor). Uncheck -> ask
+ * for the lead's name first (window.prompt; no existing modal pattern in
+ * lcars.js for actor input); cancel/empty -> re-check, no request.
+ */
+async function onReleaseGatesChange() {
+    const checkbox = _relGateEl('release-gates-checkbox');
+    if (!checkbox) return;
+    const wantEnforce = checkbox.checked;
+    const payload = { team: CONFIG.team, mode: wantEnforce ? 'enforce' : 'report' };
+
+    if (!wantEnforce) {
+        const answer = (typeof prompt === 'function')
+            ? prompt('Turning release gates OFF requires a release lead. Enter the lead name:')
+            : null;
+        const actor = typeof answer === 'string' ? answer.trim() : '';
+        if (!actor) {
+            checkbox.checked = true; // cancelled: stay enforced, send nothing
+            return;
+        }
+        payload.actor = actor;
+    }
+
+    checkbox.disabled = true;
+    _setReleaseGatesStatus('Saving...', 'saving');
+
+    try {
+        const response = await apiFetch(apiUrl('/api/release-gate-enforcement'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        const result = await response.json().catch(() => null);
+        if (!response.ok) {
+            throw new Error(_releaseGatesReason(result, response.status));
+        }
+        const m = result && result.mode;
+        if (m !== 'enforce' && m !== 'report') {
+            throw new Error('malformed response from server');
+        }
+        _renderReleaseGateEnforcement(result); // from the response, never the request
+    } catch (err) {
+        console.error('[release-gates] Save failed:', err);
+        if (_lastGoodReleaseGates) {
+            _renderReleaseGateEnforcement(_lastGoodReleaseGates);
+        } else {
+            _renderReleaseGatesFailClosed('Could not confirm current release gate setting.');
+        }
+        _showReleaseGatesError(`Save failed: ${err.message}`);
+        _setReleaseGatesStatus('Save failed', 'error');
     }
 }
 

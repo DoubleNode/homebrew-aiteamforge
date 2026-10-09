@@ -5661,6 +5661,9 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         # XACA-1083-004: Board settings (requireEpicOnStart / requireReleaseOnStart)
         elif path == '/api/board-settings':
             self.handle_update_board_settings()
+        # XACA-1482: releaseConfig.gateEnforcement setter
+        elif path == '/api/release-gate-enforcement':
+            self.handle_update_release_gate_enforcement()
         # XACA-0281 Phase A.3: Team account config endpoints
         elif path == '/api/team-config/account/save':
             self.handle_team_account_save()
@@ -17459,6 +17462,169 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             print(f"[LCARS] ERROR updating board settings: {e}")
             self._send_json_response({'success': False, 'error': str(e)}, status=500)
 
+    # ------------------------------------------------------------------
+    # XACA-1482: supported setter for releaseConfig.gateEnforcement
+    # ------------------------------------------------------------------
+    # The ONLY writer of releaseConfig.gateEnforcement (kb-release enforcement and the LCARS
+    # Team Config checkbox both call it). It resolves the mode with the gate's OWN resolver
+    # (_gate_mode) so the UI, the CLI and the promote gate can never disagree.
+
+    _GATE_ENFORCEMENT_ALLOWED_KEYS = {'team', 'mode', 'actor'}
+    _GATE_ENFORCEMENT_AUDIT_TARGET = 'RELEASE-CONFIG'   # activity/<this>.json in the team's kanban dir
+
+    def _gate_enforcement_fields(self, team, release_config):
+        """The GET payload for `release_config` (a dict, {} when the board has none)."""
+        mode, warning = self._gate_mode(release_config)
+        return {
+            'team': team,
+            'mode': mode,
+            'explicit': 'gateEnforcement' in release_config,
+            'configWarning': warning,
+        }
+
+    def _read_release_config_shared(self, team):
+        """(release_config_dict, error, status). Raw releaseConfig under a SHARED lock on the
+        board's sidecar. Missing releaseConfig -> {} (the resolver then says enforce). Missing
+        board -> 404, as the writer answers: a default for a board that does not exist would be
+        a confident answer about nothing. A releaseConfig that is present but not an object
+        yields {} (enforce, which is what the gate does) and the GET adds a configWarning, since
+        the writer refuses it with a 409."""
+        import fcntl
+        board_file = self._get_board_file(team)
+        if not board_file.exists():
+            return None, 'no board for team %r' % (team,), 404
+        lock_file = board_file.with_suffix('.json.lock')
+        try:
+            if lock_file.parent.is_dir():
+                with open(lock_file, 'a') as lock:
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_SH)
+                    try:
+                        with open(board_file, 'r') as f:
+                            board = json.load(f)
+                    finally:
+                        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            else:
+                with open(board_file, 'r') as f:
+                    board = json.load(f)
+        except (OSError, ValueError) as e:
+            return None, 'cannot read board for team %r: %s' % (team, e), 500
+        return board, None, 200
+
+    def serve_release_gate_enforcement(self, query_string: str):
+        """GET /api/release-gate-enforcement?team=<team> (XACA-1482).
+
+        Response: {team, mode, explicit, configWarning}. `mode` is what the promote gate will
+        do (_gate_mode: absent -> enforce, malformed -> enforce + configWarning), never the raw
+        field. `explicit` is False when the key is absent. Unknown/missing team -> 400.
+        """
+        try:
+            params = parse_qs(query_string) if query_string else {}
+            team = params.get('team', [None])[0]
+            if not team or team not in TEAM_KANBAN_DIRS:
+                self._send_json_response({'error': 'Unknown team: %s' % (team,)}, status=400)
+                return
+            board, err, status = self._read_release_config_shared(team)
+            if err:
+                self._send_json_response({'error': err}, status=status)
+                return
+            payload = self._gate_enforcement_fields(team, self._release_cfg(board))
+            raw_rc = board.get('releaseConfig') if isinstance(board, dict) else None
+            if raw_rc is not None and not isinstance(raw_rc, dict) and payload['configWarning'] is None:
+                payload['configWarning'] = (
+                    "releaseConfig is %s, not an object; the gate treats it as enforce, and this "
+                    "setter refuses to write until the board is repaired" % type(raw_rc).__name__)
+            self._send_json_response(payload)
+        except Exception as e:
+            print(f"[LCARS] ERROR serving release gate enforcement: {e}")
+            self._send_json_response({'error': str(e)}, status=500)
+
+    def handle_update_release_gate_enforcement(self):
+        """POST /api/release-gate-enforcement (XACA-1482).
+
+        Body {team, mode, actor?}. `mode` must be exactly the string 'enforce' or 'report' (no
+        strip/lowercase/coercion). Status codes: 400 bad request (unknown team/keys, bad mode,
+        bad actor), 403 enforce->report without a releaseConfig.leads actor (fails closed:
+        empty/absent leads = nobody), 404 no board, 409 releaseConfig present but not an object,
+        500 write failure, 200 ok. report->enforce needs no actor. Re-posting the value that is
+        already explicitly set is 200 {changed: false} with no write and no audit. Success body
+        is {success: true, changed, ...GET fields} from a FRESH re-read after the write.
+        Only releaseConfig.gateEnforcement is touched (lastUpdated is deliberately left alone).
+        Every change appends one audit record {at, team, from, to, actor}.
+        """
+        try:
+            body, err = self._read_release_json_body()
+            if err:
+                return self._send_json_response({'success': False, 'error': err}, status=400)
+            unknown = set(body) - self._GATE_ENFORCEMENT_ALLOWED_KEYS
+            if unknown:
+                return self._send_json_response(
+                    {'success': False, 'error': 'Unknown key(s): %s' % ', '.join(sorted(unknown))}, status=400)
+            team = body.get('team')
+            if not isinstance(team, str) or team not in TEAM_KANBAN_DIRS:
+                return self._send_json_response({'success': False, 'error': 'Unknown team: %s' % (team,)}, status=400)
+            mode = body.get('mode')
+            if not isinstance(mode, str) or mode not in self._RELEASE_GATE_MODES:
+                return self._send_json_response(
+                    {'success': False, 'error': "mode must be exactly 'enforce' or 'report', got %r" % (mode,)},
+                    status=400)
+            actor = None
+            if 'actor' in body:
+                actor = body['actor']
+                if not isinstance(actor, str) or not actor.strip():
+                    return self._send_json_response(
+                        {'success': False, 'error': 'actor, when given, must be a non-empty string'}, status=400)
+                actor = actor.strip()
+
+            payload = None
+            audit = None
+            with self._board_write_transaction(team):
+                board_file = self._get_board_file(team)
+                if not board_file.exists():
+                    raise _DeferredResponse.json(
+                        {'success': False, 'error': 'No board for team %r' % team}, 404)
+                board = self._read_board_raw_locked(team)
+                if not isinstance(board, dict):
+                    raise _DeferredResponse.json({'success': False, 'error': 'Board file is not a JSON object'}, 409)
+                if 'releaseConfig' in board and not isinstance(board['releaseConfig'], dict):
+                    raise _DeferredResponse.json(
+                        {'success': False,
+                         'error': 'releaseConfig is %s, not an object; refusing to overwrite it. '
+                                  'Repair the board first.' % type(board['releaseConfig']).__name__}, 409)
+                rcfg = board.get('releaseConfig') or {}
+                current, _warn = self._gate_mode(rcfg)
+                already = isinstance(rcfg.get('gateEnforcement'), str) and rcfg['gateEnforcement'] == mode
+                if already:
+                    payload = dict(self._gate_enforcement_fields(team, rcfg), success=True, changed=False)
+                else:
+                    if current == 'enforce' and mode == 'report':
+                        is_lead, reason = self._actor_is_lead(actor, rcfg)
+                        if not is_lead:
+                            raise _DeferredResponse.json(
+                                {'success': False, 'error': reason, 'code': self._lead_reason_code(rcfg)}, 403)
+                    new_rcfg = dict(rcfg)
+                    new_rcfg['gateEnforcement'] = mode
+                    board['releaseConfig'] = new_rcfg
+                    self._atomic_write_json(board_file, board)
+                    audit = {'at': self._get_timestamp(), 'team': team, 'from': current, 'to': mode, 'actor': actor}
+                    # Fresh re-read of what is now on disk, never an echo of the request.
+                    after = self._release_cfg(self._read_board_raw_locked(team))
+                    payload = dict(self._gate_enforcement_fields(team, after), success=True, changed=True)
+            if audit is not None:
+                # Fire-and-forget like every release activity record; outside the board lock.
+                try:
+                    log_activity('release_gate_enforcement_changed', self._GATE_ENFORCEMENT_AUDIT_TARGET, 'release',
+                                 field='gateEnforcement', old_value=audit['from'], new_value=audit['to'],
+                                 context=json.dumps(audit, sort_keys=True), team=team)
+                except Exception as log_err:  # pragma: no cover
+                    print(f"[LCARS] Warning: gateEnforcement audit failed for {team}: {log_err}")
+            return self._send_json_response(payload)
+        except _DeferredResponse as deferred:
+            deferred.emit(self)
+            return
+        except Exception as e:
+            print(f"[LCARS] ERROR updating release gate enforcement: {e}")
+            self._send_json_response({'success': False, 'error': str(e)}, status=500)
+
     def _write_team_paths_registry(self, team_paths_file: Path, data: dict) -> None:
         """Atomically write *data* as the team-paths.json registry at *team_paths_file*.
 
@@ -20686,6 +20852,9 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         # XACA-1083-004: Board settings (requireEpicOnStart / requireReleaseOnStart)
         elif path == '/api/board-settings':
             self.serve_board_settings(parsed.query)
+        # XACA-1482: releaseConfig.gateEnforcement (resolved mode + explicit flag)
+        elif path == '/api/release-gate-enforcement':
+            self.serve_release_gate_enforcement(parsed.query)
         # XACA-0281 Phase A.3: Team account config endpoints
         elif path == '/api/team-config/account/current':
             self.serve_team_account_current(parsed.query)
