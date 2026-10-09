@@ -92,7 +92,12 @@ async function boot(tree, htmlOverride, nAcc) {
     const poll = async (pct) => {
         state.data.accessories[0].last_reading.percent = pct;
         timers.forEach((fn) => { try { fn(); } catch (e) { /* unrelated timer */ } });
-        await sleep(200);
+        // XACA-1480-010: a fixed sleep let the poll's fetch resolve LATE under full-suite
+        // load, so its re-render landed after the test had started its next step (and
+        // after it had put focus somewhere). Wait for the poll's own reading to be
+        // painted -- the re-render is synchronous, so focus restore has run by then.
+        await until(() => (d.getElementById(T.content).textContent || '').includes(pct + '%'), 4000);
+        await sleep(50);
     };
     return { w, d, T, poll, state, close() { try { w.close(); } catch (e) { /* closed */ } } };
 }
@@ -406,6 +411,7 @@ for (const { tree, page } of PAGES) {
                 before.focus();
                 assert.equal(pg.d.activeElement, before, what + ' focused');
                 await pg.poll(pct--);
+                await until(() => pg.d.activeElement !== before && pg.d.activeElement !== pg.d.body);
                 const now = pg.d.activeElement;
                 assert.notEqual(now, pg.d.body, what + ': focus not dropped to body');
                 assert.notEqual(now, before, what + ': the control really was rebuilt');
@@ -427,12 +433,14 @@ for (const { tree, page } of PAGES) {
             await pg.poll(90);
             const sent = [];
             stubFetch(pg, sent, (url, method) => { if (method === 'DELETE') pg.state.data.accessories[0].attached_machine_ids = []; });
+            assert.ok(await until(() => cards(pg)[0] && cards(pg)[0].querySelector('.accessory-detach, .accessory-detach-btn')), 'DETACH rendered');
             const btn = cards(pg)[0].querySelector('.accessory-detach, .accessory-detach-btn');
             btn.focus();
             assert.equal(pg.d.activeElement, btn);
             btn.click();
             assert.ok(await until(() => sent.length === 1));
             assert.ok(await until(() => /Detached .* from UPS-One/.test((live(pg) || {}).textContent || '')), 'live region announced');
+            assert.ok(await until(() => cards(pg)[0] && pg.d.activeElement === cards(pg)[0].querySelector(SEL)), 'focus settles on the card select');
             const now = pg.d.activeElement;
             assert.notEqual(now, pg.d.body, 'focus not dropped to body');
             assert.equal(now, cards(pg)[0].querySelector(SEL), 'focus on the card\'s machine select');
@@ -456,6 +464,7 @@ for (const { tree, page } of PAGES) {
             btn.click();
             assert.ok(await until(() => sent.length === 1));
             assert.ok(await until(() => /Attached .* to UPS-One/.test((live(pg) || {}).textContent || '')), 'live region announced');
+            assert.ok(await until(() => cards(pg)[0] && pg.d.activeElement === cards(pg)[0].querySelector(SEL)), 'focus settles on the card select');
             const now = pg.d.activeElement;
             assert.notEqual(now, pg.d.body, 'focus not dropped to body');
             assert.equal(now, cards(pg)[0].querySelector(SEL), 'focus on the card\'s machine select');
@@ -470,6 +479,7 @@ for (const { tree, page } of PAGES) {
             await pg.poll(90);
             const sent = [];
             stubFetch(pg, sent, (url, method) => { if (method === 'DELETE') pg.state.data.accessories[0].attached_machine_ids = []; });
+            assert.ok(await until(() => cards(pg)[0] && cards(pg)[0].querySelector('.accessory-detach, .accessory-detach-btn')), 'DETACH rendered');
             const outside = pg.d.createElement('button'); pg.d.body.appendChild(outside); outside.focus();
             cards(pg)[0].querySelector('.accessory-detach, .accessory-detach-btn').click();
             assert.ok(await until(() => /Detached/.test((live(pg) || {}).textContent || '')));

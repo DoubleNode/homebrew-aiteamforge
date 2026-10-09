@@ -165,7 +165,8 @@
         if (!a || !container.contains(a) || !a.getAttribute) return null;
         var kind = a.classList.contains('accessory-attach-select') ? 'select'
             : a.classList.contains('accessory-attach-btn') ? 'attach'
-            : a.classList.contains('accessory-detach-btn') ? 'detach' : null;
+            : a.classList.contains('accessory-detach-btn') ? 'detach'
+            : a.classList.contains('accessory-card') ? 'card' : null;   // XACA-1480: post-write card fallback
         var accId = a.getAttribute('data-accessory-id');
         if (!kind || !accId) return null;
         return { kind: kind, accId: accId, machineId: kind === 'detach' ? a.getAttribute('data-machine-id') : null };
@@ -174,11 +175,13 @@
     function restoreFocus(container, f) {
         if (!f) return;
         var cls = f.kind === 'select' ? 'accessory-attach-select'
-            : f.kind === 'attach' ? 'accessory-attach-btn' : 'accessory-detach-btn';
+            : f.kind === 'attach' ? 'accessory-attach-btn'
+            : f.kind === 'card' ? 'accessory-card' : 'accessory-detach-btn';
         var els = container.querySelectorAll('.' + cls);
         for (var i = 0; i < els.length; i++) {
             if (els[i].getAttribute('data-accessory-id') !== f.accId) continue;
             if (f.kind === 'detach' && els[i].getAttribute('data-machine-id') !== f.machineId) continue;
+            if (f.kind === 'card') els[i].setAttribute('tabindex', '-1');   // rebuilt card lost it
             if (typeof els[i].focus === 'function') els[i].focus();
             return;
         }
@@ -280,7 +283,11 @@
         render(_lastData);
         var c = document.getElementById(CONTAINER_ID);
         if (!c || !w) return;
-        if (w.hadFocus) focusCardAfterWrite(c, w.accId);
+        // XACA-1480: hadFocus is a pre-write snapshot; re-check at refresh time so
+        // focus the operator moved elsewhere mid-write is not yanked back. Refocus
+        // only if it was lost to the re-render (body/null) or is still in the grid.
+        var ae = document.activeElement;
+        if (w.hadFocus && (!ae || ae === document.body || c.contains(ae))) focusCardAfterWrite(c, w.accId);
         // Errors are already announced by the card's role=alert text.
         var live = w.ok ? liveRegion(c) : null;
         if (live) {

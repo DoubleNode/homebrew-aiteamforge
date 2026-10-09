@@ -1316,6 +1316,8 @@
             const mid = (acc.attached_machine_ids || [])[Number(a.getAttribute('data-attached-idx'))];
             return mid ? { accId: acc.id, kind: 'detach', machineId: mid } : null;
         }
+        // XACA-1480: the post-write fallback can leave focus on the card itself.
+        if (a.classList.contains('accessory-card')) return { accId: acc.id, kind: 'card' };
         return null;
     }
 
@@ -1324,13 +1326,15 @@
         const ai = accessories.findIndex(function(a) { return a && a.id === f.accId; });
         if (ai === -1) return;
         const cls = f.kind === 'select' ? 'accessory-attach-select'
-            : f.kind === 'attach' ? 'accessory-attach-btn' : 'accessory-detach';
+            : f.kind === 'attach' ? 'accessory-attach-btn'
+            : f.kind === 'card' ? 'accessory-card' : 'accessory-detach';
         const els = container.querySelectorAll('.' + cls + '[data-acc-idx="' + ai + '"]');
         for (let i = 0; i < els.length; i++) {
             if (f.kind === 'detach') {
                 const mid = (accessories[ai].attached_machine_ids || [])[Number(els[i].getAttribute('data-attached-idx'))];
                 if (mid !== f.machineId) continue;
             }
+            if (f.kind === 'card') els[i].setAttribute('tabindex', '-1');   // rebuilt card lost it
             els[i].focus();
             return;
         }
@@ -1521,7 +1525,13 @@
         await fetchFleetData();   // re-renders (incl. accessories) from fresh server state
         renderAccessories();      // also covers a failed fetch / error-only change
         if (!listEl) return;
-        if (hadFocus) focusAccessoryCardAfterWrite(listEl, accId);
+        // XACA-1480: decide at refresh time. Refocus only if focus was lost to the
+        // re-render (body/null) or is still inside the list; if the operator moved
+        // it elsewhere mid-write, leave it alone.
+        const active = document.activeElement;
+        if (hadFocus && (!active || active === document.body || listEl.contains(active))) {
+            focusAccessoryCardAfterWrite(listEl, accId);
+        }
         // Errors are already announced by the card's role=alert text.
         if (!accessoriesUi.errors[accId]) {
             const live = accessoryLiveRegion(listEl);
