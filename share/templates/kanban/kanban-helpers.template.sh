@@ -26669,21 +26669,18 @@ _kb_release_enf_request() {
     url="http://localhost:${port}/api/release-gate-enforcement"
 
     _kb_lcars_auth_args
+    # One curl call for both methods so curl_exit=$? sits directly on curl's close (XACA-1099 S4).
+    local -a method_args
     if [[ "$method" == "GET" ]]; then
-        response=$(printf '%s' "$_KB_LCARS_AUTH_STDIN" | curl -s -w "\n%{http_code}" \
-            --max-time "${KB_RELEASE_HTTP_TIMEOUT:-30}" \
-            -G --data-urlencode "team=${team}" \
-            "${_KB_LCARS_AUTH_ARGS[@]}" \
-            "$url" 2>/dev/null)
+        method_args=(-G --data-urlencode "team=${team}")
     else
-        response=$(printf '%s' "$_KB_LCARS_AUTH_STDIN" | curl -s -w "\n%{http_code}" \
-            --max-time "${KB_RELEASE_HTTP_TIMEOUT:-30}" \
-            -X POST \
-            -H "Content-Type: application/json" \
-            "${_KB_LCARS_AUTH_ARGS[@]}" \
-            -d "$payload" \
-            "$url" 2>/dev/null)
+        method_args=(-X POST -H "Content-Type: application/json" -d "$payload")
     fi
+    response=$(printf '%s' "$_KB_LCARS_AUTH_STDIN" | curl -s -w "\n%{http_code}" \
+        --max-time "${KB_RELEASE_HTTP_TIMEOUT:-30}" \
+        "${method_args[@]}" \
+        "${_KB_LCARS_AUTH_ARGS[@]}" \
+        "$url" 2>/dev/null)
     curl_exit=$?
     _KB_REL_CODE=$(printf '%s' "$response" | tail -n1)
     _KB_REL_BODY=$(printf '%s' "$response" | sed '$d')

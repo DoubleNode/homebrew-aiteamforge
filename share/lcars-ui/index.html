@@ -2189,13 +2189,14 @@
     </div>
 
     <!-- XACA-1482-011: pick the release lead who authorizes turning release gates OFF -->
-    <div class="lcars-modal-overlay" id="release-gates-lead-modal" style="display: none;" role="dialog" aria-modal="true" aria-labelledby="release-gates-lead-title">
+    <div class="lcars-modal-overlay" id="release-gates-lead-modal" style="display: none;" role="dialog" aria-modal="true" aria-labelledby="release-gates-lead-title" aria-describedby="release-gates-lead-consequence">
         <div class="lcars-modal">
             <div class="lcars-modal-header">
                 <span class="lcars-modal-title" id="release-gates-lead-title">TURN RELEASE GATES OFF</span>
                 <button class="lcars-modal-close" id="release-gates-lead-close" type="button" aria-label="Cancel">&times;</button>
             </div>
             <div class="lcars-modal-body">
+                <p class="modal-label-hint" id="release-gates-lead-consequence">Failing release gates will be logged only; promotions will no longer be refused.</p>
                 <div class="modal-field">
                     <label class="modal-label" for="release-gates-lead-select">RELEASE LEAD AUTHORIZING THIS CHANGE</label>
                     <select class="modal-select" id="release-gates-lead-select"></select>
@@ -2204,7 +2205,7 @@
             <div class="lcars-modal-footer">
                 <div class="modal-footer-spacer"></div>
                 <button class="modal-btn modal-btn-cancel" id="release-gates-lead-cancel" type="button">CANCEL</button>
-                <button class="modal-btn modal-btn-confirm" id="release-gates-lead-confirm" type="button">CONFIRM</button>
+                <button class="modal-btn modal-btn-confirm" id="release-gates-lead-confirm" type="button">TURN GATES OFF</button>
             </div>
         </div>
     </div>

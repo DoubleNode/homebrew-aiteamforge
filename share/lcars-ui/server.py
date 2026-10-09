@@ -17545,14 +17545,21 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             if err:
                 self._send_json_response({'error': err}, status=status)
                 return
-            # Mirrors the POST's 409 test exactly: key PRESENT and not an object (null included).
-            raw_rc = board.get('releaseConfig') if isinstance(board, dict) else None
-            writable = not (isinstance(board, dict) and 'releaseConfig' in board) or isinstance(raw_rc, dict)
+            # Mirrors BOTH of the POST's 409 tests exactly: the board file itself is not an object
+            # (XACA-1482-018), or releaseConfig is PRESENT and not an object (null included).
+            board_is_obj = isinstance(board, dict)
+            raw_rc = board.get('releaseConfig') if board_is_obj else None
+            writable = board_is_obj and ('releaseConfig' not in board or isinstance(raw_rc, dict))
             payload = self._gate_enforcement_fields(team, self._release_cfg(board), writable=writable)
             if not writable and payload['configWarning'] is None:
-                payload['configWarning'] = (
-                    "releaseConfig is %s, not an object; the gate treats it as enforce, and this "
-                    "setter refuses to write until the board is repaired" % type(raw_rc).__name__)
+                if not board_is_obj:
+                    payload['configWarning'] = (
+                        "the board file is %s, not a JSON object; the gate treats it as enforce, and "
+                        "this setter refuses to write until the board is repaired" % type(board).__name__)
+                else:
+                    payload['configWarning'] = (
+                        "releaseConfig is %s, not an object; the gate treats it as enforce, and this "
+                        "setter refuses to write until the board is repaired" % type(raw_rc).__name__)
             self._send_json_response(payload)
         except Exception as e:
             print(f"[LCARS] ERROR serving release gate enforcement: {e}")
