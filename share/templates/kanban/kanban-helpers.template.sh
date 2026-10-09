@@ -4172,7 +4172,89 @@ kb-pr() {
     # XACA-1479-003: apply a recorded manual CI priority to the (now existing) PR.
     # Never changes kb-pr's exit status - a failure here is a warning only.
     _kb_ci_priority_pr_hook || true
+    _kb_pr_base_check || true
     return $_kb_pr_rc
+}
+
+# _kb_pr_base_resolve <ITEM-ID>   (XACA-1483)
+# Print the branch a PR for <ITEM-ID> must target (rc 0), or print nothing and return 1.
+# Thin wrapper over scripts/kb-pr-base - the SINGLE source of truth; its logic is never
+# re-implemented here and there is NO fallback to "develop". The script is self-located
+# relative to THIS FILE (so a worktree uses its own copy, like _kb_board_settings_script),
+# falling back to `kb-pr-base` on PATH. rc is captured straight from the command.
+_kb_pr_base_resolve() {
+    local item="${1-}" bs root bin="" base="" rc=0
+    [[ -n "$item" ]] || return 1
+    bs=$(_kb_board_settings_script 2>/dev/null) && root="${bs%/kanban-hooks/board_settings.py}"
+    if [[ -n "$root" && -x "$root/scripts/kb-pr-base" ]]; then
+        bin="$root/scripts/kb-pr-base"
+    else
+        bin=$(command -v kb-pr-base 2>/dev/null) || bin=""
+    fi
+    [[ -n "$bin" ]] || return 1
+    base=$("$bin" "$item" 2>/dev/null)
+    rc=$?
+    (( rc == 0 )) || return 1
+    [[ -n "$base" && "$base" != *$'\n'* ]] || return 1
+    printf '%s\n' "$base"
+}
+
+# _kb_pr_base_check   (XACA-1483-004)
+# Read-only: compare the base of the current ticket's open PR with `kb-pr-base <ID>` and
+# warn on stderr when they differ, or when either side cannot be determined. Quiet when
+# they match, or when there is no open PR yet. Always returns 0 (kb-pr ignores it anyway).
+# Uses one bounded `gh pr list` (timeout/gtimeout when available; gh has its own HTTP limits).
+_kb_pr_base_check() {
+    local tgt item board_file idx branch cur repo prs nprs want pr have _t=""
+    local -a _pr_rows
+    tgt=$(_kb_ci_priority_target "" 2>/dev/null) || return 0
+    item="${tgt%%$'\t'*}"
+    board_file="${tgt#*$'\t'}"
+    command -v gh >/dev/null 2>&1 || return 0
+    idx=$(_kb_find_by_id "$board_file" "$item" 2>/dev/null)
+    [[ "$idx" =~ ^[0-9]+$ ]] || return 0
+    branch=$(_kb_jq_read "$board_file" ".backlog[$idx].worktreeBranch // empty" -r 2>/dev/null)
+    if [[ -z "$branch" ]]; then
+        cur=$(git branch --show-current 2>/dev/null)
+        # Only trust the current branch when it names this ticket (same boundary rule as _kb_ci_priority_apply_pr).
+        local _cur_lc _id_lc
+        _cur_lc=$(printf '%s' "$cur" | tr '[:upper:]' '[:lower:]')
+        _id_lc=$(printf '%s' "$item" | tr '[:upper:]' '[:lower:]')
+        [[ -n "$cur" && "$_cur_lc" =~ (^|[^a-z0-9])${_id_lc}([^0-9]|$) ]] && branch="$cur"
+    fi
+    [[ -n "$branch" ]] || return 0
+    repo=$(_kb_ci_priority_resolve_repo "$item" "$board_file" "$idx" 2>/dev/null) || {
+        echo "⚠️  kb-pr: could not resolve the repository for $item - PR base NOT checked. Verify by hand: kb-pr-base $item" >&2
+        return 0
+    }
+    if command -v timeout >/dev/null 2>&1; then _t="timeout 20"
+    elif command -v gtimeout >/dev/null 2>&1; then _t="gtimeout 20"; fi
+    prs=$(${=_t} gh pr list --repo "$repo" --head "$branch" --state open --json number,baseRefName 2>/dev/null) || {
+        echo "⚠️  kb-pr: 'gh pr list' failed for branch '$branch' - PR base NOT checked. Verify by hand: kb-pr-base $item" >&2
+        return 0
+    }
+    nprs=$(printf '%s' "$prs" | jq -r 'length' 2>/dev/null) || nprs=""
+    if ! [[ "$nprs" =~ ^[0-9]+$ ]]; then
+        echo "⚠️  kb-pr: unreadable 'gh pr list' output for branch '$branch' - PR base NOT checked. Verify by hand: kb-pr-base $item" >&2
+        return 0
+    fi
+    (( nprs == 0 )) && return 0
+    want=$(_kb_pr_base_resolve "$item") || {
+        echo "⚠️  kb-pr: cannot verify the PR base for $item - kb-pr-base could not resolve the expected branch (run: kb-pr-base $item). Do NOT guess; kb-pr-monitor will block the merge until it resolves." >&2
+        return 0
+    }
+    _pr_rows=("${(@f)$(printf '%s' "$prs" | jq -r '.[] | "\(.number)\t\(.baseRefName)"' 2>/dev/null)}")
+    for pr in "${_pr_rows[@]}"; do
+        [[ -n "$pr" ]] || continue
+        have="${pr#*$'\t'}"
+        pr="${pr%%$'\t'*}"
+        if [[ "$have" != "$want" ]]; then
+            echo "⚠️  kb-pr: PR #$pr for $item targets '$have' but kb-pr-base says it must target '$want'." >&2
+            echo "    Fix: gh pr edit $pr --base $want   (then re-run BOTH gates in full - approvals are stale after a retarget)" >&2
+            echo "    kb-pr-monitor will refuse to merge this PR until the base matches." >&2
+        fi
+    done
+    return 0
 }
 
 # ----------------------------------------------------------------------------
@@ -15434,6 +15516,19 @@ _kb_build_debug_prompt() {
         subitem_count=0
     fi
 
+    # XACA-1483-002: resolve the PR base ONCE, from scripts/kb-pr-base (the single
+    # source of truth), and put the literal branch in the prompt. Unresolvable ->
+    # STOP text and NO branch name: never fall back to "develop" (a wrong base is
+    # worse than no answer). Both PR-workflow lines below use these two variables.
+    local _pr_base_step _pr_base_rule _pr_base=""
+    if _pr_base=$(_kb_pr_base_resolve "$item_id") && [[ -n "$_pr_base" ]]; then
+        _pr_base_step="Follow the standard PR workflow (target \`${_pr_base}\`, resolved by kb-pr-base)"
+        _pr_base_rule="target \`${_pr_base}\` (from kb-pr-base), use proper commit messages"
+    else
+        _pr_base_step="STOP: PR base unresolvable for ${item_id} — report to the lead, do not guess a branch (do not open a PR until the lead supplies the base)"
+        _pr_base_rule="STOP: PR base unresolvable for ${item_id} — report to the lead, do not guess a branch; use proper commit messages"
+    fi
+
     # XACA-1128: this prompt is emitted via `echo -e`, which expands backslash
     # escapes in ANY text it's given — including user-authored ticket/subitem
     # text interpolated below. A literal `\bword\b` or `C:\dev\team` gets
@@ -15489,7 +15584,7 @@ _kb_build_debug_prompt() {
     prompt+="   - Test edge cases related to the fix\n"
     prompt+="   - Verify no regressions in related functionality\n"
     prompt+="\n4. **Create a PR** when the fix is verified:\n"
-    prompt+="   - Follow the standard PR workflow (target develop)\n"
+    prompt+="   - ${_pr_base_step}\n"
     prompt+="   - Use commit type \"fix:\" for bug fixes\n"
     prompt+="   - Reference the original item ID in the PR description\n"
     prompt+="   - Generate the Test Handoff Prompt for QA\n"
@@ -15534,7 +15629,7 @@ _kb_build_debug_prompt() {
     prompt+="- **Minimal fixes** — fix the bug, don't refactor the world\n"
     prompt+="- **Test thoroughly** — the fix must not introduce new issues\n"
     prompt+="- **Track progress** — use sub start/sub done for each debug subitem\n"
-    prompt+="- **Standard PR workflow** — target develop, use proper commit messages\n"
+    prompt+="- **Standard PR workflow** — ${_pr_base_rule}\n"
     prompt+="- When done, run \`kb-done\` to complete the item\n"
 
     echo -e "$prompt"

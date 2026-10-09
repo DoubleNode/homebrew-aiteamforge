@@ -57,7 +57,8 @@
 #   22  BLOCKED          a gate blocked (protected subitems open, sweep did not
 #                        positively run, failing/cancelled CI check, tap gate red
 #                        with no bypass, mergeStateStatus off the allowlist,
-#                        unreadable behind-count, mergeability stuck UNKNOWN)
+#                        unreadable behind-count, mergeability stuck UNKNOWN,
+#                        PR base != `kb-pr-base <ITEM>` or base unresolvable)
 #   30  PR_CLOSED        PR state CLOSED or MERGED externally
 #   31  TIMEOUT          exceeded --max-hours
 #    2  USAGE_ERROR      usage error / missing dependency / unresolvable env
@@ -81,6 +82,17 @@
 #
 # --no-merge runs every gate but stops short of kb-merge, still returning
 # 0/GATES_PASSED. For dry runs and tests.
+#
+# BASE GATE (XACA-1483): every poll, right after the head SHA is read and
+# BEFORE any review/CI/mergeability/staleness gate, the PR's baseRefName must
+# equal `scripts/kb-pr-base <ITEM>` (the item's release branch, else the team
+# integration branch). A mismatch, an unreadable baseRefName, or a kb-pr-base
+# failure is BLOCKED (22) — never "unknown = match". Remedy on mismatch:
+# `gh pr edit <N> --base <expected>`, then re-run BOTH gates in full (a
+# retarget changes the diff, so both approvals are stale, as with
+# RESPAWN_BOTH). It runs under --once and --no-merge like every other gate.
+# KBPM_PR_BASE overrides the resolver path (tests); default is the kb-pr-base
+# sibling of this script.
 #
 # SHELL PORTABILITY: this script must parse and run under BOTH zsh and
 # /bin/bash 3.2 (macOS system bash). No bash-4 constructs, no top-level
@@ -126,6 +138,8 @@
 #                  hints in RESPAWN_* detail=, fail-closed to full on anything
 #                  that cannot positively prove a linear, merge-commit-free
 #                  ancestor range for the "already approved, just stale" bot
+#   XACA-1483      PR-base gate: baseRefName must equal kb-pr-base <ITEM>;
+#                  mismatch / unresolvable / unreadable all fail CLOSED
 # ============================================================================
 
 PR_NUM=""
@@ -202,6 +216,17 @@ _kbpm_default_helpers() {
     fi
 }
 KBPM_HELPERS="${KBPM_HELPERS:-$(_kbpm_default_helpers)}"
+# XACA-1483: the base resolver is the kb-pr-base SIBLING of this script (same
+# $KBPM_SELF resolution as the helpers default above, for the same worktree
+# reason), never a re-implementation of its logic — three copies of "which
+# branch?" drift apart (memory k501). The tap mirrors both files into the same
+# scripts/ dir (sync-tap.sh). A missing resolver is NOT a usage error: the base
+# gate fails closed to BLOCKED on it, like any other resolver failure.
+_kbpm_default_pr_base() {
+    _dp_dir=$(cd -- "$(dirname -- "$KBPM_SELF")" >/dev/null 2>&1 && pwd -P) || _dp_dir=""
+    printf '%s\n' "${_dp_dir:-.}/kb-pr-base"
+}
+KBPM_PR_BASE="${KBPM_PR_BASE:-$(_kbpm_default_pr_base)}"
 KBPM_PIDFILE=""
 KBPM_RCFILE=""
 # XACA-1281-002: durable, head-keyed home for the Gate 3.5 CI-absence
@@ -1001,6 +1026,53 @@ while true; do
     HEAD_SHA=$(gh pr view "$PR_NUM" --repo "$REPO" --json headRefOid --jq '.headRefOid' 2>/dev/null)
     if [ -z "$HEAD_SHA" ]; then
         verdict BLOCKED "could not read head SHA for PR #$PR_NUM — not assuming anything about gate state"
+    fi
+
+    # ── Base gate (XACA-1483) ───────────────────────────────────────────────
+    # A PR opened against the wrong base (an agent defaulted to `develop`
+    # while the item belongs to a release branch, or vice versa) must never
+    # merge, and must never reach the staleness arm below either — that arm
+    # runs `gh pr update-branch`, which would merge the WRONG base into the
+    # feature branch. It sits here, BEFORE every other gate, because every
+    # downstream gate reads something relative to the base: the bots review a
+    # diff against it, the UX backstop reads `gh pr diff` against it, and the
+    # CONFLICT remedy tells the operator to merge it in. Re-checked EVERY poll
+    # (one gh read + one kb-pr-base call per poll interval) so a release
+    # (re)assignment or a retarget mid-run is honoured, not cached stale.
+    # Fail closed on all three unknowns: unreadable baseRefName, kb-pr-base
+    # non-zero, kb-pr-base empty. Unknown is never treated as a match — same
+    # rule as the unreadable behind-count further down.
+    PR_BASE=$(gh pr view "$PR_NUM" --repo "$REPO" --json baseRefName --jq '.baseRefName' 2>/dev/null)
+    PR_BASE_RC=$?   # capture-first
+    case "$PR_BASE" in
+        ''|null|*[[:space:]]*)
+            printf '%s\n' "x could not read the base branch of PR #$PR_NUM (gh rc=$PR_BASE_RC, value='${PR_BASE:-<empty>}') — not assuming it is correct."
+            verdict BLOCKED "could not read baseRefName for PR #$PR_NUM (gh rc=$PR_BASE_RC, value='${PR_BASE:-<empty>}') — base gate fails closed" ;;
+    esac
+    if [ "$PR_BASE_RC" -ne 0 ]; then
+        verdict BLOCKED "could not read baseRefName for PR #$PR_NUM (gh rc=$PR_BASE_RC) — base gate fails closed"
+    fi
+    if [ -f "$KBPM_PR_BASE" ] && [ -x "$KBPM_PR_BASE" ]; then
+        EXPECTED_BASE=$("$KBPM_PR_BASE" "$ITEM_ID")
+        EXPECTED_BASE_RC=$?   # capture-first; kb-pr-base's stderr reaches the operator as-is
+    else
+        EXPECTED_BASE=""
+        EXPECTED_BASE_RC=127
+        printf '%s\n' "x kb-pr-base resolver not found or not executable at $KBPM_PR_BASE."
+    fi
+    case "$EXPECTED_BASE" in
+        *[[:space:]]*) EXPECTED_BASE_BAD="multi-token output" ;;
+        '')            EXPECTED_BASE_BAD="empty output" ;;
+        *)             EXPECTED_BASE_BAD="" ;;
+    esac
+    if [ "$EXPECTED_BASE_RC" -ne 0 ] || [ -n "$EXPECTED_BASE_BAD" ]; then
+        printf '%s\n' "x cannot resolve the expected PR base for $ITEM_ID (kb-pr-base rc=$EXPECTED_BASE_RC${EXPECTED_BASE_BAD:+, $EXPECTED_BASE_BAD}) — not treating an unknown base as a match."
+        verdict BLOCKED "base unresolvable for $ITEM_ID (kb-pr-base rc=$EXPECTED_BASE_RC${EXPECTED_BASE_BAD:+, $EXPECTED_BASE_BAD}); fix the item's release assignment or the team's releaseConfig.branches.integration, then re-run"
+    fi
+    if [ "$PR_BASE" != "$EXPECTED_BASE" ]; then
+        printf '%s\n' "x PR #$PR_NUM targets '$PR_BASE' but $ITEM_ID must target '$EXPECTED_BASE' (kb-pr-base). Not merging, not updating the branch."
+        printf '%s\n' "  Fix: gh pr edit $PR_NUM --repo $REPO --base $EXPECTED_BASE — then re-run BOTH gates in full (tester_mode=full reviewer_mode=full): the retarget changes the diff, so both approvals are stale."
+        verdict BLOCKED "PR base mismatch: PR #$PR_NUM base is '$PR_BASE', expected '$EXPECTED_BASE' (kb-pr-base $ITEM_ID); remedy: gh pr edit $PR_NUM --repo $REPO --base $EXPECTED_BASE, then re-run BOTH gates in full (tester_mode=full reviewer_mode=full)"
     fi
     # NOTE: `gh api --jq` is gh's OWN jq evaluator — it has NO --arg flag
     # (`--jq --arg head "$X"` exits 1 "unknown flag", output empty, gates never

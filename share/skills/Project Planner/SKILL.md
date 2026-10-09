@@ -449,7 +449,7 @@ Any project that involves code changes MUST also include a dedicated **"PR Creat
 │                                                                             │
 │  This subitem should include:                                               │
 │  • Create feature branch and push to remote                                │
-│  • Create PR targeting develop (NEVER master) with full description        │
+│  • Create PR targeting `kb-pr-base <ID>` (NEVER master), full description  │
 │  • Auto-spawn test agent (background Agent, subagent_type for QA)          │
 │  • Auto-spawn review agent (background Agent, subagent_type for reviewer)  │
 │  • Both agents fire in PARALLEL (not sequential)                           │
@@ -466,7 +466,7 @@ Any project that involves code changes MUST also include a dedicated **"PR Creat
 │  ⛔ DO NOT merge without both QA and reviewer approval                     │
 │                                                                             │
 │  Follows the Auto-Spawn PR Test & Review workflow in CLAUDE.md:            │
-│  • PR targets develop branch                                               │
+│  • PR targets the branch printed by `kb-pr-base <ID>`                      │
 │  • Test + review agents auto-spawned via Agent tool (run_in_background)    │
 │  • Both run in parallel — no sequential dependency                         │
 │  • gh-bot-test/gh-bot-review used for formal approval (bot identity)       │
@@ -2181,7 +2181,7 @@ Include enough detail that:
 
 **v1.4.0** (February 14, 2026)
 - **MANDATORY PR Creation & Review subitem** - All code-related projects now require a dedicated PR Creation & Review subitem
-- PR subitem covers: branch push, PR creation targeting develop, review handoff prompt generation, bot approval monitoring, merge after approval, kanban status update
+- PR subitem covers: branch push, PR creation targeting the base printed by `kb-pr-base <ID>` (release branch, else team integration branch), review handoff prompt generation, bot approval monitoring, merge after approval, kanban status update
 - Follows the full PR Review Workflow defined in CLAUDE.md (gh-bot-review, --admin merge, cross-terminal review)
 - **Mandatory trailing subitem ordering** - Testing & Debugging is second-to-last, PR Creation & Review is always last
 - Ensures all code is tested and lint-clean before PR is opened

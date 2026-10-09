@@ -7,6 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- **XACA-1483** (Fixed): `share/scripts/kb-pr-monitor` re-mirrored with a fail-closed PR-base gate (PR `baseRefName` must equal `kb-pr-base <ITEM>`; a mismatch, an unreadable base or a resolver failure gives 22 BLOCKED with remedy `gh pr edit <N> --base <b>`). `share/templates/kanban/kanban-helpers.template.sh` hand-ported: the work prompt names the resolved base (or STOP) instead of "target develop", and `kb-pr` warns non-fatally on a base mismatch (new `_kb_pr_base_resolve`, `_kb_pr_base_check`). `share/skills/Project Planner/SKILL.md` and `docs/USER_GUIDE.md` re-mirrored with the `kb-pr-base` wording.
+
 ## [0.21.1] - 2026-10-09
 
 - **XACA-1481** (Changed): `share/scripts/power-guard/client/power-guard-runner.py` re-mirrored. `notify()` now logs `notify: attempting <names>` and exactly one outcome line per command, adding `notify: <name> ok (rc=0)` on success (failure/timeout/exception lines unchanged), so a delivered alert and a notify that never ran are distinguishable in `power-guard.log`. `ok (rc=0)` means the command succeeded, not that a human saw the alert. Reaching installed machines needs a re-run of `sudo bash .../install-power-guard.sh install` (root-owned copy). Verbatim copy of canonical.

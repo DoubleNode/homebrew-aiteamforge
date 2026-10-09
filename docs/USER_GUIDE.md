@@ -506,8 +506,9 @@ cd ~/aiteamforge/worktrees/feature/xios-0042
 # 3. Work on feature (separate from main repo)
 # Make changes, commit, push
 
-# 4. When done, create PR
-gh pr create --base develop
+# 4. When done, create PR. kb-pr-base prints the right base (the item's
+#    release branch, else the team integration branch) and fails, not guesses.
+gh pr create --base "$(kb-pr-base <ITEM-ID>)"
 
 # 5. After merge, clean up worktree
 wt-remove feature/xios-0042
@@ -831,7 +832,7 @@ done
 
 5. **Create PR when done:**
    ```bash
-   gh pr create --base develop
+   gh pr create --base "$(kb-pr-base <ITEM-ID>)"  # release branch, else integration branch
    ```
 
 6. **Clean up:**
