@@ -2166,7 +2166,12 @@ _persist_accessory_state() {
     esac
 
     dir=$(dirname "$state_file")
-    mkdir -p "$dir" 2>/dev/null || { echo "  ! accessory state: cannot create $dir" >&2; return 0; }
+    # A MISSING state dir is created owner-only (0700, the ~/.aiteamforge/run
+    # contract from XACA-0385); an existing one is never re-moded (XACA-1394-018).
+    if [ ! -d "$dir" ]; then
+        mkdir -p "$(dirname "$dir")" 2>/dev/null && mkdir -m 700 "$dir" 2>/dev/null \
+            || { echo "  ! accessory state: cannot create $dir" >&2; return 0; }
+    fi
     tmp=$(mktemp "$dir/.accessory-state.XXXXXX" 2>/dev/null) || { echo "  ! accessory state: cannot create temp file in $dir" >&2; return 0; }
     [ -n "$received_at" ] || received_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 

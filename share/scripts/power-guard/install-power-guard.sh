@@ -131,7 +131,7 @@ dev_machine_guard() {
       if [ "$is_repo" = 0 ] && env -u GIT_DIR -u GIT_WORK_TREE git -C "$real" ls-files --error-unmatch kanban-helpers.sh >/dev/null 2>&1; then
         is_repo=1
       fi
-      if [ "$is_repo" = 0 ] && [ -n "$(env -u GIT_DIR -u GIT_WORK_TREE git -C "$real" ls-files 2>/dev/null | head -n 1)" ]; then
+      if [ "$is_repo" = 0 ] && [ -n "$(env -u GIT_DIR -u GIT_WORK_TREE git -C "$real" ls-files 2>/dev/null)" ]; then
         is_repo=1
       fi
     fi
@@ -193,6 +193,16 @@ run() { # run <cmd...>: executes, or only prints under --dry-run
 run_as_user() {
   local u="$1"; shift
   run "$SUDO_BIN" -n -u "$u" -- "$@"
+}
+
+# seed_user_dir <user> <dir> <mode>: create a MISSING directory as the user with
+# <mode>. An existing one (or a symlink to one) is left exactly as it is: never
+# re-moded. `install -d -m` would chmod a pre-existing dir, and ~/.aiteamforge/run
+# is an owner-only 0700 dir (XACA-0385) that must never be widened (XACA-1394-018).
+seed_user_dir() {
+  local u="$1" d="$2" m="$3"
+  [ -d "$d" ] && return 0
+  run_as_user "$u" mkdir -m "$m" "$d"
 }
 
 render_plist() { # render_plist <out> <user> <user_home>
@@ -282,7 +292,8 @@ do_install() {
   else
     # A failure here (e.g. ~/.aiteamforge is a regular file) must not abort the
     # install half-done under set -e: no policy == disarmed, so report and go on.
-    if run_as_user "$user" install -d -m 755 "${uhome}/.aiteamforge" "${uhome}/.aiteamforge/run" \
+    if seed_user_dir "$user" "${uhome}/.aiteamforge" 755 \
+       && seed_user_dir "$user" "${uhome}/.aiteamforge/run" 700 \
        && run_as_user "$user" install -m 600 "$(policy_template)" "$pol"; then
       info "Seeded DISARMED policy (enabled=false, dry_run=true): $pol"
     else
