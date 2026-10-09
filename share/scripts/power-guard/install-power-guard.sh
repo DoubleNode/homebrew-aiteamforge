@@ -50,12 +50,14 @@ LOG_DIR="/Library/Logs/aiteamforge"
 LIBEXEC_DIR="/usr/local/libexec/aiteamforge/power-guard"
 COUNTER_DIR="/var/db/aiteamforge"
 CLIENT_DIR="${PG_SELF_DIR}/client"
+SUDO_BIN="/usr/bin/sudo"
 if [ "${PG_TESTING:-}" = "1" ]; then
   LAUNCHD_DIR="${PG_LAUNCHD_DIR:-$LAUNCHD_DIR}"
   LOG_DIR="${PG_LOG_DIR:-$LOG_DIR}"
   LIBEXEC_DIR="${PG_LIBEXEC_DIR:-$LIBEXEC_DIR}"
   CLIENT_DIR="${PG_CLIENT_DIR:-$CLIENT_DIR}"
   COUNTER_DIR="${PG_COUNTER_DIR:-$COUNTER_DIR}"
+  SUDO_BIN="${PG_SUDO_BIN:-$SUDO_BIN}"
 fi
 # Ownership flags. Under PG_TESTING the suite is not root, so it cannot chown to root:wheel;
 # production (PG_TESTING unset) always sets root:wheel. Unquoted on purpose (word-split flags).
@@ -186,10 +188,11 @@ run() { # run <cmd...>: executes, or only prints under --dry-run
 # BY the user, never by root (XACA-1394-014/015). Root following a user-placed
 # symlink (~/.aiteamforge, ~/.aiteamforge/run, or the policy file itself) could
 # write anywhere; the user following it can only write where the user already can.
-# Under PG_TESTING the suite already runs as the non-root "user", and sudo is a stub.
+# The SAME code path runs in production and under test: only SUDO_BIN differs
+# (PG_SUDO_BIN, honoured solely under PG_TESTING, points at a pass-through stub).
 run_as_user() {
   local u="$1"; shift
-  if [ "${PG_TESTING:-}" = "1" ]; then run "$@"; else run /usr/bin/sudo -n -u "$u" -- "$@"; fi
+  run "$SUDO_BIN" -n -u "$u" -- "$@"
 }
 
 render_plist() { # render_plist <out> <user> <user_home>
