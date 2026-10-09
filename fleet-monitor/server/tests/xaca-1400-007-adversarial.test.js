@@ -515,7 +515,7 @@ describe('2. fail-open', () => {
         assert.equal(h2.store.resolveConnection('conn-b').secrets.token, 'sec-b');
     });
 
-    test('wrong-key restart: reads stay public-safe, dispatch fails closed with fixed text, update 500s without secrets, old ciphertext survives other writes', async () => {
+    test('wrong-key restart: reads stay public-safe, dispatch fails closed with fixed text, update 409s without secrets, old ciphertext survives other writes', async () => {
         const p = makeProvider('t1');
         const dir = path.join(H.TMP, 'wrongkey-' + rand(4));
         const h1 = makeHarness({ dir, providers: [p] });
@@ -530,8 +530,8 @@ describe('2. fail-open', () => {
         assert.equal(d.body.delivered, 0);
         assert.equal(d.body.receipts[0].error, 'connection secrets unreadable');
         const up = await adm(request(h2.app).put('/api/notify/connections/conn-a')).send({ label: 'renamed' });
-        assert.equal(up.status, 500);
-        assert.equal(up.body.error, 'decrypt_failed');
+        assert.equal(up.status, 409);
+        assert.equal(up.body.error, 'secrets_unreadable');
         assertNoLeak(assert, [['update', up.text], ['dispatch', d.text]], ['sec-a', key2, H.KEY]);
         // unrelated write under the wrong key must preserve the old ciphertext byte for byte
         assert.equal((await pushRoutes(h2, 'team-a', { 'pr-merged': ['conn-a'] }, { dedupeWindow: 5 })).status, 200);
@@ -714,7 +714,7 @@ describe('4. policy correctness', () => {
         assert.equal(crit.body.receipts[0].suppressed, 'rate-limit');
     });
 
-    test('one connection rate-limited, the other delivers: partial result, dedupe recorded', async () => {
+    test('one connection rate-limited, the other delivers: partial result, dedupe recorded for the delivered connection only', async () => {
         const clock = makeClock();
         const rl = policies.createRateLimiter({ limit: 1, clock: () => clock.date() });
         const { h, p } = await twoConnHarness({ harness: { clock, dispatcherOpts: { rateLimiter: rl } } });
@@ -724,7 +724,10 @@ describe('4. policy correctness', () => {
         assert.equal(r.body.delivered, 1); assert.equal(r.body.suppressed, 1); assert.equal(r.body.failed, 0);
         assert.equal(r.body.ok, true);
         assert.deepEqual(p.calls.map((c) => c.id), ['conn-b']);
-        assert.equal((await post(h)).body.receipts.every((x) => x.suppressed === 'dedupe'), true);
+        // per-connection dedupe: conn-b (delivered) is deduped; conn-a (never delivered) is attempted again -> rate-limited again
+        const r2 = await post(h);
+        assert.equal(r2.body.receipts.find((x) => x.connectionId === 'conn-b').suppressed, 'dedupe');
+        assert.equal(r2.body.receipts.find((x) => x.connectionId === 'conn-a').suppressed, 'rate-limit');
     });
 
     test('a send that times out is ONE failed receipt; when it later resolves or rejects nothing else is written', async () => {

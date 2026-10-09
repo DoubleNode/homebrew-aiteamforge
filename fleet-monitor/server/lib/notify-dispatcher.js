@@ -19,10 +19,15 @@
  *   caller `severity` (valid) > config.severityOverrides[type] > catalog defaultSeverity.
  * An invalid caller severity is a 400, never silently replaced.
  *
- * POLICY ORDER: no-route short-circuit -> dedupe -> quiet hours (both are
- * notice-level: every routed connection gets a suppressed receipt, no provider
- * call) -> per connection: rate limit -> resolve -> provider lookup -> send
- * with timeout. dedupe.record() runs only if >= 1 connection delivered.
+ * POLICY ORDER (final): no-route short-circuit -> quiet hours (notice-level:
+ * every routed connection gets a suppressed receipt, no provider call) -> per
+ * connection: dedupe check -> resolve connection -> provider lookup -> rate
+ * limit -> send with timeout (aborted via AbortSignal on timeout).
+ * Resolution and provider lookup come BEFORE the rate limiter so an unknown
+ * connection/provider never spends a slot.
+ * DEDUPE IS PER CONNECTION (key team|type|ref|connectionId): a connection that
+ * already delivered inside the window is suppressed, one that failed is tried
+ * again. dedupe.record() runs only for a connection whose send succeeded.
  *
  * LEAKS. Receipts are allowlisted by notify-receipts; the result envelope is
  * built here from receipts + counters only. Title, body, params, secrets and
@@ -69,10 +74,13 @@ function resolveSeverity(callerSeverity, config, catalog, type) {
     return isValidSeverity(def) ? def : 'info';
 }
 
-function withTimeout(promise, ms) {
+function withTimeout(promise, ms, controller) {
     let timer;
     const timeout = new Promise((resolve) => {
-        timer = setTimeout(() => resolve({ ok: false, error: 'send timed out' }), ms);
+        timer = setTimeout(() => {
+            resolve({ ok: false, error: 'send timed out' });
+            try { controller.abort(); } catch (_) { /* abort listeners must not break the dispatcher */ }
+        }, ms);
     });
     return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
@@ -113,20 +121,14 @@ function createNotifyDispatcher(opts = {}) {
         const window = config.dedupeWindow === undefined ? DEFAULT_DEDUPE_WINDOW_SECONDS : config.dedupeWindow;
 
         let list;
-        const noticeSuppressed = (reason) => ids.map((id) => make(id, { ok: false, error: '', suppressed: reason }));
-
-        if (dedupe.check(team, type, ref, window).duplicate) {
-            list = noticeSuppressed('dedupe');
+        const q = quietHoursDecision(severity, config.quietHours, clock());
+        if (q.warning) warnings.push(q.warning);
+        if (q.suppress) {
+            list = ids.map((id) => make(id, { ok: false, error: '', suppressed: 'quiet-hours' }));
         } else {
-            const q = quietHoursDecision(severity, config.quietHours, clock());
-            if (q.warning) warnings.push(q.warning);
-            list = q.suppress ? noticeSuppressed('quiet-hours') : null;
-        }
-
-        if (list === null) {
             const message = { team, type, title, body, ref, severity };
-            list = await Promise.all(ids.map((id) => deliver(id, message, make)));
-            if (list.some((r) => r.ok)) dedupe.record(team, type, ref, window);
+            const dd = { team, type, ref, window };
+            list = await Promise.all(ids.map((id) => deliver(id, message, make, dd)));
         }
 
         const delivered = list.filter((r) => r.ok).length;
@@ -147,9 +149,10 @@ function createNotifyDispatcher(opts = {}) {
         return result;
     }
 
-    async function deliver(id, message, make) {
-        const rl = rateLimiter.take(id);
-        if (!rl.allowed) return make(id, { ok: false, error: '', suppressed: 'rate-limit' });
+    async function deliver(id, message, make, dd) {
+        if (dedupe.check(dd.team, dd.type, dd.ref, dd.window, id).duplicate) {
+            return make(id, { ok: false, error: '', suppressed: 'dedupe' });
+        }
 
         let connection;
         try {
@@ -165,7 +168,13 @@ function createNotifyDispatcher(opts = {}) {
         const pname = connection.provider;
         if (!registry.has(pname)) return make(id, { ok: false, error: 'unknown provider', provider: pname });
 
-        const out = await withTimeout(attemptSend(registry.get(pname), connection, message), sendTimeoutMs);
+        const rl = rateLimiter.take(id);
+        if (!rl.allowed) return make(id, { ok: false, error: '', suppressed: 'rate-limit' });
+
+        const controller = new AbortController();
+        const out = await withTimeout(
+            attemptSend(registry.get(pname), connection, message, controller.signal), sendTimeoutMs, controller);
+        if (out.ok === true) dedupe.record(dd.team, dd.type, dd.ref, dd.window, id);
         // A provider's error text may echo this connection's own secret or destination: scrub, then bound.
         const error = out.ok === true ? '' : scrubText(out.error, sensitiveValues(connection), MAX_ERROR_TEXT);
         const fields = { ok: out.ok === true, error, provider: pname };

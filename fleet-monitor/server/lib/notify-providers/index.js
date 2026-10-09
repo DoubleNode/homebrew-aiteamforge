@@ -14,9 +14,16 @@
  * Provider shape:
  *   { name, paramFields: string[], secretFields: string[],
  *     validate(connection)            // sync, NO network, throws NotifyConfigError
- *     async send(connection, message) // ONE attempt, no retries,
+ *     async send(connection, message, { signal })
+ *                                     // ONE attempt, no retries,
  *                                     // resolves {providerMessageId?},
  *                                     // throws NotifySendError on failure }
+ *
+ *  - `signal` is an AbortSignal the dispatcher aborts when its send timeout
+ *    fires. Providers MUST pass it to their HTTP/network calls
+ *    (fetch(url, { signal }), request options, etc.) so a timed-out send is
+ *    actually cancelled instead of continuing in the background. XACA-1401's
+ *    real providers must honour this.
  *
  *  - Error messages NEVER carry destinations, params or secrets.
  *  - A FOREIGN exception's text may embed the target (a URL in a fetch error,
@@ -72,10 +79,10 @@ function createProviderRegistry() {
  * NotifyError messages pass through; anything else becomes its type name only.
  * Never throws.
  */
-async function attemptSend(provider, connection, message) {
+async function attemptSend(provider, connection, message, signal) {
     try {
         provider.validate(connection);
-        const res = await provider.send(connection, message);
+        const res = await provider.send(connection, message, { signal });
         const out = { ok: true, error: '' };
         if (res && typeof res.providerMessageId === 'string' && res.providerMessageId) {
             out.providerMessageId = res.providerMessageId;
@@ -96,19 +103,31 @@ function createTestProvider() {
     const calls = [];
     let failures = 0;
     let seq = 0;
+    let hold = false;
     return {
         name: 'test',
         paramFields: [],
         secretFields: ['token'],
         calls,
         failNext(n = 1) { failures = n; },
-        reset() { calls.length = 0; failures = 0; seq = 0; },
+        /** Make send() hang until its signal aborts (then it rejects, aborted:true on the call). */
+        holdSends(on = true) { hold = !!on; },
+        reset() { calls.length = 0; failures = 0; seq = 0; hold = false; },
         validate(connection) {
             const t = connection && connection.secrets && connection.secrets.token;
             if (typeof t !== 'string' || !t.trim()) throw new NotifyConfigError('test provider requires a token');
         },
-        async send(connection, message) {
-            calls.push({ connectionId: connection.id, message: { ...message } });
+        async send(connection, message, ctx) {
+            const signal = ctx && ctx.signal;
+            const call = { connectionId: connection.id, message: { ...message } };
+            calls.push(call);
+            if (signal && hold) {
+                // Hung-send simulation that honours the contract: reject on abort.
+                await new Promise((resolve, reject) => {
+                    const onAbort = () => { call.aborted = true; reject(new NotifySendError('test provider send aborted')); };
+                    if (signal.aborted) onAbort(); else signal.addEventListener('abort', onAbort, { once: true });
+                });
+            }
             if (failures > 0) {
                 failures -= 1;
                 throw new NotifySendError('test provider forced failure');

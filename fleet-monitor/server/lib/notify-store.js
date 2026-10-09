@@ -84,6 +84,17 @@ class NotifyCryptoError extends NotifyStoreError {
     }
 }
 
+/**
+ * A PUT needs to KEEP an old secret that cannot be decrypted (key changed). 409,
+ * not 500: the operator must resupply every secret field. Never carries values.
+ */
+class NotifySecretsUnreadableError extends NotifyStoreError {
+    constructor(id) {
+        super(`stored secrets of connection '${id}' are unreadable (NOTIFY_STORE_KEY changed?); resupply ALL secret fields in this update`, 'secrets_unreadable', 409);
+        this.name = 'NotifySecretsUnreadableError';
+    }
+}
+
 /** Parse a 32-byte key from 64 hex chars or base64. Returns {key} or {reason}. */
 function parseKey(raw) {
     if (Buffer.isBuffer(raw)) {
@@ -345,7 +356,16 @@ function createNotifyStore(opts) {
             checkParams(provider, params);
             const sp = patch.secrets === undefined ? {} : patch.secrets;
             checkSecretKeys(provider, sp);
-            const plain = decryptSecrets(cur);
+            // Only secrets this patch does NOT replace/clear are decrypted; a patch that
+            // supplies every stored secret never touches the old envelopes.
+            const kept = { ...cur, secrets: {} };
+            for (const [f, envl] of Object.entries(cur.secrets)) if (!has(sp, f)) kept.secrets[f] = envl;
+            let plain;
+            try { plain = decryptSecrets(kept); }
+            catch (e) {
+                if (e instanceof NotifyCryptoError) throw new NotifySecretsUnreadableError(id);
+                throw e;
+            }
             for (const [k, v] of Object.entries(sp)) {
                 if (v === null || v === '') delete plain[k]; else plain[k] = v;
             }
@@ -411,5 +431,5 @@ function createNotifyStore(opts) {
 module.exports = {
     createNotifyStore, parseKey, ID_RE,
     NotifyStoreError, NotifyStoreDisabledError, NotifyValidationError,
-    NotifyNotFoundError, NotifyConflictError, NotifyCryptoError,
+    NotifyNotFoundError, NotifyConflictError, NotifyCryptoError, NotifySecretsUnreadableError,
 };

@@ -25,6 +25,7 @@
 
 const fs   = require('fs');
 const path = require('path');
+const { isValidTimeZone } = require('./notify-policies');
 
 const SEVERITIES = ['info', 'warning', 'high', 'critical'];
 const CATALOG_TAG = 'notice-types/v1';
@@ -139,13 +140,10 @@ function loadCanonicalCatalog(file) {
 
 // ---------------------------------------------------------------- v2 config
 
+// One validator shared with send-time quiet hours (notify-policies): a zone the
+// push accepts is a zone quietHoursDecision honours.
 function validZone(name) {
-    if (typeof name !== 'string' || !TZ_RE.test(name) || name.length > 64) return false;
-    try {
-        // eslint-disable-next-line no-new
-        new Intl.DateTimeFormat(undefined, { timeZone: name });
-        return true;
-    } catch (_) { return false; }
+    return typeof name === 'string' && TZ_RE.test(name) && isValidTimeZone(name);
 }
 
 function minutes(hhmm) {

@@ -19,8 +19,8 @@
  * STATE IS IN-MEMORY. A server restart resets every dedupe and rate window.
  * Acceptable for the MVP (worst case: one extra notice after a restart).
  *
- * Policy order, enforced by the dispatcher not here: quiet-hours -> dedupe
- * -> per-connection rate limit.
+ * Policy order, enforced by the dispatcher not here: quiet-hours (notice-level)
+ * -> per connection: dedupe -> resolve -> rate limit.
  *
  * Quiet hours
  *  - critical ALWAYS bypasses quiet hours. It does NOT bypass dedupe or the
@@ -32,11 +32,14 @@
  *    A broken config must never silently swallow a notice, nor silently read
  *    as "not quiet".
  *
- * Dedupe: WHEN is a key recorded?
- *  check() is READ-ONLY. record() is a separate call the dispatcher makes
- *  only AFTER the notice was delivered to at least one connection.
+ * Dedupe is PER CONNECTION: the key is team|type|ref|connectionId (the
+ *  connectionId part is optional so the Python-style team|type|ref key still
+ *  works standalone). A connection that already delivered inside the window is
+ *  suppressed; a connection that failed is attempted again.
+ *  WHEN is a key recorded? check() is READ-ONLY. record() is a separate call
+ *  the dispatcher makes only for a connection that DELIVERED.
  *  Therefore none of these open a window: quiet-hours suppression,
- *  rate-limit suppression, or a notice that failed on every connection.
+ *  rate-limit suppression, or a send that failed/timed out.
  *  A failure can never hide a later retry, and a quiet-hours notice is not
  *  swallowed forever once quiet hours end. A dedupe-suppressed notice does
  *  NOT refresh the window (fixed window from the first delivery).
@@ -79,6 +82,7 @@ function minutes(hhmm) {
     return m ? parseInt(m[1], 10) * 60 + parseInt(m[2], 10) : null;
 }
 
+const MAX_ZONE_LENGTH = 64;
 const formatters = new Map(); // zone -> Intl.DateTimeFormat | null (invalid)
 const FORMATTER_CAP = 64;
 
@@ -87,7 +91,7 @@ function formatterFor(zone) {
     let fmt = null;
     // Python requires the canonical name; Intl is case-insensitive and also
     // accepts offset zones. Reject both so the two runtimes agree.
-    if (typeof zone === 'string' && zone && !/^[+-]/.test(zone)) {
+    if (typeof zone === 'string' && zone && zone.length <= MAX_ZONE_LENGTH && !/^[+-]/.test(zone)) {
         try {
             const f = new Intl.DateTimeFormat('en-GB', {
                 timeZone: zone, hourCycle: 'h23', hour: '2-digit', minute: '2-digit',
@@ -100,6 +104,17 @@ function formatterFor(zone) {
     if (formatters.size >= FORMATTER_CAP) formatters.delete(formatters.keys().next().value);
     formatters.set(zone, fmt);
     return fmt;
+}
+
+/**
+ * THE timezone validator. The push route (notify-team-routes) and send-time
+ * quiet hours (quietHoursDecision) both call this, so a zone accepted at push is
+ * honoured at send. Strict, to match Python zoneinfo + available_timezones() in
+ * release_notify_routing._zone: case-sensitive canonical/alias names ('UTC',
+ * 'America/Chicago', 'US/Central'), no offset zones ('+05:00'), <= 64 chars.
+ */
+function isValidTimeZone(zone) {
+    return formatterFor(zone) !== null;
 }
 
 function localMinutes(fmt, date) {
@@ -135,8 +150,11 @@ function quietHoursDecision(severity, quietHours, now) {
 
 // --------------------------------------------------------------------- dedupe
 
-function dedupeKey(team, type, ref) {
-    return `${team}|${type}|${ref || ''}`;
+// connectionId (optional) makes the key per-connection: team|type|ref|connectionId.
+// Omitted, the key is the Python-compatible team|type|ref.
+function dedupeKey(team, type, ref, connectionId) {
+    const base = `${team}|${type}|${ref || ''}`;
+    return connectionId === undefined ? base : `${base}|${connectionId}`;
 }
 
 function createDedupeTracker(opts = {}) {
@@ -162,8 +180,8 @@ function createDedupeTracker(opts = {}) {
     }
 
     /** READ-ONLY. Does not open a window. */
-    function check(team, type, ref, windowSeconds) {
-        const key = dedupeKey(team, type, ref);
+    function check(team, type, ref, windowSeconds, connectionId) {
+        const key = dedupeKey(team, type, ref, connectionId);
         if (resolveWindow(windowSeconds) === 0) return { duplicate: false, key };
         const exp = seen.get(key);
         const t = nowMs(clock);
@@ -173,8 +191,8 @@ function createDedupeTracker(opts = {}) {
     }
 
     /** Open the window. Call only after a successful delivery. */
-    function record(team, type, ref, windowSeconds) {
-        const key = dedupeKey(team, type, ref);
+    function record(team, type, ref, windowSeconds, connectionId) {
+        const key = dedupeKey(team, type, ref, connectionId);
         const w = resolveWindow(windowSeconds);
         if (w === 0) return { recorded: false, key };
         const t = nowMs(clock);
@@ -234,6 +252,7 @@ module.exports = {
     severityRank,
     isValidSeverity,
     quietHoursDecision,
+    isValidTimeZone,
     createDedupeTracker,
     createRateLimiter,
 };
