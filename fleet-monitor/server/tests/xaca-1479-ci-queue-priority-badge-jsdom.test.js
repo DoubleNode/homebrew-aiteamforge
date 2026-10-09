@@ -88,6 +88,26 @@ test('XACA-1479-019: queued rows render in priority rank then server order; runn
     env.el.querySelectorAll('tbody tr').forEach((r) => assert.equal(r, nodes[r.getAttribute('data-ciq-job')], 'node reused'));
 });
 
+test('XACA-1479 UX: a focused job link keeps focus when a priority change moves its row', () => {
+    const env = loadImpl();
+    const doc = env.el.ownerDocument;
+    const url = (id) => ({ url: 'https://github.com/o/r/actions/runs/1/job/' + id });
+    env.render(body([job(1, url(1)), job(2, url(2)), job(3, url(3))]));
+    const link = env.el.querySelector('tr[data-ciq-job="o/r#3"] a');
+    assert.ok(link, 'job 3 renders a link');
+    link.focus();
+    assert.equal(doc.activeElement, link);
+    env.render(body([job(1, url(1)), job(2, url(2)), job(3, Object.assign(url(3), { priority: 'critical' }))]));
+    assert.equal(env.el.querySelector('tbody tr').getAttribute('data-ciq-job'), 'o/r#3', 'the row moved to the top');
+    assert.equal(doc.activeElement, link, 'focus is back on the same link after the move');
+});
+
+test('XACA-1479 UX: the caption says queued rows are in dispatch order', () => {
+    const env = loadImpl();
+    env.render(body([job(1)]));
+    assert.match(env.el.querySelector('caption').textContent, /dispatch order: critical, then high, then oldest first/);
+});
+
 test('XACA-1479-020: status cell accessible text has real spaces', () => {
     const env = loadImpl();
     env.render(body([job(1, { priority: 'critical' }), job(2, { priority: 'high' }), job(3)]));

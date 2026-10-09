@@ -215,7 +215,7 @@
         scroll.setAttribute('role', 'region');
         scroll.setAttribute('aria-label', 'Queued and running CI jobs');
         var table = el(doc, 'table', 'ciq-table');
-        table.appendChild(el(doc, 'caption', 'ciq-caption', 'Queued and running CI jobs and the machine that took each'));
+        table.appendChild(el(doc, 'caption', 'ciq-caption', 'Queued and running CI jobs and the machine that took each. Queued jobs are listed in dispatch order: critical, then high, then oldest first.'));
         var thead = el(doc, 'thead');
         var tr = el(doc, 'tr');
         ['Repo', 'Workflow / job', 'Branch', 'Status', 'Waiting / running for', 'Machine'].forEach(function(t) {
@@ -407,10 +407,15 @@
         rootEl.querySelector('[data-ciq-empty]').hidden = shown > 0;
         rootEl.querySelector('[data-ciq-scroll]').hidden = shown === 0;
 
-        // Drop stale rows, then place in order moving only what is out of place (keeps focus).
+        // Drop stale rows, then place in order moving only what is out of place. Moving a row that holds
+        // focus (e.g. its job link) blurs it, so remember the focused element and give focus back afterwards.
+        var focused = doc.activeElement && doc.activeElement !== doc.body && tbody.contains(doc.activeElement) ? doc.activeElement : null;
         Array.prototype.slice.call(tbody.children).forEach(function(r) { if (wanted.indexOf(r) < 0) tbody.removeChild(r); });
         for (var k = 0; k < wanted.length; k++) {
             if (tbody.children[k] !== wanted[k]) tbody.insertBefore(wanted[k], tbody.children[k] || null);
+        }
+        if (focused && doc.activeElement !== focused && tbody.contains(focused) && typeof focused.focus === 'function') {
+            try { focused.focus({ preventScroll: true }); } catch (_) { focused.focus(); }
         }
         return queue;
     }
