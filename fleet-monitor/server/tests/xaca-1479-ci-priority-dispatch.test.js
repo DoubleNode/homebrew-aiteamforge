@@ -445,6 +445,31 @@ describe('005 watcher: rec.priority on first sight, refreshed per TTL, never thr
         assert.equal(s2.events.filter((e) => e.change === 'priority').length, N);
     });
 
+    test('XACA-1479: at most PRIORITY_LOOKUP_CONCURRENCY lookups are in flight; the rest queue and all complete', async () => {
+        const { PRIORITY_LOOKUP_CONCURRENCY: LIMIT } = require('../lib/ci-dispatch-watcher');
+        const N = LIMIT * 2 + 3;
+        const waiting = [];
+        let maxInFlight = 0;
+        const resolver = () => new Promise((res) => { waiting.push(res); maxInFlight = Math.max(maxInFlight, waiting.length); });
+        const tick = async () => { for (let i = 0; i < 20; i++) await new Promise((res) => setImmediate(res)); };
+        const s = watcherSetup(resolver);
+        s.world.queued = Array.from({ length: N }, (_, i) => wrun(i + 1, { status: 'queued', head_branch: `feature/c${i}` }));
+        for (let i = 1; i <= N; i++) s.world.jobs[i] = [wjob(i * 10)];
+        const c = s.w.runCycle();
+        let resolved = 0;
+        for (let round = 0; round < 10 && resolved < N; round++) {
+            await tick();
+            assert.ok(waiting.length <= LIMIT, `in flight ${waiting.length} exceeds the limit ${LIMIT}`);
+            const batch = waiting.splice(0);
+            resolved += batch.length;
+            batch.forEach((res) => res('high'));
+        }
+        await c;
+        assert.equal(resolved, N, 'every distinct branch was eventually looked up');
+        assert.equal(maxInFlight, LIMIT, 'the limit is actually reached (not trivially serial)');
+        assert.equal(s.events.filter((e) => e.change === 'queued' && e.rec.priority === 'high').length, N);
+    });
+
     test('without a resolver the record shape is unchanged (no priority key)', async () => {
         const s = watcherSetup(null);
         s.world.queued = [wrun(1)]; s.world.jobs[1] = [wjob(11)];

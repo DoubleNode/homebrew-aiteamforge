@@ -382,12 +382,12 @@ const PRIORITIES = Object.freeze(['critical', 'high', 'normal']);
 const PRIORITY_TTL_MS = 60 * 1000;                   // a removed label takes effect within ~1 min
 const PRIORITY_FAIL_AUDIT_EVERY_MS = 15 * 60 * 1000; // one failure audit line per (repo|branch|reason) per window
 const PRIORITY_CACHE_MAX = 1000;
-const PRIORITY_TIMEOUT_MS = 5000;
+const PRIORITY_TIMEOUT_MS = 5000;                    // a hung lookup must never stall the watcher
 // XACA-1479-021: after a timeout, 'normal' is cached this long. 15 s: long enough that a stalled
 // endpoint costs one 5 s wait per branch per window instead of one per watcher cycle (cycles are a few
 // seconds apart), short enough that a recovered GitHub is retried well inside the 60 s success TTL so
 // a critical label is not hidden for a full minute. A late real answer overwrites it.
-const PRIORITY_TIMEOUT_TTL_MS = 15 * 1000;                    // a hung lookup must never stall the watcher
+const PRIORITY_TIMEOUT_TTL_MS = 15 * 1000;
 
 /**
  * Priority of ONE PR's label names: 'critical' | 'high' | 'normal', or {malformed:true} when any label

@@ -50,6 +50,7 @@ const MAX_TRACKED_JOBS = 5000;                   // hard cap; oldest completed e
 const PAGE_SIZE = 100;                           // per_page on every list call
 const MAX_PAGES = 10;                            // XACA-1441-032: pagination cap per list (1000 items)
 
+const PRIORITY_LOOKUP_CONCURRENCY = 8;             // XACA-1479: max resolver calls in flight (rate-budget bound)
 const FIELD_CAP = 200;                           // XACA-1444: cap on branch / workflow / url strings
 
 /** Display string from untrusted GitHub data: string only, control chars dropped, length-capped, else null. */
@@ -140,6 +141,16 @@ function createWatcher(opts = {}) {
     // entries can be started together (prefetchPriorities / refreshPriorities) and a repeat inside the
     // cycle shares the one promise. Cleared when pollRepo ends; the resolver's own cache spans cycles.
     const prioMemo = new Map();
+    // At most PRIORITY_LOOKUP_CONCURRENCY resolver calls in flight across the watcher, so a cold cache or a
+    // large queue cannot fire one GitHub request per distinct branch at once against the rate budget. With a
+    // hung GitHub, a cycle then costs ceil(N / limit) resolver timeouts, still bounded, and the resolver's
+    // timeout cache makes the following cycles immediate.
+    let prioActive = 0;
+    const prioWaiting = [];
+    const prioAcquire = () => (prioActive < PRIORITY_LOOKUP_CONCURRENCY
+        ? (prioActive++, Promise.resolve())
+        : new Promise((res) => prioWaiting.push(res)));
+    const prioRelease = () => { const next = prioWaiting.shift(); if (next) next(); else prioActive--; };
 
     function priorityFor(owner, repo, branch, headRepoFullName) {
         if (!resolvePriority) return Promise.resolve(null);
@@ -148,12 +159,15 @@ function createWatcher(opts = {}) {
         let p = prioMemo.get(mk);
         if (!p) {
             p = (async () => {
+                await prioAcquire();
                 try {
                     const v = await resolvePriority({ owner, repo, branch, headOwner });
                     return v === 'critical' || v === 'high' ? v : 'normal';
                 } catch (e) {
                     log('warn', `watcher: priority resolver threw (${(e && (e.code || e.message)) || 'error'}); NORMAL`);
                     return 'normal';
+                } finally {
+                    prioRelease();
                 }
             })();
             prioMemo.set(mk, p);
@@ -582,4 +596,5 @@ function createWatcher(opts = {}) {
 
 module.exports = {
     createWatcher, BUSY_INTERVAL_MS, IDLE_INTERVAL_MS, COMPLETED_RETENTION_MS, MAX_TRACKED_JOBS,
+    PRIORITY_LOOKUP_CONCURRENCY,
 };

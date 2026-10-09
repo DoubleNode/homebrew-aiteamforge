@@ -4251,13 +4251,15 @@ _kb_ci_priority_resolve_repo() {
     ctx=$(_kb_detect_context 2>/dev/null) || ctx=""
     cur_team="${ctx%%:*}"
     item_team=$(_kb_get_team_from_code "$item" 2>/dev/null)
-    if [[ -n "$item_team" && "$item_team" != "ERROR" && -n "$cur_team" && "$cur_team" != "ERROR" && "$item_team" != "$cur_team" ]]; then
+    # Fail closed: the cwd may stand in for the item's repo ONLY when both teams are known and equal.
+    # An undetectable session (non-tmux shell, no KB_TEAM) or an unknown item team is NOT "same team".
+    if ! [[ -n "$item_team" && "$item_team" != "ERROR" && -n "$cur_team" && "$cur_team" != "ERROR" && "$item_team" == "$cur_team" ]]; then
         foreign=1
     fi
     wt=$(_kb_jq_read "$board_file" ".backlog[$idx].worktree // empty" -r 2>/dev/null)
     if [[ -n "$wt" && -d "$wt" ]]; then
         dir="$wt"
-    elif (( foreign == 1 )) && command -v python3 >/dev/null 2>&1; then
+    elif (( foreign == 1 )) && [[ -n "$item_team" && "$item_team" != "ERROR" ]] && command -v python3 >/dev/null 2>&1; then
         bs=$(_kb_board_settings_script 2>/dev/null) && hooks=$(dirname "$bs")
         if [[ -n "$hooks" ]]; then
             dir=$(python3 -I -c '
@@ -4273,7 +4275,7 @@ except Exception:
         fi
     fi
     if [[ -z "$dir" ]] && (( foreign == 1 )); then
-        echo "❌ kb-ci-priority: $item belongs to team '$item_team' but this session is team '$cur_team', and its repository cannot be determined (no usable worktree recorded on the item, no resolvable repo in the team registry) - PR label NOT changed; the priority stays recorded locally. Re-run it from the $item_team repo." >&2
+        echo "❌ kb-ci-priority: $item belongs to team '${item_team:-unknown}' but this session is team '${cur_team:-undetected}', and its repository cannot be determined (no usable worktree recorded on the item, no resolvable repo in the team registry) - PR label NOT changed; the priority stays recorded locally. Re-run it from the $item_team repo." >&2
         return 1
     fi
     if [[ -n "$dir" ]]; then
