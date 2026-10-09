@@ -60,7 +60,10 @@ describe('timezone: push validator and send-time quiet hours agree', () => {
         ['est', false], ['america/indiana/indianapolis', false],
         ['Us/Eastern', false], ['America/North_dakota/Center', false],
     ];
-    // Python's own _zone, one batched subprocess. null => python3 unavailable.
+    // Python's own _zone, one batched subprocess. Three outcomes, never a silent no-op:
+    // python3 or the reference module ABSENT -> explicit skip with the reason (e.g. the tap
+    // layout, where kanban-hooks/ is not beside fleet-monitor/); the subprocess RAN but failed
+    // or printed unparseable output -> the parity test fails; otherwise rows are compared.
     const HOOKS = path.join(__dirname, '..', '..', '..', 'kanban-hooks');
     const PY = [
         'import json, sys',
@@ -74,12 +77,28 @@ describe('timezone: push validator and send-time quiet hours agree', () => {
         '        out[z] = False',
         'print(json.dumps(out))',
     ].join('\n');
+    // { absent: reason } | { error: reason } | { out: stdout }
     function runPython(args, input) {
         const r = require('child_process').spawnSync('python3', args, { input, encoding: 'utf8', timeout: 30000 });
-        return r.error || r.status !== 0 ? null : r.stdout;
+        if (r.error && r.error.code === 'ENOENT') return { absent: 'python3 not on PATH' };
+        if (r.error) return { error: `python3 did not complete (${r.error.code || r.error.name})` };
+        if (r.status !== 0) return { error: `python3 exited ${r.status}: ${String(r.stderr).trim().split('\n').pop()}` };
+        return { out: r.stdout };
     }
-    const pyOut = runPython(['-c', PY, HOOKS], JSON.stringify(CASES.map(([z]) => z)));
-    const PY_RESULT = pyOut === null ? null : JSON.parse(pyOut);
+    function parsePy(res) {
+        if (!res.out) return res;
+        try { return { result: JSON.parse(res.out) }; } catch (e) { return { error: 'python3 printed unparseable output' }; }
+    }
+    const PY_STATE = fs.existsSync(path.join(HOOKS, 'release_notify_routing.py'))
+        ? parsePy(runPython(['-c', PY, HOOKS], JSON.stringify(CASES.map(([z]) => z))))
+        : { absent: `Python reference ${path.join(HOOKS, 'release_notify_routing.py')} not present in this layout` };
+    const PY_RESULT = PY_STATE.result || null;
+
+    test('Python _zone parity reference ran (or is explicitly absent)', (t) => {
+        if (PY_STATE.absent) return t.skip(PY_STATE.absent);
+        assert.ok(!PY_STATE.error, `Python parity check could not run: ${PY_STATE.error}`);
+        assert.deepEqual(Object.keys(PY_RESULT).sort(), CASES.map(([z]) => z).sort(), 'python returned a result for every row');
+    });
     // Python lists 'Factory' but the JS runtime cannot evaluate it (Intl throws),
     // so JS is deliberately STRICTER there. Every other row must match exactly.
     const JS_STRICTER = new Set(['Factory']);
@@ -89,10 +108,11 @@ describe('timezone: push validator and send-time quiet hours agree', () => {
     // fail-closed (push 400) and depends on the machine's tzdata, so it is reported, not asserted --
     // an exact-match assertion would go red on any machine with different tzdata.
     test('bundled iana_zones.json contains only zones Python available_timezones() accepts (drift guard)', (t) => {
-        const listOut = runPython(['-c', 'import sys, json, zoneinfo\nprint(json.dumps(sorted(zoneinfo.available_timezones())))'], '');
-        if (listOut === null) return t.skip('python3 not available on this machine');
+        const res = parsePy(runPython(['-c', 'import sys, json, zoneinfo\nprint(json.dumps(sorted(zoneinfo.available_timezones())))'], ''));
+        if (res.absent) return t.skip(res.absent);
+        assert.ok(!res.error, `drift guard could not run: ${res.error}`);
         const bundled = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'config', 'iana_zones.json'), 'utf8'));
-        const live = new Set(JSON.parse(listOut));
+        const live = new Set(res.result);
         const extra = bundled.filter((z) => !live.has(z));
         assert.deepEqual(extra, [],
             'bundled zones Python rejects -- regenerate fleet-monitor/server/config/iana_zones.json from zoneinfo.available_timezones()');

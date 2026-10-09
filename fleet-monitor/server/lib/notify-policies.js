@@ -91,8 +91,10 @@ const FORMATTER_CAP = 64;
 
 // The bundled IANA zone list (config/iana_zones.json) is a SNAPSHOT of Python's
 // zoneinfo.available_timezones() (regenerate: sorted(available_timezones()) as a
-// JSON array, one name per line; the drift test in
-// tests/xaca-1400-008-review-round1.test.js names any difference); it is the single source of truth for valid zone
+// JSON array, one name per line). The drift test in
+// tests/xaca-1400-008-review-round1.test.js FAILS only on a bundled name the local
+// Python rejects (the fail-open direction) and merely REPORTS names Python knows that
+// the bundle lacks (those are refused at push, fail-closed). It is the single source of truth for valid zone
 // NAMES, so this validator and release_notify_routing._zone agree by
 // construction. Fail closed: if the file cannot be read, EVERY zone is invalid
 // (push 400s, send-time skips quiet hours) and the cause is logged loudly.
@@ -138,8 +140,9 @@ function formatterFor(zone) {
  * aliases ('UTC', 'America/Chicago', 'US/Central') pass; offsets ('+05:00'),
  * miscased names and miscased aliases ('us/central') do not.
  *
- * Caveat: the list is a snapshot of the generating machine's tzdata; a drift
- * test fails when it no longer matches Python's. Also, the JS runtime must be
+ * Caveat: the list is a snapshot of the generating machine's tzdata; the drift
+ * test fails only if the bundle holds a name the local Python rejects, and reports
+ * (without failing) names Python has that the bundle lacks. Also, the JS runtime must be
  * able to evaluate the zone, so a name Python lists but Intl cannot resolve
  * ('Factory') is refused here: stricter than Python, never looser.
  */
