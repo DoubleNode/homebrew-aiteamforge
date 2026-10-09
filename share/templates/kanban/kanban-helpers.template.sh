@@ -4240,11 +4240,12 @@ _kb_ci_priority_target() {
 # false "no open PR". Resolution, in order:
 #   1. the item's recorded worktree path (item.worktree, if the dir exists here) -
 #      `gh repo view` run INSIDE it;
-#   2. foreign-team item only: the team registry's repo, via
+#   2. not-provably-same-team item, with a known item team: the team registry's repo, via
 #      aiteamforge_paths.get_team_repo_root (read-only config view; XACA-1477 resolves
 #      container-layout teams whose working_dir is not itself a repo);
-#   3. same-team item only (or team unknown): the cwd, as before.
-# A foreign-team item that resolves by neither 1 nor 2 is refused, never guessed.
+#   3. the cwd - ONLY when the item's team and the session's team are both known and equal.
+# Anything else (foreign team, undetectable session, unknown item team) that resolves by
+# neither 1 nor 2 is refused, never guessed.
 _kb_ci_priority_resolve_repo() {
     local item="${1-}" board_file="${2-}" idx="${3-}"
     local ctx cur_team item_team wt dir="" bs hooks repo="" foreign=0
@@ -4275,7 +4276,7 @@ except Exception:
         fi
     fi
     if [[ -z "$dir" ]] && (( foreign == 1 )); then
-        echo "❌ kb-ci-priority: $item belongs to team '${item_team:-unknown}' but this session is team '${cur_team:-undetected}', and its repository cannot be determined (no usable worktree recorded on the item, no resolvable repo in the team registry) - PR label NOT changed; the priority stays recorded locally. Re-run it from the $item_team repo." >&2
+        echo "❌ kb-ci-priority: $item belongs to team '${item_team:-unknown}' but this session is team '${cur_team:-undetected}', and its repository cannot be determined (no usable worktree recorded on the item, no resolvable repo in the team registry) - PR label NOT changed; the priority stays recorded locally. Re-run it from ${item_team:+the $item_team repo}${item_team:-the item's own repo, in a session whose team is detectable}." >&2
         return 1
     fi
     if [[ -n "$dir" ]]; then
