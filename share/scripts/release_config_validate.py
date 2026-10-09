@@ -165,7 +165,8 @@ def _render_key(key: str) -> str:
     global _KNOWN_KEYS
     if _KNOWN_KEYS is None:
         known: set = set()
-        for name in ("notify.schema.json", "wiki.schema.json", "profile.schema.json"):
+        for name in ("notify.schema.json", "notify-v2.schema.json",
+                     "wiki.schema.json", "profile.schema.json"):
             _declared_property_names(_load_schema(name), known)
         _KNOWN_KEYS = known
     if key in _KNOWN_KEYS or _ALIAS_NAME_RE.search(key):
@@ -250,8 +251,41 @@ def _validate_against_schema(instance: Any, schema: dict) -> list[str]:
 # ---------------------------------------------------------------------------
 
 def validate_notify_config(config: dict) -> list[str]:
-    """Validate a notify.json dict against release-notify/v1. § 11.4."""
+    """Validate a notify.json dict. § 11.4.
+
+    Dispatches on the "$schema" discriminator (XACA-1399): release-notify/v2
+    (notice-type routes) is checked against notify-v2.schema.json; EVERYTHING
+    else -- including a missing or garbled "$schema" -- goes to the unchanged
+    v1 schema, so v1 configs and v1 error messages are byte-for-byte as before.
+    Schema-only: route ids are cross-checked against the notice-type catalog by
+    notify_v2_semantic_errors() (needs the team's catalog layer).
+    """
+    if isinstance(config, dict) and config.get("$schema") == "release-notify/v2":
+        return _validate_against_schema(config, _load_schema("notify-v2.schema.json"))
     return _validate_against_schema(config, _load_schema("notify.schema.json"))
+
+
+def notify_v2_semantic_errors(config: dict, kanban_dir) -> list[str]:
+    """Schema-valid v2 config -> catalog/quiet-hours cross-checks (XACA-1399).
+    Unknown notice-type ids in routes fail closed. [] for non-v2 configs."""
+    if not (isinstance(config, dict) and config.get("$schema") == "release-notify/v2"):
+        return []
+    here = Path(__file__).resolve().parent
+    for cand in (here.parent / "kanban-hooks", here):
+        if (cand / "release_notify_routing.py").is_file():
+            sys.path.insert(0, str(cand))
+            try:
+                import release_notify_routing as rr  # noqa: PLC0415
+            finally:
+                sys.path.remove(str(cand))
+            break
+    else:
+        return ["cannot find kanban-hooks/release_notify_routing.py; v2 routes not cross-checked"]
+    try:
+        catalog = rr.load_catalog(kanban_dir)
+    except rr.NoticeRoutingError as exc:
+        return [str(exc)]
+    return rr.validate_v2_semantics(config, catalog)
 
 
 def validate_wiki_config(config: dict) -> list[str]:
@@ -816,6 +850,9 @@ def _run(argv: list[str]) -> int:
             continue
 
         errors = validate_fn(config)
+        if not errors and validate_fn is validate_notify_config:
+            # XACA-1399: v2 route ids must exist in the team's merged catalog
+            errors = notify_v2_semantic_errors(config, config_dir.parent)
         if errors:
             had_failure = True
             print(f"{label}: INVALID")

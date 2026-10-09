@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "release-notify/v2",
+  "title": "Release Notify Config (release-notify/v2)",
+  "description": "XACA-1399 / EPIC-0068 D2. v2 adds notice-type routing to the team's notify.json. v1 stays a separate, UNCHANGED schema (notify.schema.json); release_config_validate dispatches on '$schema'. Cross-checks the schema cannot express (route/severityOverrides ids must exist in the merged notice-type catalog, quietHours start != end, timezone is a real IANA zone) run in kanban-hooks/release_notify_routing.py.",
+  "type": "object",
+  "required": ["$schema", "version", "routes"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": { "const": "release-notify/v2" },
+    "version": { "const": 2 },
+    "aliases": {
+      "type": "object",
+      "description": "Optional in v2. Same alias grammar and secretRef rules as v1 (direct-provider aliases; also the XACA-1403 local-fallback set).",
+      "propertyNames": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,31}(?![\\s\\S])" },
+      "additionalProperties": {
+        "type": "object",
+        "required": ["provider", "target"],
+        "additionalProperties": false,
+        "properties": {
+          "provider": {
+            "type": "string",
+            "enum": ["teams", "slack", "sms", "email"]
+          },
+          "shape": {
+            "type": "string",
+            "description": "teams provider only -- payload shape ('flow' default, or 'webhook'). Ignored by other providers.",
+            "enum": ["flow", "webhook"]
+          },
+          "target": {
+            "type": "object",
+            "description": "Never a literal destination (URL/number) -- always a secretRef (§ 2.2, § 11.4).",
+            "required": ["secretRef"],
+            "additionalProperties": false,
+            "properties": {
+              "secretRef": {
+                "type": "string",
+                "description": "vault:<engine_slug>/<account_slug> or env:RELEASE_<TEAM>_<PURPOSE> only. A literal value is a validation error.",
+                "pattern": "^(vault:[a-z][a-z0-9-]{0,63}/[a-z][a-z0-9-]{0,63}|env:RELEASE_[A-Z][A-Z0-9_]*)(?![\\s\\S])"
+              }
+            }
+          }
+        }
+      }
+    },
+    "routes": {
+      "type": "object",
+      "description": "notice-type id -> hub connection ids (connections live in Fleet Monitor, EPIC-0068 D2). An empty list is an explicit 'route nowhere'.",
+      "propertyNames": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,31}(?![\\s\\S])" },
+      "additionalProperties": {
+        "type": "array",
+        "uniqueItems": true,
+        "maxItems": 16,
+        "items": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,31}(?![\\s\\S])" }
+      }
+    },
+    "severityOverrides": {
+      "type": "object",
+      "description": "Optional per-type severity; wins over the catalog defaultSeverity.",
+      "propertyNames": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,31}(?![\\s\\S])" },
+      "additionalProperties": { "type": "string", "enum": ["info", "warning", "high", "critical"] }
+    },
+    "quietHours": {
+      "type": "object",
+      "description": "Suppress notices below 'critical' inside [start,end) in the given zone; the window may span midnight. critical always bypasses.",
+      "required": ["start", "end", "timezone"],
+      "additionalProperties": false,
+      "properties": {
+        "start": { "type": "string", "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9](?![\\s\\S])" },
+        "end": { "type": "string", "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9](?![\\s\\S])" },
+        "timezone": { "type": "string", "maxLength": 64, "pattern": "^[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z0-9_+-]+){0,2}(?![\\s\\S])" }
+      }
+    },
+    "dedupeWindow": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 86400,
+      "description": "Seconds. Same team+type+ref inside the window collapses to one notice. 0 disables. Absent = 300 (release_notify_routing.DEFAULT_DEDUPE_WINDOW_SECONDS)."
+    }
+  }
+}

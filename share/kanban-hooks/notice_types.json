@@ -1,0 +1,16 @@
+{
+  "$schema": "notice-types/v1",
+  "schemaVersion": 1,
+  "types": [
+    {"id": "needs-input",           "defaultSeverity": "high",     "description": "A session is blocked waiting for the operator's decision or input."},
+    {"id": "gate-blocked",          "defaultSeverity": "warning",  "description": "A PR gate (test, review, UX or sweep) is red or cannot proceed."},
+    {"id": "pr-merged",             "defaultSeverity": "info",     "description": "A pull request passed its gates and was merged."},
+    {"id": "build-failed",          "defaultSeverity": "high",     "description": "A build or CI run failed."},
+    {"id": "release-promoted",      "defaultSeverity": "info",     "description": "A release moved to the next environment stage."},
+    {"id": "cr-approval-needed",    "defaultSeverity": "high",     "description": "A change request is waiting for the operator's approval."},
+    {"id": "machine-offline",       "defaultSeverity": "critical", "description": "A fleet machine stopped reporting past the offline threshold."},
+    {"id": "machine-recovered",     "defaultSeverity": "info",     "description": "A previously offline fleet machine is reporting again."},
+    {"id": "accessory-on-battery",  "defaultSeverity": "high",     "description": "A UPS accessory switched to battery power."},
+    {"id": "accessory-restored",    "defaultSeverity": "info",     "description": "A UPS accessory is back on mains power."}
+  ]
+}

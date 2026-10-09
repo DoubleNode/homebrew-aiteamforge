@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "notice-types/v1",
+  "title": "Notice-Type Catalog (notice-types/v1)",
+  "description": "XACA-1399 / EPIC-0068 D3. Root validates the canonical catalog (kanban-hooks/notice_types.json): every entry is complete. A team's kanban/config/notice_types.json validates against #/$defs/teamOverride: it may ADD new types (all three fields required) and OVERRIDE defaultSeverity/description of an existing id (only id required). It may never delete or rename a type, and an id may not repeat within one file.",
+  "type": "object",
+  "required": ["$schema", "schemaVersion", "types"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": { "const": "notice-types/v1" },
+    "schemaVersion": { "const": 1 },
+    "types": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/type" }
+    }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,31}(?![\\s\\S])" },
+    "severity": { "type": "string", "enum": ["info", "warning", "high", "critical"] },
+    "description": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "type": {
+      "type": "object",
+      "required": ["id", "defaultSeverity", "description"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "defaultSeverity": { "$ref": "#/$defs/severity" },
+        "description": { "$ref": "#/$defs/description" }
+      }
+    },
+    "teamOverride": {
+      "type": "object",
+      "required": ["$schema", "schemaVersion", "types"],
+      "additionalProperties": false,
+      "properties": {
+        "$schema": { "const": "notice-types/v1" },
+        "schemaVersion": { "const": 1 },
+        "types": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["id"],
+            "additionalProperties": false,
+            "properties": {
+              "id": { "$ref": "#/$defs/id" },
+              "defaultSeverity": { "$ref": "#/$defs/severity" },
+              "description": { "$ref": "#/$defs/description" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

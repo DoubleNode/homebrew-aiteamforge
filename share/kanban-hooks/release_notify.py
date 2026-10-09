@@ -276,7 +276,8 @@ class NotifyEngine:
     def board_file(self) -> Path:
         return self.kanban_dir() / ("%s-board.json" % self.team)
 
-    def load_aliases(self) -> Mapping[str, Any]:
+    def load_config(self) -> Mapping[str, Any]:
+        """Read + schema-validate the team's notify.json (v1 or v2)."""
         path = self.kanban_dir() / "config" / "notify.json"
         try:
             config = json.loads(path.read_text(encoding="utf-8"))
@@ -290,7 +291,33 @@ class NotifyEngine:
         errors = validate(config)
         if errors:  # the validator's messages are redaction-safe by contract
             raise NotifyConfigError("notify.json invalid: " + "; ".join(errors))
-        return config["aliases"]
+        return config
+
+    def load_aliases(self) -> Mapping[str, Any]:
+        # v1 always has aliases; in v2 they are optional (XACA-1399)
+        return self.load_config().get("aliases") or {}
+
+    # -- notice-type resolution (XACA-1399) --------------------------------
+    def resolve_type(self, notice_type: str, *, ref: Optional[str] = None, now=None) -> Dict[str, Any]:
+        """Resolve `--type`: effective severity (override > catalog default),
+        hub connection ids from the v2 routes, the quiet-hours decision and the
+        dedupe key/window. Delivers NOTHING (hub delivery is XACA-1400/1403).
+        NotifyConfigError for an unknown type / v1 config / bad catalog."""
+        import release_notify_routing as rr  # noqa: PLC0415 - sibling module
+        config = self.load_config()
+        if not rr.is_v2(config):
+            raise NotifyConfigError("notify.json is release-notify/v1; --type needs a v2 config with routes")
+        try:
+            catalog = rr.load_catalog(self.kanban_dir())
+            if notice_type not in catalog:
+                raise NotifyConfigError("unknown notice type '%s'" % rr._safe_id(notice_type))
+            errs = rr.validate_v2_semantics(config, catalog)
+            if errs:
+                raise NotifyConfigError("notify.json invalid: " + "; ".join(errs))
+            return rr.resolve_notice(config, catalog, self.team, notice_type, ref=ref,
+                                     now=now or datetime.now(timezone.utc))
+        except rr.NoticeRoutingError as exc:
+            raise NotifyConfigError(str(exc)) from None
 
     def _context(self, aliases: Mapping[str, Any]) -> SessionContext:
         resolver = self._secret_resolver
