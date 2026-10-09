@@ -22,7 +22,7 @@
  *   3. Cookie login + CSRF — login/logout/session routes, each CSRF layer
  *      rejecting on its own, header auth unaffected, cookie refused on the
  *      fleet tier, rate limit, no echo of the token.
- *   4. Route inventory (static, source-derived) — the 28 admin routes are on
+ *   4. Route inventory (static, source-derived) — the 35 admin routes are on
  *      requireAdminKey, the 9 fleet routes stay on the fleet gate, and every
  *      mutating route anywhere is gated or deliberately allowlisted.
  *   5. vault + engines (real route modules) — ALL 9 of their admin routes
@@ -578,7 +578,7 @@ describe('cookie on an admin route — each CSRF layer rejects on its own', () =
 // 4. Route inventory (static, source-derived)
 // ===========================================================================
 
-// The 28 admin-tier routes (19 from the design's §1 tier classification + 2 XACA-1441 + 4 XACA-1422 mint/revoke + 3 XACA-1392 accessories). This is
+// The 35 admin-tier routes (19 from the design's §1 tier classification + 2 XACA-1441 + 4 XACA-1422 mint/revoke + 3 XACA-1392 accessories + 7 XACA-1400 notify). This is
 // the EXPECTED list — deliberately not derived from source, so a route moved
 // back to requireApiKey disappears from the source-derived admin set and the
 // equality assertion below fails.
@@ -614,15 +614,25 @@ const ADMIN_ROUTES = [
     { method: 'PUT',    path: '/api/accessories/:id/machines/:machineId',        file: 'lib/accessories-routes.js' },
     { method: 'DELETE', path: '/api/accessories/:id/machines/:machineId',        file: 'lib/accessories-routes.js' },
     { method: 'PUT',    path: '/api/accessories/:id/nickname',                   file: 'lib/accessories-routes.js' },
+    // XACA-1400 (EPIC-0068): notification hub connection CRUD, status and receipts. The team-scoped
+    // PUT/GET /api/notify/routes/:team and POST /api/notify stay on the fleet key (requireApiKey).
+    { method: 'GET',    path: '/api/notify/status',                              file: 'lib/notify-routes.js' },
+    { method: 'GET',    path: '/api/notify/connections',                         file: 'lib/notify-routes.js' },
+    { method: 'GET',    path: '/api/notify/connections/:id',                     file: 'lib/notify-routes.js' },
+    { method: 'POST',   path: '/api/notify/connections',                         file: 'lib/notify-routes.js' },
+    { method: 'PUT',    path: '/api/notify/connections/:id',                     file: 'lib/notify-routes.js' },
+    { method: 'DELETE', path: '/api/notify/connections/:id',                     file: 'lib/notify-routes.js' },
+    { method: 'GET',    path: '/api/notify/receipts',                            file: 'lib/notify-routes.js' },
 ];
 
-// The 10 fleet-tier routes (XACA-1328 added the vault ciphertext GET; XACA-1422 moved ci-runners-push OUT to the
-// telemetry-key tier below). 7 use requireApiKey middleware; the 3 msg-relay
+// The 13 fleet-tier routes (XACA-1328 added the vault ciphertext GET; XACA-1400 added 3 notify routes; XACA-1422 moved ci-runners-push OUT to the
+// telemetry-key tier below). 10 use requireApiKey middleware; the 3 msg-relay
 // routes use the checkApiKey guard form inside the handler.
 const FLEET_MIDDLEWARE_ROUTES = [
     'POST /api/status', 'POST /api/team-register', 'POST /api/kanban-push', 'POST /api/knowledge-push',
     'POST /api/token-reports', 'GET /api/token-reports',
     'GET /api/vault/secrets/:engineSlug/:accountSlug/ciphertext', // XACA-1328
+    'PUT /api/notify/routes/:team', 'GET /api/notify/routes/:team', 'POST /api/notify', // XACA-1400: team-scoped by id + registry
 ];
 const FLEET_GUARD_ROUTES = ['POST /api/msg', 'GET /api/msg', 'POST /api/msg/ack'];
 
@@ -663,12 +673,12 @@ describe('route inventory — every admin route is on the admin gate (static)', 
     const regs = deriveRegistrations();
     const key = (r) => `${r.method} ${r.path}`;
 
-    test('exactly 28 expected admin routes, no duplicates', () => {
-        assert.equal(ADMIN_ROUTES.length, 28);
-        assert.equal(new Set(ADMIN_ROUTES.map(key)).size, 28);
+    test('exactly 35 expected admin routes, no duplicates', () => {
+        assert.equal(ADMIN_ROUTES.length, 35);
+        assert.equal(new Set(ADMIN_ROUTES.map(key)).size, 35);
     });
 
-    test('the source-derived requireAdminKey set equals the 28 expected admin routes exactly', () => {
+    test('the source-derived requireAdminKey set equals the 35 expected admin routes exactly', () => {
         const derived = regs.filter((r) => r.gate === 'requireAdminKey').map((r) => `${r.file} ${key(r)}`).sort();
         const expected = ADMIN_ROUTES.map((r) => `${r.file} ${key(r)}`).sort();
         assert.deepEqual(derived, expected);
@@ -682,7 +692,7 @@ describe('route inventory — every admin route is on the admin gate (static)', 
         });
     }
 
-    test('the requireApiKey (fleet middleware) set is exactly the 7 fleet middleware routes (ci-runners-push is NOT one: XACA-1422)', () => {
+    test('the requireApiKey (fleet middleware) set is exactly the 10 fleet middleware routes (ci-runners-push is NOT one: XACA-1422)', () => {
         const derived = regs.filter((r) => r.gate === 'requireApiKey').map(key).sort();
         assert.deepEqual(derived, [...FLEET_MIDDLEWARE_ROUTES].sort());
     });
@@ -695,11 +705,11 @@ describe('route inventory — every admin route is on the admin gate (static)', 
         assert.ok(!/checkAdminKey/.test(src));
     });
 
-    test('tier totals: 28 admin + 10 fleet + 2 ci-host + 1 ci-telemetry = 41 guarded', () => {
+    test('tier totals: 35 admin + 13 fleet + 2 ci-host + 1 ci-telemetry = 51 guarded', () => {
         const admin = regs.filter((r) => r.gate === 'requireAdminKey').length;
         const fleet = regs.filter((r) => r.gate === 'requireApiKey').length + FLEET_GUARD_ROUTES.length;
-        assert.equal(admin, 28);
-        assert.equal(fleet, 10);
+        assert.equal(admin, 35);
+        assert.equal(fleet, 13);
         assert.equal(regs.filter((r) => r.gate === 'ciHostKey').length, 2);
         assert.equal(regs.filter((r) => r.gate === 'ciTelemetryKey').length, 1);
     });

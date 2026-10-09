@@ -43,6 +43,7 @@ const { registerTokenReportsRoutes } = require('./lib/token-reports-routes');
 const { registerCiRunnersRoutes } = require('./lib/ci-runners-routes');
 // XACA-1441-007: Fleet CI Pool dispatcher (dormant unless FLEET_CI_DISPATCHER=1 + GitHub App secrets).
 const { wireCiPool } = require('./lib/ci-dispatcher');
+const { wireNotifyHub } = require('./lib/notify-routes');
 // XACA-1392: accessory registry (UPS auto-discovery, attachment, derived power state).
 const { createRegistry: createAccessoryRegistry } = require('./lib/accessories');
 const { registerAccessoriesRoutes } = require('./lib/accessories-routes');
@@ -3340,6 +3341,18 @@ registerEnginesRoutes(app);
 // ============================================================================
 
 registerVaultRoutes(app);
+
+// ============================================================================
+// NOTIFICATION HUB API (XACA-1400 / EPIC-0068)
+//
+// Mounts /api/notify/status, /connections*, /routes/:team, POST /api/notify and
+// /receipts via wireNotifyHub (lib/notify-routes.js): provider registry, encrypted
+// connection + route store, receipt log. The hub is DISABLED -- its endpoints answer
+// 503 -- until the NOTIFY_STORE_KEY Fly secret is set; the server still starts.
+// `team` is the board's team id, the same key /api/team-register stores in registeredTeams.
+// ============================================================================
+
+wireNotifyHub(app, { isRegisteredTeam: (teamId) => registeredTeams.has(teamId) });
 
 // ============================================================================
 // KB-MSG CROSS-MACHINE RELAY API (XACA-0777)
