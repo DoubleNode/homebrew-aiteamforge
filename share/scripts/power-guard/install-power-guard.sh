@@ -182,6 +182,16 @@ run() { # run <cmd...>: executes, or only prints under --dry-run
   if [ "$DRY" = 1 ]; then info "  [dry-run] $*"; else "$@"; fi
 }
 
+# run_as_user <user> <cmd...>: anything created under the user's HOME is created
+# BY the user, never by root (XACA-1394-014/015). Root following a user-placed
+# symlink (~/.aiteamforge, ~/.aiteamforge/run, or the policy file itself) could
+# write anywhere; the user following it can only write where the user already can.
+# Under PG_TESTING the suite already runs as the non-root "user", and sudo is a stub.
+run_as_user() {
+  local u="$1"; shift
+  if [ "${PG_TESTING:-}" = "1" ]; then run "$@"; else run /usr/bin/sudo -n -u "$u" -- "$@"; fi
+}
+
 render_plist() { # render_plist <out> <user> <user_home>
   sed -e "s|{{INSTALL_DIR}}|${LIBEXEC_DIR}|g" \
       -e "s|{{USER_HOME}}|$3|g" \
@@ -258,20 +268,23 @@ do_install() {
 
   # Policy: seed ONLY if absent. Never overwrite, never chmod an existing one.
   pol="${uhome}/.aiteamforge/power-guard-policy.json"
-  # A symlink (even dangling, which fails -e) is never written through as root:
-  # skip seeding. A missing policy is the disarmed state, so this fails closed.
+  # The seeding writes run AS THE USER (run_as_user), so a symlinked parent dir or
+  # policy file can only redirect the write somewhere the user could write anyway.
+  # A symlinked policy LEAF is still refused outright: a missing policy is the
+  # disarmed state, so declining to seed fails closed.
   if [ -L "$pol" ]; then
     err "Policy path is a symlink, not seeding (power-guard stays disarmed): $pol"
   elif [ -e "$pol" ]; then
     info "Policy exists, left untouched: $pol"
   else
-    local ugrp
-    ugrp="$(id -gn "$user" 2>/dev/null || echo staff)"
-    local uown="-o $user -g $ugrp"
-    [ "${PG_TESTING:-}" = "1" ] && uown=""
-    run install -d -m 755 $uown "${uhome}/.aiteamforge" "${uhome}/.aiteamforge/run"
-    run install -m 600 $uown "$(policy_template)" "$pol"
-    info "Seeded DISARMED policy (enabled=false, dry_run=true): $pol"
+    # A failure here (e.g. ~/.aiteamforge is a regular file) must not abort the
+    # install half-done under set -e: no policy == disarmed, so report and go on.
+    if run_as_user "$user" install -d -m 755 "${uhome}/.aiteamforge" "${uhome}/.aiteamforge/run" \
+       && run_as_user "$user" install -m 600 "$(policy_template)" "$pol"; then
+      info "Seeded DISARMED policy (enabled=false, dry_run=true): $pol"
+    else
+      err "Could not seed the policy as $user at $pol (power-guard stays disarmed until one exists)"
+    fi
   fi
 
   if [ "$DRY" = 1 ]; then
