@@ -7,6 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-10-08
+
 - **XACA-1476** (Changed, PR #1112 review round 1): `fleet-monitor/server/` re-mirrored. Pool card toggle is a native button inside the machine-name heading (APG disclosure), the stale CI/CD summary uses a colour swap + STALE tag instead of opacity (WCAG AA), the runner-state subhead reads RUNNER STATES, and machine ids such as `toString` are now pruned.
 - **XACA-1476** (Changed): `fleet-monitor/server/` mirrored. CI/CD screen reorders to summary → pool → queue → runner states → recent jobs (new `#cicd-summary` mount), pool machine cards collapse their details behind an accessible toggle whose state survives polls, pool card inner-left corners curve, and the Job Queue gets sticky headers, contained scroll and a visible focus ring. Three-way merged onto the XACA-1393 tap-ahead `lcars-dashboard.html` / `package.json` (both sides kept).
 - **XACA-1478** (Fixed): `share/lcars-ui/server.py` re-mirrored. A release created before the PLANNED stage existed (legacy stage list DEV..PROD) no longer mirrors stage PLANNED as DEV: `_legacy_environment_for_stage` always treats PLANNED as a usable target for stage PLANNED, so `kb-release plan` / `regress --to PLANNED` set each platform's environment to PLANNED and LCARS stops showing the release as ACTIVE. XACA-1375 enablement for other stages is unchanged.
@@ -7928,7 +7930,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.33...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.0...HEAD
+[0.21.0]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.33...v0.21.0
 [0.20.33]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.32...v0.20.33
 [0.20.32]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.31...v0.20.32
 [0.20.31]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.30...v0.20.31
