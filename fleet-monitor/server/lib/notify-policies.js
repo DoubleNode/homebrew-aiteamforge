@@ -7,6 +7,9 @@
 
 'use strict';
 
+const fs = require('fs');
+const path = require('path');
+
 /**
  * Notification dispatcher policies (XACA-1400-004, EPIC-0068 D6).
  *
@@ -86,19 +89,37 @@ const MAX_ZONE_LENGTH = 64;
 const formatters = new Map(); // zone -> Intl.DateTimeFormat | null (invalid)
 const FORMATTER_CAP = 64;
 
+// The bundled IANA zone list (config/iana_zones.json) is a SNAPSHOT of Python's
+// zoneinfo.available_timezones() (regenerate: sorted(available_timezones()) as a
+// JSON array, one name per line; the drift test in
+// tests/xaca-1400-008-review-round1.test.js names any difference); it is the single source of truth for valid zone
+// NAMES, so this validator and release_notify_routing._zone agree by
+// construction. Fail closed: if the file cannot be read, EVERY zone is invalid
+// (push 400s, send-time skips quiet hours) and the cause is logged loudly.
+const ZONES_FILE = path.join(__dirname, '..', 'config', 'iana_zones.json');
+let ZONE_SET = new Set();
+try {
+    const list = JSON.parse(fs.readFileSync(ZONES_FILE, 'utf8'));
+    if (!Array.isArray(list) || list.length === 0 || !list.every((z) => typeof z === 'string')) {
+        throw new Error('expected a non-empty JSON array of strings');
+    }
+    ZONE_SET = new Set(list);
+} catch (err) {
+    console.error('[NOTIFY] FATAL: cannot load ' + ZONES_FILE + ' (' + err.message
+        + '); every quietHours timezone will be rejected until it is restored');
+}
+
 function formatterFor(zone) {
     if (formatters.has(zone)) return formatters.get(zone);
     let fmt = null;
-    // Python requires the canonical name; Intl is case-insensitive and also
-    // accepts offset zones. Reject both so the two runtimes agree.
-    if (typeof zone === 'string' && zone && zone.length <= MAX_ZONE_LENGTH && !/^[+-]/.test(zone)) {
+    // Exact, case-sensitive membership in Python's list (rejects offsets, miscased
+    // names and miscased ALIASES like 'us/eastern'), AND the runtime must be able
+    // to evaluate it (Intl rejects a few listed names such as 'Factory').
+    if (typeof zone === 'string' && zone && zone.length <= MAX_ZONE_LENGTH && ZONE_SET.has(zone)) {
         try {
-            const f = new Intl.DateTimeFormat('en-GB', {
+            fmt = new Intl.DateTimeFormat('en-GB', {
                 timeZone: zone, hourCycle: 'h23', hour: '2-digit', minute: '2-digit',
             });
-            const resolved = f.resolvedOptions().timeZone;
-            const caseOnlyMismatch = resolved !== zone && resolved.toLowerCase() === zone.toLowerCase();
-            fmt = caseOnlyMismatch ? null : f;
         } catch (_) { fmt = null; }
     }
     if (formatters.size >= FORMATTER_CAP) formatters.delete(formatters.keys().next().value);
@@ -109,9 +130,18 @@ function formatterFor(zone) {
 /**
  * THE timezone validator. The push route (notify-team-routes) and send-time
  * quiet hours (quietHoursDecision) both call this, so a zone accepted at push is
- * honoured at send. Strict, to match Python zoneinfo + available_timezones() in
- * release_notify_routing._zone: case-sensitive canonical/alias names ('UTC',
- * 'America/Chicago', 'US/Central'), no offset zones ('+05:00'), <= 64 chars.
+ * honoured at send.
+ *
+ * Parity with Python release_notify_routing._zone: a zone is valid iff its name
+ * is an exact (case-sensitive) member of zoneinfo.available_timezones() -- the
+ * bundled config/iana_zones.json -- and is <= 64 chars. Canonical names and
+ * aliases ('UTC', 'America/Chicago', 'US/Central') pass; offsets ('+05:00'),
+ * miscased names and miscased aliases ('us/central') do not.
+ *
+ * Caveat: the list is a snapshot of the generating machine's tzdata; a drift
+ * test fails when it no longer matches Python's. Also, the JS runtime must be
+ * able to evaluate the zone, so a name Python lists but Intl cannot resolve
+ * ('Factory') is refused here: stricter than Python, never looser.
  */
 function isValidTimeZone(zone) {
     return formatterFor(zone) !== null;

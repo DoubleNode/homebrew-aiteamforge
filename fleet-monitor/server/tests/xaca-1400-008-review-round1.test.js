@@ -48,9 +48,65 @@ describe('timezone: push validator and send-time quiet hours agree', () => {
         ['garbage', false],
         ['', false],
         ['A'.repeat(65), false],
+        // XACA-1400-018: the reviewer's measured round-1 variants.
+        ['Europe/LONDON', false], ['Utc', false], ['Factory', false], ['localtime', false],
+        ['Etc/UTC', true], ['GMT', true], ['EST', true], ['EST5EDT', true],
+        ['US/Eastern', true], ['Asia/Calcutta', true], ['Asia/Kolkata', true],
+        ['Europe/Kiev', true], ['America/Argentina/Buenos_Aires', true],
+        ['America/Indiana/Indianapolis', true], ['America/Port-au-Prince', true],
+        ['Etc/GMT+5', true], ['Etc/GMT-14', true],
+        // XACA-1400-019: miscased ALIASES that Intl resolves to a different spelling.
+        ['us/central', false], ['us/eastern', false], ['etc/utc', false], ['gmt', false],
+        ['est', false], ['america/indiana/indianapolis', false],
+        ['Us/Eastern', false], ['America/North_dakota/Center', false],
     ];
+    // Python's own _zone, one batched subprocess. null => python3 unavailable.
+    const HOOKS = path.join(__dirname, '..', '..', '..', 'kanban-hooks');
+    const PY = [
+        'import json, sys',
+        'sys.path.insert(0, sys.argv[1])',
+        'import release_notify_routing as r',
+        'out = {}',
+        'for z in json.load(sys.stdin):',
+        '    try:',
+        '        r._zone(z); out[z] = True',
+        '    except Exception:',
+        '        out[z] = False',
+        'print(json.dumps(out))',
+    ].join('\n');
+    function runPython(args, input) {
+        const r = require('child_process').spawnSync('python3', args, { input, encoding: 'utf8', timeout: 30000 });
+        return r.error || r.status !== 0 ? null : r.stdout;
+    }
+    const pyOut = runPython(['-c', PY, HOOKS], JSON.stringify(CASES.map(([z]) => z)));
+    const PY_RESULT = pyOut === null ? null : JSON.parse(pyOut);
+    // Python lists 'Factory' but the JS runtime cannot evaluate it (Intl throws),
+    // so JS is deliberately STRICTER there. Every other row must match exactly.
+    const JS_STRICTER = new Set(['Factory']);
+
+    // Drift guard, fail-open direction only: a bundled name this Python rejects would let the hub
+    // honour a zone the Python side refuses. The reverse (Python knows a zone the bundle lacks) is
+    // fail-closed (push 400) and depends on the machine's tzdata, so it is reported, not asserted --
+    // an exact-match assertion would go red on any machine with different tzdata.
+    test('bundled iana_zones.json contains only zones Python available_timezones() accepts (drift guard)', (t) => {
+        const listOut = runPython(['-c', 'import sys, json, zoneinfo\nprint(json.dumps(sorted(zoneinfo.available_timezones())))'], '');
+        if (listOut === null) return t.skip('python3 not available on this machine');
+        const bundled = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'config', 'iana_zones.json'), 'utf8'));
+        const live = new Set(JSON.parse(listOut));
+        const extra = bundled.filter((z) => !live.has(z));
+        assert.deepEqual(extra, [],
+            'bundled zones Python rejects -- regenerate fleet-monitor/server/config/iana_zones.json from zoneinfo.available_timezones()');
+        const missing = [...live].filter((z) => !bundled.includes(z));
+        if (missing.length) t.diagnostic(`python knows ${missing.length} zone(s) the bundle lacks (refused at push): ${missing.slice(0, 5).join(', ')}`);
+    });
+
     for (const [zone, ok] of CASES) {
-        test(`${JSON.stringify(zone.slice(0, 20))} -> ${ok ? 'accepted' : 'refused'} at BOTH`, () => {
+        test(`${JSON.stringify(zone.slice(0, 40))} -> ${ok ? 'accepted' : 'refused'} at BOTH`, (t) => {
+            // JS_STRICTER zones are refused by JS whatever Python says (fail-closed), and whether
+            // Python lists them depends on the machine's tzdata, so they are not compared.
+            if (PY_RESULT !== null && !JS_STRICTER.has(zone)) {
+                assert.equal(PY_RESULT[zone], ok, `python _zone disagrees for ${JSON.stringify(zone)}`);
+            }
             const quietHours = { start: '10:00', end: '20:00', timezone: zone };
             const push = teamRoutes.validateTeamPush({
                 config: { $schema: 'release-notify/v2', version: 2, routes: {}, quietHours },
