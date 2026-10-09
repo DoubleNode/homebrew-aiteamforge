@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "notice-types/v1",
   "title": "Notice-Type Catalog (notice-types/v1)",
-  "description": "XACA-1399 / EPIC-0068 D3. Root validates the canonical catalog (kanban-hooks/notice_types.json): every entry is complete. A team's kanban/config/notice_types.json validates against #/$defs/teamOverride: it may ADD new types (all three fields required) and OVERRIDE defaultSeverity/description of an existing id (only id required). It may never delete or rename a type, and an id may not repeat within one file.",
+  "description": "XACA-1399 / EPIC-0068 D3. Root validates the canonical catalog (kanban-hooks/notice_types.json): every entry is complete. A team's kanban/config/notice_types.json validates against #/$defs/teamOverride: it may ADD new types (all three fields required) and OVERRIDE defaultSeverity/description of an existing id (only id required). It may never delete or rename a type, and an id may not repeat within one file (enforced by validate_catalog()/validate_team_override() only: JSON Schema uniqueItems compares whole entries, not ids).",
   "type": "object",
   "required": ["$schema", "schemaVersion", "types"],
   "additionalProperties": false,
@@ -19,7 +19,7 @@
   "$defs": {
     "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,31}(?![\\s\\S])" },
     "severity": { "type": "string", "enum": ["info", "warning", "high", "critical"] },
-    "description": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "description": { "type": "string", "minLength": 1, "maxLength": 200, "pattern": "\\S" },
     "type": {
       "type": "object",
       "required": ["id", "defaultSeverity", "description"],

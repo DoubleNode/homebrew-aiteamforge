@@ -121,14 +121,16 @@ def validate_team_override(doc: Any) -> List[str]:
 def merge_catalog(canonical: Mapping[str, Any], team: Optional[Mapping[str, Any]]) -> Dict[str, Dict[str, str]]:
     """canonical + team layer -> {id: {id, defaultSeverity, description, source}}.
     source is 'default', 'override' (team changed a default type) or 'team'
-    (team-added). Raises NoticeRoutingError on any invalid layer."""
+    (team-added). severitySource is 'catalog' or 'team-catalog' (team changed
+    or added the severity). Raises NoticeRoutingError on any invalid layer."""
     errs = validate_catalog(canonical)
     if errs:
         raise NoticeRoutingError("notice-type catalog invalid: " + "; ".join(errs))
     merged: Dict[str, Dict[str, str]] = {}
     for ent in canonical["types"]:
         merged[ent["id"]] = {"id": ent["id"], "defaultSeverity": ent["defaultSeverity"],
-                             "description": ent["description"], "source": "default"}
+                             "description": ent["description"], "source": "default",
+                             "severitySource": "catalog"}
     if team is None:
         return merged
     errs = validate_team_override(team)
@@ -137,6 +139,8 @@ def merge_catalog(canonical: Mapping[str, Any], team: Optional[Mapping[str, Any]
     for ent in team["types"]:
         tid = ent["id"]
         if tid in merged:
+            if "defaultSeverity" in ent and ent["defaultSeverity"] != merged[tid]["defaultSeverity"]:
+                merged[tid]["severitySource"] = "team-catalog"
             for key in ("defaultSeverity", "description"):
                 if key in ent:
                     merged[tid][key] = ent[key]
@@ -147,7 +151,8 @@ def merge_catalog(canonical: Mapping[str, Any], team: Optional[Mapping[str, Any]
                 raise NoticeRoutingError(
                     "team notice_types.json: new type '%s' must define %s" % (tid, " and ".join(missing)))
             merged[tid] = {"id": tid, "defaultSeverity": ent["defaultSeverity"],
-                           "description": ent["description"], "source": "team"}
+                           "description": ent["description"], "source": "team",
+                           "severitySource": "team-catalog"}
     return merged
 
 
@@ -211,6 +216,11 @@ def validate_v2_semantics(config: Mapping[str, Any], catalog: Mapping[str, Any])
             for tid in sorted(block, key=str):
                 if tid not in catalog:
                     errs.append("$.%s: unknown notice type '%s'" % (section, _safe_id(tid)))
+    if "dedupeWindow" in config:
+        w = config["dedupeWindow"]
+        # jsonschema treats 1.0 as an integer; the runtime does not.
+        if isinstance(w, bool) or not isinstance(w, int) or w < 0:
+            errs.append("$.dedupeWindow: must be a non-negative integer (not a float)")
     qh = config.get("quietHours")
     if isinstance(qh, dict):
         try:
@@ -223,7 +233,10 @@ def validate_v2_semantics(config: Mapping[str, Any], catalog: Mapping[str, Any])
 
 
 def effective_severity(config: Mapping[str, Any], catalog: Mapping[str, Any], notice_type: str):
-    """(severity, source): per-type override beats the catalog default."""
+    """(severity, source): per-type override beats the catalog default.
+    source is 'override' (notify.json severityOverrides), 'team-catalog' (the
+    team's notice_types.json set/changed defaultSeverity) or 'catalog' (the
+    Academy default)."""
     if notice_type not in catalog:
         raise NoticeRoutingError("unknown notice type '%s'" % _safe_id(notice_type))
     override = (config.get("severityOverrides") or {}).get(notice_type)
@@ -231,7 +244,8 @@ def effective_severity(config: Mapping[str, Any], catalog: Mapping[str, Any], no
         if override not in SEVERITIES:
             raise NoticeRoutingError("severity override for '%s' is invalid" % notice_type)
         return override, "override"
-    return catalog[notice_type]["defaultSeverity"], "catalog"
+    entry = catalog[notice_type]
+    return entry["defaultSeverity"], entry.get("severitySource", "catalog")
 
 
 def quiet_hours_decision(severity: str, quiet_hours: Optional[Mapping[str, Any]], now: datetime) -> Dict[str, Any]:
