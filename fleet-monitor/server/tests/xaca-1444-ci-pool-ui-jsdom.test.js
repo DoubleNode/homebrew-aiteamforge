@@ -107,6 +107,10 @@ test('the draining and no-capacity fixtures render too', () => {
 
 test('capacity renders as text with units; null/absent renders an em dash, never 0', () => {
     const env = setup(fixture('mixed'));
+    // XACA-1476: details are collapsed by default; the capacity text must still be in the DOM, just hidden.
+    const det = card(env, 'm4mini').querySelector('[data-cicd-pool-details]');
+    assert.ok(det && det.hasAttribute('hidden'), 'capacity lives in the collapsed (hidden) details region');
+    assert.ok(det.querySelector('[data-cicd-pool-capacity]'), 'capacity is inside the details region');
     const t = card(env, 'm4mini').querySelector('[data-cicd-pool-capacity]').textContent;
     assert.match(t, /Reclaimable memory\s*3\.8\s*GiB/);
     assert.match(t, /Swap used \/ total/);
@@ -147,6 +151,7 @@ test('dormant Enable is aria-disabled, focusable, described, and clicking never 
     const body = fixture('mixed', (d) => { d.machines.m2mini.capability = 'dormant'; });
     const env = setup(body, f);
     const b = btn(env, 'm2mini', 'enable');
+    assert.ok(b.closest('[data-cicd-pool-details]').hasAttribute('hidden'), 'XACA-1476: controls sit in the collapsed details but stay in the DOM');
     assert.equal(b.tagName, 'BUTTON');
     assert.equal(b.getAttribute('aria-disabled'), 'true');
     assert.equal(b.hasAttribute('disabled'), false);
@@ -359,8 +364,9 @@ test('css: tokens only, no raw hex, no looping animation, reduced-motion respect
 
 test('wiring: dashboard has both containers in order plus asset tags; cicd.js polls /api/ci-pool', () => {
     const html = fs.readFileSync(DASHBOARD_HTML, 'utf8');
-    const iPool = html.indexOf('id="cicd-pool"'), iQueue = html.indexOf('id="cicd-queue"'), iContent = html.indexOf('id="cicd-content"');
-    assert.ok(iPool > 0 && iQueue > iPool && iContent > iQueue, 'pool, queue, then runners content');
+    const iSummary = html.indexOf('id="cicd-summary"'), iPool = html.indexOf('id="cicd-pool"');
+    const iQueue = html.indexOf('id="cicd-queue"'), iContent = html.indexOf('id="cicd-content"');
+    assert.ok(iSummary > 0 && iPool > iSummary && iQueue > iPool && iContent > iQueue, 'summary, pool, queue, then runners content (XACA-1476)');
     ['shared/css/lcars-ci-pool.css', 'shared/css/lcars-ci-queue.css', 'shared/js/lcars-ci-pool.js', 'shared/js/lcars-ci-queue.js']
         .forEach((a) => assert.match(html, new RegExp(a.replace(/[./]/g, '\\$&') + '\\?v=\\d{8}[a-z]'), a));
     assert.match(fs.readFileSync(CICD_JS, 'utf8'), /\/api\/ci-pool/);
@@ -368,7 +374,7 @@ test('wiring: dashboard has both containers in order plus asset tags; cicd.js po
 
 test('cicd.js refresh() feeds both modules, hides on 404, and refreshes after a write', async () => {
     const dom = new JSDOM('<!doctype html><html><body><div class="lcars-section active" data-section="cicd">' +
-        '<div id="cicd-pool"></div><div id="cicd-queue"></div><div id="cicd-content"></div></div></body></html>',
+        '<div id="cicd-summary"></div><div id="cicd-pool"></div><div id="cicd-queue"></div><div id="cicd-content"></div></div></body></html>',
     { runScripts: 'outside-only', url: 'http://localhost/' });
     const w = dom.window;
     const seen = { pool: 0, queue: 0 };

@@ -39,11 +39,16 @@
 .ciq-flag { color: var(--lcars-alert-red); font-weight: bold; }
 .ciq-empty { margin: 0; color: var(--lcars-brown); }
 
-.ciq-scroll { max-width: 100%; overflow: auto; max-height: 60vh; }
-.ciq-scroll:focus-visible { outline: 2px solid var(--lcars-cyan); outline-offset: 2px; }
+.ciq-scroll { max-width: 100%; overflow: auto; max-height: 60vh; overscroll-behavior: contain; padding: 2px; }
+/* XACA-1476-017: ring on :focus too (a mouse click on a div never matches :focus-visible, and Safari
+   skips non-controls on Tab). Inset offset so the overflow:auto box cannot clip it; the 2px padding keeps the
+   sticky th (which paints over the scroll box's own outline) out of the ring band. */
+.ciq-scroll:focus, .ciq-scroll:focus-visible { outline: 2px solid var(--lcars-cyan); outline-offset: -2px; }
 .ciq-table { border-collapse: collapse; width: 100%; min-width: 34em; color: var(--lcars-peach); }
 .ciq-caption { text-align: left; color: var(--lcars-cyan); padding-bottom: 4px; }
-.ciq-table th { text-align: left; color: var(--lcars-purple); border-bottom: 2px solid var(--lcars-purple); padding: 4px 8px; white-space: nowrap; }
+/* XACA-1476-015: sticky header. Opaque bg = the panel's rendered surface (body --lcars-black) so rows cannot
+   show through. border-collapse drops a sticky th's border, so the underline is an inset box-shadow. */
+.ciq-table th { text-align: left; color: var(--lcars-purple); background: var(--lcars-black); box-shadow: inset 0 -2px 0 var(--lcars-purple); position: sticky; top: 0; z-index: 1; padding: 4px 8px; white-space: nowrap; }
 .ciq-table td { padding: 4px 8px; border-bottom: 1px solid var(--lcars-navy); overflow-wrap: anywhere; }
 .ciq-table a { color: var(--lcars-cyan); }
 .ciq-table a:focus-visible { outline: 2px solid var(--lcars-cyan); outline-offset: 2px; }

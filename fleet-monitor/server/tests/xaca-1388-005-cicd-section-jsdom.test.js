@@ -731,3 +731,59 @@ test('not-reported dash: no aria-label on role-less elements; meaning carried by
     env.el.querySelectorAll('span[aria-label]:not([role])').forEach(s =>
         assert.fail('role-less span with aria-label: ' + s.outerHTML));
 });
+
+// ---- XACA-1476: real two-mount path (#cicd-summary above #cicd-content) -----
+// Every test above mounts only #cicd-content, which now exercises the FALLBACK path
+// (strip rendered at the top of the container). These cover the production layout.
+function loadTwoMount() {
+    const dom = new JSDOM('<!doctype html><html><body><div id="cicd-summary"></div><div id="cicd-pool" hidden></div>' +
+        '<div id="cicd-queue" hidden></div><div id="cicd-content"></div></body></html>',
+    { runScripts: 'outside-only', url: 'http://localhost/' });
+    dom.window.eval(fs.readFileSync(CICD_JS, 'utf8'));
+    const doc = dom.window.document;
+    return { window: dom.window, document: doc, api: dom.window.LCARSCICD,
+        summary: doc.getElementById('cicd-summary'), el: doc.getElementById('cicd-content') };
+}
+
+test('two-mount: summary tiles land in #cicd-summary and NOT in #cicd-content (XACA-1476)', () => {
+    const env = loadTwoMount();
+    env.api.render(fixture('healthy'), env.el);
+    ['today', 'cycle'].forEach(k => {
+        assert.equal(env.summary.querySelectorAll('[data-cicd-summary="' + k + '"]').length, 1, k + ' tile in summary mount');
+        assert.equal(env.el.querySelectorAll('[data-cicd-summary="' + k + '"]').length, 0, k + ' tile NOT in content');
+    });
+    assert.ok(squash(env.summary.querySelector('[data-cicd-summary="today"]')).includes('208'));
+});
+
+test('two-mount: fallback pills and status line are in #cicd-summary, not #cicd-content (XACA-1476)', () => {
+    const env = loadTwoMount();
+    env.api.render(fixture('healthy'), env.el);
+    assert.equal(env.summary.querySelector('[data-cicd-fallback="linux"]').getAttribute('data-cicd-state'), 'SELF-HOSTED');
+    assert.ok(env.summary.querySelector('[data-cicd-slot="status"]'), 'status line slot in summary');
+    assert.match(normText(env.summary.querySelector('[data-cicd-slot="updated"]')), /^UPDATED /);
+    assert.equal(env.el.querySelectorAll('[data-cicd-fallback]').length, 0, 'no fallback pills in content');
+    assert.equal(env.el.querySelectorAll('[data-cicd-slot="status"], [data-cicd-slot="pills"], [data-cicd-top]').length, 0);
+});
+
+test('two-mount: runner states and jobs stay in #cicd-content (XACA-1476)', () => {
+    const env = loadTwoMount();
+    env.api.render(fixture('healthy'), env.el);
+    assert.ok(env.el.querySelector('[data-cicd-machine="m1mini"]'), 'machine card in content');
+    assert.ok(env.el.querySelector('[data-cicd-runner]'), 'runner row in content');
+    assert.equal(env.el.querySelectorAll('[data-cicd-job]').length, 3, 'jobs in content');
+    assert.equal(env.summary.querySelectorAll('[data-cicd-machine], [data-cicd-runner], [data-cicd-job]').length, 0, 'none in summary');
+});
+
+test('two-mount: schemaVersion > 1 stale note renders in the summary mount (XACA-1476)', () => {
+    const env = loadTwoMount();
+    const d = fixture('healthy'); d.schemaVersion = 2;
+    env.api.render(d, env.el);
+    assert.equal(env.summary.querySelectorAll('.cicd-stale-note').length, 1);
+    assert.equal(env.el.querySelectorAll('.cicd-stale-note').length, 0);
+});
+
+test('fallback path: with no #cicd-summary the strip renders at the top of #cicd-content (XACA-1476)', () => {
+    const env = renderFixture('healthy');   // fixture mounts only #cicd-content
+    assert.ok(env.el.querySelector('[data-cicd-top]'));
+    assert.equal(env.el.firstElementChild.hasAttribute('data-cicd-top'), true, 'strip is first in the container');
+});

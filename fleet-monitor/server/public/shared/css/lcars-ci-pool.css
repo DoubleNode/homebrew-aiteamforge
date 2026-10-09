@@ -9,16 +9,18 @@
  */
 .cicd-pool { margin: 0 0 16px; max-width: 100%; }
 .cicd-pool-title { margin: 0 0 8px; font-size: 1rem; letter-spacing: 0.08em; color: var(--lcars-cyan); }
-.cicd-pool-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px;
+.cicd-pool-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; align-items: start;
     grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr)); }
 .cicd-pool-card { background: var(--lcars-dark); color: var(--lcars-peach); border: 2px solid var(--lcars-brown);
-    border-left-width: 8px; border-radius: 8px; padding: 10px 12px; min-width: 0; overflow-wrap: anywhere; }
+    border-left-width: 8px; border-radius: 16px 8px 8px 16px / 10px 8px 8px 10px; padding: 10px 12px; min-width: 0; overflow-wrap: anywhere; }
 .cicd-pool-card[data-cicd-pool-state="enabled"]  { border-color: var(--lcars-green); }
 .cicd-pool-card[data-cicd-pool-state="disabled"] { border-color: var(--lcars-brown); border-style: dashed; }
 .cicd-pool-card[data-cicd-pool-state="draining"] { border-color: var(--lcars-amber); }
 .cicd-pool-card[data-cicd-pool-state="paused"]   { border-color: var(--lcars-amber); border-style: double; }
 .cicd-pool-card[data-cicd-pool-state="resuming"] { border-color: var(--lcars-cyan); }
 .cicd-pool-card[data-cicd-pool-state="unknown"]  { border-color: var(--lcars-alert-red); border-style: dotted; }
+/* XACA-1476-014: the 8px left border cancels an 8px radius to a 0 inner radius (hard 90deg inside corners);
+   the larger left radii above leave an ~8px curve on the padding edge for every state/border style. */
 .cicd-pool-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
 .cicd-pool-name { margin: 0; font-size: 1.05rem; color: var(--lcars-lavender); }
 .cicd-pool-badge { display: inline-block; padding: 2px 8px; border: 1px solid currentColor; border-radius: 12px;
@@ -52,4 +54,14 @@
 .cicd-pool-dialog h4 { margin: 0 0 6px; }
 .cicd-pool-dialog input { max-width: 100%; box-sizing: border-box; min-height: 24px; }
 .cicd-pool-dlg-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+/* XACA-1476-005: collapsible details. Toggle = the head row (role=button); ▸/▾ is a static glyph, no animation. */
+.cicd-pool-toggle { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; cursor: pointer; border-radius: 6px;
+    margin: -2px -4px; padding: 2px 4px; }
+.cicd-pool-toggle:hover { background: var(--lcars-darker); }
+.cicd-pool-toggle:focus-visible { outline: 3px solid var(--lcars-cyan); outline-offset: 2px; }
+.cicd-pool-chev { flex: 0 0 auto; width: 1em; color: var(--lcars-cyan); text-align: center; }
+.cicd-pool-toggle .cicd-pool-name { flex: 1 1 8ch; min-width: 0; }
+.cicd-pool-toggle .cicd-pool-badge { flex: 0 0 auto; }
+.cicd-pool-details { margin-top: 4px; }
+.cicd-pool-details[hidden] { display: none; }
 @media (prefers-reduced-motion: reduce) { .cicd-pool, .cicd-pool * { animation: none !important; transition: none !important; } }

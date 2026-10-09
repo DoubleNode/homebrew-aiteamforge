@@ -110,10 +110,22 @@
         return { action: 'pause', label: 'Pause' };
     }
 
-    function cardHtml(id, m, serverTime) {
+    // ---- expand state (XACA-1476-004) ---------------------------------------
+    // Source of truth for which cards are expanded: machine id -> boolean, IN MEMORY ONLY (never storage).
+    // cardHtml() reads it, so a signature-driven card.innerHTML rewrite keeps the card's state. Absent = collapsed.
+    var expandState = new Map();
+    function isExpanded(id) { return expandState.get(String(id)) === true; }
+    function setExpanded(id, on) { expandState.set(String(id), on === true); }
+    var CHEV_CLOSED = '\u25B8', CHEV_OPEN = '\u25BE';   // same glyphs as lcars-division-collapse.js
+
+    function cardHtml(id, m, serverTime, expanded) {
         var state = STATES[m.state] ? m.state : 'unknown';
         var st = STATES[state], key = safeId(id);
-        var h = '<div class="cicd-pool-head">' +
+        var detailsId = 'cicd-pool-details-' + key;
+        var h = '<div class="cicd-pool-header">' +
+            '<div class="cicd-pool-head cicd-pool-toggle" role="button" tabindex="0" data-cicd-pool-toggle="' + esc(id) + '"' +
+            ' aria-expanded="' + (expanded ? 'true' : 'false') + '" aria-controls="' + esc(detailsId) + '">' +
+            '<span class="cicd-pool-chev" aria-hidden="true" data-cicd-pool-chev>' + (expanded ? CHEV_OPEN : CHEV_CLOSED) + '</span>' +
             '<h4 class="cicd-pool-name" id="cicd-pool-name-' + esc(key) + '">' + esc(id) + '</h4>' +
             '<span class="cicd-pool-badge" data-cicd-pool-state="' + esc(state) + '">' +
             '<span aria-hidden="true" class="cicd-pool-glyph">' + st.glyph + '</span> ' + esc(st.label) + '</span></div>';
@@ -125,6 +137,7 @@
         if (m.pauseDrift === true) {
             h += '<p class="cicd-pool-drift" data-cicd-pool-drift>Pause marker on the machine disagrees with the server.</p>';
         }
+        h += '</div><div class="cicd-pool-details" id="' + esc(detailsId) + '" data-cicd-pool-details' + (expanded ? '' : ' hidden') + '>';
         h += '<dl class="cicd-pool-cap" data-cicd-pool-capacity>';
         capacityRows(m, serverTime).forEach(function(r) {
             h += '<div><dt>' + esc(r[0]) + '</dt><dd>' + r[1] + '</dd></div>';
@@ -141,7 +154,21 @@
             h += '<p class="cicd-pool-cmd"><code data-cicd-pool-command>' + esc(c.command) + '</code> ' +
                 '<button type="button" class="cicd-pool-btn cicd-pool-copy" data-cicd-pool-copy="' + esc(c.command) + '" data-cicd-pool-control="' + esc(id) + ':copy">Copy command</button></p>';
         }
-        return h + '</div>';
+        return h + '</div></div>';
+    }
+
+    // Flip one card in place (no innerHTML rewrite, so focus on the toggle survives).
+    function toggleCard(card, id) {
+        var on = !isExpanded(id);
+        setExpanded(id, on);
+        var t = card.querySelector('[data-cicd-pool-toggle]');
+        var d = card.querySelector('[data-cicd-pool-details]');
+        if (t) {
+            t.setAttribute('aria-expanded', on ? 'true' : 'false');
+            var c = t.querySelector('[data-cicd-pool-chev]');
+            if (c) c.textContent = on ? CHEV_OPEN : CHEV_CLOSED;
+        }
+        if (d) { if (on) d.removeAttribute('hidden'); else d.setAttribute('hidden', ''); }
     }
 
     // ---- skeleton / lookup ------------------------------------------------
@@ -220,12 +247,13 @@
         r._ctx = { opts: opts, body: body };
         var list = r.querySelector('[data-cicd-pool-list]');
         var ids = Object.keys(body.machines).sort();
-        var active = doc.activeElement, refocus = null, seen = {}, pos = 0;
+        var active = doc.activeElement, refocus = null, refocusToggle = null, seen = {}, pos = 0;
         ids.forEach(function(id) {
             var m = body.machines[id];
             if (!m || typeof m !== 'object') return;
             seen[id] = true;
-            var html = cardHtml(id, m, body.serverTime);
+            var open = isExpanded(id);
+            var html = cardHtml(id, m, body.serverTime, open);
             var card = findCard(list, id);
             if (!card) {
                 card = doc.createElement('li');
@@ -233,10 +261,13 @@
                 card.className = 'cicd-pool-card';
                 card.setAttribute('aria-labelledby', 'cicd-pool-name-' + safeId(id));
             }
-            var sig = html.replace(AGE_RE, '');
+            // The signature ignores the expand flag: a toggle is applied in place by toggleCard(), so only a real
+            // content change rebuilds the card (and that rebuild re-reads the expand map via cardHtml).
+            var sig = (open ? cardHtml(id, m, body.serverTime, false) : html).replace(AGE_RE, '');
             if (card._sig !== sig) {
                 if (active && card.contains(active)) {
-                    refocus = [active.getAttribute('data-cicd-pool-control'), id];
+                    if (active.hasAttribute('data-cicd-pool-toggle')) refocusToggle = id;
+                    else refocus = [active.getAttribute('data-cicd-pool-control'), id];
                 }
                 card.innerHTML = html;
                 card._sig = sig;
@@ -250,6 +281,15 @@
         Array.prototype.slice.call(list.children).forEach(function(c) {
             if (!seen[c.getAttribute('data-cicd-pool-machine-card')]) list.removeChild(c);
         });
+        // Prune expand state for machines that are gone: a machine that reappears starts collapsed.
+        var stale = [];
+        expandState.forEach(function(v, mid) { if (!seen[mid]) stale.push(mid); });
+        stale.forEach(function(mid) { expandState.delete(mid); });
+        if (refocusToggle !== null) {
+            var tc = findCard(list, refocusToggle);
+            var te = tc && tc.querySelector('[data-cicd-pool-toggle]');
+            if (te && doc.activeElement !== te) te.focus();
+        }
         if (refocus && refocus[0]) {
             var el = findByControl(r, refocus[0]);
             if (!el) {   // the control itself changed (e.g. Pause -> Resume): land on the card's first control
@@ -436,7 +476,19 @@
     }
 
     // ---- delegated events -------------------------------------------------
+    function cardToggle(r, e) {
+        var tg = e.target && e.target.closest ? e.target.closest('[data-cicd-pool-toggle]') : null;
+        if (!tg || !r.contains(tg)) return null;
+        if (r.querySelector('[data-cicd-pool-dialog]')) return null;   // modal open: background is inert
+        return tg;
+    }
     function onClick(r, e) {
+        var tg = cardToggle(r, e);
+        if (tg) {
+            var tcard = tg.closest('[data-cicd-pool-machine-card]');
+            if (tcard) toggleCard(tcard, tg.getAttribute('data-cicd-pool-toggle'));
+            return;
+        }
         var t = e.target && e.target.closest ? e.target.closest('button') : null;
         if (!t || !r.contains(t)) return;
         if (r.querySelector('[data-cicd-pool-dialog]') && !t.closest('[data-cicd-pool-dialog]')) { e.preventDefault(); return; }
@@ -473,6 +525,15 @@
     }
 
     function onKey(r, e) {
+        if ((e['key'] === 'Enter' || e['key'] === ' ' || e['key'] === 'Spacebar') && !e.altKey && !e.ctrlKey && !e.metaKey) {
+            var tg = cardToggle(r, e);
+            if (tg && e.target === tg) {
+                e.preventDefault();   // Space must not scroll the page; Enter must not also fire a click
+                var tcard = tg.closest('[data-cicd-pool-machine-card]');
+                if (tcard) toggleCard(tcard, tg.getAttribute('data-cicd-pool-toggle'));
+                return;
+            }
+        }
         var d = e.target && e.target.closest ? e.target.closest('[data-cicd-pool-dialog]') : null;
         if (!d) return;
         if (e.key === 'Escape') { e.preventDefault(); closeDialog(r, true); return; }
@@ -485,7 +546,7 @@
         }
     }
 
-    root.LCARSCIPool = { render: render, teardown: teardown };
+    root.LCARSCIPool = { render: render, teardown: teardown, isExpanded: isExpanded };
 
 })(typeof window !== 'undefined' ? window : this);
 

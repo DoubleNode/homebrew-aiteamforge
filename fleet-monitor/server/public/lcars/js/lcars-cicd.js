@@ -35,6 +35,7 @@
 
     var CI_RUNNERS_API = '/api/ci-runners';
     var CONTAINER_ID = 'cicd-content';
+    var SUMMARY_ID = 'cicd-summary';
     var CI_POOL_API = '/api/ci-pool';
     var DEFAULT_STALE_AFTER = 180;
     var DEFAULT_OFFLINE_AFTER = 600;
@@ -445,10 +446,6 @@
     function bodyHtml(data) {
         var machines = Array.isArray(data.machines) ? data.machines : [];
         var html = '';
-        if (isNum(data.schemaVersion) && data.schemaVersion > 1) {
-            html += '<div class="cicd-stale-note">Newer data format - some fields may not display</div>';
-        }
-        html += summaryHtml(data.summary);
         html += '<h3 class="cicd-subhead">MACHINES</h3>';
         if (!machines.length) {
             html += emptyStateHtml('NO CI RUNNERS REPORTING',
@@ -465,16 +462,32 @@
     // DOM: skeleton + focus/scroll preservation
     // =========================================================================
 
-    function slot(container, name) {
-        return container.querySelector('[data-cicd-slot="' + name + '"]');
+    // XACA-1476-001: the summary row + fallback/status strip live in their own
+    // mount (#cicd-summary), above the pool. Older pages and fixtures that only
+    // mount #cicd-content have no such element; the strip then renders at the top
+    // of the container instead (null-safe, same behaviour as before the split).
+    function summaryMount(container) {
+        var doc = container && container.ownerDocument;
+        return doc ? doc.getElementById(SUMMARY_ID) : null;
     }
 
-    // The skeleton is built once. Its two live regions (fallback pills, failure
-    // badge) persist across polls so they only announce when their content changes.
-    function ensureSkeleton(container) {
-        if (container.querySelector('[data-cicd-root]')) return;
-        container.innerHTML =
-            '<div class="cicd-root" data-cicd-root>' +
+    function stripHost(container) {
+        return summaryMount(container) || container;
+    }
+
+    function slot(container, name) {
+        var sel = '[data-cicd-slot="' + name + '"]';
+        var sm = summaryMount(container);
+        return (sm && sm.querySelector(sel)) || container.querySelector(sel);
+    }
+
+    // Idempotent: builds the summary row, fallback bar, status line and stale note once.
+    function ensureStrip(host) {
+        if (host.querySelector('[data-cicd-top]')) return;
+        var top = host.ownerDocument.createElement('div');
+        top.setAttribute('data-cicd-top', '');
+        top.innerHTML =
+            '<div data-cicd-slot="summary"></div>' +
             '<div class="cicd-fallback-bar">' +
             '<span class="cicd-label">FALLBACK SWITCH</span>' +
             '<div class="cicd-pills" role="status" aria-live="polite" aria-atomic="true" data-cicd-slot="pills"></div>' +
@@ -484,8 +497,29 @@
             '<span class="cicd-sub" data-cicd-slot="updated"></span>' +
             '<span role="status" data-cicd-slot="status"></span>' +
             '</div>' +
-            '<div data-cicd-slot="body"></div>' +
-            '</div>';
+            '<div data-cicd-slot="stale"></div>';
+        host.insertBefore(top, host.firstChild);
+    }
+
+    // On failure the summary keeps its last good numbers (focus/scroll safe) but is
+    // flagged so it is never read as live; the UPDATE FAILED badge sits right under it.
+    function markSummaryStale(container, stale) {
+        var el = slot(container, 'summary');
+        if (!el) return;
+        if (stale) { el.setAttribute('data-cicd-stale', 'true'); el.className = 'dimmed'; }
+        else { el.removeAttribute('data-cicd-stale'); el.className = ''; }
+    }
+
+    // The skeleton is built once. Its two live regions (fallback pills, failure
+    // badge) persist across polls so they only announce when their content changes.
+    function ensureSkeleton(container) {
+        if (!container.querySelector('[data-cicd-root]')) {
+            container.innerHTML =
+                '<div class="cicd-root" data-cicd-root>' +
+                '<div data-cicd-slot="body"></div>' +
+                '</div>';
+        }
+        ensureStrip(stripHost(container));
     }
 
     function captureView(container) {
@@ -539,6 +573,12 @@
         var upd = utcClock(data.generatedAt);
         slot(container, 'updated').textContent = upd ? 'UPDATED ' + upd : '';
 
+        var stale = slot(container, 'stale');
+        stale.innerHTML = (isNum(data.schemaVersion) && data.schemaVersion > 1)
+            ? '<div class="cicd-stale-note">Newer data format - some fields may not display</div>' : '';
+        slot(container, 'summary').innerHTML = summaryHtml(data.summary);
+        markSummaryStale(container, false);
+
         slot(container, 'body').innerHTML = bodyHtml(data);
         _lastGood = data;
         setStatus(container, false);
@@ -548,6 +588,8 @@
     function renderUnavailable(container) {
         if (!container) return;
         _lastGood = null;
+        var sm = summaryMount(container);
+        if (sm) sm.innerHTML = '';
         container.innerHTML = emptyStateHtml('CI TELEMETRY NOT AVAILABLE',
             'CI telemetry not available on this server.', 'data-cicd-unavailable');
     }
@@ -556,10 +598,14 @@
         if (!container) return;
         if (_lastGood && container.querySelector('[data-cicd-root]')) {
             // Keep the last good render untouched (focus/scroll safe); just badge it.
+            markSummaryStale(container, true);
             setStatus(container, true);
             return;
         }
         ensureSkeleton(container);
+        // Never-loaded: summary shows dashes, not numbers.
+        slot(container, 'summary').innerHTML = summaryHtml(null);
+        markSummaryStale(container, false);
         slot(container, 'body').innerHTML = emptyStateHtml('CI DATA UNAVAILABLE', 'CI DATA UNAVAILABLE - retrying');
         setStatus(container, true);
     }

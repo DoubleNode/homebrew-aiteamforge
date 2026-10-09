@@ -1416,6 +1416,11 @@
 
 .cicd-summary-group { display: contents; }
 
+/* XACA-1476-001: after a failed poll the summary keeps its last numbers but must
+   not read as live; mute it like a dimmed runner. UPDATE FAILED sits just below. */
+[data-cicd-slot="summary"][data-cicd-stale] .cicd-summary { opacity: 0.55; }
+[data-cicd-slot="summary"][data-cicd-stale] .cicd-val { color: var(--lcars-tan); }
+
 .cicd-subhead {
     margin: 22px 0 10px;
     font-size: 14px;
