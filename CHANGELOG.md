@@ -7,6 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [0.21.1] - 2026-10-09
+
 - **XACA-1481** (Changed): `share/scripts/power-guard/client/power-guard-runner.py` re-mirrored. `notify()` now logs `notify: attempting <names>` and exactly one outcome line per command, adding `notify: <name> ok (rc=0)` on success (failure/timeout/exception lines unchanged), so a delivered alert and a notify that never ran are distinguishable in `power-guard.log`. `ok (rc=0)` means the command succeeded, not that a human saw the alert. Reaching installed machines needs a re-run of `sudo bash .../install-power-guard.sh install` (root-owned copy). Verbatim copy of canonical.
 - **XACA-1479** (Fixed, follow-up to PR #1113): `kanban-helpers.template.sh` ports `_kb_ci_priority_resolve_repo` (kb-ci-priority labels the ticket's own team repo, never the cwd's, and refuses an unresolvable foreign-team item). `fleet-monitor/server/` re-mirrored: priority lookups run concurrently and a timed-out lookup caches NORMAL for 15 s; the Job Queue lists queued rows in dispatch order (priority, then FIFO) and the badge's accessible text is spaced ("queued CRITICAL priority").
 - **XACA-1479** (Added): `share/templates/kanban/kanban-helpers.template.sh` hand-ported from `kanban-helpers.sh` - new `kb-ci-priority <critical|high|normal> [ID]` manual CI priority lane (records `ciPriority` on the item and sets/clears the `ci-priority:*` PR label), `kb-pr` now applies a recorded priority to the PR (warning-only, never changes kb-pr's exit status), `kb-done` clears `ciPriority`, and `kb-help` lists it.
@@ -7938,7 +7940,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.0...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.1...HEAD
+[0.21.1]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.0...v0.21.1
 [0.21.0]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.33...v0.21.0
 [0.20.33]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.32...v0.20.33
 [0.20.32]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.31...v0.20.32
