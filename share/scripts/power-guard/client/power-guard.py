@@ -40,6 +40,10 @@ explicitly; this file does not try to detect the console user.
   state    --state-file   | $AITEAMFORGE_ACCESSORY_STATE_FILE | ~/.aiteamforge/run/accessory-state.json
   policy   --policy-file  | $AITEAMFORGE_POWER_GUARD_POLICY   | ~/.aiteamforge/power-guard-policy.json
   counter  --counter-file | (none)                            | <state dir>/power-guard-counter.json
+The counter default above is for NON-root use only. The root daemon passes
+/var/db/aiteamforge/power-guard-counter.json (root-owned, 0700) and the runner
+verifies that dir before calling decide(): root must never write into the
+user-writable state dir (XACA-1394-013).
 
 Must run under /usr/bin/python3 (3.9): no match/case, no `X | Y` types, and
 datetime.fromisoformat() on 3.9 rejects a trailing "Z" and odd fractional

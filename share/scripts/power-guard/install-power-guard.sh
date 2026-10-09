@@ -20,13 +20,18 @@
 #   4. seeds ~/.aiteamforge/power-guard-policy.json from config/templates/
 #      power-guard-policy.example.json ONLY IF ABSENT (owned by the user, mode 600).
 #      An existing policy is NEVER touched: it may have been armed after a drill.
-#   5. launchctl bootout (ignored if not loaded) then bootstrap.
+#   5. creates the ROOT-OWNED debounce-counter dir /var/db/aiteamforge (root:wheel 0700).
+#      Root writes the counter every 30 s, so it must not live in the user-writable
+#      ~/.aiteamforge/run, where a symlink could steer root's file creates
+#      (XACA-1394-013). The runner re-verifies the dir on every run.
+#   6. launchctl bootout (ignored if not loaded) then bootstrap.
 # It does NOT arm anything: the seeded policy is enabled=false, dry_run=true.
 #
-# UNINSTALL: bootout, remove the plist and the root-owned dir. The policy and the logs
-# under /Library/Logs/aiteamforge are LEFT in place (evidence of what the guard saw).
+# UNINSTALL: bootout, remove the plist, the root-owned dir and the debounce counter
+# (runtime state). The policy and the logs under /Library/Logs/aiteamforge are LEFT in
+# place (evidence of what the guard saw).
 #
-# TEST SEAMS: PG_LAUNCHD_DIR PG_LOG_DIR PG_LIBEXEC_DIR PG_CLIENT_DIR PG_USER_HOME are
+# TEST SEAMS: PG_LAUNCHD_DIR PG_LOG_DIR PG_LIBEXEC_DIR PG_CLIENT_DIR PG_USER_HOME PG_COUNTER_DIR are
 # honoured ONLY when PG_TESTING=1. Without it the real system paths are used.
 #
 # Exit codes: 0 ok | 1 failure / not root / not installed (status) | 2 usage
@@ -43,12 +48,14 @@ PG_ROOT="$(cd "${PG_SELF_DIR}/../.." 2>/dev/null && pwd -P)"
 LAUNCHD_DIR="/Library/LaunchDaemons"
 LOG_DIR="/Library/Logs/aiteamforge"
 LIBEXEC_DIR="/usr/local/libexec/aiteamforge/power-guard"
+COUNTER_DIR="/var/db/aiteamforge"
 CLIENT_DIR="${PG_SELF_DIR}/client"
 if [ "${PG_TESTING:-}" = "1" ]; then
   LAUNCHD_DIR="${PG_LAUNCHD_DIR:-$LAUNCHD_DIR}"
   LOG_DIR="${PG_LOG_DIR:-$LOG_DIR}"
   LIBEXEC_DIR="${PG_LIBEXEC_DIR:-$LIBEXEC_DIR}"
   CLIENT_DIR="${PG_CLIENT_DIR:-$CLIENT_DIR}"
+  COUNTER_DIR="${PG_COUNTER_DIR:-$COUNTER_DIR}"
 fi
 # Ownership flags. Under PG_TESTING the suite is not root, so it cannot chown to root:wheel;
 # production (PG_TESTING unset) always sets root:wheel. Unquoted on purpose (word-split flags).
@@ -57,6 +64,7 @@ ROOT_OWN="-o root -g wheel"
 PLIST="${LAUNCHD_DIR}/${LABEL}.plist"
 TEMPLATE="${PG_SELF_DIR}/power-guard-daemon.template.plist"
 PAYLOAD="power-guard-runner.py power-guard.py"
+COUNTER_FILE="${COUNTER_DIR}/power-guard-counter.json"
 
 err() { echo "ERROR: $*" >&2; }
 info() { echo "$*"; }
@@ -178,7 +186,8 @@ render_plist() { # render_plist <out> <user> <user_home>
   sed -e "s|{{INSTALL_DIR}}|${LIBEXEC_DIR}|g" \
       -e "s|{{USER_HOME}}|$3|g" \
       -e "s|{{USERNAME}}|$2|g" \
-      -e "s|{{LOG_DIR}}|${LOG_DIR}|g" "$TEMPLATE" >"$1"
+      -e "s|{{LOG_DIR}}|${LOG_DIR}|g" \
+      -e "s|{{COUNTER_DIR}}|${COUNTER_DIR}|g" "$TEMPLATE" >"$1"
   if grep -q '{{[A-Z_]*}}' "$1"; then err "unsubstituted placeholder left in rendered plist"; return 1; fi
 }
 
@@ -244,10 +253,16 @@ do_install() {
   [ -z "$ROOT_OWN" ] || run chown root:wheel "$LIBEXEC_DIR"
   run chmod 755 "$LIBEXEC_DIR"
   run install -m 644 $ROOT_OWN "$tmp/rendered.plist" "$PLIST"
+  # Debounce counter: root-owned 0700, outside the user's home (XACA-1394-013).
+  run install -d -m 700 $ROOT_OWN "$COUNTER_DIR"
 
   # Policy: seed ONLY if absent. Never overwrite, never chmod an existing one.
   pol="${uhome}/.aiteamforge/power-guard-policy.json"
-  if [ -e "$pol" ]; then
+  # A symlink (even dangling, which fails -e) is never written through as root:
+  # skip seeding. A missing policy is the disarmed state, so this fails closed.
+  if [ -L "$pol" ]; then
+    err "Policy path is a symlink, not seeding (power-guard stays disarmed): $pol"
+  elif [ -e "$pol" ]; then
     info "Policy exists, left untouched: $pol"
   else
     local ugrp
@@ -282,6 +297,8 @@ do_uninstall() {
   run rm -f "$PLIST"
   for f in $PAYLOAD; do run rm -f "${LIBEXEC_DIR}/$f"; done
   if [ "$DRY" = 1 ]; then info "  [dry-run] rmdir ${LIBEXEC_DIR}"; else rmdir "$LIBEXEC_DIR" 2>/dev/null || true; fi
+  run rm -f "$COUNTER_FILE"
+  if [ "$DRY" = 1 ]; then info "  [dry-run] rmdir ${COUNTER_DIR}"; else rmdir "$COUNTER_DIR" 2>/dev/null || true; fi
   info "power-guard removed. Policy (~/.aiteamforge/power-guard-policy.json) and logs (${LOG_DIR}) were left in place."
 }
 

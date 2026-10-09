@@ -10,6 +10,12 @@
     {{USER_HOME}}    home of the INVOKING (consuming) user, never root's
     {{USERNAME}}     that user; the runner uses it to notify the desktop session
     {{LOG_DIR}}      /Library/Logs/aiteamforge
+    {{COUNTER_DIR}}  /var/db/aiteamforge (root:wheel 0700; holds the debounce counter)
+
+  WHY THE COUNTER IS NOT IN THE USER'S HOME (XACA-1394-013): root WRITES the
+  counter every run. ~/.aiteamforge/run is user-writable, so a symlink there
+  could steer where root creates files. The state and policy files stay in the
+  user's home because root only READS them.
 
   WHY A DAEMON (not a LaunchAgent): it must work with nobody logged in, and a
   shutdown needs root. It runs as root (no UserName key) every 30 s.
@@ -40,7 +46,7 @@
         <string>--policy-file</string>
         <string>{{USER_HOME}}/.aiteamforge/power-guard-policy.json</string>
         <string>--counter-file</string>
-        <string>{{USER_HOME}}/.aiteamforge/run/power-guard-counter.json</string>
+        <string>{{COUNTER_DIR}}/power-guard-counter.json</string>
         <string>--log-file</string>
         <string>{{LOG_DIR}}/power-guard.log</string>
         <string>--notify-user</string>

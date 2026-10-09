@@ -2137,10 +2137,16 @@ EOF
 # (the same run dir kb-msg-pull-status / token-report-status already use).
 # NOTE: tests extract this function with awk '/^_persist_accessory_state\(\)/,/^}/'
 # - keep the opening line and closing brace at column 0.
+#
+# Optional $2: the receivedAt to stamp (RFC3339 UTC). send_status passes the
+# time the chosen response actually ARRIVED, because in hybrid mode the single
+# write happens after the whole endpoint loop (XACA-1394-012), and a later
+# endpoint's retries can take ~100 s; stamping write time would make the
+# reading look fresher than it is. Default: now.
 _persist_accessory_state() {
     local body="$1"
     local state_file="${AITEAMFORGE_ACCESSORY_STATE_FILE:-$HOME/.aiteamforge/run/accessory-state.json}"
-    local kind dir tmp received_at
+    local kind dir tmp received_at="${2:-}"
 
     command -v jq >/dev/null 2>&1 || return 0
 
@@ -2162,7 +2168,7 @@ _persist_accessory_state() {
     dir=$(dirname "$state_file")
     mkdir -p "$dir" 2>/dev/null || { echo "  ! accessory state: cannot create $dir" >&2; return 0; }
     tmp=$(mktemp "$dir/.accessory-state.XXXXXX" 2>/dev/null) || { echo "  ! accessory state: cannot create temp file in $dir" >&2; return 0; }
-    received_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    [ -n "$received_at" ] || received_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
     if printf '%s' "$body" | jq -c --arg r "$received_at" --arg m "${MACHINE_ID:-}" \
             '{schema:1, receivedAt:$r, machine:$m, accessories:.accessories}' > "$tmp" 2>/dev/null \
@@ -2173,6 +2179,64 @@ _persist_accessory_state() {
     # Failure: leave no partial temp file behind (state file itself untouched).
     unlink "$tmp" 2>/dev/null
     echo "  ! accessory state: write to $state_file failed" >&2
+    return 0
+}
+
+# XACA-1394-012: ONE accessory-state write per heartbeat cycle.
+#
+# In hybrid FLEET_MODE send_status posts to several endpoints (local first,
+# then central). Persisting every 2xx response let a local server that has no
+# record of an attached-only UPS write accessories:[] moments before central
+# wrote the real reading, and a power-guard tick in between reset the debounce
+# count. So, while send_status's loop runs (_ACC_COLLECT=1), send_to_endpoint
+# hands each 2xx body to _accessory_collect instead of persisting it, and
+# _accessory_flush writes once after the loop:
+#   - the LAST endpoint whose `accessories` is a NON-EMPTY array wins;
+#   - otherwise `[]`, but only if at least one endpoint returned an array;
+#   - otherwise nothing (every fail-closed rule of _persist_accessory_state
+#     still applies: missing key, non-array, bad JSON, HTTP failure => the
+#     file is untouched; the chosen body is re-validated there too).
+# A single endpoint collects one body and flushes it: same file, same content.
+# Direct callers of send_to_endpoint (no collect mode) persist immediately, as
+# before. NOTE: tests extract these with awk - keep the opening line and the
+# closing brace at column 0.
+_ACC_COLLECT=0
+_ACC_PICK_BODY=""
+_ACC_PICK_AT=""
+_ACC_EMPTY_BODY=""
+_ACC_EMPTY_AT=""
+
+_accessory_collect() {
+    local body="$1" kind
+    command -v jq >/dev/null 2>&1 || return 0
+    kind=$(printf '%s' "$body" | jq -r '
+        if type != "object" then "invalid"
+        elif has("accessories") | not then "missing"
+        elif (.accessories | type) != "array" then (.accessories | type)
+        elif (.accessories | length) > 0 then "nonempty"
+        else "empty" end' 2>/dev/null) || kind="invalid"
+    case "$kind" in
+        nonempty)
+            _ACC_PICK_BODY="$body"
+            _ACC_PICK_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+            ;;
+        empty)
+            _ACC_EMPTY_BODY="$body"
+            _ACC_EMPTY_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+            ;;
+        missing|invalid) ;;    # contributes nothing
+        *) echo "  ! accessory state not used: accessories is $kind, not an array" >&2 ;;
+    esac
+    return 0
+}
+
+_accessory_flush() {
+    if [ -n "$_ACC_PICK_BODY" ]; then
+        _persist_accessory_state "$_ACC_PICK_BODY" "$_ACC_PICK_AT" || true
+    elif [ -n "$_ACC_EMPTY_BODY" ]; then
+        _persist_accessory_state "$_ACC_EMPTY_BODY" "$_ACC_EMPTY_AT" || true
+    fi
+    _ACC_PICK_BODY=""; _ACC_PICK_AT=""; _ACC_EMPTY_BODY=""; _ACC_EMPTY_AT=""
     return 0
 }
 
@@ -2220,7 +2284,12 @@ send_to_endpoint() {
         if [ "$http_code" = "200" ] || [ "$http_code" = "201" ]; then
             echo "  ✓ Reported to $endpoint"
             # XACA-1394-002: best-effort; must never fail the heartbeat.
-            _persist_accessory_state "$body" || true
+            # XACA-1394-012: inside send_status's loop, collect; written once after it.
+            if [ "${_ACC_COLLECT:-0}" = 1 ]; then
+                _accessory_collect "$body" || true
+            else
+                _persist_accessory_state "$body" || true
+            fi
             return 0
         else
             if [ $attempt -lt $max_retries ]; then
@@ -2245,6 +2314,9 @@ send_status() {
     echo "Fleet Mode: $FLEET_MODE"
     echo "Endpoints: ${#API_ENDPOINTS[@]}"
 
+    # XACA-1394-012: one accessory-state write per cycle (see _accessory_flush).
+    _ACC_PICK_BODY=""; _ACC_PICK_AT=""; _ACC_EMPTY_BODY=""; _ACC_EMPTY_AT=""
+    _ACC_COLLECT=1
     for endpoint in "${API_ENDPOINTS[@]}"; do
         # XACA-0395: send the token to every endpoint, not just non-localhost
         # ones. fleet-monitor's auth gate (FLEET_AUTH_TOKEN) is per-server-
@@ -2266,6 +2338,8 @@ send_status() {
             ((fail_count++))
         fi
     done
+    _ACC_COLLECT=0
+    _accessory_flush || true
 
     echo ""
     if [ $success_count -gt 0 ]; then

@@ -6,7 +6,7 @@ LaunchDaemon (EPIC-0067 D4, option (a); plist template is XACA-1394-005)
 runs every StartInterval. One invocation == one evaluation; there is no loop.
 
     /usr/bin/python3 power-guard-runner.py \
-        --state-file F --policy-file F --counter-file F \
+        --state-file F --policy-file F [--counter-file F] \
         --log-file L --notify-user USERNAME \
         [--marker-file M] [--dry-run-force] [--kb-msg-to TEAM]
 
@@ -66,9 +66,37 @@ kb-msg TARGET
   path when academy is not live on this machine. Best-effort: if
   kanban-helpers.sh cannot be found, or kb-msg fails, it is logged and skipped.
 
+WHERE ROOT WRITES (XACA-1394-013, PR #1111 round 2)
+  The debounce counter is the only file power-guard.py WRITES, and root is the
+  writer here. It lives in a ROOT-OWNED dir, /var/db/aiteamforge (mode 0700,
+  created by this runner or the installer), never in the user's
+  ~/.aiteamforge/run: that dir is user-writable, so a user process could swap
+  it for a symlink and steer where root creates and replaces files.
+  When running as root (euid exactly 0), before power-guard is consulted:
+    1. every component of the counter file's PARENT dir is checked;
+    2. the counter dir itself is created (mkdir 0700, leaf only) if missing;
+    3. every component of the counter dir is checked, on the literal path
+       AND on its realpath.
+  A component fails the check if it is not owned by root, is group- or
+  world-writable, is not a directory, or is a symlink. One exception: on the
+  LITERAL path a root-owned symlink is accepted (macOS ships /var as a
+  root-owned symlink to private/var), because its parent passed the check, so
+  only root could have created or replaced it; its target is then held to the
+  full rule by the realpath pass. Any failure => NO_ACTION with a loud
+  "ERROR: refusing counter file" log line, and power-guard is not consulted
+  at all (no counter write happens). Fail closed.
+  Non-root runs (drills, tests) skip the check: they can never shut down.
+
+  The state and policy files stay under the user's home and are READ by root,
+  possibly through a symlink. That is accepted: it is a read only, and the
+  worst a user can achieve by steering it is a NO_ACTION or a shutdown the
+  machine's own user could trigger anyway. Root writes nothing under the
+  user's home: notifications run AS the user via sudo -u.
+
 TEST SEAMS
   SHUTDOWN_ARGV, geteuid, execute_shutdown, _spawn, lookup_user,
-  load_decide, NOTIFY_TIMEOUT_S are module globals that tests monkeypatch.
+  load_decide, NOTIFY_TIMEOUT_S, counter_dir_problem, path_lstat, realpath
+  are module globals that tests monkeypatch.
   They are deliberately NOT environment variables (see above).
 
 Must run under /usr/bin/python3 (3.9): no match/case, no `X | Y` types.
@@ -82,6 +110,7 @@ import os
 import pwd
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -95,6 +124,9 @@ DEFAULT_LOG_FILE = "/Library/Logs/aiteamforge/power-guard.log"
 DEFAULT_MARKER_FILE = "/var/run/aiteamforge-power-guard.shutdown-initiated"
 LAST_VERDICT_BASENAME = "aiteamforge-power-guard.last-verdict"
 DEFAULT_KB_MSG_TO = "academy"
+# Root-owned home of the debounce counter (see WHERE ROOT WRITES above).
+COUNTER_DIR = "/var/db/aiteamforge"
+DEFAULT_COUNTER_FILE = os.path.join(COUNTER_DIR, "power-guard-counter.json")
 
 LOG_MAX_BYTES = 1024 * 1024  # rotate to <log>.1 above this; one generation kept
 NOTIFY_TIMEOUT_S = 10
@@ -115,6 +147,8 @@ KB_MSG_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 SHUTDOWN_ARGV = ("/sbin/shutdown", "-h", "now")
 geteuid = os.geteuid
 lookup_user = pwd.getpwnam
+path_lstat = os.lstat
+realpath = os.path.realpath
 
 
 def _spawn(argv, timeout):
@@ -204,6 +238,83 @@ def log_line(log_file, msg):
         return True
     except Exception:
         return False
+
+
+def _components(path):
+    """'/a/b/c' -> ['/', '/a', '/a/b', '/a/b/c'] (path must be absolute)."""
+    out = ["/"]
+    cur = "/"
+    for part in path.split("/"):
+        if part:
+            cur = os.path.join(cur, part)
+            out.append(cur)
+    return out
+
+
+def _component_problem(p, allow_root_symlink):
+    """None if `p` is a safe ancestor for a root-written file, else why not."""
+    try:
+        st = path_lstat(p)
+    except OSError as exc:
+        return "%s: cannot lstat (%s)" % (p, exc)
+    if stat.S_ISLNK(st.st_mode):
+        if not allow_root_symlink:
+            return "%s is a symlink" % p
+        if st.st_uid != 0:
+            return "%s is a symlink not owned by root (uid %s)" % (p, st.st_uid)
+        return None
+    if not stat.S_ISDIR(st.st_mode):
+        return "%s is not a directory" % p
+    if st.st_uid != 0:
+        return "%s is owned by uid %s, not root" % (p, st.st_uid)
+    if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        return "%s is group/world-writable (mode %o)" % (p, stat.S_IMODE(st.st_mode))
+    return None
+
+
+def _counter_dir_problem(d):
+    """None if every component of dir `d` is root-owned, not group/world-
+    writable and not a user-controlled symlink; otherwise a reason string.
+
+    Pass 1 walks the LITERAL path and accepts a root-owned symlink (its parent
+    already passed, so only root could have placed it; macOS /var is one).
+    Pass 2 walks the REALPATH and accepts no symlink at all, so wherever a
+    root-owned symlink points is held to the full rule as well."""
+    d = os.path.abspath(d)
+    for p in _components(d):
+        prob = _component_problem(p, allow_root_symlink=True)
+        if prob:
+            return prob
+    for p in _components(realpath(d)):
+        prob = _component_problem(p, allow_root_symlink=False)
+        if prob:
+            return "resolved path: " + prob
+    return None
+
+
+counter_dir_problem = _counter_dir_problem
+
+
+def secure_counter_dir(counter_file):
+    """Root only. Verify the counter file's dir (creating it 0700 if missing,
+    leaf only, after its parent is verified). Returns None or a reason."""
+    d = os.path.dirname(os.path.abspath(counter_file))
+    prob = counter_dir_problem(os.path.dirname(d))
+    if prob:
+        return prob
+    try:
+        path_lstat(d)
+    except FileNotFoundError:
+        try:
+            os.mkdir(d, 0o700)
+            os.chmod(d, 0o700)  # mkdir's mode is filtered by the umask
+        except FileExistsError:
+            pass  # raced with another creator; the check below decides
+        except OSError as exc:
+            return "cannot create %s: %s" % (d, exc)
+    except OSError:
+        pass  # counter_dir_problem below reports it
+    return counter_dir_problem(d)
 
 
 def evaluate(state_file, policy_file, counter_file):
@@ -350,8 +461,29 @@ def notify(log_file, user, title, message, kb_msg_to):
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
+def _is_root():
+    try:
+        euid = geteuid()
+    except Exception:
+        return False
+    # type() check: False == 0 and 0.0 == 0 in Python; only the int 0 is root.
+    return type(euid) is int and euid == 0
+
+
 def run(args):
-    verdict, reason, acc, _raw = evaluate(args.state_file, args.policy_file, args.counter_file)
+    unsafe = None
+    if _is_root():
+        try:
+            unsafe = secure_counter_dir(args.counter_file)
+        except Exception as exc:
+            unsafe = "check failed: %s: %s" % (type(exc).__name__, exc)
+    if unsafe:
+        log_line(args.log_file, "ERROR: refusing counter file %s (%s); root will not write there. "
+                 "NO ACTION until the counter dir is root-owned and not group/world-writable."
+                 % (args.counter_file, _one_line(unsafe)))
+        verdict, reason, acc = NO_ACTION, "counter path unsafe, failing closed: " + unsafe, None
+    else:
+        verdict, reason, acc, _raw = evaluate(args.state_file, args.policy_file, args.counter_file)
 
     if verdict == SHUTDOWN and args.dry_run_force:
         verdict = WOULD_SHUTDOWN
@@ -420,7 +552,9 @@ def parse_args(argv=None):
                                             "(run by the root LaunchDaemon, once per invocation)")
     p.add_argument("--state-file", required=True)
     p.add_argument("--policy-file", required=True)
-    p.add_argument("--counter-file", required=True)
+    p.add_argument("--counter-file", default=DEFAULT_COUNTER_FILE,
+                   help="debounce counter (default %s; must be in a root-owned dir when run as root)"
+                   % DEFAULT_COUNTER_FILE)
     p.add_argument("--log-file", default=DEFAULT_LOG_FILE)
     p.add_argument("--notify-user", required=True,
                    help="console user to notify (also the kb-msg sender account)")
