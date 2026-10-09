@@ -7,6 +7,9 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- **XACA-1479** (Added): `share/templates/kanban/kanban-helpers.template.sh` hand-ported from `kanban-helpers.sh` - new `kb-ci-priority <critical|high|normal> [ID]` manual CI priority lane (records `ciPriority` on the item and sets/clears the `ci-priority:*` PR label), `kb-pr` now applies a recorded priority to the PR (warning-only, never changes kb-pr's exit status), `kb-done` clears `ciPriority`, and `kb-help` lists it.
+- **XACA-1479** (Added): `fleet-monitor/server/` re-mirrored. The CI dispatcher resolves each queued job's priority from its branch's open-PR `ci-priority:*` label through the GitHub App (Pull requests: read, 60 s cache keyed by head owner, every failure resolves NORMAL with an audit line), serves critical -> high -> normal then FIFO across label sets, and `GET /api/ci-pool` `queue[]` gains an additive `priority` field rendered as a text + glyph badge in the Job Queue.
+
 ## [0.21.0] - 2026-10-08
 
 - **XACA-1476** (Changed, PR #1112 review round 1): `fleet-monitor/server/` re-mirrored. Pool card toggle is a native button inside the machine-name heading (APG disclosure), the stale CI/CD summary uses a colour swap + STALE tag instead of opacity (WCAG AA), the runner-state subhead reads RUNNER STATES, and machine ids such as `toString` are now pruned.

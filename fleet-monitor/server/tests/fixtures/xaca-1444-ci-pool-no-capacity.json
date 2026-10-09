@@ -172,7 +172,8 @@
       ],
       "status": "queued",
       "runnerName": null,
-      "machine": null
+      "machine": null,
+      "priority": "normal"
     },
     {
       "key": "DoubleNode/dev-team#2#1",
@@ -195,7 +196,8 @@
       ],
       "status": "queued",
       "runnerName": null,
-      "machine": null
+      "machine": null,
+      "priority": "normal"
     },
     {
       "key": "DoubleNode/dev-team#3#1",
@@ -218,7 +220,8 @@
       ],
       "status": "queued",
       "runnerName": null,
-      "machine": null
+      "machine": null,
+      "priority": "normal"
     },
     {
       "key": "DoubleNode/dev-team#4#1",
@@ -241,7 +244,8 @@
       ],
       "status": "queued",
       "runnerName": null,
-      "machine": null
+      "machine": null,
+      "priority": "normal"
     },
     {
       "key": "DoubleNode/dev-team#5#1",
@@ -264,7 +268,8 @@
       ],
       "status": "queued",
       "runnerName": null,
-      "machine": null
+      "machine": null,
+      "priority": "normal"
     },
     {
       "key": "DoubleNode/dev-team#6#1",
@@ -287,7 +292,8 @@
       ],
       "status": "queued",
       "runnerName": null,
-      "machine": null
+      "machine": null,
+      "priority": "normal"
     },
     {
       "key": "DoubleNode/dev-team#7#1",
@@ -310,7 +316,8 @@
       ],
       "status": "queued",
       "runnerName": null,
-      "machine": null
+      "machine": null,
+      "priority": "normal"
     },
     {
       "key": "DoubleNode/dev-team#8#1",
@@ -333,7 +340,8 @@
       ],
       "status": "queued",
       "runnerName": null,
-      "machine": null
+      "machine": null,
+      "priority": "normal"
     },
     {
       "key": "DoubleNode/dev-team#9#1",
@@ -356,7 +364,8 @@
       ],
       "status": "queued",
       "runnerName": null,
-      "machine": null
+      "machine": null,
+      "priority": "normal"
     },
     {
       "key": "DoubleNode/dev-team#10#1",
@@ -379,7 +388,8 @@
       ],
       "status": "queued",
       "runnerName": null,
-      "machine": null
+      "machine": null,
+      "priority": "normal"
     },
     {
       "key": "DoubleNode/dev-team#11#1",
@@ -402,7 +412,8 @@
       ],
       "status": "queued",
       "runnerName": null,
-      "machine": null
+      "machine": null,
+      "priority": "normal"
     },
     {
       "key": "DoubleNode/dev-team#12#1",
@@ -425,7 +436,8 @@
       ],
       "status": "queued",
       "runnerName": null,
-      "machine": null
+      "machine": null,
+      "priority": "normal"
     },
     {
       "key": "DoubleNode/dev-team#13#1",
@@ -448,7 +460,8 @@
       ],
       "status": "queued",
       "runnerName": null,
-      "machine": null
+      "machine": null,
+      "priority": "normal"
     },
     {
       "key": "DoubleNode/dev-team#14#1",
@@ -471,7 +484,8 @@
       ],
       "status": "queued",
       "runnerName": null,
-      "machine": null
+      "machine": null,
+      "priority": "normal"
     },
     {
       "key": "DoubleNode/dev-team#15#1",
@@ -494,7 +508,8 @@
       ],
       "status": "queued",
       "runnerName": null,
-      "machine": null
+      "machine": null,
+      "priority": "normal"
     },
     {
       "key": "DoubleNode/dev-team#16#1",
@@ -517,7 +532,8 @@
       ],
       "status": "queued",
       "runnerName": null,
-      "machine": null
+      "machine": null,
+      "priority": "normal"
     },
     {
       "key": "DoubleNode/dev-team#17#1",
@@ -540,7 +556,8 @@
       ],
       "status": "queued",
       "runnerName": null,
-      "machine": null
+      "machine": null,
+      "priority": "normal"
     },
     {
       "key": "DoubleNode/dev-team#18#1",
@@ -563,7 +580,8 @@
       ],
       "status": "queued",
       "runnerName": null,
-      "machine": null
+      "machine": null,
+      "priority": "normal"
     },
     {
       "key": "DoubleNode/dev-team#19#1",
@@ -586,7 +604,8 @@
       ],
       "status": "queued",
       "runnerName": null,
-      "machine": null
+      "machine": null,
+      "priority": "normal"
     },
     {
       "key": "DoubleNode/dev-team#20#1",
@@ -609,7 +628,8 @@
       ],
       "status": "queued",
       "runnerName": null,
-      "machine": null
+      "machine": null,
+      "priority": "normal"
     },
     {
       "key": "DoubleNode/dev-team#21#1",
@@ -632,7 +652,8 @@
       ],
       "status": "queued",
       "runnerName": null,
-      "machine": null
+      "machine": null,
+      "priority": "normal"
     },
     {
       "key": "DoubleNode/dev-team#22#1",
@@ -655,7 +676,8 @@
       ],
       "status": "queued",
       "runnerName": null,
-      "machine": null
+      "machine": null,
+      "priority": "normal"
     },
     {
       "key": "DoubleNode/dev-team#23#1",
@@ -678,7 +700,8 @@
       ],
       "status": "queued",
       "runnerName": null,
-      "machine": null
+      "machine": null,
+      "priority": "normal"
     },
     {
       "key": "DoubleNode/dev-team#24#1",
@@ -701,7 +724,8 @@
       ],
       "status": "queued",
       "runnerName": null,
-      "machine": null
+      "machine": null,
+      "priority": "normal"
     },
     {
       "key": "DoubleNode/dev-team#25#1",
@@ -724,7 +748,8 @@
       ],
       "status": "queued",
       "runnerName": null,
-      "machine": null
+      "machine": null,
+      "priority": "normal"
     },
     {
       "key": "DoubleNode/dev-team#26#1",
@@ -747,7 +772,8 @@
       ],
       "status": "queued",
       "runnerName": null,
-      "machine": null
+      "machine": null,
+      "priority": "normal"
     },
     {
       "key": "DoubleNode/dev-team#27#1",
@@ -770,7 +796,8 @@
       ],
       "status": "queued",
       "runnerName": null,
-      "machine": null
+      "machine": null,
+      "priority": "normal"
     },
     {
       "key": "DoubleNode/dev-team#28#1",
@@ -793,7 +820,8 @@
       ],
       "status": "queued",
       "runnerName": null,
-      "machine": null
+      "machine": null,
+      "priority": "normal"
     },
     {
       "key": "DoubleNode/dev-team#29#1",
@@ -816,7 +844,8 @@
       ],
       "status": "queued",
       "runnerName": null,
-      "machine": null
+      "machine": null,
+      "priority": "normal"
     },
     {
       "key": "DoubleNode/dev-team#30#1",
@@ -839,7 +868,8 @@
       ],
       "status": "queued",
       "runnerName": null,
-      "machine": null
+      "machine": null,
+      "priority": "normal"
     },
     {
       "key": "DoubleNode/dev-team#31#1",
@@ -862,7 +892,8 @@
       ],
       "status": "queued",
       "runnerName": null,
-      "machine": null
+      "machine": null,
+      "priority": "normal"
     },
     {
       "key": "DoubleNode/dev-team#32#1",
@@ -885,7 +916,8 @@
       ],
       "status": "queued",
       "runnerName": null,
-      "machine": null
+      "machine": null,
+      "priority": "normal"
     },
     {
       "key": "DoubleNode/dev-team#33#1",
@@ -908,7 +940,8 @@
       ],
       "status": "queued",
       "runnerName": null,
-      "machine": null
+      "machine": null,
+      "priority": "normal"
     },
     {
       "key": "DoubleNode/dev-team#34#1",
@@ -931,7 +964,8 @@
       ],
       "status": "queued",
       "runnerName": null,
-      "machine": null
+      "machine": null,
+      "priority": "normal"
     },
     {
       "key": "DoubleNode/dev-team#35#1",
@@ -954,7 +988,8 @@
       ],
       "status": "queued",
       "runnerName": null,
-      "machine": null
+      "machine": null,
+      "priority": "normal"
     },
     {
       "key": "DoubleNode/dev-team#36#1",
@@ -977,7 +1012,8 @@
       ],
       "status": "queued",
       "runnerName": null,
-      "machine": null
+      "machine": null,
+      "priority": "normal"
     },
     {
       "key": "DoubleNode/dev-team#37#1",
@@ -1000,7 +1036,8 @@
       ],
       "status": "queued",
       "runnerName": null,
-      "machine": null
+      "machine": null,
+      "priority": "normal"
     },
     {
       "key": "DoubleNode/dev-team#38#1",
@@ -1023,7 +1060,8 @@
       ],
       "status": "queued",
       "runnerName": null,
-      "machine": null
+      "machine": null,
+      "priority": "normal"
     },
     {
       "key": "DoubleNode/dev-team#39#1",
@@ -1046,7 +1084,8 @@
       ],
       "status": "queued",
       "runnerName": null,
-      "machine": null
+      "machine": null,
+      "priority": "normal"
     },
     {
       "key": "DoubleNode/dev-team#40#1",
@@ -1069,7 +1108,8 @@
       ],
       "status": "queued",
       "runnerName": null,
-      "machine": null
+      "machine": null,
+      "priority": "normal"
     },
     {
       "key": "DoubleNode/dev-team#41#1",
@@ -1092,7 +1132,8 @@
       ],
       "status": "queued",
       "runnerName": null,
-      "machine": null
+      "machine": null,
+      "priority": "normal"
     },
     {
       "key": "DoubleNode/dev-team#42#1",
@@ -1115,7 +1156,8 @@
       ],
       "status": "queued",
       "runnerName": null,
-      "machine": null
+      "machine": null,
+      "priority": "normal"
     },
     {
       "key": "DoubleNode/dev-team#43#1",
@@ -1138,7 +1180,8 @@
       ],
       "status": "queued",
       "runnerName": null,
-      "machine": null
+      "machine": null,
+      "priority": "normal"
     },
     {
       "key": "DoubleNode/dev-team#44#1",
@@ -1161,7 +1204,8 @@
       ],
       "status": "queued",
       "runnerName": null,
-      "machine": null
+      "machine": null,
+      "priority": "normal"
     }
   ],
   "running": [],

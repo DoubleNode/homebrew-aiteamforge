@@ -46,6 +46,10 @@ const DEFAULT_RUNNER_GROUP_ID = 1;
 const PURPOSE_PERMISSIONS = Object.freeze({
     watcher: Object.freeze({ actions: 'read' }),
     admin:   Object.freeze({ administration: 'write' }),
+    // XACA-1479-005: the priority resolver reads a branch's open PRs + labels. Needs the App's
+    // "Pull requests: read"; when an installation lacks it the token mint fails and the resolver
+    // fails toward NORMAL (never upward).
+    pulls:   Object.freeze({ pull_requests: 'read' }),
 });
 
 const OWNER_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
@@ -338,10 +342,207 @@ function createGithubClient(opts = {}) {
         throw new GithubError('HTTP', `DELETE /repos/{owner}/{repo}/actions/runners/{id} failed: HTTP ${res.status}`, { status: res.status });
     }
 
-    return { getInstallationId, getToken, conditionalGet, generateJitConfig, deleteRunner, getRateState };
+    // ---- pull requests (XACA-1479-005) ----------------------------------------
+    /**
+     * Open PRs whose head is `<headOwner>:<branch>`, with their label names. Conditional GET under
+     * the least-privilege 'pulls' purpose (a 304 does not spend rate limit). Throws a GithubError on
+     * any non-200 / malformed body; the caller (createPriorityResolver) owns the fail-toward-normal.
+     * @returns {Promise<{number:number|null, labels:string[]}[]>}
+     */
+    async function listBranchPullLabels({ owner, repo, branch, headOwner }) {
+        checkRepo(owner, repo);
+        const ho = headOwner === undefined || headOwner === null ? owner : headOwner;
+        if (!OWNER_RE.test(String(ho))) throw new GithubError('BAD_ARGS', 'invalid head owner');
+        if (typeof branch !== 'string' || branch === '' || branch.length > 255 || /[\u0000-\u001f\u007f]/.test(branch)) {
+            throw new GithubError('BAD_ARGS', 'invalid branch');
+        }
+        const head = encodeURIComponent(`${ho}:${branch}`);
+        const res = await conditionalGet({
+            owner, repo, purpose: 'pulls',
+            path: `/repos/${owner}/${repo}/pulls?state=open&head=${head}&per_page=10`,
+        });
+        if (!Array.isArray(res.data)) throw new GithubError('BAD_RESPONSE', 'pulls list response malformed');
+        return res.data.map((pr) => ({
+            number: pr && Number.isInteger(pr.number) ? pr.number : null,
+            labels: pr && Array.isArray(pr.labels)
+                ? pr.labels.map((l) => (l && typeof l.name === 'string' ? l.name : null)).filter((n) => n !== null)
+                : [],
+        }));
+    }
+
+    return { getInstallationId, getToken, conditionalGet, generateJitConfig, deleteRunner, getRateState, listBranchPullLabels };
+}
+
+// ============================================================================
+// XACA-1479-005: CI priority resolver
+// ============================================================================
+
+const PRIORITY_LABEL_PREFIX = 'ci-priority:';
+const PRIORITIES = Object.freeze(['critical', 'high', 'normal']);
+const PRIORITY_TTL_MS = 60 * 1000;                   // a removed label takes effect within ~1 min
+const PRIORITY_FAIL_AUDIT_EVERY_MS = 15 * 60 * 1000; // one failure audit line per (repo|branch|reason) per window
+const PRIORITY_CACHE_MAX = 1000;
+const PRIORITY_TIMEOUT_MS = 5000;                    // a hung lookup must never stall the watcher
+
+/**
+ * Priority of ONE PR's label names: 'critical' | 'high' | 'normal', or {malformed:true} when any label
+ * under the ci-priority: prefix (case-insensitive) is not exactly ci-priority:critical / ci-priority:high.
+ * Both valid labels on one PR => the higher wins (critical).
+ */
+function priorityOfLabels(labels) {
+    let best = 'normal';
+    for (const raw of Array.isArray(labels) ? labels : []) {
+        if (typeof raw !== 'string') continue;
+        if (!raw.trim().toLowerCase().startsWith(PRIORITY_LABEL_PREFIX)) continue;
+        if (raw === 'ci-priority:critical') best = 'critical';
+        else if (raw === 'ci-priority:high') { if (best !== 'critical') best = 'high'; }
+        else return { malformed: true };
+    }
+    return best;
+}
+
+/**
+ * Branch -> CI priority, cached, FAILING TOWARD NORMAL (plan Requirement 6).
+ *
+ * resolve() NEVER rejects, and yields above 'normal' only when a consistent, well-formed ci-priority
+ * label was actually read from GitHub. Every failure (exception, rate limit, 403/404/422, timeout, no
+ * PR, PRs with conflicting priorities, malformed label, bad response) => 'normal' plus a 'priority'
+ * audit line. Failure lines are throttled per (repo, branch, reason) -- one per
+ * PRIORITY_FAIL_AUDIT_EVERY_MS, carrying a `suppressed` count -- so a missing permission cannot spam the
+ * log; a 403/422 (the shape of a missing "Pull requests: read") also logs ONE warning per installation
+ * owner for the process lifetime (an App installation is per account, so owner == installation).
+ * Results, failures included, are cached per (owner/repo, branch) for ttlMs; concurrent lookups of one
+ * key share a single request; a lookup slower than timeoutMs resolves 'normal' (the request still
+ * fills the cache when it lands).
+ *
+ * @param {object} opts
+ * @param {object}   opts.github   createGithubClient() result (listBranchPullLabels, getRateState)
+ * @param {object}   [opts.audit]  {append(event, fields)}
+ * @param {Function} [opts.log]    (level, msg) => void
+ * @param {Function} [opts.now]
+ * @param {number}   [opts.ttlMs]
+ * @param {number}   [opts.timeoutMs]
+ * @param {Function} [opts.setTimer] / [opts.clearTimer]  (tests)
+ */
+function createPriorityResolver(opts = {}) {
+    const github = opts.github;
+    if (!github || typeof github.listBranchPullLabels !== 'function') throw new TypeError('createPriorityResolver: github client required');
+    const now = typeof opts.now === 'function' ? opts.now : Date.now;
+    const log = typeof opts.log === 'function' ? opts.log : () => {};
+    const audit = opts.audit && typeof opts.audit.append === 'function' ? opts.audit : null;
+    const ttlMs = Number.isFinite(opts.ttlMs) && opts.ttlMs > 0 ? opts.ttlMs : PRIORITY_TTL_MS;
+    const timeoutMs = Number.isFinite(opts.timeoutMs) && opts.timeoutMs > 0 ? opts.timeoutMs : PRIORITY_TIMEOUT_MS;
+    const setTimer = opts.setTimer || ((fn, ms) => { const h = setTimeout(fn, ms); if (h && h.unref) h.unref(); return h; });
+    const clearTimer = opts.clearTimer || clearTimeout;
+
+    const cache = new Map();         // key -> {priority, expiresAtMs}
+    const inflight = new Map();      // key -> Promise<priority>
+    const lastFailAudit = new Map(); // "key|reason" -> {atMs, suppressed}
+    const warnedOwners = new Set();
+
+    function writeAudit(fields) {
+        if (!audit) return;
+        try { audit.append('priority', fields); } catch (_) { /* audit never throws into the watcher */ }
+    }
+
+    /** Fail toward normal: throttled audit line (+ one-time permission warning upstream). */
+    function fail(owner, repo, branch, reason, extra) {
+        const k = `${owner}/${repo}|${branch}|${reason}`;
+        const t = now();
+        const prev = lastFailAudit.get(k);
+        if (prev && t - prev.atMs < PRIORITY_FAIL_AUDIT_EVERY_MS) {
+            prev.suppressed++;
+        } else {
+            writeAudit(Object.assign({ repo: `${owner}/${repo}`, branch, priority: 'normal', reason, suppressed: prev ? prev.suppressed : 0 }, extra || {}));
+            lastFailAudit.delete(k);
+            lastFailAudit.set(k, { atMs: t, suppressed: 0 });
+            while (lastFailAudit.size > PRIORITY_CACHE_MAX) lastFailAudit.delete(lastFailAudit.keys().next().value);
+        }
+        return 'normal';
+    }
+
+    async function lookup(owner, repo, branch, headOwner) {
+        const rate = typeof github.getRateState === 'function' ? github.getRateState() : null;
+        if (rate && (rate.mode === 'suspended' || rate.mode === 'blocked')) return fail(owner, repo, branch, 'rate-limited');
+        let prs;
+        try {
+            prs = await github.listBranchPullLabels({ owner, repo, branch, headOwner });
+        } catch (e) {
+            const status = e && e.status;
+            if (e && e.code === 'RATE_LIMITED') return fail(owner, repo, branch, 'rate-limited', { httpStatus: status === undefined ? null : status });
+            if (status === 403 || status === 422) {
+                if (!warnedOwners.has(owner)) {
+                    warnedOwners.add(owner);
+                    log('warn', `priority: GitHub refused the pulls lookup for installation ${owner} (HTTP ${status}); does the App have "Pull requests: read"? Its jobs resolve to NORMAL.`);
+                }
+                return fail(owner, repo, branch, 'permission', { httpStatus: status });
+            }
+            if (status === 404) return fail(owner, repo, branch, 'not-found', { httpStatus: status });
+            return fail(owner, repo, branch, 'error', { httpStatus: status === undefined ? null : status });
+        }
+        if (!Array.isArray(prs)) return fail(owner, repo, branch, 'bad-response');
+        if (prs.length === 0) return fail(owner, repo, branch, 'no-pr');
+        const per = prs.map((pr) => priorityOfLabels(pr && pr.labels));
+        if (per.some((p) => typeof p !== 'string')) return fail(owner, repo, branch, 'malformed-label');
+        if (new Set(per).size > 1) return fail(owner, repo, branch, 'conflicting-prs');
+        const p = per[0];
+        if (p !== 'normal') {
+            writeAudit({ repo: `${owner}/${repo}`, branch, priority: p, reason: 'resolved', prNumber: prs[0] && prs[0].number });
+        }
+        return p;
+    }
+
+    // Head owner is part of the identity: a fork's `fix` must not inherit upstream `fix`'s priority.
+    function cacheKey(owner, repo, branch, headOwner) {
+        const ho = headOwner === undefined || headOwner === null ? owner : headOwner;
+        return `${owner}/${repo}|${ho}:${branch}`;
+    }
+
+    /** @returns {Promise<'critical'|'high'|'normal'>} never rejects */
+    function resolve({ owner, repo, branch, headOwner } = {}) {
+        if (typeof branch !== 'string' || branch === '' || typeof owner !== 'string' || typeof repo !== 'string') {
+            return Promise.resolve('normal');   // nothing to look up (e.g. a run with no head branch)
+        }
+        const key = cacheKey(owner, repo, branch, headOwner);
+        const hit = cache.get(key);
+        if (hit && now() < hit.expiresAtMs) return Promise.resolve(hit.priority);
+        let p = inflight.get(key);
+        if (!p) {
+            p = (async () => {
+                let v;
+                try { v = await lookup(owner, repo, branch, headOwner); } catch (_) { v = fail(owner, repo, branch, 'error'); }
+                if (!PRIORITIES.includes(v)) v = 'normal';
+                cache.delete(key);
+                cache.set(key, { priority: v, expiresAtMs: now() + ttlMs });
+                while (cache.size > PRIORITY_CACHE_MAX) cache.delete(cache.keys().next().value);
+                return v;
+            })().finally(() => { inflight.delete(key); });
+            inflight.set(key, p);
+        }
+        // Bounded wait: a hung lookup resolves NORMAL now; the in-flight request still fills the cache later.
+        return new Promise((done) => {
+            let settled = false;
+            const h = setTimer(() => {
+                if (settled) return;
+                settled = true;
+                done(fail(owner, repo, branch, 'timeout'));
+            }, timeoutMs);
+            p.then((v) => { if (!settled) { settled = true; clearTimer(h); done(v); } },
+                () => { if (!settled) { settled = true; clearTimer(h); done('normal'); } });
+        });
+    }
+
+    /** Fresh cached value, else null. Makes no request. */
+    function peek({ owner, repo, branch, headOwner } = {}) {
+        const hit = cache.get(cacheKey(owner, repo, branch, headOwner));
+        return hit && now() < hit.expiresAtMs ? hit.priority : null;
+    }
+
+    return { resolve, peek, ttlMs };
 }
 
 module.exports = {
     createGithubClient, GithubError, PURPOSE_PERMISSIONS,
+    createPriorityResolver, priorityOfLabels, PRIORITY_TTL_MS, PRIORITY_FAIL_AUDIT_EVERY_MS, PRIORITY_LABEL_PREFIX,
     TOKEN_REFRESH_MARGIN_MS, SLOW_BELOW, SUSPEND_BELOW, JWT_BACKDATE_S, JWT_LIFETIME_S,
 };

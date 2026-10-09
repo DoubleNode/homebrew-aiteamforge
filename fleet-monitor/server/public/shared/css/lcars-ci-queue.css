@@ -54,6 +54,12 @@
 .ciq-table a:focus-visible { outline: 2px solid var(--lcars-cyan); outline-offset: 2px; }
 .ciq-null { color: var(--lcars-brown); }
 
+/* XACA-1479-007: priority badge. Glyph + text carry the meaning; colour is only reinforcement. */
+.ciq-prio { display: inline-block; margin-left: 8px; padding: 0 8px; border: 2px solid var(--lcars-teal); border-radius: 10px; color: var(--lcars-cyan); font-weight: bold; letter-spacing: 0.05em; white-space: nowrap; }
+.ciq-prio-critical { border-color: var(--lcars-alert-red); color: var(--lcars-alert-red); background: var(--lcars-dark); }
+.ciq-prio-glyph { margin-right: 4px; }
+.ciq-sr { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+
 @media (prefers-reduced-motion: reduce) {
     .ciq, .ciq * { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 }

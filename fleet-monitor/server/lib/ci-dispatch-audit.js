@@ -50,7 +50,9 @@ const EVENT_FIELDS = {
   'pause':      BASE_FIELDS.concat(['paused', 'by', 'action', 'outcome', 'confirmed']),   // XACA-1444: action/outcome/confirmed
   'enable':     BASE_FIELDS.concat(['enabled', 'by', 'action', 'outcome', 'confirmed']),  // XACA-1444: enabled flips
   'key-mint':   BASE_FIELDS.concat(['keyKind', 'by']),   // XACA-1422: never the credential itself
-  'key-revoke': BASE_FIELDS.concat(['keyKind', 'by'])
+  'key-revoke': BASE_FIELDS.concat(['keyKind', 'by']),
+  'priority':   BASE_FIELDS.concat(['branch', 'priority', 'prNumber', 'httpStatus', 'suppressed']),   // XACA-1479-005: resolved / failed toward normal
+  'surge':      BASE_FIELDS.concat(['runId', 'labelSet', 'priority', 'ahead', 'target', 'forJobId'])   // XACA-1479-006: surge mints
 };
 
 const SECRET_PATTERNS = [

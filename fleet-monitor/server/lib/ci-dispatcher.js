@@ -76,6 +76,50 @@ const MAX_DECIDED_IDS = 20000;
 const SHADOW_LOG_PRIME_BYTES = 512 * 1024;
 const DEFAULT_SHADOW_LOG_NAME = 'ci-shadow-decisions.jsonl';
 
+// XACA-1479-006: dispatch priority. Only these two values outrank normal; anything else (missing,
+// 'normal', unknown, a non-string) ranks as normal -- the dispatcher never promotes on bad data.
+const PRIORITY_RANK = Object.freeze({ critical: 0, high: 1 });
+const NORMAL_RANK = 2;
+function priorityRank(rec) {
+    const p = rec && rec.priority;
+    return typeof p === 'string' && Object.prototype.hasOwnProperty.call(PRIORITY_RANK, p) ? PRIORITY_RANK[p] : NORMAL_RANK;
+}
+
+/**
+ * XACA-1479-006: per label set, the surge window for its priority job(s). Pure.
+ * @param {object[]} demandFifo  job records in demand (covered + needing), oldest first
+ * @param {Set}      coveredKeys job keys that already have an outstanding runner
+ * @param {Function} setKeyOf    labels -> label-set key
+ * @returns {Map<string, {priority, target, forJobId, forKey, windowKeys:Set, uncoveredInWindow:number}>}
+ *   target = 1-based FIFO position of the NEWEST priority job in the set (it plus every job ahead of it);
+ *   windowKeys = the UNCOVERED jobs inside that window (the ones a surge must mint for);
+ *   priority = the highest priority present in the window. Sets with no priority job are absent.
+ */
+function surgePlan(demandFifo, coveredKeys, setKeyOf) {
+    const bySet = new Map();
+    for (const rec of demandFifo) {
+        const sk = setKeyOf(rec.labels);
+        if (sk === null) continue;
+        if (!bySet.has(sk)) bySet.set(sk, []);
+        bySet.get(sk).push(rec);
+    }
+    const out = new Map();
+    for (const [sk, recs] of bySet) {
+        let last = -1;
+        let best = NORMAL_RANK;
+        recs.forEach((r, i) => { const rk = priorityRank(r); if (rk < NORMAL_RANK) { last = i; if (rk < best) best = rk; } });
+        if (last < 0) continue;
+        const windowKeys = new Set();
+        for (let i = 0; i <= last; i++) if (!coveredKeys.has(recs[i].key)) windowKeys.add(recs[i].key);
+        out.set(sk, {
+            priority: best === PRIORITY_RANK.critical ? 'critical' : 'high',
+            target: last + 1, forJobId: recs[last].jobId, forKey: recs[last].key,
+            windowKeys, uncoveredInWindow: windowKeys.size,
+        });
+    }
+    return out;
+}
+
 const clean = (v) => (v === undefined || v === null ? '' : String(v).trim());
 /** Display string from untrusted data: string only, control chars -> space, capped, else null. */
 function capStr(v, max) {
@@ -450,6 +494,12 @@ function createDispatcher(deps) {
                     running.set(rec.key, { rec, since: prior ? prior.since : now() });
                     while (running.size > MAX_RUNNING) running.delete(running.keys().next().value);
                 }
+            } else if (change === 'priority') {
+                // XACA-1479-005: TTL refresh of a still-queued job's resolved priority.
+                const t = tracked.get(rec.key);
+                if (t) t.rec.priority = rec.priority;
+                const c = configRejected.get(rec.key);
+                if (c) c.priority = rec.priority;
             } else if (change === 'completed') {
                 tracked.delete(rec.key);
                 running.delete(rec.key);
@@ -552,7 +602,12 @@ function createDispatcher(deps) {
             });
         }
 
-        const jobs = [...tracked.values()].sort((a, b) => (a.rec.firstSeenAt < b.rec.firstSeenAt ? -1 : a.rec.firstSeenAt > b.rec.firstSeenAt ? 1 : 0));
+        const byFifo = (a, b) => (a.rec.firstSeenAt < b.rec.firstSeenAt ? -1 : a.rec.firstSeenAt > b.rec.firstSeenAt ? 1 : 0);
+        const fifo = [...tracked.values()].sort(byFifo);
+        // XACA-1479-006: dispatch order is priority rank (critical > high > normal; missing/unknown =
+        // normal), then the existing firstSeenAt FIFO. Array#sort is stable, so an all-normal queue keeps
+        // exactly the pre-1479 order.
+        const jobs = fifo.slice().sort((a, b) => (priorityRank(a.rec) - priorityRank(b.rec)) || byFifo(a, b));
         const outstanding = assignments.outstandingBySet();
         // The oldest `outstanding` jobs of a label-set are COVERED: runners already exist for them
         // (pending/delivered/started, not yet bound), so they are neither a no-capacity signal nor new demand.
@@ -561,6 +616,18 @@ function createDispatcher(deps) {
             const ck = plc.labelSetKey(String(raw).split(','));
             coverage.set(ck, (coverage.get(ck) || 0) + n);
         }
+        // XACA-1479-006: coverage is attributed in FIFO order (those runners were minted for the OLDER
+        // jobs), not in priority order. A newly-arrived priority job is therefore uncovered and gets a
+        // runner of its own this tick, first in the mint loop, while the count of covered jobs per set
+        // is unchanged from before.
+        const coveredKeys = new Set();
+        {
+            const left = new Map(coverage);
+            for (const t of fifo) {
+                const sk = plc.labelSetKey(t.rec.labels);
+                if ((left.get(sk) || 0) > 0) { left.set(sk, left.get(sk) - 1); coveredKeys.add(t.rec.key); }
+            }
+        }
         const globalShadow = effectiveMode() !== 'live';
         const decRes = new Map(reserved);   // reservations as the decision records see them (shadow decisions consume capacity too)
         const demand = [];   // covered + needing: what computeSupply sees
@@ -568,10 +635,9 @@ function createDispatcher(deps) {
         let adjusted = withReservations(base, reserved);
         for (const t of jobs) {
             const setKey = plc.labelSetKey(t.rec.labels);
-            const isCovered = (coverage.get(setKey) || 0) > 0;
+            const isCovered = coveredKeys.has(t.rec.key);
             recordPlacement(t.rec, machines, base, decRes, pcfg, isCovered, t.viaHostLabel === true);
             if (isCovered) {
-                coverage.set(setKey, coverage.get(setKey) - 1);
                 t.noCapSince = null; demand.push(t.rec);
                 continue;
             }
@@ -610,26 +676,56 @@ function createDispatcher(deps) {
         raiseQueueAgeAlerts(nowMs);
 
         const supply = plc.computeSupply(demand, outstanding);
-        const stats = { minted: 0, failed: 0 };
-        for (const s of supply) {
-            if (s.mint <= 0) continue;
-            const inSet = needing.filter((j) => plc.labelSetKey(j.labels) === s.key);
-            for (let i = 0; i < s.mint && i < inSet.length; i++) {
-                const job = inSet[i];
+        // XACA-1479-006 SURGE. For a label set holding a priority job P, target = P's 1-based position in
+        // the set's FIFO order (every job GitHub would likely hand a runner to first, plus P), taking the
+        // NEWEST priority job when there are several. The set's mint budget is raised to cover every
+        // UNCOVERED job inside that window (covered ones already have a runner). Capacity is NOT raised:
+        // each mint below still needs a free, unreserved, live slot from rankCandidates, so a short cap
+        // mints up to the cap and stops. Nothing running is cancelled or preempted.
+        // NOTE (measured by mutation, 2026-10-09): with today's computeSupply (mint = queued - outstanding,
+        // queued counting every demand job) the floor never binds -- the baseline already budgets one
+        // runner per uncovered job. It is kept as an explicit invariant so a future per-set mint limit
+        // cannot silently shrink a priority window. What surge changes in practice is WHICH runner goes
+        // first (priority order, across sets), coverage attribution (FIFO, so P gets its own runner) and
+        // the 'surge' audit trail.
+        const inDemand = new Set(demand);
+        const surge = surgePlan(fifo.filter((t) => inDemand.has(t.rec)).map((t) => t.rec), coveredKeys, plc.labelSetKey);
+        const budget = new Map();
+        for (const s of supply) budget.set(s.key, s.mint);
+        for (const [sk, sg] of surge) budget.set(sk, Math.max(budget.get(sk) || 0, sg.uncoveredInWindow));
+        const stats = { minted: 0, failed: 0, surged: 0 };
+        const stoppedSets = new Set();   // a set whose mint loop stopped this tick (no capacity / bad labels / mint failure)
+        // Mint in dispatch order (priority, then FIFO) ACROSS sets, so a priority set is not starved of a
+        // shared host's slots by an alphabetically earlier normal set.
+        for (const job of needing) {
+            const sk = plc.labelSetKey(job.labels);
+            if (stoppedSets.has(sk) || !((budget.get(sk) || 0) > 0)) continue;
+            {
                 adjusted = withReservations(base, reserved);
                 const jobVia = !!(tracked.get(job.key) && tracked.get(job.key).viaHostLabel);
                 const ranked = plc.rankCandidates(machines, adjusted, job, pcfg).filter((r) => machineMode(machines[r.id], jobVia) === 'live');
-                if (!ranked.length) break; // capacity ran out mid-tick; the next tick re-evaluates
+                if (!ranked.length) { stoppedSets.add(sk); continue; } // capacity ran out mid-tick; the next tick re-evaluates
                 const id = ranked[0].id;
                 if (machineMode(machines[id], jobVia) !== 'live') continue;   // last line of defence: shadow never mints
                 const mrec = Object.assign({ id }, machines[id]);
                 const labels = plc.mintLabels(job, mrec, pcfg);
                 const os = plc.jobOs(job);
-                if (!labels || !os) { say('warn', `skip mint for job ${job.jobId}: no valid label set`); break; }
+                if (!labels || !os) { say('warn', `skip mint for job ${job.jobId}: no valid label set`); stoppedSets.add(sk); continue; }
                 const r = await assignments.mint({ job, machine: id, labels, os });
                 if (r && r.ok) {
                     stats.minted++; mintFailures = 0;
+                    budget.set(sk, budget.get(sk) - 1);
                     reserved.set(`${id}|${os}`, (reserved.get(`${id}|${os}`) || 0) + 1);
+                    const sg = surge.get(sk);
+                    if (sg && sg.windowKeys.has(job.key)) {
+                        stats.surged++;
+                        writeAudit('surge', {
+                            repo: `${job.owner}/${job.repo}`, jobId: job.jobId, runAttempt: job.runAttempt, runId: job.runId,
+                            machine: id, runnerId: r.assignment && r.assignment.runnerId, labelSet: sk,
+                            priority: sg.priority, ahead: sg.target - 1, target: sg.target, forJobId: sg.forJobId,
+                            reason: job.key === sg.forKey ? 'surge:priority-job' : 'surge:job-ahead',
+                        });
+                    }
                 } else {
                     stats.failed++; mintFailures++;
                     if (mintFailures >= MINT_FAIL_ALERT_AFTER) {
@@ -640,7 +736,7 @@ function createDispatcher(deps) {
                             ref: 'mint-failures',
                         });
                     }
-                    break; // do not hammer GitHub within one tick
+                    stoppedSets.add(sk); continue; // do not hammer GitHub within one tick (this set stops, as before)
                 }
             }
         }
@@ -796,6 +892,8 @@ function createDispatcher(deps) {
             status: t.rec.status || 'queued',
             runnerName: t.rec.runnerName || null,
             machine: machineFor(t.rec),
+            // XACA-1479-007 (additive): dispatch priority, always one of critical|high|normal (missing/unknown -> normal).
+            priority: ['critical', 'high'][priorityRank(t.rec)] || 'normal',
         }));
     }
 
@@ -871,7 +969,7 @@ function wireCiPool(app, opts) {
     const { createPoolStore } = require('./ci-pool-store');
     const { createAudit } = require('./ci-dispatch-audit');
     const { createAssignments } = require('./ci-dispatch-assignments');
-    const { createGithubClient } = require('./ci-dispatch-github');
+    const { createGithubClient, createPriorityResolver } = require('./ci-dispatch-github');
     const { createWatcher } = require('./ci-dispatch-watcher');
     const { createAlerts } = require('./ci-dispatch-alerts');
     const { registerCiPoolRoutes } = require('./ci-pool-routes');
@@ -896,7 +994,11 @@ function wireCiPool(app, opts) {
     dispatcher = createDispatcher({
         shadowLogPath: path.join(o.dataDir, 'ci-shadow-decisions.jsonl'),
         env, store, assignments, alerts, audit, github, reports, now: o.now, logger,
-        createWatcher: ({ allowlist, getAllowlist, onJob, log }) => createWatcher({ github, allowlist, getAllowlist, onJob, log, now: o.now }),
+        createWatcher: ({ allowlist, getAllowlist, onJob, log }) => {
+            // XACA-1479-005: branch -> open-PR ci-priority label, cached, failing toward NORMAL.
+            const priority = createPriorityResolver({ github, audit, log, now: o.now });
+            return createWatcher({ github, allowlist, getAllowlist, onJob, log, now: o.now, resolvePriority: priority.resolve });
+        },
     });
     registerCiPoolRoutes(app, { store, assignments, dispatcher, audit, reports, now: o.now, logger });
 
@@ -909,6 +1011,6 @@ function wireCiPool(app, opts) {
 }
 
 module.exports = {
-    createDispatcher, wireCiPool, hasCredentials, dormantReason, globalMode,
+    createDispatcher, wireCiPool, hasCredentials, dormantReason, globalMode, priorityRank, surgePlan,
     NO_CAPACITY_AFTER_MS, FALLBACK_DELAY_MS, MAX_MINTS_PER_JOB, MAX_TRACKED_MS, MAX_CONFIG_REJECTED,
 };

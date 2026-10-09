@@ -496,7 +496,8 @@ describe('secrets never leak (sentinel)', () => {
     test('public surface never hands back the key or a JWT: client has no accessor for them', () => {
         const g = harness();
         assert.deepEqual(Object.keys(g.client).sort(),
-            ['conditionalGet', 'deleteRunner', 'generateJitConfig', 'getInstallationId', 'getRateState', 'getToken']);
+            // XACA-1479-005 added listBranchPullLabels: it returns PR numbers + label names only.
+            ['conditionalGet', 'deleteRunner', 'generateJitConfig', 'getInstallationId', 'getRateState', 'getToken', 'listBranchPullLabels']);
         assert.ok(!JSON.stringify(g.client.getRateState()).includes('PRIVATE'));
     });
 });

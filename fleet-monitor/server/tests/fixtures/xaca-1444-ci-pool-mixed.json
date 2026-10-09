@@ -259,7 +259,8 @@
       ],
       "status": "queued",
       "runnerName": null,
-      "machine": null
+      "machine": null,
+      "priority": "normal"
     },
     {
       "key": "DoubleNode/dev-team#2#1",
@@ -281,7 +282,8 @@
       ],
       "status": "queued",
       "runnerName": null,
-      "machine": null
+      "machine": null,
+      "priority": "normal"
     },
     {
       "key": "DoubleNode/dev-team#3#1",
@@ -303,7 +305,8 @@
       ],
       "status": "queued",
       "runnerName": null,
-      "machine": null
+      "machine": null,
+      "priority": "normal"
     }
   ],
   "running": [],

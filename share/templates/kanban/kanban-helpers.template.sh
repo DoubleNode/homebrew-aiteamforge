@@ -4167,7 +4167,262 @@ kb-commit() {
 # Shortcut: Move to PR review
 # Usage: kb-pr
 kb-pr() {
-    kb-status "pr_review"
+    local _kb_pr_rc=0
+    kb-status "pr_review" || _kb_pr_rc=$?
+    # XACA-1479-003: apply a recorded manual CI priority to the (now existing) PR.
+    # Never changes kb-pr's exit status - a failure here is a warning only.
+    _kb_ci_priority_pr_hook || true
+    return $_kb_pr_rc
+}
+
+# ----------------------------------------------------------------------------
+# XACA-1479: manual CI priority lane
+#
+# kb-ci-priority is a MANUAL, operator-only entry point. Nothing derives a CI
+# priority from the kanban `priority` field, tags or anything else, and no
+# other function may call kb-ci-priority (tests/test-xaca-1479-kb-ci-priority.zsh
+# asserts that). `ciPriority` on the LOCAL board item is only the record of
+# intent; the carrier the fleet CI dispatcher reads is the PR label
+# `ci-priority:critical` / `ci-priority:high`. NORMAL = no field, no label.
+# ----------------------------------------------------------------------------
+
+# _kb_ci_priority_target [ITEM-ID]
+# Echoes "<item-id><TAB><board-file>" for the explicit ID or, with none, the current
+# ticket (same resolution kb-done uses: activeWindows workingOnId; fallback = the
+# ticket id named by the current git branch). A subitem id maps to its parent.
+# rc 1 + reason on stderr when nothing resolves.
+_kb_ci_priority_target() {
+    local explicit="${1-}" item="" board_file="" context="" team=""
+    context=$(_kb_detect_context 2>/dev/null) || context=""
+    team="${context%%:*}"
+    if [[ -n "$explicit" ]]; then
+        item="$explicit"
+        local id_team
+        id_team=$(_kb_get_team_from_code "$item" 2>/dev/null)
+        [[ -n "$id_team" ]] && team="$id_team"
+    fi
+    if [[ -z "$team" || "$team" == "ERROR" ]]; then
+        echo "Error: cannot detect kanban team context" >&2
+        return 1
+    fi
+    board_file=$(_kb_get_board_file "$team") && [[ -f "$board_file" ]] || {
+        echo "Error: no kanban board for team '$team'" >&2
+        return 1
+    }
+    if [[ -z "$item" ]]; then
+        local rest terminal window_name window_id
+        rest="${context#*:}"
+        terminal="${rest%%:*}"
+        rest="${rest#*:}"
+        window_name="${rest#*:}"
+        window_id=$(_kb_get_window_id "$terminal" "$window_name")
+        item=$(_kb_jq_read "$board_file" \
+            '.activeWindows[]? | select(.id == $wid) | .workingOnId // empty' \
+            --arg wid "$window_id" -r 2>/dev/null | head -1)
+        if [[ -z "$item" ]]; then
+            item=$(git branch --show-current 2>/dev/null | grep -oiE 'x[a-z]{3}-[0-9]+' | head -1 | tr '[:lower:]' '[:upper:]')
+        fi
+    fi
+    if [[ -z "$item" ]]; then
+        echo "Error: no ITEM-ID given and no current ticket could be resolved" >&2
+        return 1
+    fi
+    # Subitem id (XACA-1479-001) -> parent: ciPriority lives on the top-level item.
+    _kb_is_subitem_id "$item" 2>/dev/null && item="${item%-*}"
+    printf '%s\t%s\n' "$item" "$board_file"
+}
+
+# _kb_ci_priority_apply_pr <item-id> <board-file> <critical|high|normal> [from-kb-pr]
+# Make the item's open PR(s) carry exactly the label for <level>. Reports what it did.
+# rc 0: applied, already correct, or no open PR (recorded only)
+# rc 1: a gh call failed - the label state is UNKNOWN/unchanged and the message says so.
+_kb_ci_priority_apply_pr() {
+    local item="${1-}" board_file="${2-}" level="${3-}" from_pr="${4-}"
+    local idx branch cur repo prs rc nprs _cur_lc _id_lc
+    local pr labels has_crit has_high edit_rc added removed lab want_add="" fail=0
+    local -a pr_list edit_args
+    if ! command -v gh >/dev/null 2>&1; then
+        echo "❌ kb-ci-priority: gh not found - PR label NOT changed ($item stays recorded as '$level')" >&2
+        return 1
+    fi
+    idx=$(_kb_find_by_id "$board_file" "$item")
+    branch=$(_kb_jq_read "$board_file" ".backlog[$idx].worktreeBranch // empty" -r 2>/dev/null)
+    if [[ -z "$branch" ]]; then
+        cur=$(git branch --show-current 2>/dev/null)
+        # Only trust the current branch when it names this ticket - never label a foreign PR.
+        # Boundary-aware: XACA-147 must not match feature/xaca-1479 (a substring test labelled the wrong PR).
+        _cur_lc=$(printf '%s' "$cur" | tr '[:upper:]' '[:lower:]')
+        _id_lc=$(printf '%s' "$item" | tr '[:upper:]' '[:lower:]')
+        if [[ -n "$cur" && "$_cur_lc" =~ (^|[^a-z0-9])${_id_lc}([^0-9]|$) ]]; then
+            branch="$cur"
+        fi
+    fi
+    if [[ -z "$branch" ]]; then
+        echo "  PR: no branch known for $item - recorded only; kb-pr will apply it"
+        return 0
+    fi
+
+    repo=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null)
+    rc=$?
+    if (( rc != 0 )) || ! [[ "$repo" == */* ]]; then
+        echo "❌ kb-ci-priority: could not resolve the repository (gh repo view failed) - PR label NOT changed" >&2
+        return 1
+    fi
+    prs=$(gh pr list --repo "$repo" --head "$branch" --state open --json number,labels 2>/dev/null)
+    rc=$?
+    if (( rc != 0 )); then
+        echo "❌ kb-ci-priority: 'gh pr list' failed for branch '$branch' - PR label NOT changed" >&2
+        return 1
+    fi
+    nprs=$(printf '%s' "$prs" | jq -r 'length' 2>/dev/null) || nprs=""
+    if ! [[ "$nprs" =~ ^[0-9]+$ ]]; then
+        echo "❌ kb-ci-priority: unreadable 'gh pr list' output for branch '$branch' - PR label NOT changed" >&2
+        return 1
+    fi
+    if (( nprs == 0 )); then
+        if [[ -n "$from_pr" ]]; then
+            echo "  PR: no open PR for '$branch' yet - after creating it, re-run: kb-ci-priority $level $item"
+        else
+            echo "  PR: no open PR for '$branch' - recorded only; kb-pr will apply it"
+        fi
+        return 0
+    fi
+
+    case "$level" in
+        critical) want_add="ci-priority:critical" ;;
+        high)     want_add="ci-priority:high" ;;
+    esac
+    if [[ -n "$want_add" ]]; then
+        # Idempotent: --force updates an existing label instead of failing "already exists".
+        for lab in ci-priority:critical ci-priority:high; do
+            gh label create "$lab" --repo "$repo" --force \
+                --color "$([[ $lab == *critical ]] && echo B60205 || echo D93F0B)" \
+                --description "Manual CI priority lane (XACA-1479): fleet CI pool serves this PR's jobs first" >/dev/null 2>&1
+            rc=$?
+            if (( rc != 0 )); then
+                echo "❌ kb-ci-priority: could not ensure label '$lab' exists on $repo - PR label NOT changed" >&2
+                return 1
+            fi
+        done
+    fi
+
+    pr_list=($(printf '%s' "$prs" | jq -r '.[].number'))
+    for pr in "${pr_list[@]}"; do
+        labels=$(printf '%s' "$prs" | jq -r --argjson n "$pr" '.[] | select(.number == $n) | .labels[]?.name')
+        has_crit=0; has_high=0
+        printf '%s\n' "$labels" | grep -qx 'ci-priority:critical' && has_crit=1
+        printf '%s\n' "$labels" | grep -qx 'ci-priority:high' && has_high=1
+        edit_args=(); added=""; removed=""
+        if [[ "$level" == "critical" ]]; then
+            if (( has_crit == 0 )); then edit_args+=(--add-label ci-priority:critical); added="ci-priority:critical"; fi
+            if (( has_high == 1 )); then edit_args+=(--remove-label ci-priority:high); removed="ci-priority:high"; fi
+        elif [[ "$level" == "high" ]]; then
+            if (( has_high == 0 )); then edit_args+=(--add-label ci-priority:high); added="ci-priority:high"; fi
+            if (( has_crit == 1 )); then edit_args+=(--remove-label ci-priority:critical); removed="ci-priority:critical"; fi
+        else
+            if (( has_crit == 1 )); then edit_args+=(--remove-label ci-priority:critical); removed="ci-priority:critical"; fi
+            if (( has_high == 1 )); then edit_args+=(--remove-label ci-priority:high); removed="${removed:+$removed, }ci-priority:high"; fi
+        fi
+        if (( ${#edit_args[@]} == 0 )); then
+            echo "  PR #$pr: labels already correct - no change"
+            continue
+        fi
+        gh pr edit "$pr" --repo "$repo" "${edit_args[@]}" >/dev/null 2>&1
+        edit_rc=$?
+        if (( edit_rc != 0 )); then
+            echo "❌ kb-ci-priority: 'gh pr edit' FAILED on PR #$pr - labels NOT changed (exit $edit_rc)" >&2
+            fail=1
+            continue
+        fi
+        echo "  PR #$pr:${added:+ added $added}${added:+${removed:+,}}${removed:+ removed $removed}"
+    done
+    (( fail == 0 )) || return 1
+    return 0
+}
+
+# kb-pr hook (XACA-1479-003). Silent no-op unless the current ticket has a recorded
+# ciPriority of critical/high. Any failure is a warning; the caller ignores the rc.
+_kb_ci_priority_pr_hook() {
+    local tgt item board_file idx level
+    tgt=$(_kb_ci_priority_target "" 2>/dev/null) || return 0
+    item="${tgt%%$'\t'*}"
+    board_file="${tgt#*$'\t'}"
+    idx=$(_kb_find_by_id "$board_file" "$item" 2>/dev/null)
+    [[ "$idx" =~ ^[0-9]+$ ]] || return 0
+    level=$(_kb_jq_read "$board_file" ".backlog[$idx].ciPriority // empty" -r 2>/dev/null)
+    case "$level" in
+        critical|high) ;;
+        *) return 0 ;;
+    esac
+    echo "CI priority: applying recorded '$level' to the PR for $item"
+    if ! _kb_ci_priority_apply_pr "$item" "$board_file" "$level" from-kb-pr; then
+        echo "⚠️  kb-pr: could not apply CI priority '$level' to the PR (PR itself is fine). Retry: kb-ci-priority $level $item" >&2
+        return 1
+    fi
+    return 0
+}
+
+# Usage: kb-ci-priority <critical|high|normal> [ITEM-ID]
+#        kb-ci-priority [show [ITEM-ID]]      show the recorded state
+# Manual CI priority override for ONE ticket's fleet-runner jobs (XACA-1479).
+# Records ciPriority on the local item and sets/clears the ci-priority:* label on the
+# ticket's open PR. `normal` clears. Never derived from the kanban `priority` field.
+kb-ci-priority() {
+    local value="${1-}" explicit="${2-}" show=false
+    case "$value" in
+        -h|--help)
+            echo "Usage: kb-ci-priority <critical|high|normal> [ITEM-ID]"
+            echo "       kb-ci-priority [show [ITEM-ID]]"
+            return 0 ;;
+        "")        show=true; explicit="" ;;
+        show)      show=true ;;
+        critical|high|normal) ;;
+        *)
+            echo "Error: invalid CI priority '$value' (expected critical, high or normal) - nothing changed" >&2
+            return 2 ;;
+    esac
+    if [[ -n "$explicit" && ! "$explicit" =~ ^X[A-Za-z]{3}-[0-9]+(-[0-9]+)?$ ]]; then
+        echo "Error: invalid ITEM-ID '$explicit'" >&2
+        return 2
+    fi
+    _kb_ensure_jq || return 1
+
+    local tgt item board_file idx old ts
+    tgt=$(_kb_ci_priority_target "$explicit") || return 1
+    item="${tgt%%$'\t'*}"
+    board_file="${tgt#*$'\t'}"
+    idx=$(_kb_find_by_id "$board_file" "$item")
+    if ! [[ "$idx" =~ ^[0-9]+$ ]]; then
+        echo "Error: Item not found: $item" >&2
+        return 1
+    fi
+    old=$(_kb_jq_read "$board_file" ".backlog[$idx].ciPriority // empty" -r 2>/dev/null)
+    case "$old" in critical|high) ;; *) old="normal" ;; esac
+
+    if [[ "$show" == "true" ]]; then
+        if [[ "$old" == "normal" ]]; then
+            echo "[$item] CI priority: normal (default)"
+        else
+            echo "[$item] CI priority: $old (manual override)"
+        fi
+        return 0
+    fi
+
+    if [[ "$old" != "$value" ]]; then
+        ts=$(_kb_get_timestamp)
+        if [[ "$value" == "normal" ]]; then
+            _kb_jq_update "$board_file" \
+                'del(.backlog[$idx].ciPriority) | .backlog[$idx].updatedAt = $ts | .lastUpdated = $ts' \
+                --argjson idx "$idx" --arg ts "$ts" || { echo "❌ kb-ci-priority: board write failed - nothing changed" >&2; return 1; }
+        else
+            _kb_jq_update "$board_file" \
+                '.backlog[$idx].ciPriority = $v | .backlog[$idx].updatedAt = $ts | .lastUpdated = $ts' \
+                --argjson idx "$idx" --arg v "$value" --arg ts "$ts" || { echo "❌ kb-ci-priority: board write failed - nothing changed" >&2; return 1; }
+        fi
+        _kb_log_activity "field_update" "$item" "item" "ciPriority" "$old" "$value" "" 2>/dev/null
+    fi
+    echo "✓ [$item] CI priority: $old → $value"
+    _kb_ci_priority_apply_pr "$item" "$board_file" "$value"
 }
 
 # _kb_pr_merged_record <ITEM-ID|""> <PR#>   (XACA-1347-029)
@@ -7504,6 +7759,8 @@ kb-done() {
                  del(.backlog[$idx].worktree) |
                  del(.backlog[$idx].worktreeBranch) |
                  del(.backlog[$idx].worktreeWindowId) |
+                 # XACA-1479: the manual CI priority override ends with the ticket.
+                 del(.backlog[$idx].ciPriority) |
                  .lastUpdated = $ts' \
                 --argjson idx "$item_idx" --arg ts "$timestamp" \
                 --arg timeMs "$item_total_time_ms"; then
@@ -30560,6 +30817,7 @@ kb-help() {
     echo "  kb-test                Move to testing"
     echo "  kb-commit              Move to commit"
     echo "  kb-pr                  Move to PR review"
+    echo "  kb-ci-priority <critical|high|normal> [ID]  Manual fleet-CI priority for one ticket (no arg = show)"
     echo "  kb-pause \"reason\"      Pause task with reason (external wait)"
     echo "  kb-resume              Resume and return to previous status"
     echo "  kb-block \"reason\"      (deprecated alias for kb-pause)"

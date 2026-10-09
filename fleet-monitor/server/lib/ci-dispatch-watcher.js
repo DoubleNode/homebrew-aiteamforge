@@ -87,9 +87,16 @@ function parseAllowlist(allowlist, log) {
  * @param {Function} [opts.setTimer]   (fn, ms) => handle
  * @param {Function} [opts.clearTimer] (handle) => void
  * @param {Function} opts.onJob        (record, change) => void; change is one of
- *   'queued' | 'seen' | 'pickup' | 'in_progress' | 'completed'. 'seen' is a first
+ *   'queued' | 'seen' | 'pickup' | 'in_progress' | 'completed' | 'priority'. 'priority' (XACA-1479-005)
+ *   is emitted only when opts.resolvePriority is set and a still-queued job's resolved priority changed
+ *   on a TTL refresh. 'seen' is a first
  *   sighting of a job that is already past queued; the catch-up changes follow.
  * @param {Function} [opts.log]        (level, msg) => void
+ * @param {Function} [opts.resolvePriority] XACA-1479-005: ({owner, repo, branch, headOwner}) =>
+ *   Promise<'critical'|'high'|'normal'> (createPriorityResolver().resolve). When set, every job record
+ *   carries `priority`, resolved BEFORE its first emit and refreshed for still-queued jobs every cycle
+ *   (the resolver's cache sets the real cadence). Any throw / rejection / unknown value => 'normal'.
+ *   When unset the record shape is unchanged.
  */
 function createWatcher(opts = {}) {
     const github = opts.github;
@@ -103,6 +110,7 @@ function createWatcher(opts = {}) {
     const log = typeof opts.log === 'function' ? opts.log : () => {};
     const onJob = opts.onJob;
     const getAllowlist = typeof opts.getAllowlist === 'function' ? opts.getAllowlist : null;
+    const resolvePriority = typeof opts.resolvePriority === 'function' ? opts.resolvePriority : null;
     // With a live getter the first cycle's read is the source; parsing the static list too would warn
     // about an invalid entry twice at boot (PR #1086 advisory).
     let repos = getAllowlist ? [] : parseAllowlist(opts.allowlist, log);
@@ -127,7 +135,20 @@ function createWatcher(opts = {}) {
     }
 
     /** Fold one GitHub job into the lifecycle table, emitting changes in order. */
-    function observeJob(owner, repo, run, j, nowMs, touch) {
+    /** XACA-1479-005: never throws, never blocks past the resolver's own timeout, unknown => 'normal'. */
+    async function priorityFor(owner, repo, branch, headRepoFullName) {
+        if (!resolvePriority) return null;
+        const headOwner = typeof headRepoFullName === 'string' && headRepoFullName.includes('/') ? headRepoFullName.split('/')[0] : owner;
+        try {
+            const p = await resolvePriority({ owner, repo, branch, headOwner });
+            return p === 'critical' || p === 'high' ? p : 'normal';
+        } catch (e) {
+            log('warn', `watcher: priority resolver threw (${(e && (e.code || e.message)) || 'error'}); NORMAL`);
+            return 'normal';
+        }
+    }
+
+    function observeJob(owner, repo, run, j, nowMs, touch, priority) {
         const runAttempt = j.run_attempt ?? run.runAttempt ?? 1;
         const key = `${owner}/${repo}#${j.id}#${runAttempt}`;
         const status = normalizeStatus(j.status);
@@ -149,6 +170,7 @@ function createWatcher(opts = {}) {
                     run: { event: run.event, repoFullName: run.repoFullName, headRepoFullName: run.headRepoFullName },
                 },
             };
+            if (resolvePriority) entry.rec.priority = priority || 'normal';
             jobs.set(key, entry);
         }
         // A 304 replay of a gone run's cached body is not a sighting: it must not keep the job
@@ -261,8 +283,15 @@ function createWatcher(opts = {}) {
         // Fresh = every page was a 200 (a 304 page is a replay). A capped list may be missing jobs.
         const fresh = allFresh && !capped;
         const seen = new Set();
+        // XACA-1479-005: resolve once per run (cached per branch) and only when a NEW queued job would be
+        // emitted, so the dispatcher sees rec.priority on first sight.
+        let priority = null;
+        if (resolvePriority && list.some((j) => j && normalizeStatus(j.status) === 'queued'
+            && !jobs.has(`${r.owner}/${r.repo}#${j.id}#${j.run_attempt ?? run.runAttempt ?? 1}`))) {
+            priority = await priorityFor(r.owner, r.repo, capStr(run.branch), run.headRepoFullName);   // same capped value refresh uses
+        }
         for (const j of list) {
-            observeJob(r.owner, r.repo, run, j, nowMs, fresh || !gone);
+            observeJob(r.owner, r.repo, run, j, nowMs, fresh || !gone, priority);
             seen.add(`${r.owner}/${r.repo}#${j.id}#${j.run_attempt ?? run.runAttempt ?? 1}`);
         }
         const attempt = Number.isInteger(run.runAttempt) ? run.runAttempt : null;
@@ -332,7 +361,32 @@ function createWatcher(opts = {}) {
             }
             if (openJobsFor(r.owner, r.repo, id)) active = true;
         }
+        await refreshPriorities(r);
         return active;
+    }
+
+    /**
+     * XACA-1479-005: re-resolve still-queued jobs' priority (the resolver cache makes this a lookup per
+     * branch per TTL, not per cycle) and emit 'priority' on a change. Never throws.
+     */
+    async function refreshPriorities(r) {
+        if (!resolvePriority) return;
+        const byBranch = new Map();
+        for (const e of jobs.values()) {
+            const rec = e.rec;
+            if (rec.owner !== r.owner || rec.repo !== r.repo || rec.status !== 'queued' || rec.runnerName || !rec.branch) continue;
+            const k = `${rec.branch}\u0000${rec.run.headRepoFullName || ''}`;
+            if (!byBranch.has(k)) byBranch.set(k, []);
+            byBranch.get(k).push(rec);
+        }
+        for (const recs of byBranch.values()) {
+            const p = await priorityFor(r.owner, r.repo, recs[0].branch, recs[0].run.headRepoFullName);
+            for (const rec of recs) {
+                if (rec.priority === p) continue;
+                rec.priority = p;
+                emit(rec, 'priority');
+            }
+        }
     }
 
     function prune(nowMs) {

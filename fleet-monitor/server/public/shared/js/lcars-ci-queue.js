@@ -27,8 +27,10 @@
 //   5. No looping animation (none at all; the CSS adds none).
 //
 // Server contract notes:
-//   queue item  : { key, repo, jobId, name, branch, url, jobClass, waitingMs, noCapacityMs, noEligibleMachine }  (QUEUED jobs only;
-//                 noEligibleMachine is the server-gated flag the banner uses, noCapacityMs is raw and ignored)
+//   queue item  : { key, repo, jobId, name, branch, url, jobClass, waitingMs, noCapacityMs, noEligibleMachine, priority }  (QUEUED jobs only;
+//                 noEligibleMachine is the server-gated flag the banner uses, noCapacityMs is raw and ignored;
+//                 priority 'critical'|'high'|'normal' (XACA-1479, additive; absent/unknown = normal): critical/high rows get a
+//                 text+glyph badge in the Status cell, normal rows none)
 //   running[]   : { key, repo, jobId, name, branch, workflow, url, runnerName, machine|null, startedAt }  (picked up, JIT or persistent)
 //   assignment  : { machine, repo, state, intendedJob, boundJob:{id,name,runId,branch,workflow,url}, boundAt, startedAt }
 //   Running jobs are not in queue[]; they are the assignments with state 'running' and a boundJob, plus running[].
@@ -300,6 +302,29 @@
         return tr;
     }
 
+    // XACA-1479-007: priority badge in the Status cell. Text AND glyph (never colour alone); the glyph is
+    // aria-hidden and a visually-hidden word gives the accessible name. Unknown/absent priority = normal = no badge.
+    var PRIO = { critical: { glyph: '\u25B2\u25B2', label: 'CRITICAL' }, high: { glyph: '\u25B2', label: 'HIGH' } };
+    function fillStatus(doc, cell, text, priority) {
+        if (cell.getAttribute('data-ciq-null') === '1') { cell.textContent = ''; cell.removeAttribute('data-ciq-null'); }
+        var t = cell.firstChild;
+        if (!t || t.nodeType !== 3) { cell.textContent = ''; t = doc.createTextNode(''); cell.appendChild(t); }
+        if (t.nodeValue !== text) t.nodeValue = text;
+        var badge = cell.querySelector('.ciq-prio');
+        var key = typeof priority === 'string' && Object.prototype.hasOwnProperty.call(PRIO, priority) ? priority : null;
+        if (key === null) { if (badge) cell.removeChild(badge); return; }
+        if (badge && badge.getAttribute('data-ciq-priority') === key) return;
+        if (badge) cell.removeChild(badge);
+        badge = el(doc, 'span', 'ciq-prio ciq-prio-' + key);
+        badge.setAttribute('data-ciq-priority', key);
+        var g = el(doc, 'span', 'ciq-prio-glyph', PRIO[key].glyph);
+        g.setAttribute('aria-hidden', 'true');
+        badge.appendChild(g);
+        badge.appendChild(el(doc, 'span', 'ciq-prio-text', PRIO[key].label));
+        badge.appendChild(el(doc, 'span', 'ciq-sr', ' priority'));
+        cell.appendChild(badge);
+    }
+
     function fillJob(doc, cell, name, url) {
         var safe = safeGithubUrl(url);
         var a = cell.firstElementChild && cell.firstElementChild.tagName === 'A' ? cell.firstElementChild : null;
@@ -338,7 +363,7 @@
             fillJob(doc, cells[1], isStr(item.name) ? item.name : null, pick(item, ['url', 'htmlUrl', 'html_url', 'jobUrl']));
             var br = pick(item, ['branch', 'headBranch']);
             fillCell(doc, cells[2], isStr(br) ? br : null);
-            fillCell(doc, cells[3], 'queued');
+            fillStatus(doc, cells[3], 'queued', item.priority);
             setAttr(tr, 'data-ciq-status', 'queued');
             var w = humanSec(waitingSec(item, ref));
             fillCell(doc, cells[4], w === null ? null : 'waiting ' + w);
@@ -353,7 +378,7 @@
             fillCell(doc, cells[0], a.repo);
             fillJob(doc, cells[1], isStr(a.name) ? a.name : null, a.url);
             fillCell(doc, cells[2], isStr(a.branch) ? a.branch : null);
-            fillCell(doc, cells[3], 'running');
+            fillStatus(doc, cells[3], 'running', null);
             setAttr(tr, 'data-ciq-status', 'running');
             var r = humanSec(runningSec({ boundAt: a.at }, ref));
             fillCell(doc, cells[4], r === null ? null : 'running for ' + r);
