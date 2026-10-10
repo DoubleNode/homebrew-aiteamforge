@@ -22,10 +22,19 @@
  *
  * LIFECYCLE
  *   queued --claim--> leased --ack ok--------------------------> done
- *                       |  \--ack !ok / lease expiry--> queued (attempts < max)
- *                       |                          \--> failed (attempts == max)
- *   queued|leased --ttl--> failed
+ *     |                 |  \--ack !ok / lease expiry--> queued (attempts < max, inside TTL)
+ *     |                 |                          \--> failed (attempts == max, or past TTL)
+ *     \--ttl--> failed (ttl_expired)
  *  - lease 60 s, max 3 attempts (counted at claim), TTL 10 min from enqueue.
+ *  - The TTL bounds time spent WAITING for a relay: it settles QUEUED jobs only.
+ *    A LEASED job is never failed by the TTL while its lease is live, because
+ *    the relay may be mid-send and its ack must still be honoured (otherwise
+ *    the receipt says failed for a message that was delivered). A job claimed
+ *    just before the TTL therefore settles on its ack or its lease expiry, so
+ *    it can outlive the TTL by at most one lease.
+ *  - PAST THE TTL a job is never requeued. When the lease expires with no ack
+ *    it fails as ttl_expired; when the relay acks failure the relay's own
+ *    errorType wins (it is the more specific fact), same as attempts-exhausted.
  *  - FAILOVER: after a lease expires (or a relay acks failure) the last holder
  *    is excluded for sameMachineGraceMs (default 25 s = one long-poll cycle),
  *    so a different machine wins the job if any is polling. After the grace the
@@ -76,7 +85,16 @@ function createImessageQueue(opts = {}) {
     const relays = new Map();      // machineId -> {lastClaimAt, lastAckOk}
     const waiters = new Set();     // wake callbacks for long-polling claims
 
-    function wake() { for (const w of [...waiters]) w(); }
+    // RE-ENTRANCY (XACA-1402-016). A waiter's check() calls claim() -> sweep(), so a
+    // wake() raised by requeue() inside sweep() used to run a nested sweep over the
+    // outer loop's snapshot and settle a job twice. Wakes raised while sweeping are
+    // deferred to the end of the outermost sweep, and settle() is idempotent.
+    let sweepDepth = 0;
+    let wakePending = false;
+    function wake() {
+        if (sweepDepth > 0) { wakePending = true; return; }
+        for (const w of [...waiters]) w();
+    }
 
     function safeErrorType(job, t) {
         if (typeof t !== 'string' || !ERROR_TYPE_RE.test(t)) return 'Error';
@@ -87,6 +105,9 @@ function createImessageQueue(opts = {}) {
     }
 
     function settle(job, stage, errorType) {
+        // Exactly one settlement per job, however the caller reached it.
+        if (job.state === 'settled' || active.get(job.id) !== job) return;
+        job.state = 'settled';
         const out = { jobId: job.id, meta: job.meta, stage };
         if (stage === 'failed') out.errorType = safeErrorType(job, errorType);
         active.delete(job.id);
@@ -105,11 +126,30 @@ function createImessageQueue(opts = {}) {
     }
 
     function sweep() {
+        sweepDepth++;
+        try {
+            sweepOnce();
+        } finally {
+            sweepDepth--;
+        }
+        if (sweepDepth === 0 && wakePending) {
+            wakePending = false;
+            wake();
+        }
+    }
+
+    function sweepOnce() {
         const t = now();
         for (const job of [...active.values()]) {
-            if (t >= job.expiresAt) { settle(job, 'failed', 'ttl_expired'); continue; }
-            if (job.state === 'leased' && t >= job.leaseExpiresAt) {
-                if (job.attempt >= maxAttempts) settle(job, 'failed', 'attempts_exhausted');
+            if (job.state === 'settled' || active.get(job.id) !== job) continue;
+            if (job.state === 'queued') {
+                if (t >= job.expiresAt) settle(job, 'failed', 'ttl_expired');
+                continue;
+            }
+            // Leased: the TTL does not apply until the lease itself is over.
+            if (t >= job.leaseExpiresAt) {
+                if (t >= job.expiresAt) settle(job, 'failed', 'ttl_expired');
+                else if (job.attempt >= maxAttempts) settle(job, 'failed', 'attempts_exhausted');
                 else requeue(job, job.leaseMachine);
             }
         }
@@ -210,7 +250,7 @@ function createImessageQueue(opts = {}) {
         if (job.state !== 'leased' || job.leaseMachine !== machineId) return 'lease_not_held';
         touchRelay(machineId).lastAckOk = ok === true;
         if (ok === true) settle(job, 'delivered');
-        else if (job.attempt >= maxAttempts) settle(job, 'failed', errorType);
+        else if (job.attempt >= maxAttempts || now() >= job.expiresAt) settle(job, 'failed', errorType); // relay's real errorType wins
         else requeue(job, machineId);
         return 'ok';
     }

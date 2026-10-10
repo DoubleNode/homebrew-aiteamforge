@@ -203,6 +203,55 @@ describe('ack', () => {
         assert.equal(failed.length, 1);
         assert.equal(failed[0].error, 'imessage delivery failed (attempts_exhausted)');
     });
+
+    // TTL vs lease (review round 1, BLOCKING): the TTL bounds QUEUED time only. A job
+    // leased before the TTL settles on its ack / lease expiry, not at the TTL.
+    // Offsets are ms after enqueue; TTL = 600000, lease = 60000.
+    const TTL = 10 * 60 * 1000;
+    const TTL_CASES = [
+        { name: 'control: claim well inside the TTL, ack ok', claimAt: 1000, then: 2000, ackOk: true, status: 200, stage: 'delivered' },
+        { name: '(a) claim in the last lease-length, ack ok after the TTL', claimAt: TTL - 1000, then: TTL + 5000, ackOk: true, status: 200, stage: 'delivered' },
+        { name: '(b) same, relay acks failure: its real errorType wins over ttl_expired', claimAt: TTL - 1000, then: TTL + 5000, ackOk: false, errorType: 'not_authorized', status: 200, stage: 'failed', error: 'imessage delivery failed (not_authorized)' },
+        { name: '(c) claim inside the TTL, ack after the TTL but inside the lease', claimAt: TTL - 30000, then: TTL + 20000, ackOk: true, status: 200, stage: 'delivered' },
+        { name: '(d) claim near the TTL, lease expires past the TTL, no ack: ttl_expired', claimAt: TTL - 1000, then: TTL - 1000 + LEASE_MS, ackOk: null, stage: 'failed', error: 'imessage delivery failed (ttl_expired)' },
+    ];
+    for (const c of TTL_CASES) {
+        test('TTL x lease: ' + c.name, async () => {
+            const ctx = build();
+            const t0 = ctx.t.now;
+            const sent = await notify(ctx);
+            const jobId = sent.body.receipts[0].providerMessageId;
+            ctx.t.now = t0 + c.claimAt;
+            assert.equal((await claim(ctx)).status, 200);
+            ctx.t.now = t0 + c.then;
+            if (c.ackOk === null) {
+                ctx.queue.sweep();
+                // The late ack must now be refused; the receipt already says failed.
+                assert.equal((await ack(ctx, { machineId: 'm1', jobId, ok: true })).status, 409);
+            } else {
+                const body = { machineId: 'm1', jobId, ok: c.ackOk };
+                if (c.errorType) body.errorType = c.errorType;
+                const r = await ack(ctx, body);
+                assert.equal(r.status, c.status);
+            }
+            const settled = receiptLines(ctx).filter((x) => x.providerMessageId === jobId && x.stage !== 'accepted');
+            assert.equal(settled.length, 1, 'exactly one settling receipt');
+            assert.equal(settled[0].stage, c.stage);
+            if (c.error) assert.equal(settled[0].error, c.error);
+        });
+    }
+
+    test('TTL x lease: ack failure past the TTL never requeues the job', async () => {
+        const ctx = build();
+        const t0 = ctx.t.now;
+        await notify(ctx);
+        ctx.t.now = t0 + TTL - 1000;
+        const c = await claim(ctx);
+        ctx.t.now = t0 + TTL + 1000;
+        assert.equal((await ack(ctx, { machineId: 'm1', jobId: c.body.jobId, ok: false, errorType: 'x_fail' })).status, 200);
+        assert.equal(ctx.queue.size(), 0);
+        assert.equal((await claim(ctx, { machineId: 'm2', waitSeconds: 0 })).status, 204);
+    });
 });
 
 describe('pool', () => {

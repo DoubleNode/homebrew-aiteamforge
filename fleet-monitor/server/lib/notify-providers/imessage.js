@@ -19,8 +19,12 @@
  * params:  recipient   E.164 phone (^\+[1-9]\d{7,14}$) or an email-shaped Apple ID
  *          minSeverity one of the hub SEVERITIES; default `high` (D6). The
  *                      dispatcher's severity gate reads it (generic, any provider).
- *          pool        optional array (<= 32) of machine ids allowed to send;
- *                      default is any claiming machine.
+ *          pool        optional array (<= 32) of machine ids preferred to send;
+ *                      default is any claiming machine. A ROUTING PREFERENCE,
+ *                      NOT an authorization control: machineId is self-asserted
+ *                      on claim, so any holder of the fleet key can claim as any
+ *                      pool member (and so read the recipient and text of jobs
+ *                      routed to it). The fleet key is the only access boundary.
  * secrets: none.
  *
  * `asyncDelivery: true` tells the dispatcher the initial receipt means

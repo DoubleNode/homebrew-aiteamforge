@@ -37,6 +37,9 @@
  *        400/401/5xx/network -> exponential backoff, never a tight loop
  *   POST {base}/api/notify/imessage/ack {machineId, jobId, ok, errorType?}
  *        200 ok; 409 lease_not_held / 404 unknown_job -> log job id, drop
+ *   A lease the relay itself judges over (server lease length minus local
+ *   elapsed time, never server-vs-local clock) is acked ok:false
+ *   errorType 'lease_expired_local' so the server requeues immediately.
  *
  * Config/auth reuse msg-client.js's resolution (shared vault-keygen.js
  * helpers): base URL, Bearer token only over https/loopback, redirects
@@ -260,6 +263,14 @@ function parseLease(v) {
     return NaN;
 }
 
+/** Server time (epoch ms) from the HTTP Date header, or NaN when absent/unusable. */
+function parseServerDate(res) {
+    try {
+        const h = res && res.headers && typeof res.headers.get === 'function' ? res.headers.get('date') : null;
+        return typeof h === 'string' && h ? Date.parse(h) : NaN;
+    } catch (_) { return NaN; }
+}
+
 /** Next backoff delay: 5s doubling, capped at 60s. */
 function nextBackoff(prevMs) {
     return prevMs ? Math.min(prevMs * 2, BACKOFF_MAX_MS) : BACKOFF_MIN_MS;
@@ -338,6 +349,9 @@ async function runCycle(deps, state) {
         return { outcome: 'error' };
     }
 
+    // Local receipt time for the lease check below. The lease is only ever
+    // measured against this machine's OWN elapsed time since the response.
+    const t0 = deps.now();
     let job;
     try { job = await res.json(); } catch (_) { job = null; }
     if (!job || typeof job.jobId !== 'string' || !job.jobId) {
@@ -352,10 +366,18 @@ async function runCycle(deps, state) {
         return { outcome: 'invalid_job', jobId };
     }
 
-    // Lease already past: another machine will (or did) get it. Do not send, do not ack.
+    // Lease check WITHOUT comparing the server's clock to ours (a Mac a minute
+    // ahead would otherwise skip, and burn an attempt on, every job). The lease
+    // length is leaseExpiresAt minus the server's own time (HTTP Date header),
+    // and what has elapsed is measured on our clock since t0. No usable server
+    // time -> send anyway: the server is the authority and at-least-once
+    // delivery tolerates a duplicate. When we do decide the lease is gone, ack
+    // the failure so the server requeues at once instead of waiting it out.
     const lease = parseLease(job.leaseExpiresAt);
-    if (Number.isFinite(lease) && lease <= deps.now()) {
-        deps.log(`job=${jobId} lease already expired; skipping`);
+    const serverNow = parseServerDate(res);
+    if (Number.isFinite(lease) && Number.isFinite(serverNow) && (lease - serverNow) - (deps.now() - t0) <= 0) {
+        deps.log(`job=${jobId} lease already expired; acking lease_expired_local`);
+        await ackJob(deps, state, jobId, { ok: false, errorType: 'lease_expired_local' });
         return { outcome: 'expired', jobId };
     }
 
