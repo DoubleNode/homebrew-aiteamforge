@@ -183,7 +183,7 @@ function registerNotifyRoutes(app, { store, registry, isRegisteredTeam, dispatch
  *
  * @param {object} app
  * @param {{isRegisteredTeam: Function, logger?: object, storeOpts?: object, receiptOpts?: object}} opts
- * @returns {{store: object, registry: object, receipts: object}}
+ * @returns {{store: object, registry: object, receipts: object, imessageQueue: object}}
  */
 function wireNotifyHub(app, opts) {
     const o = opts || {};
@@ -191,10 +191,21 @@ function wireNotifyHub(app, opts) {
     const logger = o.logger || console;
     const { createNotifyStore } = require('./notify-store');
     const { defaultRegistry } = require('./notify-providers');
-    const registry = defaultRegistry();
-    const store = createNotifyStore(Object.assign({}, o.storeOpts, { registry }));
     const receipts = createReceiptLog(o.receiptOpts);
+    // iMessage sender pool (XACA-1402): ONE in-memory queue shared by the provider (enqueue)
+    // and the relay routes (claim/ack); settling a job appends the delivery receipt.
+    const { createImessageQueue } = require('./notify-imessage-queue');
+    const { registerImessageRelayRoutes, createDeliveryReceiptSink } = require('./notify-imessage-routes');
+    const imessageQueue = o.imessageQueue || createImessageQueue({ onSettle: createDeliveryReceiptSink(receipts, logger) });
+    const registry = defaultRegistry({ imessageQueue });
+    const store = createNotifyStore(Object.assign({}, o.storeOpts, { registry }));
+    registerImessageRelayRoutes(app, { queue: imessageQueue });
     registerNotifyRoutes(app, { store, registry, receipts, isRegisteredTeam: o.isRegisteredTeam });
+    // Lease/TTL expiry is also swept lazily on every queue call; this timer makes a failed
+    // delivery receipt appear even when no relay is polling. unref'd: never holds the process open.
+    const sweepMs = Number.isFinite(o.imessageSweepMs) && o.imessageSweepMs > 0 ? o.imessageSweepMs : 15000;
+    const sweeper = setInterval(() => { try { imessageQueue.sweep(); } catch (_) { /* next tick */ } }, sweepMs);
+    if (typeof sweeper.unref === 'function') sweeper.unref();
     const s = store.status();
     const rec = s.recovered;
     const recovery = rec
@@ -206,7 +217,7 @@ function wireNotifyHub(app, opts) {
     logger.log(s.enabled
         ? `[NOTIFY] hub enabled${recovery}`
         : `[NOTIFY] hub disabled (${s.reason})${recovery}; /api/notify endpoints answer 503`);
-    return { store, registry, receipts };
+    return { store, registry, receipts, imessageQueue };
 }
 
 module.exports = { registerNotifyRoutes, wireNotifyHub };

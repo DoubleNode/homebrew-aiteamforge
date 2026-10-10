@@ -20,6 +20,10 @@ source "$SCRIPT_DIR/../lib/ci-runner-bundle.sh"
 # one-time sudo offer (files and text only; nothing is run). Shared verbatim with
 # aiteamforge-upgrade.sh.
 source "$SCRIPT_DIR/../lib/power-guard-bundle.sh"
+# XACA-1402-011: opt-in iMessage relay bundle placement + the printed opt-in
+# command (files and text only; nothing is run). Shared verbatim with
+# aiteamforge-upgrade.sh.
+source "$SCRIPT_DIR/../lib/imessage-relay-bundle.sh"
 
 #──────────────────────────────────────────────────────────────────────────────
 # Constants
@@ -349,6 +353,11 @@ install_helper_scripts() {
     # prints the one-time sudo command at the end via _aitf_power_guard_offer.
     _aitf_install_power_guard_bundle "$scripts_src" "$scripts_dest"
 
+    # XACA-1402-011: iMessage relay bundle -> scripts/imessage-relay/. Files only: the
+    # opt-in LaunchAgent is NOT installed here; install_shell_environment prints the
+    # opt-in command at the end via _aitf_imessage_relay_offer.
+    _aitf_install_imessage_relay_bundle "$scripts_src" "$scripts_dest"
+
     success "Installed helper scripts"
 }
 
@@ -539,6 +548,10 @@ install_shell_environment() {
     # XACA-1394-005: OFFER the UPS power-guard daemon. Prints the exact one-time
     # `sudo bash .../install-power-guard.sh install`; never runs sudo, never prompts.
     _aitf_power_guard_offer "$AITEAMFORGE_DIR/scripts"
+
+    # XACA-1402-011: OFFER the opt-in iMessage relay. Prints the exact
+    # `bash .../install-imessage-relay.sh install --opt-in`; never runs it.
+    _aitf_imessage_relay_offer "$AITEAMFORGE_DIR/scripts"
 
     return 0
 }

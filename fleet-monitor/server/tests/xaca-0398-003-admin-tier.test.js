@@ -705,6 +705,14 @@ describe('route inventory — every admin route is on the admin gate (static)', 
         assert.ok(!/checkAdminKey/.test(src));
     });
 
+    test('the 3 imessage sender-pool routes keep the checkApiKey guard (fleet tier), including the GET (XACA-1402)', () => {
+        const src = fs.readFileSync(path.join(SERVER_DIR, 'lib', 'notify-imessage-routes.js'), 'utf8');
+        const derived = regs.filter((r) => r.file === 'lib/notify-imessage-routes.js').map(key).sort();
+        assert.deepEqual(derived, ['GET /api/notify/imessage/pool', 'POST /api/notify/imessage/ack', 'POST /api/notify/imessage/claim']);
+        assert.equal((src.match(/if \(!checkApiKey\(req, res\)\) return;/g) || []).length, 3);
+        assert.ok(!/checkAdminKey|requireAdminKey/.test(src));
+    });
+
     test('tier totals: 35 admin + 13 fleet + 2 ci-host + 1 ci-telemetry = 51 guarded', () => {
         const admin = regs.filter((r) => r.gate === 'requireAdminKey').length;
         const fleet = regs.filter((r) => r.gate === 'requireApiKey').length + FLEET_GUARD_ROUTES.length;
@@ -738,6 +746,7 @@ describe('route inventory — every admin route is on the admin gate (static)', 
             .filter((r) => !(r.gate === 'ciHostKey' && r.file === 'lib/ci-pool-routes.js' && CI_HOST_KEY_ROUTES.includes(key(r))))
             .filter((r) => !(r.gate === 'ciTelemetryKey' && r.file === 'lib/ci-runners-routes.js' && CI_TELEMETRY_KEY_ROUTES.includes(key(r))))
             .filter((r) => r.file !== 'lib/msg-relay-routes.js') // guard form, asserted above
+            .filter((r) => r.file !== 'lib/notify-imessage-routes.js') // guard form, asserted below (XACA-1402)
             .map(key)
             .filter((k) => !UNGATED_MUTATING_ALLOWLIST.includes(k));
         assert.deepEqual(ungated, [], `ungated mutating route(s): ${ungated.join(', ')}`);

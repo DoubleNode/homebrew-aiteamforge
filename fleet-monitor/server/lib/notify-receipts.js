@@ -26,8 +26,10 @@ const crypto = require('crypto');
 
 const DEFAULT_MAX_BYTES = 5 * 1024 * 1024;
 const ALLOWED = ['id', 'ts', 'team', 'type', 'ref', 'severity', 'connectionId',
-    'provider', 'ok', 'error', 'suppressed', 'providerMessageId'];
-const SUPPRESSED = ['dedupe', 'rate-limit', 'quiet-hours'];
+    'provider', 'ok', 'error', 'suppressed', 'providerMessageId', 'stage'];
+const SUPPRESSED = ['dedupe', 'rate-limit', 'quiet-hours', 'severity-gate'];
+// Async-delivery providers (imessage) write two receipts per send, same providerMessageId.
+const STAGES = ['accepted', 'delivered', 'failed'];
 
 function createReceiptLog(opts = {}) {
     const file = opts.file
@@ -48,6 +50,7 @@ function createReceiptLog(opts = {}) {
         r.ok = r.ok === true;
         r.error = r.ok ? '' : String(r.error == null ? '' : r.error);
         if (r.suppressed !== undefined && !SUPPRESSED.includes(r.suppressed)) delete r.suppressed;
+        if (r.stage !== undefined && !STAGES.includes(r.stage)) delete r.stage;
         if (r.providerMessageId !== undefined && typeof r.providerMessageId !== 'string') delete r.providerMessageId;
         return r;
     }
@@ -112,4 +115,4 @@ function createReceiptLog(opts = {}) {
     return { file, newReceipt, append, recent };
 }
 
-module.exports = { createReceiptLog, ALLOWED_FIELDS: ALLOWED };
+module.exports = { createReceiptLog, ALLOWED_FIELDS: ALLOWED, SUPPRESSED_REASONS: SUPPRESSED, STAGES };

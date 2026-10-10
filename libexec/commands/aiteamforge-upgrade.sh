@@ -35,6 +35,9 @@ source "${LIBEXEC_DIR}/lib/ci-runner-bundle.sh"
 # XACA-1394-005: power-guard bundle placement + stale-root-payload notice, shared
 # verbatim with install-shell.sh. Files and text only -- see lib/power-guard-bundle.sh.
 source "${LIBEXEC_DIR}/lib/power-guard-bundle.sh"
+# XACA-1402-011: opt-in iMessage relay bundle placement + stale-running-copy notice,
+# shared verbatim with install-shell.sh. Files and text only -- see lib/imessage-relay-bundle.sh.
+source "${LIBEXEC_DIR}/lib/imessage-relay-bundle.sh"
 # XACA-0931: shared nested-project persona deploy-target enumerator — the
 # SAME enumerator aiteamforge-persona-parity-check.sh's S3 surface uses
 # (XACA-0931-003), so the upgrade-path fixer and the drift detector can never
@@ -3469,6 +3472,11 @@ update_runtime_helpers() {
   _aitf_install_power_guard_bundle "$scripts_source" "$scripts_dest" "$([ "$DRY_RUN" = true ] && echo dry)"
   updated=$((updated + AITF_PG_BUNDLE_COUNT))
 
+  # XACA-1402-011: iMessage relay bundle (scripts/imessage-relay/). A subdirectory, so only
+  # this step reaches it; always (re)written, materialised when absent. Files only.
+  _aitf_install_imessage_relay_bundle "$scripts_source" "$scripts_dest" "$([ "$DRY_RUN" = true ] && echo dry)"
+  updated=$((updated + AITF_IR_BUNDLE_COUNT))
+
   if [ $updated -eq 0 ]; then
     print_success "All runtime helper scripts up to date"
   elif [ "$DRY_RUN" = true ]; then
@@ -3496,6 +3504,13 @@ update_runtime_helpers() {
   # never runs sudo, never blocks the upgrade, silent when the daemon is not installed.
   if [ "$DRY_RUN" != true ]; then
     _aitf_power_guard_upgrade_notice "${scripts_dest}" || true
+  fi
+
+  # XACA-1402-011: an INSTALLED iMessage relay runs a copy at scripts/imessage-relay.js that this
+  # upgrade does not refresh. Print the exact re-run when it differs from the staged client/.
+  # Advisory: never runs the installer or launchctl, silent when the agent is not installed.
+  if [ "$DRY_RUN" != true ]; then
+    _aitf_imessage_relay_upgrade_notice "${scripts_dest}" || true
   fi
 
   # XACA-0677: Refresh the root-level iterm2_window_manager.py copy.

@@ -21,10 +21,18 @@
  *
  * POLICY ORDER (final): no-route short-circuit -> quiet hours (notice-level:
  * every routed connection gets a suppressed receipt, no provider call) -> per
- * connection: dedupe check -> resolve connection -> provider lookup -> rate
- * limit -> send with timeout (aborted via AbortSignal on timeout).
+ * connection: dedupe check -> resolve connection -> provider lookup -> severity
+ * gate (XACA-1402) -> rate limit -> send with timeout (aborted via AbortSignal
+ * on timeout).
  * Resolution and provider lookup come BEFORE the rate limiter so an unknown
- * connection/provider never spends a slot.
+ * connection/provider never spends a slot; the severity gate comes before it
+ * too, so a gated notice never spends one either.
+ * SEVERITY GATE (XACA-1402): connection.params.minSeverity (else the provider's
+ * defaultMinSeverity, if it declares one) is a floor; a notice ranking below it
+ * gets a suppressed 'severity-gate' receipt and no provider call.
+ * ASYNC DELIVERY: a provider with `asyncDelivery: true` (imessage) reports only
+ * acceptance, so its send receipt carries stage 'accepted'; the provider's queue
+ * appends the delivered/failed receipt later with the same providerMessageId.
  * DEDUPE IS PER CONNECTION (key team|type|ref|connectionId): a connection that
  * already delivered inside the window is suppressed, one that failed is tried
  * again. dedupe.record() runs only for a connection whose send succeeded.
@@ -42,7 +50,7 @@
 const { attemptSend } = require('./notify-providers');
 const { createReceiptLog } = require('./notify-receipts');
 const {
-    SEVERITIES, DEFAULT_DEDUPE_WINDOW_SECONDS, isValidSeverity,
+    SEVERITIES, DEFAULT_DEDUPE_WINDOW_SECONDS, isValidSeverity, severityRank,
     quietHoursDecision, createDedupeTracker, createRateLimiter,
 } = require('./notify-policies');
 const { NotifyCryptoError } = require('./notify-store');
@@ -168,17 +176,26 @@ function createNotifyDispatcher(opts = {}) {
         const pname = connection.provider;
         if (!registry.has(pname)) return make(id, { ok: false, error: 'unknown provider', provider: pname });
 
+        const provider = registry.get(pname);
+        const params = isPlainObject(connection.params) ? connection.params : {};
+        const floor = isValidSeverity(params.minSeverity) ? params.minSeverity
+            : (isValidSeverity(provider.defaultMinSeverity) ? provider.defaultMinSeverity : null);
+        if (floor !== null && severityRank(message.severity) < severityRank(floor)) {
+            return make(id, { ok: false, error: '', suppressed: 'severity-gate', provider: pname });
+        }
+
         const rl = rateLimiter.take(id);
         if (!rl.allowed) return make(id, { ok: false, error: '', suppressed: 'rate-limit' });
 
         const controller = new AbortController();
         const out = await withTimeout(
-            attemptSend(registry.get(pname), connection, message, controller.signal), sendTimeoutMs, controller);
+            attemptSend(provider, connection, message, controller.signal), sendTimeoutMs, controller);
         if (out.ok === true) dedupe.record(dd.team, dd.type, dd.ref, dd.window, id);
         // A provider's error text may echo this connection's own secret or destination: scrub, then bound.
         const error = out.ok === true ? '' : scrubText(out.error, sensitiveValues(connection), MAX_ERROR_TEXT);
         const fields = { ok: out.ok === true, error, provider: pname };
         if (out.providerMessageId) fields.providerMessageId = out.providerMessageId;
+        if (out.ok === true && provider.asyncDelivery === true) fields.stage = 'accepted';
         return make(id, fields);
     }
 

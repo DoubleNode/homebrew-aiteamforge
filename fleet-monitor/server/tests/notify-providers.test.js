@@ -15,9 +15,9 @@ test('error classes form a hierarchy', () => {
     assert.ok(new NotifySendError('a') instanceof NotifyError);
 });
 
-test('default registry holds the test provider plus the XACA-1401 channels', () => {
+test('default registry holds the test provider plus the XACA-1401 channels and imessage', () => {
     const reg = defaultRegistry();
-    assert.deepEqual(reg.names(), ['email', 'ntfy', 'pushover', 'slack', 'teams', 'test']);
+    assert.deepEqual(reg.names(), ['email', 'imessage', 'ntfy', 'pushover', 'slack', 'teams', 'test']);
     assert.equal(reg.has('sms'), false);
     assert.throws(() => reg.get('sms'), (e) => e instanceof NotifyConfigError && /unknown provider/.test(e.message));
 });

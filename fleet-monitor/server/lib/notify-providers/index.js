@@ -29,7 +29,9 @@
  *  - A FOREIGN exception's text may embed the target (a URL in a fetch error,
  *    a token in a library message): attemptSend records its TYPE only.
  *  - defaultRegistry() registers `test` plus the XACA-1401 channels (teams,
- *    slack, email, pushover, ntfy). SMS lands in XACA-1402.
+ *    slack, email, pushover, ntfy) and `imessage` (XACA-1402: enqueue for the
+ *    consumer-Mac sender pool; optional `asyncDelivery`/`defaultMinSeverity`
+ *    provider fields drive the dispatcher's accepted-stage receipt and severity gate).
  */
 
 class NotifyError extends Error {
@@ -149,7 +151,8 @@ function createTestProvider() {
     };
 }
 
-function defaultRegistry() {
+/** @param {{imessageQueue?: object}} [opts] the imessage sender-pool queue the relay routes also use. */
+function defaultRegistry({ imessageQueue } = {}) {
     // Required lazily: each provider module requires this file for the error
     // classes, so a top-level require here would be a cycle (XACA-1401-005).
     const { createTeamsProvider } = require('./teams');
@@ -157,6 +160,7 @@ function defaultRegistry() {
     const { createEmailProvider } = require('./email');
     const { createPushoverProvider } = require('./pushover');
     const { createNtfyProvider } = require('./ntfy');
+    const { createImessageProvider } = require('./imessage');
     const reg = createProviderRegistry();
     reg.register('test', createTestProvider());
     reg.register('teams', createTeamsProvider());
@@ -164,6 +168,7 @@ function defaultRegistry() {
     reg.register('email', createEmailProvider());
     reg.register('pushover', createPushoverProvider());
     reg.register('ntfy', createNtfyProvider());
+    reg.register('imessage', createImessageProvider({ queue: imessageQueue }));
     return reg;
 }
 
