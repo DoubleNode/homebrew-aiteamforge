@@ -261,3 +261,27 @@ test('lead modal confirm class follows the caller: danger by default, confirm fo
         'REMOVE LEAD after ADD LEAD must not inherit the confirm class');
     assert.match(SRC, /confirmLabel: 'ADD LEAD',\s*\n\s*confirmClass: 'modal-btn-confirm'/, 'ADD LEAD caller passes confirmClass');
 });
+
+// XACA-1486: danger buttons must meet WCAG AA text contrast (4.5:1) on every crimson they render on.
+test('modal-btn-danger text meets WCAG AA contrast on base, fallback and hover backgrounds', function () {
+    var css = fs.readFileSync(path.join(__dirname, '..', 'css', 'lcars.css'), 'utf8');
+    var rule = css.match(/\.lcars-modal-overlay \.modal-btn-danger \{([^}]*)\}/);
+    var hover = css.match(/\.lcars-modal-overlay \.modal-btn-danger:hover \{([^}]*)\}/);
+    assert.ok(rule && hover, 'danger rules not found');
+    function hexIn(decl, prop) {
+        var m = decl.match(new RegExp(prop + ':\\s*(?:var\\([^,]+,\\s*)?(#[0-9a-fA-F]{6})'));
+        assert.ok(m, prop + ' hex not found in: ' + decl);
+        return m[1];
+    }
+    function lum(h) {
+        return [1, 3, 5].map(function (i) { return parseInt(h.substr(i, 2), 16) / 255; })
+            .map(function (c) { return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); })
+            .reduce(function (a, c, i) { return a + c * [0.2126, 0.7152, 0.0722][i]; }, 0);
+    }
+    function ratio(a, b) { var x = lum(a), y = lum(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); }
+    var fg = hexIn(rule[1], 'color');
+    var token = css.match(/--lcars-crimson:\s*(#[0-9a-fA-F]{6})/)[1];
+    [token, hexIn(rule[1], 'background'), hexIn(hover[1], 'background')].forEach(function (bg) {
+        assert.ok(ratio(fg, bg) >= 4.5, fg + ' on ' + bg + ' is ' + ratio(fg, bg).toFixed(2) + ':1');
+    });
+});

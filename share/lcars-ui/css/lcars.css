@@ -10736,7 +10736,9 @@ body {
 
 .lcars-modal-overlay .modal-btn-danger {
     background: var(--lcars-crimson, #cc6666);
-    color: var(--lcars-white, #ffffff);
+    /* Dark text, like .modal-btn-confirm: white on crimson was ~3.0-3.4:1 (fails WCAG AA
+       4.5:1 at 14px/600); dark is >=5.3:1 on every crimson incl. :hover — XACA-1486 */
+    color: var(--lcars-black, #0a0a0f);
 }
 
 .lcars-modal-overlay .modal-btn-danger:hover {
