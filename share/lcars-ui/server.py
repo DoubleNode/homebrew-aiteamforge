@@ -17723,6 +17723,21 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             print(f"[LCARS] ERROR serving release branches: {e}")
             self._send_json_response({'error': str(e)}, status=500)
 
+    @staticmethod
+    def _git_accepts_branch_name(name):
+        """XACA-1484-013: (ok, reason) from `git check-ref-format --branch <name>`. Argv list, no shell, short
+        timeout, GIT_DIR-style vars stripped. Fails closed: missing git / OS error / timeout => (False, why)."""
+        clean = {k: v for k, v in os.environ.items() if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE")}
+        clean["GIT_TERMINAL_PROMPT"] = "0"
+        try:
+            r = subprocess.run(["git", "check-ref-format", "--branch", name], capture_output=True, text=True,
+                               stdin=subprocess.DEVNULL, timeout=10, env=clean)
+        except (OSError, subprocess.SubprocessError) as e:
+            return False, 'could not run git check-ref-format (%s); refusing to write' % type(e).__name__
+        if r.returncode != 0:
+            return False, 'git check-ref-format --branch rejects it as a branch name'
+        return True, ''
+
     def handle_update_release_branches(self):
         """POST /api/release-branches (XACA-1484-004).
 
@@ -17804,6 +17819,15 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         new_eff = _release_branches.effective_branches(new_rcfg)   # the consumers' own validator
                     except ValueError as e:
                         raise _DeferredResponse.json({'success': False, 'error': str(e)}, 400)
+                    # XACA-1484-013: _SAFE_REF is looser than git (a//b, x/.y, dev., a/b.lock/c ...). Ask git
+                    # itself about each value being CHANGED; fail closed if git cannot answer.
+                    for k, v in wanted.items():
+                        if isinstance(old_br.get(k), str) and old_br[k] == v:
+                            continue
+                        ok, why = self._git_accepts_branch_name(v)
+                        if not ok:
+                            raise _DeferredResponse.json(
+                                {'success': False, 'error': '%s %r refused: %s' % (k, v, why)}, 400)
                     try:
                         old_eff = _release_branches.effective_branches(rcfg)
                     except ValueError:
