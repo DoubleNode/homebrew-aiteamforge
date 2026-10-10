@@ -22,10 +22,11 @@ const express = require('express');
 const request = require('supertest');
 
 const FLEET = 'fleet-' + crypto.randomBytes(8).toString('hex');
+const ADMIN = 'admin-' + crypto.randomBytes(8).toString('hex'); // XACA-1488: a SEPARATE admin tier is required for the notify team routes
 const SENTINEL = 'SENTINEL-s3cret-' + crypto.randomBytes(6).toString('hex');
 const SAVED = { a: process.env.FLEET_ADMIN_TOKEN, f: process.env.FLEET_AUTH_TOKEN };
 process.env.FLEET_AUTH_TOKEN = FLEET;
-delete process.env.FLEET_ADMIN_TOKEN;
+process.env.FLEET_ADMIN_TOKEN = ADMIN;
 
 const { createNotifyStore } = require('../lib/notify-store');
 const { registerNotifyRoutes } = require('../lib/notify-routes');
@@ -53,7 +54,7 @@ function build(key, withGate = true) {
     registerNotifyRoutes(app, deps);
     return { app, store, file };
 }
-const auth = (r) => r.set('x-api-key', FLEET);
+const auth = (r) => r.set('x-api-key', ADMIN);
 const cfg = (over) => Object.assign({
     $schema: 'release-notify/v2', version: 2,
     routes: { 'pr-merged': ['phone-sms'], 'build-failed': ['phone-sms', 'team-chat'] },

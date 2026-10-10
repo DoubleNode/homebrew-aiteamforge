@@ -20,7 +20,7 @@ const { test, describe, after } = require('node:test');
 const assert = require('node:assert/strict');
 const H = require('./xaca-1400-007-helpers');
 const {
-    request, fs, path, rand, adm, flt, cfg, pushRoutes, notice, post, mkConn, readLines, sleep, assertNoLeak,
+    request, fs, path, rand, adm, flt, tkAuth, cfg, pushRoutes, notice, post, mkConn, readLines, sleep, assertNoLeak,
     makeHarness, makeProvider, makeClock, captureConsole, NotifyConfigError, NotifySendError,
     createTestProvider, createNotifyStore, createReceiptLog, createNotifyDispatcher, createProviderRegistry,
 } = H;
@@ -226,18 +226,19 @@ describe('1. secret leakage', () => {
         const h = makeHarness();
         const raw = async (url, method, text) => flt(adm(request(h.app)[method](url)).set('content-type', 'application/json')).send(text);
         const send = (method, url, text, tier = adm) => tier(request(h.app)[method](url)).set('content-type', 'application/json').send(text);
+        const tka = tkAuth(h, 'team-a'); // XACA-1488: the routes/:team + POST /api/notify routes want a team key, not the fleet key
         const r1 = await send('post', '/api/notify/connections',
             '{"id":"c1","provider":"test","label":"l","params":{"__proto__":{"polluted":1}},"secrets":{"token":"t"}}');
         const r2 = await send('post', '/api/notify/connections',
             '{"id":"c2","provider":"test","label":"l","secrets":{"__proto__":"x","token":"t"}}');
         const r3 = await send('put', '/api/notify/routes/team-a',
-            '{"config":{"$schema":"release-notify/v2","version":2,"routes":{"__proto__":["a"]}}}', flt);
+            '{"config":{"$schema":"release-notify/v2","version":2,"routes":{"__proto__":["a"]}}}', tka);
         const r4 = await send('put', '/api/notify/routes/team-a',
-            '{"config":{"$schema":"release-notify/v2","version":2,"routes":{},"__proto__":{"x":1}}}', flt);
+            '{"config":{"$schema":"release-notify/v2","version":2,"routes":{},"__proto__":{"x":1}}}', tka);
         const r5 = await send('put', '/api/notify/routes/team-a',
-            '{"config":{"$schema":"release-notify/v2","version":2,"routes":{}},"catalog":{"$schema":"notice-types/v1","schemaVersion":1,"types":[{"id":"__proto__","defaultSeverity":"info","description":"d"}]}}', flt);
+            '{"config":{"$schema":"release-notify/v2","version":2,"routes":{}},"catalog":{"$schema":"notice-types/v1","schemaVersion":1,"types":[{"id":"__proto__","defaultSeverity":"info","description":"d"}]}}', tka);
         const r6 = await send('post', '/api/notify',
-            '{"team":"team-a","type":"pr-merged","title":"t","body":"b","__proto__":{"x":1}}', flt);
+            '{"team":"team-a","type":"pr-merged","title":"t","body":"b","__proto__":{"x":1}}', tka);
         void raw;
         for (const [i, r] of [r1, r2, r3, r4, r5, r6].entries()) assert.equal(r.status, 400, `case ${i + 1}: ${r.text.slice(0, 120)}`);
         assert.equal({}.polluted, undefined);
@@ -319,7 +320,7 @@ describe('2. fail-open', () => {
             let put; let get; let pst;
             try {
                 put = await pushRoutes(h, 'team-a', { 'pr-merged': ['conn-a'] });
-                get = await flt(request(h.app).get('/api/notify/routes/team-a'));
+                get = await tkAuth(h, 'team-a')(request(h.app).get('/api/notify/routes/team-a'));
                 pst = await post(h);
             } finally { cap.restore(); }
             assert.equal(put.status, 404); assert.equal(get.status, 404); assert.equal(pst.status, 404);
@@ -344,9 +345,9 @@ describe('2. fail-open', () => {
                 adm(request(h.app).get('/api/notify/connections/c1')),
                 adm(request(h.app).put('/api/notify/connections/c1')).send({ label: 'x' }),
                 adm(request(h.app).delete('/api/notify/connections/c1')),
-                flt(request(h.app).put('/api/notify/routes/team-a')).send({ config: cfg({}) }),
-                flt(request(h.app).get('/api/notify/routes/team-a')),
-                flt(request(h.app).post('/api/notify')).send(notice()),
+                tkAuth(h, 'team-a')(request(h.app).put('/api/notify/routes/team-a')).send({ config: cfg({}) }),
+                tkAuth(h, 'team-a')(request(h.app).get('/api/notify/routes/team-a')),
+                tkAuth(h, 'team-a')(request(h.app).post('/api/notify')).send(notice()),
             ];
             for (const r of await Promise.all(reqs)) assert.equal(r.status, 503, `key=${String(key).slice(0, 8)}: ${r.req.method} ${r.req.path}`);
             assert.equal(fs.existsSync(h.storeFile), false);
@@ -571,7 +572,8 @@ describe('2. fail-open', () => {
         const h = makeHarness();
         const admin = [['get', '/api/notify/status'], ['get', '/api/notify/connections'], ['post', '/api/notify/connections'],
             ['get', '/api/notify/connections/x'], ['put', '/api/notify/connections/x'], ['delete', '/api/notify/connections/x'],
-            ['get', '/api/notify/receipts']];
+            ['get', '/api/notify/receipts'],
+            ['post', '/api/notify/teams/team-a/key'], ['delete', '/api/notify/teams/team-a/key']]; // XACA-1488
         const fleet = [['put', '/api/notify/routes/team-a'], ['get', '/api/notify/routes/team-a'], ['post', '/api/notify']];
         for (const [m, u] of [...admin, ...fleet]) {
             assert.equal((await request(h.app)[m](u).send({})).status, 401, `no key ${m} ${u}`);
@@ -581,9 +583,14 @@ describe('2. fail-open', () => {
             const s = (await flt(request(h.app)[m](u)).send({})).status;
             assert.ok(s === 401 || s === 403, `fleet key on admin route ${m} ${u} -> ${s}`);
         }
+        // XACA-1488: the fleet API key no longer opens the team-gated routes; admin and a team key do.
         for (const [m, u] of fleet) {
+            const fs_ = (await flt(request(h.app)[m](u)).send({})).status;
+            assert.equal(fs_, 401, `fleet key on team-gated route ${m} ${u} -> ${fs_}`);
             const s = (await adm(request(h.app)[m](u)).send({})).status;
             assert.notEqual(s, 401, `admin key on fleet route ${m} ${u}`);
+            const t = (await tkAuth(h, 'team-a')(request(h.app)[m](u)).send({})).status;
+            assert.notEqual(t, 401, `team key on team-gated route ${m} ${u}`);
         }
     });
 });
@@ -595,10 +602,10 @@ describe('3. cross-team isolation', () => {
         mkConn(h, 'conn-a'); mkConn(h, 'conn-b');
         await pushRoutes(h, 'team-b', { 'pr-merged': ['conn-b'] });
         const body = { config: cfg({ 'pr-merged': ['conn-a'] }), team: 'team-b', teams: { 'team-b': {} } };
-        assert.equal((await flt(request(h.app).put('/api/notify/routes/team-a')).send(body)).status, 200);
-        const gb = await flt(request(h.app).get('/api/notify/routes/team-b'));
+        assert.equal((await tkAuth(h, 'team-a')(request(h.app).put('/api/notify/routes/team-a')).send(body)).status, 200);
+        const gb = await tkAuth(h, 'team-b')(request(h.app).get('/api/notify/routes/team-b'));
         assert.deepEqual(gb.body.config.routes, { 'pr-merged': ['conn-b'] });
-        const ga = await flt(request(h.app).get('/api/notify/routes/team-a'));
+        const ga = await tkAuth(h, 'team-a')(request(h.app).get('/api/notify/routes/team-a'));
         assert.deepEqual(ga.body.config.routes, { 'pr-merged': ['conn-a'] });
     });
 

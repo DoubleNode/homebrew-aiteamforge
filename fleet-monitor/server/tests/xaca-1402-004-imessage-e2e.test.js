@@ -29,12 +29,13 @@ const { execFile: realExecFile } = require('child_process');
 const express = require('express');
 
 const FLEET = 'fleet-' + crypto.randomBytes(8).toString('hex');
+const ADMIN = 'admin-' + crypto.randomBytes(8).toString('hex'); // XACA-1488: a SEPARATE admin tier is required for the notify team routes
 const SAVED = {
     a: process.env.FLEET_ADMIN_TOKEN, f: process.env.FLEET_AUTH_TOKEN,
     u: process.env.FLEET_MONITOR_URL, h: process.env.HOME,
 };
 process.env.FLEET_AUTH_TOKEN = FLEET;
-delete process.env.FLEET_ADMIN_TOKEN;
+process.env.FLEET_ADMIN_TOKEN = ADMIN;
 
 const { wireNotifyHub } = require('../lib/notify-routes');
 const { createImessageQueue, MAX_WAIT_S, TTL_MS } = require('../lib/notify-imessage-queue');
@@ -76,9 +77,9 @@ async function startFm(connParams = {}, queueOpts = {}) {
     hub.store.setTeamRoutes('academy', { config: { $schema: 'release-notify/v2', version: 2, routes: { 'pr-merged': ['im-main'] } } });
     const srv = await new Promise((res) => { const s = http.createServer(app); s.listen(0, '127.0.0.1', () => res(s)); });
     const url = `http://127.0.0.1:${srv.address().port}`;
-    const hdr = { 'x-api-key': FLEET, 'content-type': 'application/json' };
+    const hdrFor = (p) => ({ 'x-api-key': p.startsWith('/api/notify/imessage') ? FLEET : ADMIN, 'content-type': 'application/json' });
     const call = async (method, p, body) => {
-        const r = await fetch(url + p, { method, headers: hdr, body: body === undefined ? undefined : JSON.stringify(body) });
+        const r = await fetch(url + p, { method, headers: hdrFor(p), body: body === undefined ? undefined : JSON.stringify(body) });
         const text = await r.text();
         let json = null; try { json = JSON.parse(text); } catch (_) { /* 204 */ }
         return { status: r.status, json, text };

@@ -518,5 +518,8 @@ module.exports = {
     getAuthPosture,
     getAdminExpectedKey,
     safeEqual,
+    // XACA-1488-003: reused by notify-routes' per-team key gate (no duplicated parsing / 401 body).
+    extractHeaderCredential,
+    sendUnauthorized,
     logAuthStartupNotice,
 };

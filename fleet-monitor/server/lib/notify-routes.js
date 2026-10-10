@@ -14,14 +14,26 @@
  * PUT /api/notify/routes/:team and later work adds POST /api/notify, inside
  * registerNotifyRoutes() below.
  *
- * Every route is ADMIN tier (requireAdminKey). No response ever contains a
- * secret value: connections are returned in their public view (secret fields
- * as 'set'), and error bodies carry a fixed code plus the store's own message,
- * which never includes submitted secret values. The request body is never
- * echoed. A disabled store (missing/malformed NOTIFY_STORE_KEY) answers 503.
+ * Auth tiers. ADMIN (requireAdminKey): status, connection CRUD, receipts, and the
+ * per-team key mint/revoke routes (XACA-1488). TEAM tier (PUT/GET
+ * /api/notify/routes/:team and POST /api/notify) uses makeRequireNotifyTeamKey:
+ * the admin key, or the team's own `fnt_` key bound to the team the request
+ * targets. The fleet API key no longer opens these routes (XACA-1488-004).
+ * FAIL CLOSED: the admin bypass and the mint/revoke routes require a SEPARATE admin tier
+ * (FLEET_ADMIN_TOKEN set and different from FLEET_AUTH_TOKEN). With the admin fallback to the fleet
+ * key, identical tokens, or open posture, mint/revoke answer 503 admin_tier_not_configured and the
+ * team routes accept only valid `fnt_` keys (everything else 401).
+ *
+ * No response contains a secret value, with ONE deliberate exception: the mint
+ * route returns the new team key's plaintext exactly once (Cache-Control:
+ * no-store; never logged, only its hash is stored). Connections are returned in
+ * their public view (secret fields as 'set'), and error bodies carry a fixed
+ * code plus the store's own message, which never includes submitted secret
+ * values. The request body is never echoed. A disabled store (missing/malformed
+ * NOTIFY_STORE_KEY) answers 503.
  */
 
-const { requireAdminKey, requireApiKey } = require('./auth-middleware');
+const { requireAdminKey, isAdminAuthorized, getAuthPosture, extractHeaderCredential, sendUnauthorized } = require('./auth-middleware');
 const { TEAM_RE, SEVERITIES } = require('./notify-team-routes');
 const { NotifyStoreError } = require('./notify-store');
 const { createNotifyDispatcher, NotifyDispatchError } = require('./notify-dispatcher');
@@ -56,6 +68,75 @@ function sendError(res, e) {
         return res.status(e.status).json({ error: e.code, message: e.message });
     }
     return res.status(500).json({ error: 'internal_error', message: 'internal error' });
+}
+
+const TEAM_KEY_PREFIX = 'fnt_';
+
+/**
+ * XACA-1488: the admin tier is "separate" only when FLEET_ADMIN_TOKEN is set AND differs from
+ * FLEET_AUTH_TOKEN. auth-middleware's admin tier otherwise falls back to the fleet key (or is open),
+ * which would let the fleet key pass the admin bypass / mint team keys. Fail closed here only; the
+ * global admin behaviour is untouched. Evaluated per request (env may change in tests).
+ */
+function adminTierSeparate() {
+    const p = getAuthPosture();
+    return p.admin === 'set' && !p.identical;
+}
+
+/**
+ * Posture guard for the mint/revoke routes, placed AFTER requireAdminKey (the route inventory test reads the first gate): 503 unless the admin tier is
+ * separate, so a fleet-key caller (fallback/identical/open posture) can never reach the handler.
+ */
+function requireSeparateAdminTier(req, res, next) {
+    if (!adminTierSeparate()) {
+        return res.status(503).json({
+            error: 'admin_tier_not_configured',
+            message: 'per-team notify keys require FLEET_ADMIN_TOKEN set and different from FLEET_AUTH_TOKEN',
+        });
+    }
+    return next();
+}
+
+/**
+ * XACA-1488-003: per-team notify key gate (plan D1/D3/D4).
+ *   a. admin credential (exactly as requireAdminKey accepts it) -> next(), no binding.
+ *   b. `fnt_` credential -> store.verifyTeamKey: disabled 503, no match 401,
+ *      bound team missing/different 403 (one fixed body naming neither team),
+ *      match -> req.notifyTeam = team, next().
+ *   c. anything else (fleet key, garbage, nothing) -> the standard byte-identical 401.
+ * A non-`fnt_` credential is never hashed against team hashes. Credentials are never logged.
+ *
+ * @param {{verifyTeamKey: Function}} store  createNotifyStore() object
+ * @param {(req) => any} bindTeam            team this request targets (req.params.team / req.body.team)
+ * @param {(req,res,bound) => boolean} [preBind]  optional: runs AFTER the key is verified and BEFORE the
+ *        binding compare; return false only if it already sent the response. Lets the route keep its
+ *        400/404 (invalid / unregistered team) answers ahead of the 403 (plan D4).
+ */
+function makeRequireNotifyTeamKey(store, bindTeam, preBind) {
+    return function requireNotifyTeamKey(req, res, next) {
+        try {
+            if (adminTierSeparate() && isAdminAuthorized(req)) return next();
+            const { status, credential } = extractHeaderCredential(req);
+            if (status !== 'present' || typeof credential !== 'string' || !credential.startsWith(TEAM_KEY_PREFIX)) {
+                return sendUnauthorized(res);
+            }
+            const team = store.verifyTeamKey(credential);
+            if (!team) return sendUnauthorized(res);
+            let bound;
+            try { bound = bindTeam(req); } catch (_) { bound = undefined; }
+            if (typeof preBind === 'function' && preBind(req, res, bound) === false) return undefined;
+            if (typeof bound !== 'string' || bound !== team) {
+                return res.status(403).json({ error: 'forbidden', message: 'key not valid for this team' });
+            }
+            req.notifyTeam = team;
+            return next();
+        } catch (e) {
+            if (e && e.code === 'store_disabled') {
+                return res.status(503).json({ error: 'store_disabled', message: `notify store disabled: ${e.message}` });
+            }
+            return res.status(500).json({ error: 'internal_error', message: 'internal error' });
+        }
+    };
 }
 
 /**
@@ -110,33 +191,69 @@ function registerNotifyRoutes(app, { store, registry, isRegisteredTeam, dispatch
         res.json({ deleted: req.params.id });
     }));
 
-    // ----- team routes (XACA-1400-002): fleet API key, team-scoped by id + registry.
-    // The key is fleet-wide, so scoping = well-formed id AND registered team.
+    // ----- team routes (XACA-1400-002): scoped by well-formed id AND registered team.
     // No isRegisteredTeam injected => fail closed (every team is "unknown").
-    const teamGate = (handler) => guard((req, res) => {
-        const team = req.params.team;
+    // Sends the 400/404 for a malformed / unregistered team id and returns true; false = team OK.
+    const sendTeamProblem = (res, team) => {
         if (typeof team !== 'string' || !TEAM_RE.test(team)) {
-            return res.status(400).json({ error: 'invalid', message: 'invalid team id' });
+            res.status(400).json({ error: 'invalid', message: 'invalid team id' });
+            return true;
         }
         let known = false;
         try { known = typeof isRegisteredTeam === 'function' && isRegisteredTeam(team) === true; } catch (_) { known = false; }
-        if (!known) return res.status(404).json({ error: 'not_found', message: 'unknown team' });
+        if (!known) {
+            res.status(404).json({ error: 'not_found', message: 'unknown team' });
+            return true;
+        }
+        return false;
+    };
+    const teamGate = (handler) => guard((req, res) => {
+        const team = req.params.team;
+        if (sendTeamProblem(res, team)) return undefined;
         return handler(req, res, team);
     });
 
-    app.put('/api/notify/routes/:team', requireApiKey, teamGate((req, res, team) => {
+    // preBind hooks (plan D4): keep the 400/404 answers ahead of the key-binding 403.
+    // Return false only when the response has been sent.
+    const preBindTeam = (req, res, bound) => (sendTeamProblem(res, bound) ? false : true);
+    const preBindDispatch = (req, res, bound) => {
+        const bad = validateNotifyBody(req.body);
+        if (bad) { res.status(400).json({ error: 'invalid', message: bad }); return false; }
+        return sendTeamProblem(res, bound) ? false : true;
+    };
+    const teamKeyGate = makeRequireNotifyTeamKey(store, (r) => r.params.team, preBindTeam);
+    const dispatchKeyGate = makeRequireNotifyTeamKey(store, (r) => r.body && r.body.team, preBindDispatch);
+
+    // ----- per-team notify keys (XACA-1488-002): ADMIN only. Mint returns the plaintext once.
+    app.post('/api/notify/teams/:team/key', requireAdminKey, requireSeparateAdminTier, teamGate((req, res, team) => {
+        const key = store.mintTeamKey(team);
+        const entry = store.listTeamKeys().find((k) => k.team === team);
+        res.set('Cache-Control', 'no-store');
+        res.status(201).json({
+            team, key, createdAt: entry ? entry.createdAt : null,
+            note: 'This key is shown once and cannot be retrieved again; store it now. Minting again replaces it.',
+        });
+    }));
+
+    app.delete('/api/notify/teams/:team/key', requireAdminKey, requireSeparateAdminTier, teamGate((req, res, team) => {
+        const revoked = store.revokeTeamKey(team);
+        res.set('Cache-Control', 'no-store');
+        res.json({ team, revoked });
+    }));
+
+    app.put('/api/notify/routes/:team', teamKeyGate, teamGate((req, res, team) => {
         const rec = store.setTeamRoutes(team, req.body);
         res.json({ team, routes: rec.config.routes, updatedAt: rec.updatedAt, catalogTypes: Object.keys(rec.catalog).length });
     }));
 
-    app.get('/api/notify/routes/:team', requireApiKey, teamGate((req, res, team) => {
+    app.get('/api/notify/routes/:team', teamKeyGate, teamGate((req, res, team) => {
         const rec = store.getTeamRoutes(team);
         if (!rec) return res.status(404).json({ error: 'not_found', message: 'no routes pushed for team' });
         res.json({ team, config: rec.config, catalog: rec.catalog, updatedAt: rec.updatedAt });
     }));
 
-    // ----- dispatch (XACA-1400-003): fleet API key, same team scoping as routes.
-    app.post('/api/notify', requireApiKey, guard(async (req, res) => {
+    // ----- dispatch (XACA-1400-003): same team scoping as routes; key gate is team-bound (XACA-1488-004).
+    app.post('/api/notify', dispatchKeyGate, guard(async (req, res) => {
         try {
             const bad = validateNotifyBody(req.body);
             if (bad) return res.status(400).json({ error: 'invalid', message: bad });
@@ -220,4 +337,4 @@ function wireNotifyHub(app, opts) {
     return { store, registry, receipts, imessageQueue };
 }
 
-module.exports = { registerNotifyRoutes, wireNotifyHub };
+module.exports = { registerNotifyRoutes, wireNotifyHub, makeRequireNotifyTeamKey };

@@ -16,7 +16,7 @@ const { test, describe, after } = require('node:test');
 const assert = require('node:assert/strict');
 const H = require('./xaca-1400-007-helpers');
 const {
-    request, fs, path, rand, adm, flt, cfg, pushRoutes, notice, post, mkConn, readLines,
+    request, fs, path, rand, adm, tkAuth, cfg, pushRoutes, notice, post, mkConn, readLines,
     makeHarness, makeProvider, createReceiptLog, createNotifyStore, createProviderRegistry, createTestProvider,
 } = H;
 
@@ -151,7 +151,7 @@ describe('5. input bounds', () => {
             assert.equal((await post(h, notice(n))).status, 400, JSON.stringify(n));
         }
         for (const bad of [null, [], 'str', 5]) {
-            const r = await flt(request(h.app).post('/api/notify')).set('content-type', 'application/json').send(JSON.stringify(bad));
+            const r = await tkAuth(h, 'team-a')(request(h.app).post('/api/notify')).set('content-type', 'application/json').send(JSON.stringify(bad));
             assert.ok(r.status >= 400 && r.status < 500, `body ${JSON.stringify(bad)} -> ${r.status}`);
         }
         const before = p.calls.length;

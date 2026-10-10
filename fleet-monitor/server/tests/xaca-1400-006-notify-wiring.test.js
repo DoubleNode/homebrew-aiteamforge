@@ -25,9 +25,10 @@ const express = require('express');
 const request = require('supertest');
 
 const FLEET = 'fleet-' + crypto.randomBytes(8).toString('hex');
+const ADMIN = 'admin-' + crypto.randomBytes(8).toString('hex'); // XACA-1488: a SEPARATE admin tier is required for the notify team routes
 const SAVED = { a: process.env.FLEET_ADMIN_TOKEN, f: process.env.FLEET_AUTH_TOKEN, k: process.env.NOTIFY_STORE_KEY };
 process.env.FLEET_AUTH_TOKEN = FLEET;
-delete process.env.FLEET_ADMIN_TOKEN;
+process.env.FLEET_ADMIN_TOKEN = ADMIN;
 delete process.env.NOTIFY_STORE_KEY;
 
 const { wireNotifyHub } = require('../lib/notify-routes');
@@ -68,13 +69,13 @@ describe('wireNotifyHub with a key', () => {
         const m = mount(KEY);
         assert.deepEqual(m.hub.store.status(), { enabled: true });
         m.hub.store.createConnection({ id: 'conn-a', provider: 'test', label: 'a', secrets: { token: 'tok-secret' } });
-        const put = await request(m.app).put('/api/notify/routes/academy').set('x-api-key', FLEET).send(ROUTES);
+        const put = await request(m.app).put('/api/notify/routes/academy').set('x-api-key', ADMIN).send(ROUTES);
         assert.equal(put.status, 200, put.text);
-        const r = await request(m.app).post('/api/notify').set('x-api-key', FLEET).send(NOTICE);
+        const r = await request(m.app).post('/api/notify').set('x-api-key', ADMIN).send(NOTICE);
         assert.equal(r.status, 200, r.text);
         assert.equal(r.body.ok, true);
         assert.equal(r.body.delivered, 1);
-        const rec = await request(m.app).get('/api/notify/receipts?team=academy').set('x-api-key', FLEET);
+        const rec = await request(m.app).get('/api/notify/receipts?team=academy').set('x-api-key', ADMIN);
         assert.equal(rec.status, 200, rec.text);
         assert.equal(rec.body.receipts.length, 1);
         assert.equal(rec.body.receipts[0].ok, true);
@@ -82,7 +83,7 @@ describe('wireNotifyHub with a key', () => {
 
     test('an unregistered team is refused (isRegisteredTeam is honoured)', async () => {
         const m = mount(KEY);
-        const r = await request(m.app).post('/api/notify').set('x-api-key', FLEET).send({ ...NOTICE, team: 'nosuch' });
+        const r = await request(m.app).post('/api/notify').set('x-api-key', ADMIN).send({ ...NOTICE, team: 'nosuch' });
         assert.equal(r.status, 404);
     });
 
@@ -98,15 +99,15 @@ describe('wireNotifyHub without a usable key (disabled)', () => {
     test('no key: status reports disabled, store endpoints 503, the app still serves', async () => {
         const m = mount();
         assert.equal(m.hub.store.status().enabled, false);
-        const st = await request(m.app).get('/api/notify/status').set('x-api-key', FLEET);
+        const st = await request(m.app).get('/api/notify/status').set('x-api-key', ADMIN);
         assert.equal(st.status, 200, st.text);
         assert.equal(st.body.enabled, false);
         assert.match(st.body.reason, /NOTIFY_STORE_KEY is not set/);
         assert.ok(st.body.providers.includes('test'));
         for (const r of [
-            await request(m.app).get('/api/notify/connections').set('x-api-key', FLEET),
-            await request(m.app).put('/api/notify/routes/academy').set('x-api-key', FLEET).send(ROUTES),
-            await request(m.app).post('/api/notify').set('x-api-key', FLEET).send(NOTICE),
+            await request(m.app).get('/api/notify/connections').set('x-api-key', ADMIN),
+            await request(m.app).put('/api/notify/routes/academy').set('x-api-key', ADMIN).send(ROUTES),
+            await request(m.app).post('/api/notify').set('x-api-key', ADMIN).send(NOTICE),
         ]) assert.equal(r.status, 503, r.text);
         assert.equal((await request(m.app).get('/ping')).status, 200);
         assert.equal(m.logs.length, 1);

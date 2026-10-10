@@ -22,8 +22,9 @@
  *   3. Cookie login + CSRF — login/logout/session routes, each CSRF layer
  *      rejecting on its own, header auth unaffected, cookie refused on the
  *      fleet tier, rate limit, no echo of the token.
- *   4. Route inventory (static, source-derived) — the 35 admin routes are on
- *      requireAdminKey, the 9 fleet routes stay on the fleet gate, and every
+ *   4. Route inventory (static, source-derived) — the 37 admin routes are on
+ *      requireAdminKey, the 10 fleet routes stay on the fleet gate, the 3 notify
+ *      team routes are on the per-team key gate, and every
  *      mutating route anywhere is gated or deliberately allowlisted.
  *   5. vault + engines (real route modules) — ALL 9 of their admin routes
  *      refuse the fleet token once FLEET_ADMIN_TOKEN is set.
@@ -578,7 +579,7 @@ describe('cookie on an admin route — each CSRF layer rejects on its own', () =
 // 4. Route inventory (static, source-derived)
 // ===========================================================================
 
-// The 35 admin-tier routes (19 from the design's §1 tier classification + 2 XACA-1441 + 4 XACA-1422 mint/revoke + 3 XACA-1392 accessories + 7 XACA-1400 notify). This is
+// The 37 admin-tier routes (19 from the design's §1 tier classification + 2 XACA-1441 + 4 XACA-1422 mint/revoke + 3 XACA-1392 accessories + 7 XACA-1400 notify + 2 XACA-1488 notify team-key mint/revoke). This is
 // the EXPECTED list — deliberately not derived from source, so a route moved
 // back to requireApiKey disappears from the source-derived admin set and the
 // equality assertion below fails.
@@ -615,7 +616,7 @@ const ADMIN_ROUTES = [
     { method: 'DELETE', path: '/api/accessories/:id/machines/:machineId',        file: 'lib/accessories-routes.js' },
     { method: 'PUT',    path: '/api/accessories/:id/nickname',                   file: 'lib/accessories-routes.js' },
     // XACA-1400 (EPIC-0068): notification hub connection CRUD, status and receipts. The team-scoped
-    // PUT/GET /api/notify/routes/:team and POST /api/notify stay on the fleet key (requireApiKey).
+    // PUT/GET /api/notify/routes/:team and POST /api/notify are on the per-team key tier below (XACA-1488).
     { method: 'GET',    path: '/api/notify/status',                              file: 'lib/notify-routes.js' },
     { method: 'GET',    path: '/api/notify/connections',                         file: 'lib/notify-routes.js' },
     { method: 'GET',    path: '/api/notify/connections/:id',                     file: 'lib/notify-routes.js' },
@@ -623,17 +624,26 @@ const ADMIN_ROUTES = [
     { method: 'PUT',    path: '/api/notify/connections/:id',                     file: 'lib/notify-routes.js' },
     { method: 'DELETE', path: '/api/notify/connections/:id',                     file: 'lib/notify-routes.js' },
     { method: 'GET',    path: '/api/notify/receipts',                            file: 'lib/notify-routes.js' },
+    // XACA-1488: per-team notify key mint (shown once) and revoke.
+    { method: 'POST',   path: '/api/notify/teams/:team/key',                     file: 'lib/notify-routes.js' },
+    { method: 'DELETE', path: '/api/notify/teams/:team/key',                     file: 'lib/notify-routes.js' },
 ];
 
-// The 13 fleet-tier routes (XACA-1328 added the vault ciphertext GET; XACA-1400 added 3 notify routes; XACA-1422 moved ci-runners-push OUT to the
-// telemetry-key tier below). 10 use requireApiKey middleware; the 3 msg-relay
+// The 10 fleet-tier routes (XACA-1328 added the vault ciphertext GET; XACA-1488 moved the 3 notify team routes OUT to the per-team
+// key tier below; XACA-1422 moved ci-runners-push OUT to the telemetry-key tier). 7 use requireApiKey middleware; the 3 msg-relay
 // routes use the checkApiKey guard form inside the handler.
 const FLEET_MIDDLEWARE_ROUTES = [
     'POST /api/status', 'POST /api/team-register', 'POST /api/kanban-push', 'POST /api/knowledge-push',
     'POST /api/token-reports', 'GET /api/token-reports',
     'GET /api/vault/secrets/:engineSlug/:accountSlug/ciphertext', // XACA-1328
-    'PUT /api/notify/routes/:team', 'GET /api/notify/routes/:team', 'POST /api/notify', // XACA-1400: team-scoped by id + registry
 ];
+
+// XACA-1488: the notify team routes are gated by makeRequireNotifyTeamKey (admin key, or the team's own
+// `fnt_` key bound to the team the request targets) — deliberately NOT the fleet tier, so the fleet token
+// cannot push routes or dispatch for a team. Only in notify-routes.js. Gate identifiers are the local
+// consts bound to makeRequireNotifyTeamKey(...) in registerNotifyRoutes.
+const NOTIFY_TEAM_KEY_ROUTES = ['PUT /api/notify/routes/:team', 'GET /api/notify/routes/:team', 'POST /api/notify'];
+const NOTIFY_TEAM_KEY_GATES = ['teamKeyGate', 'dispatchKeyGate'];
 const FLEET_GUARD_ROUTES = ['POST /api/msg', 'GET /api/msg', 'POST /api/msg/ack'];
 
 // Mutating routes that are deliberately ungated: the login/logout routes are
@@ -673,12 +683,12 @@ describe('route inventory — every admin route is on the admin gate (static)', 
     const regs = deriveRegistrations();
     const key = (r) => `${r.method} ${r.path}`;
 
-    test('exactly 35 expected admin routes, no duplicates', () => {
-        assert.equal(ADMIN_ROUTES.length, 35);
-        assert.equal(new Set(ADMIN_ROUTES.map(key)).size, 35);
+    test('exactly 37 expected admin routes, no duplicates', () => {
+        assert.equal(ADMIN_ROUTES.length, 37);
+        assert.equal(new Set(ADMIN_ROUTES.map(key)).size, 37);
     });
 
-    test('the source-derived requireAdminKey set equals the 35 expected admin routes exactly', () => {
+    test('the source-derived requireAdminKey set equals the 37 expected admin routes exactly', () => {
         const derived = regs.filter((r) => r.gate === 'requireAdminKey').map((r) => `${r.file} ${key(r)}`).sort();
         const expected = ADMIN_ROUTES.map((r) => `${r.file} ${key(r)}`).sort();
         assert.deepEqual(derived, expected);
@@ -692,7 +702,7 @@ describe('route inventory — every admin route is on the admin gate (static)', 
         });
     }
 
-    test('the requireApiKey (fleet middleware) set is exactly the 10 fleet middleware routes (ci-runners-push is NOT one: XACA-1422)', () => {
+    test('the requireApiKey (fleet middleware) set is exactly the 7 fleet middleware routes (ci-runners-push is NOT one: XACA-1422)', () => {
         const derived = regs.filter((r) => r.gate === 'requireApiKey').map(key).sort();
         assert.deepEqual(derived, [...FLEET_MIDDLEWARE_ROUTES].sort());
     });
@@ -713,11 +723,12 @@ describe('route inventory — every admin route is on the admin gate (static)', 
         assert.ok(!/checkAdminKey|requireAdminKey/.test(src));
     });
 
-    test('tier totals: 35 admin + 13 fleet + 2 ci-host + 1 ci-telemetry = 51 guarded', () => {
+    test('tier totals: 37 admin + 10 fleet + 2 ci-host + 1 ci-telemetry + 3 notify-team-key = 53 guarded', () => {
         const admin = regs.filter((r) => r.gate === 'requireAdminKey').length;
         const fleet = regs.filter((r) => r.gate === 'requireApiKey').length + FLEET_GUARD_ROUTES.length;
-        assert.equal(admin, 35);
-        assert.equal(fleet, 13);
+        assert.equal(admin, 37);
+        assert.equal(fleet, 10);
+        assert.equal(regs.filter((r) => NOTIFY_TEAM_KEY_GATES.includes(r.gate)).length, 3);
         assert.equal(regs.filter((r) => r.gate === 'ciHostKey').length, 2);
         assert.equal(regs.filter((r) => r.gate === 'ciTelemetryKey').length, 1);
     });
@@ -733,6 +744,22 @@ describe('route inventory — every admin route is on the admin gate (static)', 
         assert.ok(!/requireApiKey/.test(src), 'ci-runners-routes.js must not reference the fleet gate at all');
     });
 
+    test('the notify team-key set is exactly the 3 notify team routes, only in notify-routes.js, never the fleet gate (XACA-1488)', () => {
+        const derived = regs.filter((r) => NOTIFY_TEAM_KEY_GATES.includes(r.gate));
+        assert.deepEqual(derived.map(key).sort(), [...NOTIFY_TEAM_KEY_ROUTES].sort());
+        assert.ok(derived.every((r) => r.file === 'lib/notify-routes.js'));
+        for (const k of NOTIFY_TEAM_KEY_ROUTES) {
+            const hits = regs.filter((r) => key(r) === k);
+            assert.equal(hits.length, 1, `expected exactly one registration of ${k}`);
+            assert.notEqual(hits[0].gate, 'requireApiKey', `${k} reverted to the fleet gate`);
+        }
+        const src = fs.readFileSync(path.join(SERVER_DIR, 'lib', 'notify-routes.js'), 'utf8');
+        assert.ok(!/requireApiKey/.test(src), 'notify-routes.js must not reference the fleet gate at all');
+        for (const g of NOTIFY_TEAM_KEY_GATES) {
+            assert.match(src, new RegExp(`const ${g} = makeRequireNotifyTeamKey\\(`), `${g} must be built by makeRequireNotifyTeamKey`);
+        }
+    });
+
     test('the ciHostKey (per-host key) set is exactly the 2 CI pool agent routes, only in ci-pool-routes.js', () => {
         const derived = regs.filter((r) => r.gate === 'ciHostKey');
         assert.deepEqual(derived.map(key).sort(), [...CI_HOST_KEY_ROUTES].sort());
@@ -743,6 +770,7 @@ describe('route inventory — every admin route is on the admin gate (static)', 
         const ungated = regs
             .filter((r) => r.method !== 'GET')
             .filter((r) => r.gate !== 'requireAdminKey' && r.gate !== 'requireApiKey')
+            .filter((r) => !(NOTIFY_TEAM_KEY_GATES.includes(r.gate) && r.file === 'lib/notify-routes.js' && NOTIFY_TEAM_KEY_ROUTES.includes(key(r))))
             .filter((r) => !(r.gate === 'ciHostKey' && r.file === 'lib/ci-pool-routes.js' && CI_HOST_KEY_ROUTES.includes(key(r))))
             .filter((r) => !(r.gate === 'ciTelemetryKey' && r.file === 'lib/ci-runners-routes.js' && CI_TELEMETRY_KEY_ROUTES.includes(key(r))))
             .filter((r) => r.file !== 'lib/msg-relay-routes.js') // guard form, asserted above

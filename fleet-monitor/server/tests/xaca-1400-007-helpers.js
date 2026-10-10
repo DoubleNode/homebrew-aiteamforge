@@ -119,14 +119,38 @@ function makeHarness(o = {}) {
 const adm = (r) => r.set('x-api-key', ADMIN);
 const flt = (r) => r.set('x-api-key', FLEET);
 
+/**
+ * XACA-1488: PUT/GET /api/notify/routes/:team and POST /api/notify are team-key gated (the fleet key
+ * is a 401 there). tk(h, team) mints (once per store+team, via the real store method) and caches a
+ * `fnt_` key for `team`; tkAuth(h, team)(req) sets it. A team the store cannot mint for (invalid id,
+ * disabled store) falls back to the ADMIN key, which the gate also accepts -- so tests that probe
+ * validation/disabled behaviour still reach the handler.
+ */
+const teamKeyCache = new WeakMap();
+function tk(h, team) {
+    let m = teamKeyCache.get(h.store);
+    if (!m) { m = new Map(); teamKeyCache.set(h.store, m); }
+    if (!m.has(team)) {
+        let k = ADMIN;
+        try { k = h.store.mintTeamKey(team); } catch (_) { /* fall back to admin */ }
+        m.set(team, k);
+    }
+    return m.get(team);
+}
+const tkAuth = (h, team) => (r) => r.set('x-api-key', tk(h, team));
+
 const cfg = (routes, extra) => ({ $schema: 'release-notify/v2', version: 2, routes, ...(extra || {}) });
 const pushRoutes = (h, team, routes, extra, catalog) => {
     const body = { config: cfg(routes, extra) };
     if (catalog !== undefined) body.catalog = catalog;
-    return flt(request(h.app).put(`/api/notify/routes/${team}`)).send(body);
+    return tkAuth(h, team)(request(h.app).put(`/api/notify/routes/${team}`)).send(body);
 };
 const notice = (over) => ({ team: 'team-a', type: 'pr-merged', title: 'T-title', body: 'B-body', ref: 'PR-1', ...(over || {}) });
-const post = (h, n) => flt(request(h.app).post('/api/notify')).send(n || notice());
+const post = (h, n) => {
+    const body = n || notice();
+    const team = body && typeof body.team === 'string' ? body.team : 'team-a';
+    return tkAuth(h, team)(request(h.app).post('/api/notify')).send(body);
+};
 const mkConn = (h, id, provider = 'test', token) => h.store.createConnection({
     id, provider, label: id, secrets: { token: token || `tok-${id}-${rand(4)}` },
 });
@@ -146,7 +170,7 @@ function assertNoLeak(assert, hay, needles) {
 
 module.exports = {
     ADMIN, FLEET, KEY, TMP, rand, cleanup, restoreEnv, makeClock, makeProvider, captureConsole, makeHarness,
-    adm, flt, cfg, pushRoutes, notice, post, mkConn, readLines, sleep, assertNoLeak,
+    adm, flt, tk, tkAuth, cfg, pushRoutes, notice, post, mkConn, readLines, sleep, assertNoLeak,
     request, express, fs, path, os, crypto,
     NotifyConfigError, NotifySendError, createTestProvider, createNotifyStore, createReceiptLog,
     createNotifyDispatcher, createProviderRegistry, registerNotifyRoutes,

@@ -127,6 +127,10 @@ function decryptValue(key, aad, envl) {
     return Buffer.concat([d.update(Buffer.from(envl.ct, 'base64')), d.final()]).toString('utf8');
 }
 
+const TEAM_KEY_PREFIX = 'fnt_';
+/** sha256 hex of a team notify key (XACA-1488). Keys are high-entropy random, so a plain hash is enough. */
+function hashTeamKey(k) { return crypto.createHash('sha256').update(k, 'utf8').digest('hex'); }
+
 function isEnvelope(e) {
     return isPlainObject(e) && typeof e.iv === 'string' && typeof e.tag === 'string' && typeof e.ct === 'string';
 }
@@ -151,7 +155,7 @@ function createNotifyStore(opts) {
     const key = parsed.key || null;
     const disabledReason = key ? null : parsed.reason;
 
-    let state = { version: SCHEMA_VERSION, connections: {}, routes: {} };
+    let state = { version: SCHEMA_VERSION, connections: {}, routes: {}, teamKeys: {} };
     // Recovery trace (D3/D4): ids and a basename only, never contents.
     let movedAside = null;
     let quarantined = [];
@@ -183,6 +187,7 @@ function createNotifyStore(opts) {
             version: SCHEMA_VERSION,
             connections: good,
             routes: isPlainObject(j.routes) ? j.routes : {},
+            teamKeys: loadTeamKeys(j.teamKeys),
         };
         if (bad.length === 0) return;
         quarantined = bad;
@@ -194,6 +199,17 @@ function createNotifyStore(opts) {
             movedAside = path.basename(aside);
             persist(state);
         } catch (_) { /* best effort: the in-memory state is already usable */ }
+    }
+    /** XACA-1488: a pre-1488 file has no teamKeys -> {}. Malformed entries are dropped (fail closed). */
+    function loadTeamKeys(raw) {
+        const out = {};
+        if (!isPlainObject(raw)) return out;
+        for (const [t, e] of Object.entries(raw)) {
+            if (teamRoutes.TEAM_RE.test(t) && isPlainObject(e) && typeof e.hash === 'string' && /^[0-9a-f]{64}$/.test(e.hash)) {
+                out[t] = { hash: e.hash, createdAt: typeof e.createdAt === 'string' ? e.createdAt : null };
+            }
+        }
+        return out;
     }
     function moveAside() {
         const aside = `${file}.corrupt-${clock().getTime()}`;
@@ -422,6 +438,51 @@ function createNotifyStore(opts) {
             const r = isPlainObject(state.routes) && has(state.routes, team) ? state.routes[team] : null;
             return r ? clone(r) : null;
         },
+        /**
+         * XACA-1488: mint a per-team notify key (`fnt_`). Returns the plaintext ONCE; only its
+         * sha256 hex is stored. Replaces any existing key for the team. Throws
+         * NotifyStoreDisabledError (503) when the store is disabled.
+         */
+        mintTeamKey(team) {
+            requireEnabled();
+            if (typeof team !== 'string' || !teamRoutes.TEAM_RE.test(team)) throw new NotifyValidationError('invalid team id');
+            const plaintext = TEAM_KEY_PREFIX + crypto.randomBytes(32).toString('base64url');
+            const hash = hashTeamKey(plaintext);
+            mutate((draft) => {
+                if (!isPlainObject(draft.teamKeys)) draft.teamKeys = {};
+                draft.teamKeys[team] = { hash, createdAt: clock().toISOString() };
+            });
+            return plaintext;
+        },
+        /** Idempotent. Returns true if a key existed. Throws NotifyStoreDisabledError when disabled. */
+        revokeTeamKey(team) {
+            requireEnabled();
+            if (typeof team !== 'string' || !teamRoutes.TEAM_RE.test(team)) throw new NotifyValidationError('invalid team id');
+            if (!isPlainObject(state.teamKeys) || !has(state.teamKeys, team)) return false;
+            mutate((draft) => { delete draft.teamKeys[team]; });
+            return true;
+        },
+        /**
+         * Returns the team a presented `fnt_` key belongs to, or null. Compares against EVERY
+         * stored hash (no early return) so timing does not reveal which team matched.
+         * Throws NotifyStoreDisabledError when disabled.
+         */
+        verifyTeamKey(presented) {
+            requireEnabled();
+            if (typeof presented !== 'string' || !presented.startsWith(TEAM_KEY_PREFIX) || presented.length > 256) return null;
+            const a = Buffer.from(hashTeamKey(presented), 'hex');
+            let matched = null;
+            for (const [team, e] of Object.entries(isPlainObject(state.teamKeys) ? state.teamKeys : {})) {
+                const b = Buffer.from(e.hash, 'hex');
+                if (b.length === a.length && crypto.timingSafeEqual(a, b)) matched = team;
+            }
+            return matched;
+        },
+        /** Teams that currently hold a key (no hashes). */
+        listTeamKeys() {
+            return Object.entries(isPlainObject(state.teamKeys) ? state.teamKeys : {})
+                .map(([team, e]) => ({ team, createdAt: e.createdAt })).sort((x, y) => x.team.localeCompare(y.team));
+        },
         /** Additive seam for XACA-1400-002 route methods. Not for HTTP callers. */
         _mutate: mutate,
         _state: () => state,
@@ -429,7 +490,7 @@ function createNotifyStore(opts) {
 }
 
 module.exports = {
-    createNotifyStore, parseKey, ID_RE,
+    createNotifyStore, parseKey, hashTeamKey, TEAM_KEY_PREFIX, ID_RE,
     NotifyStoreError, NotifyStoreDisabledError, NotifyValidationError,
     NotifyNotFoundError, NotifyConflictError, NotifyCryptoError, NotifySecretsUnreadableError,
 };

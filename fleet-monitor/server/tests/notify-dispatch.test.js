@@ -22,9 +22,10 @@ const express = require('express');
 const request = require('supertest');
 
 const FLEET = 'fleet-' + crypto.randomBytes(8).toString('hex');
+const ADMIN = 'admin-' + crypto.randomBytes(8).toString('hex'); // XACA-1488: a SEPARATE admin tier is required for the notify team routes
 const SAVED = { a: process.env.FLEET_ADMIN_TOKEN, f: process.env.FLEET_AUTH_TOKEN };
 process.env.FLEET_AUTH_TOKEN = FLEET;
-delete process.env.FLEET_ADMIN_TOKEN;
+process.env.FLEET_ADMIN_TOKEN = ADMIN;
 
 const { createNotifyStore } = require('../lib/notify-store');
 const { registerNotifyRoutes } = require('../lib/notify-routes');
@@ -85,7 +86,7 @@ const cfg = (over) => Object.assign({
     routes: { 'pr-merged': ['conn-a', 'conn-b'], 'build-failed': [] },
 }, over);
 const push = (ctx, config, team = 'academy') => ctx.store.setTeamRoutes(team, { config });
-const post = (app, body, key = FLEET) => {
+const post = (app, body, key = ADMIN) => {
     const r = request(app).post('/api/notify');
     return (key ? r.set('x-api-key', key) : r).send(body);
 };
@@ -316,7 +317,7 @@ describe('receipts', () => {
     test('GET /api/notify/receipts needs the admin key, filters by team, caps limit', async () => {
         const ctx = build(); push(ctx, cfg());
         await post(ctx.app, notice());
-        const g = (q, key = FLEET) => request(ctx.app).get(`/api/notify/receipts${q}`).set('x-api-key', key);
+        const g = (q, key = ADMIN) => request(ctx.app).get(`/api/notify/receipts${q}`).set('x-api-key', key);
         assert.equal((await request(ctx.app).get('/api/notify/receipts')).status, 401);
         const ok = await g('?team=academy&limit=1');
         assert.equal(ok.status, 200);

@@ -22,9 +22,10 @@ const express = require('express');
 const request = require('supertest');
 
 const FLEET = 'fleet-' + crypto.randomBytes(8).toString('hex');
+const ADMIN = 'admin-' + crypto.randomBytes(8).toString('hex'); // XACA-1488: a SEPARATE admin tier is required for the notify team routes
 const SAVED = { a: process.env.FLEET_ADMIN_TOKEN, f: process.env.FLEET_AUTH_TOKEN };
 process.env.FLEET_AUTH_TOKEN = FLEET;
-delete process.env.FLEET_ADMIN_TOKEN;
+process.env.FLEET_ADMIN_TOKEN = ADMIN;
 
 const { wireNotifyHub } = require('../lib/notify-routes');
 const { createImessageQueue, LEASE_MS } = require('../lib/notify-imessage-queue');
@@ -72,7 +73,8 @@ function build(connParams = {}) {
 const auth = (r) => r.set('x-api-key', FLEET);
 const claim = (ctx, body = { machineId: 'm1', waitSeconds: 0 }) => auth(request(ctx.app).post('/api/notify/imessage/claim')).send(body);
 const ack = (ctx, body) => auth(request(ctx.app).post('/api/notify/imessage/ack')).send(body);
-const notify = (ctx, over = {}) => auth(request(ctx.app).post('/api/notify'))
+const authAdmin = (r) => r.set('x-api-key', ADMIN);
+const notify = (ctx, over = {}) => authAdmin(request(ctx.app).post('/api/notify'))
     .send({ team: 'academy', type: 'pr-merged', title: TITLE, body: BODY, ref: 'PR-1', severity: 'high', ...over });
 const receiptLines = (ctx) => fs.readFileSync(ctx.receiptsFile, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
 
@@ -352,7 +354,7 @@ describe('no leaks (epic D5)', () => {
             const j = await claim(ctx, { machineId: m, waitSeconds: 0 });
             if (j.status === 200) await ack(ctx, { machineId: m, jobId: j.body.jobId, ok: false, errorType: echo });
         }
-        outputs.push((await auth(request(ctx.app).get('/api/notify/receipts'))).text);
+        outputs.push((await authAdmin(request(ctx.app).get('/api/notify/receipts'))).text);
         outputs.push(fs.readFileSync(ctx.receiptsFile, 'utf8'));
         outputs.push(silent.errors.join('\n'));
         assert.equal(c.body.recipient, RECIP, 'sanity: the claim itself carries the payload');
