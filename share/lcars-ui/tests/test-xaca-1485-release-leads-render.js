@@ -355,13 +355,26 @@ test('client-side name validation sends nothing', async function () {
     var env = seeded(roster([]), function () { throw new Error('must not POST'); });
     await env.sandbox.loadReleaseLeads();
     var bad = ['', '   ', 'a'.repeat(65), 'tab\tname', 'nl\nname',
-        'zw\u200bsp', 'rlo\u202ename', 'ls\u2028name', 'ps\u2029name', 'bom\ufeffname'];
+        'zw\u200bsp', 'rlo\u202ename', 'ls\u2028name', 'ps\u2029name', 'bom\ufeffname',
+        'Will Riker', '.x', '-x', '@x', '+x', 'caf\u00e9', '\u0430dmin', 'Riker\u3164', 'a\ufe0f', 'a\u034f', 'a\u2800'];
     for (var i = 0; i < bad.length; i++) {
         env.el['release-leads-input'].value = bad[i];
         await env.sandbox.onReleaseLeadAdd();
     }
     assert.equal(postsOf(env).length, 0);
     assert.equal(env.el['release-leads-status'].className.indexOf('error') !== -1, true);
+});
+
+test('client-side allowlist: accepted names are POSTed, regex mirrors the server pattern', async function () {
+    var ok = ['darrenehlers', 'ehlersd', 'a.b-c_d', 'user@example.com', 'x', 'y'.repeat(64)];
+    for (var i = 0; i < ok.length; i++) {
+        var env = seeded(roster([]), function () { return Promise.resolve(resp(200, roster(['n'], { changed: true, success: true }))); });
+        await env.sandbox.loadReleaseLeads();
+        env.el['release-leads-input'].value = ok[i];
+        await env.sandbox.onReleaseLeadAdd();
+        assert.equal(postsOf(env).length, 1, 'should POST ' + ok[i]);
+    }
+    assert.ok(SRC.indexOf('/^[A-Za-z0-9_][A-Za-z0-9._@+-]{0,63}$/') !== -1, 'JS regex literal must equal the server pattern');
 });
 
 test('1482 enforcement copy now points at the roster editor / kb-release leads', function () {

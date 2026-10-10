@@ -17668,10 +17668,12 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     _RELEASE_LEADS_ALLOWED_KEYS = {'team', 'op', 'name', 'actor'}
     _RELEASE_LEADS_OPS = ('add', 'remove')
     _RELEASE_LEADS_MAX_NAME = 64
-    # Unicode categories rejected in a name: Cc control, Cf format (zero-width, bidi overrides, BOM),
-    # Zl line separator, Zp paragraph separator. A name that looks identical but differs invisibly
-    # would be a lead nobody can see or remove.
-    _RELEASE_LEADS_BAD_CATEGORIES = frozenset(('Cc', 'Cf', 'Zl', 'Zp'))
+    # USER DECISION 2026-10-10 (closes XACA-1485-020/-021): `add` names follow a $USER-style ASCII
+    # allowlist (POSIX/macOS usernames and emails). ASCII-only class on purpose: Python \w and \d are
+    # Unicode. `remove` is NOT held to it so a legacy hand-seeded entry stays removable.
+    # MUST match _releaseLeadNameProblem in lcars-ui/js/lcars.js exactly.
+    _RELEASE_LEADS_NAME_PATTERN = r'[A-Za-z0-9_][A-Za-z0-9._@+-]{0,63}'
+    _RELEASE_LEADS_NAME_RE = re.compile(_RELEASE_LEADS_NAME_PATTERN)
 
     def _release_leads_fields(self, team, release_config, writable=True):
         """GET payload for `release_config` (a dict, {} when the board has none). configWarning
@@ -17733,15 +17735,15 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         """POST /api/release-leads (XACA-1485).
 
         Body {team, op, name, actor?}; op is exactly 'add' or 'remove' (no coercion). 400 bad
-        request (unknown keys/team, bad op/name/actor; name: non-empty after strip, no control
-        chars, <= 64 chars), 403 non-lead actor on a non-empty roster, 404 no board, 409 board or
+        request (unknown keys/team, bad op/name/actor; name: non-empty after
+        strip; add: ASCII allowlist [A-Za-z0-9_][A-Za-z0-9._@+-]{0,63}; remove: any non-empty name),
+        403 non-lead actor on a non-empty roster, 404 no board, 409 board or
         releaseConfig not an object / removing the LAST lead (code LAST_LEAD), 500 write failure.
         A no-op (add of an existing name, remove of an absent one) is 200 {changed: false} with no
         write, no audit and no auth check. Bootstrap: adding to an EMPTY roster needs no actor.
         Only releaseConfig.leads is touched (lastUpdated is left alone). One audit record per change.
         """
         try:
-            import unicodedata
             body, err = self._read_release_json_body()
             if err:
                 return self._send_json_response({'success': False, 'error': err}, status=400)
@@ -17761,14 +17763,11 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 return self._send_json_response(
                     {'success': False, 'error': 'name must be a non-empty string'}, status=400)
             name = name.strip()
-            if any(unicodedata.category(c) in self._RELEASE_LEADS_BAD_CATEGORIES for c in name):
+            if op == 'add' and not self._RELEASE_LEADS_NAME_RE.fullmatch(name):
                 return self._send_json_response(
                     {'success': False,
-                     'error': 'name must not contain control, invisible (zero-width/bidi) or '
-                              'line-separator characters'}, status=400)
-            if len(name) > self._RELEASE_LEADS_MAX_NAME:
-                return self._send_json_response(
-                    {'success': False, 'error': 'name must be at most %d characters' % self._RELEASE_LEADS_MAX_NAME},
+                     'error': 'name must be 1-%d ASCII characters: letters, digits, and . _ @ + - '
+                              '(no spaces; must start with a letter, digit or _)' % self._RELEASE_LEADS_MAX_NAME},
                     status=400)
             actor = None
             if 'actor' in body:

@@ -21568,9 +21568,9 @@ function _releaseLeadNameProblem(raw) {
     const name = (typeof raw === 'string') ? raw.trim() : '';
     if (!name) return 'Enter a lead name first.';
     if (name.length > 64) return 'A lead name can be at most 64 characters.';
-    // Mirrors the server: Unicode Cc (control), Cf (format: zero-width, bidi overrides, BOM), Zl, Zp.
-    if (/[\u0000-\u001f\u007f-\u009f\u00ad\u0600-\u0605\u061c\u06dd\u070f\u08e2\u180e\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u206f\ufeff\ufff9-\ufffb]/.test(name)) {
-        return 'A lead name cannot contain control, invisible or line-separator characters.';
+    // Mirrors the server's _RELEASE_LEADS_NAME_PATTERN exactly (ASCII allowlist, add only).
+    if (!/^[A-Za-z0-9_][A-Za-z0-9._@+-]{0,63}$/.test(name)) {
+        return 'A lead name may use only letters, digits and . _ @ + - (no spaces), and must start with a letter, digit or _.';
     }
     return null;
 }
