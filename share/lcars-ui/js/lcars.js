@@ -182,6 +182,12 @@ const MODES = ['team', 'kanban', 'data', 'settings'];
 const MODE_KEY = 'lcars.activeMode';
 // Per-mode section memory — XACA-0164-013
 const MODE_SECTIONS_KEY = 'lcars.modeSections'; // JSON: { team, kanban, data, settings }
+// Global pages that exist in EVERY mode (data-mode lists all four). They must never be
+// remembered as a mode's "last section", or opening one from e.g. SETTINGS makes every
+// later SETTINGS click reopen it instead of the mode's own landing section — XACA-1486
+const MODE_MEMORY_EXCLUDED = new Set(['usage']);
+// One-shot: excluded section requested via URL hash, consumed by the modechange listener
+let _pendingExcludedHashSection = null;
 
 // Queue filter state
 const BACKLOG_FILTER_KEY = 'lcars-queue-filter';
@@ -10364,6 +10370,8 @@ function loadModeSections() {
                 const orig = merged[mode];
                 if (RENAMES[orig]) { merged[mode] = RENAMES[orig]; dirty = true; }
                 if (!SECTIONS.includes(merged[mode])) { merged[mode] = defaults[mode] || 'home'; dirty = true; }
+                // XACA-1486: heal users already stuck on a global page stored as a mode's memory
+                if (MODE_MEMORY_EXCLUDED.has(merged[mode])) { merged[mode] = defaults[mode] || 'home'; dirty = true; }
             }
             if (dirty) saveModeSections(merged);
             return merged;
@@ -10523,9 +10531,12 @@ function switchSection(sectionName, skipAnimation = false) {
             localStorage.setItem(SECTION_KEY, sectionName);
         } catch (e) {}
         // Per-mode section memory — XACA-0164-013
-        const modeSections = loadModeSections();
-        modeSections[activeMode] = sectionName;
-        saveModeSections(modeSections);
+        // Global pages (MODE_MEMORY_EXCLUDED) are not remembered per mode — XACA-1486
+        if (!MODE_MEMORY_EXCLUDED.has(sectionName)) {
+            const modeSections = loadModeSections();
+            modeSections[activeMode] = sectionName;
+            saveModeSections(modeSections);
+        }
         // Sync URL hash
         updateURLHash(activeMode, sectionName);
     }
@@ -20537,7 +20548,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         filterSectionsByMode(newMode);
         // Restore the last-active section for this mode, falling back to the canonical default
         const modeSections = loadModeSections();
-        const targetSection = modeSections[newMode] || pickDefaultSectionForMode(newMode);
+        // XACA-1486: a hash deep-link to a global page is honoured once, never persisted
+        const targetSection = _pendingExcludedHashSection || modeSections[newMode] || pickDefaultSectionForMode(newMode);
+        _pendingExcludedHashSection = null;
         if (targetSection) {
             switchSection(targetSection, true); // skipAnimation=true on mode switch
         }
@@ -20564,12 +20577,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     // If the hash specified a section, pre-seed modeSections so the modechange
     // listener restores it when switchMode fires.
     if (_hashSection) {
-        const modeSections = loadModeSections();
-        modeSections[initialMode] = _hashSection;
-        saveModeSections(modeSections);
+        if (MODE_MEMORY_EXCLUDED.has(_hashSection)) {
+            _pendingExcludedHashSection = _hashSection; // XACA-1486: do not persist global pages
+        } else {
+            const modeSections = loadModeSections();
+            modeSections[initialMode] = _hashSection;
+            saveModeSections(modeSections);
+        }
     }
 
     switchMode(initialMode);
+    _pendingExcludedHashSection = null; // XACA-1486: never let an unconsumed one-shot leak into a later mode switch
     // filterSectionsByMode runs via the modechange listener that switchMode dispatches.
 
     // Wire hashchange listener so back/forward and direct URL edits work — XACA-0164-013
