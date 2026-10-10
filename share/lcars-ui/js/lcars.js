@@ -21274,6 +21274,7 @@ const _RELEASE_GATES_MODAL_DEFAULTS = {
     title: 'TURN RELEASE GATES OFF',
     consequence: 'Failing release gates will be logged only; promotions will no longer be refused.',
     confirmLabel: 'TURN GATES OFF',
+    confirmClass: 'modal-btn-danger', // XACA-1486: destructive by default; ADD LEAD overrides
 };
 const _RELEASE_GATES_UNCHANGED_NOTE = 'Unchanged \u2014 gates still enforced.';
 
@@ -21381,6 +21382,7 @@ function _focusReleaseGatesCheckbox() {
 function _pickReleaseGatesLead(leads, opts) {
     // XACA-1485-003: optional {title, consequence, confirmLabel} reword the shared modal for the
     // roster editor. Omitted -> the XACA-1482 "turn gates off" copy, so enforcement is unchanged.
+    // XACA-1486: {confirmClass} styles the confirm button per caller (danger vs. plain confirm).
     const o = Object.assign({}, _RELEASE_GATES_MODAL_DEFAULTS, opts || {});
     return new Promise((resolve) => {
         const overlay = _relGateEl('release-gates-lead-modal');
@@ -21395,6 +21397,10 @@ function _pickReleaseGatesLead(leads, opts) {
         if (titleEl) titleEl.textContent = o.title;
         if (consequenceEl) consequenceEl.textContent = o.consequence;
         confirmBtn.textContent = o.confirmLabel;
+        if (confirmBtn.classList) {
+            confirmBtn.classList.remove('modal-btn-confirm', 'modal-btn-danger');
+            confirmBtn.classList.add(o.confirmClass);
+        }
 
         select.textContent = '';
         leads.forEach((name) => {
@@ -21775,6 +21781,7 @@ async function onReleaseLeadAdd() {
             title: 'ADD RELEASE LEAD',
             consequence: `Adding "${name}" gives them release-lead authority for this team.`,
             confirmLabel: 'ADD LEAD',
+            confirmClass: 'modal-btn-confirm', // a grant, not destructive — XACA-1486
         });
         if (!actor) {
             _setReleaseLeadsStatus('Unchanged — no lead added.', '');

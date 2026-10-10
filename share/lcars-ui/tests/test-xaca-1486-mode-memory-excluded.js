@@ -11,8 +11,10 @@
  * never be stored in the per-mode section memory (lcars.modeSections).
  *
  * loadModeSections() and the constants are EXTRACTED from the shipped lcars.js
- * and run in a vm sandbox with a fake localStorage. switchSection() is far too
- * large to sandbox, so its write guard is asserted structurally on the source.
+ * and run in a vm sandbox with a fake localStorage. The guards are also asserted
+ * structurally on the source, and the "flow:" tests drive the real switchMode /
+ * switchSection / modechange listener / hash pre-seed against a fake DOM.
+ * The release-gates lead modal's per-caller confirm class is driven last.
  *
  * Usage: node --test lcars-ui/tests/test-xaca-1486-mode-memory-excluded.js
  */
@@ -219,4 +221,43 @@ test('TURN GATES OFF button is the danger style, not the confirm style (XACA-148
     assert.ok(m, 'release-gates-lead-confirm button not found');
     assert.match(m[0], /class="[^"]*\bmodal-btn-danger\b/);
     assert.doesNotMatch(m[0], /modal-btn-confirm/);
+});
+
+// XACA-1486: the lead modal is shared by TURN GATES OFF, REMOVE LEAD (destructive -> danger)
+// and ADD LEAD (a grant -> plain confirm); the class must be set per open, never left over.
+test('lead modal confirm class follows the caller: danger by default, confirm for ADD LEAD', async function () {
+    function el() {
+        var cls = new Set(['modal-btn', 'modal-btn-danger']);
+        return {
+            style: {}, textContent: '', value: '', focus: function () {}, appendChild: function () {},
+            classList: {
+                add: function (c) { cls.add(c); }, remove: function () { for (var i = 0; i < arguments.length; i++) cls.delete(arguments[i]); },
+                contains: function (c) { return cls.has(c); }
+            }
+        };
+    }
+    var els = {};
+    ['modal', 'select', 'confirm', 'cancel', 'close', 'title', 'consequence']
+        .forEach(function (k) { els['release-gates-lead-' + k] = el(); });
+    var sandbox = {
+        _relGateEl: function (id) { return els[id] || null; },
+        document: { createElement: function () { return {}; } },
+        Promise: Promise, Object: Object
+    };
+    vm.createContext(sandbox);
+    vm.runInContext(slice('const _RELEASE_GATES_MODAL_DEFAULTS', '\nconst _RELEASE_GATES_UNCHANGED_NOTE') +
+        fn('_pickReleaseGatesLead'), sandbox);
+    var btn = els['release-gates-lead-confirm'];
+    async function open(opts) {
+        var p = vm.runInContext('_pickReleaseGatesLead', sandbox)(['alice'], opts);
+        btn.onclick();
+        assert.strictEqual(await p, 'alice');
+        return { danger: btn.classList.contains('modal-btn-danger'), confirm: btn.classList.contains('modal-btn-confirm') };
+    }
+    assert.deepStrictEqual(await open(undefined), { danger: true, confirm: false }, 'TURN GATES OFF');
+    assert.deepStrictEqual(await open({ confirmLabel: 'ADD LEAD', confirmClass: 'modal-btn-confirm' }),
+        { danger: false, confirm: true }, 'ADD LEAD');
+    assert.deepStrictEqual(await open({ confirmLabel: 'REMOVE LEAD' }), { danger: true, confirm: false },
+        'REMOVE LEAD after ADD LEAD must not inherit the confirm class');
+    assert.match(SRC, /confirmLabel: 'ADD LEAD',\s*\n\s*confirmClass: 'modal-btn-confirm'/, 'ADD LEAD caller passes confirmClass');
 });
