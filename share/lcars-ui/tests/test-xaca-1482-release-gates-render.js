@@ -232,7 +232,7 @@ test('empty leads -> no modal, no fetch, box re-checked, hint shown', async func
     assert.equal(env.el['release-gates-checkbox'].checked, true);
     assert.equal(env.el['release-gates-checkbox'].disabled, false);
     assert.equal(env.el['release-gates-status'].textContent,
-        "No release leads are configured for this team \u2014 gates can't be turned off here.");
+        "No release leads are configured for this team \u2014 add one in the Release leads roster below (or: kb-release leads <team> add <name>) first.");
 });
 
 test('absent / malformed leads field (older server) behaves like empty leads', async function () {
@@ -425,7 +425,7 @@ test('403 code LEADS_NOT_CONFIGURED -> plain message, box reverted', async funct
     assert.equal(env.el['release-gates-checkbox'].checked, true);
     assert.equal(env.el['release-gates-checkbox'].disabled, false);
     assert.equal(env.el['release-gates-error-text'].textContent,
-        "Save failed: No release leads are configured for this team, so gates can't be turned off. Ask an Academy admin to configure release leads.");
+        "Save failed: No release leads are configured for this team, so gates can't be turned off. Add a lead in the Release leads roster below, or run: kb-release leads <team> add <name>");
     assert.equal(env.el['release-gates-status'].textContent, 'Save failed');
 });
 

@@ -5664,6 +5664,9 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         # XACA-1482: releaseConfig.gateEnforcement setter
         elif path == '/api/release-gate-enforcement':
             self.handle_update_release_gate_enforcement()
+        # XACA-1485: releaseConfig.leads roster setter
+        elif path == '/api/release-leads':
+            self.handle_update_release_leads()
         # XACA-1484-004: releaseConfig.branches.integration / .production setter
         elif path == '/api/release-branches':
             self.handle_update_release_branches()
@@ -17656,6 +17659,176 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             self._send_json_response({'success': False, 'error': str(e)}, status=500)
 
     # ------------------------------------------------------------------
+    # XACA-1485-001: supported setter for releaseConfig.leads (the roster of release leads)
+    # ------------------------------------------------------------------
+    # The ONLY writer of releaseConfig.leads (kb-release leads and the LCARS Team Config roster
+    # editor both call it). Mirrors XACA-1482's handler structure (locked write, fresh re-read,
+    # audit after the lock). Names are case-SENSITIVE because release_gate.actor_is_lead is.
+
+    _RELEASE_LEADS_ALLOWED_KEYS = {'team', 'op', 'name', 'actor'}
+    _RELEASE_LEADS_OPS = ('add', 'remove')
+    _RELEASE_LEADS_MAX_NAME = 64
+
+    def _release_leads_fields(self, team, release_config, writable=True):
+        """GET payload for `release_config` (a dict, {} when the board has none). configWarning
+        explains anything the normalization silently drops (malformed `leads`, junk entries)."""
+        leads = self._lead_names(release_config)
+        warning = None
+        if isinstance(release_config, dict) and 'leads' in release_config:
+            raw = release_config['leads']
+            if not isinstance(raw, list):
+                warning = ("releaseConfig.leads is %s, not a list; nobody is a lead until it is repaired; "
+                           "adding a lead replaces it with a clean list" % type(raw).__name__)
+            else:
+                # Duplicates collapse by design; only entries that are not valid names are "dropped".
+                bad = sum(1 for x in raw if not (isinstance(x, str) and x.strip()))
+                if bad:
+                    warning = ("releaseConfig.leads has %d entr%s that are not valid names; they are ignored "
+                               "and will be dropped on the next change" % (bad, 'y' if bad == 1 else 'ies'))
+        return {'team': team, 'leads': leads, 'configured': len(leads) > 0,
+                'writable': writable, 'configWarning': warning}
+
+    def serve_release_leads(self, query_string: str):
+        """GET /api/release-leads?team=<team> (XACA-1485).
+
+        Response: {team, leads, configured, writable, configWarning}. `leads` is exactly the
+        normalized list release_gate.actor_is_lead accepts. Unknown/missing team -> 400, no board
+        -> 404, unreadable board -> 500.
+        """
+        try:
+            params = parse_qs(query_string) if query_string else {}
+            team = params.get('team', [None])[0]
+            if not team or team not in TEAM_KANBAN_DIRS:
+                self._send_json_response({'error': 'Unknown team: %s' % (team,)}, status=400)
+                return
+            board, err, status = self._read_board_shared_for_gate(team)
+            if err:
+                self._send_json_response({'error': err}, status=status)
+                return
+            board_is_obj = isinstance(board, dict)
+            raw_rc = board.get('releaseConfig') if board_is_obj else None
+            writable = board_is_obj and ('releaseConfig' not in board or isinstance(raw_rc, dict))
+            payload = self._release_leads_fields(team, self._release_cfg(board), writable=writable)
+            if not writable and payload['configWarning'] is None:
+                if not board_is_obj:
+                    payload['configWarning'] = (
+                        "the board file is %s, not a JSON object; nobody is a lead, and this setter "
+                        "refuses to write until the board is repaired" % type(board).__name__)
+                else:
+                    payload['configWarning'] = (
+                        "releaseConfig is %s, not an object; nobody is a lead, and this setter "
+                        "refuses to write until the board is repaired" % type(raw_rc).__name__)
+            self._send_json_response(payload)
+        except Exception as e:
+            print(f"[LCARS] ERROR serving release leads: {e}")
+            self._send_json_response({'error': str(e)}, status=500)
+
+    def handle_update_release_leads(self):
+        """POST /api/release-leads (XACA-1485).
+
+        Body {team, op, name, actor?}; op is exactly 'add' or 'remove' (no coercion). 400 bad
+        request (unknown keys/team, bad op/name/actor; name: non-empty after strip, no control
+        chars, <= 64 chars), 403 non-lead actor on a non-empty roster, 404 no board, 409 board or
+        releaseConfig not an object / removing the LAST lead (code LAST_LEAD), 500 write failure.
+        A no-op (add of an existing name, remove of an absent one) is 200 {changed: false} with no
+        write, no audit and no auth check. Bootstrap: adding to an EMPTY roster needs no actor.
+        Only releaseConfig.leads is touched (lastUpdated is left alone). One audit record per change.
+        """
+        try:
+            import unicodedata
+            body, err = self._read_release_json_body()
+            if err:
+                return self._send_json_response({'success': False, 'error': err}, status=400)
+            unknown = set(body) - self._RELEASE_LEADS_ALLOWED_KEYS
+            if unknown:
+                return self._send_json_response(
+                    {'success': False, 'error': 'Unknown key(s): %s' % ', '.join(sorted(unknown))}, status=400)
+            team = body.get('team')
+            if not isinstance(team, str) or team not in TEAM_KANBAN_DIRS:
+                return self._send_json_response({'success': False, 'error': 'Unknown team: %s' % (team,)}, status=400)
+            op = body.get('op')
+            if not isinstance(op, str) or op not in self._RELEASE_LEADS_OPS:
+                return self._send_json_response(
+                    {'success': False, 'error': "op must be exactly 'add' or 'remove', got %r" % (op,)}, status=400)
+            name = body.get('name')
+            if not isinstance(name, str) or not name.strip():
+                return self._send_json_response(
+                    {'success': False, 'error': 'name must be a non-empty string'}, status=400)
+            name = name.strip()
+            if any(unicodedata.category(c) == 'Cc' for c in name):
+                return self._send_json_response(
+                    {'success': False, 'error': 'name must not contain control characters'}, status=400)
+            if len(name) > self._RELEASE_LEADS_MAX_NAME:
+                return self._send_json_response(
+                    {'success': False, 'error': 'name must be at most %d characters' % self._RELEASE_LEADS_MAX_NAME},
+                    status=400)
+            actor = None
+            if 'actor' in body:
+                actor = body['actor']
+                if not isinstance(actor, str) or not actor.strip():
+                    return self._send_json_response(
+                        {'success': False, 'error': 'actor, when given, must be a non-empty string'}, status=400)
+                actor = actor.strip()
+
+            payload = None
+            audit = None
+            with self._board_write_transaction(team):
+                board_file = self._get_board_file(team)
+                if not board_file.exists():
+                    raise _DeferredResponse.json(
+                        {'success': False, 'error': 'No board for team %r' % team}, 404)
+                board = self._read_board_raw_locked(team)
+                if not isinstance(board, dict):
+                    raise _DeferredResponse.json({'success': False, 'error': 'Board file is not a JSON object'}, 409)
+                if 'releaseConfig' in board and not isinstance(board['releaseConfig'], dict):
+                    raise _DeferredResponse.json(
+                        {'success': False,
+                         'error': 'releaseConfig is %s, not an object; refusing to overwrite it. '
+                                  'Repair the board first.' % type(board['releaseConfig']).__name__}, 409)
+                rcfg = board.get('releaseConfig') or {}
+                before = self._lead_names(rcfg)
+                if (op == 'add' and name in before) or (op == 'remove' and name not in before):
+                    payload = dict(self._release_leads_fields(team, rcfg), success=True, changed=False)
+                else:
+                    if before:   # bootstrap: an empty roster has nobody who could authorize the first add
+                        is_lead, reason = self._actor_is_lead(actor, rcfg)
+                        if not is_lead:
+                            raise _DeferredResponse.json(
+                                {'success': False, 'error': reason, 'code': self._lead_reason_code(rcfg)}, 403)
+                    after = before + [name] if op == 'add' else [n for n in before if n != name]
+                    if not after:
+                        raise _DeferredResponse.json(
+                            {'success': False,
+                             'error': 'refusing to remove %s: it is the last release lead, and an empty roster '
+                                      'disables every lead-only action. Add another lead first.' % name,
+                             'code': 'LAST_LEAD'}, 409)
+                    new_rcfg = dict(rcfg)
+                    # Write the NORMALIZED list: junk entries / a non-list value are cleaned on any real change.
+                    new_rcfg['leads'] = after
+                    board['releaseConfig'] = new_rcfg
+                    self._atomic_write_json(board_file, board)
+                    audit = {'at': self._get_timestamp(), 'team': team, 'op': op, 'name': name,
+                             'actor': actor, 'before': before, 'after': after}
+                    # Fresh re-read of what is now on disk, never an echo of the request.
+                    fresh = self._release_cfg(self._read_board_raw_locked(team))
+                    payload = dict(self._release_leads_fields(team, fresh), success=True, changed=True)
+            if audit is not None:
+                try:
+                    log_activity('release_leads_changed', self._GATE_ENFORCEMENT_AUDIT_TARGET, 'release',
+                                 field='leads', old_value=json.dumps(audit['before']),
+                                 new_value=json.dumps(audit['after']),
+                                 context=json.dumps(audit, sort_keys=True), team=team)
+                except Exception as log_err:  # pragma: no cover
+                    print(f"[LCARS] Warning: release leads audit failed for {team}: {log_err}")
+            return self._send_json_response(payload)
+        except _DeferredResponse as deferred:
+            deferred.emit(self)
+            return
+        except Exception as e:
+            print(f"[LCARS] ERROR updating release leads: {e}")
+            self._send_json_response({'success': False, 'error': str(e)}, status=500)
+
+    # ------------------------------------------------------------------
     # XACA-1484-004: supported setter for releaseConfig.branches.integration / .production
     # ------------------------------------------------------------------
     # The ONLY writer of those two keys (kb-release branches calls it; there is no offline
@@ -21093,6 +21266,9 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         # XACA-1482: releaseConfig.gateEnforcement (resolved mode + explicit flag)
         elif path == '/api/release-gate-enforcement':
             self.serve_release_gate_enforcement(parsed.query)
+        # XACA-1485: releaseConfig.leads roster
+        elif path == '/api/release-leads':
+            self.serve_release_leads(parsed.query)
         # XACA-1484-004: releaseConfig.branches (integration / production, validated)
         elif path == '/api/release-branches':
             self.serve_release_branches(parsed.query)

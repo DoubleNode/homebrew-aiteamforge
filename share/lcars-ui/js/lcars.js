@@ -86,6 +86,7 @@ const TEAM_SCOPED_PREFIXES = [
     '/api/daily-overview',   // XACA-0334: Daily Overview aggregator
     '/api/board-settings',   // XACA-1083-005: per-team requireEpicOnStart/requireReleaseOnStart
     '/api/release-gate-enforcement', // XACA-1482-003: per-team releaseConfig.gateEnforcement
+    '/api/release-leads',    // XACA-1485-003: per-team releaseConfig.leads roster
 ];
 
 function apiUrl(path, extraParams) {
@@ -10699,6 +10700,7 @@ function switchSection(sectionName, skipAnimation = false) {
         loadTeamConfig();
         loadBoardSettings(); // XACA-1083-005
         loadReleaseGateEnforcement(); // XACA-1482-003
+        loadReleaseLeads(); // XACA-1485-003
     }
 
     // Render CR list when switching to change-req section (XACA-0292-007)
@@ -21246,10 +21248,15 @@ function _setReleaseGatesStatus(text, cls) {
 // (release_gate.CODE_LEADS_NOT_CONFIGURED / CODE_NOT_IN_LEADS). Unknown or absent
 // codes fall back to the server's own error text.
 const _RELEASE_GATES_CODE_MESSAGES = {
-    LEADS_NOT_CONFIGURED: "No release leads are configured for this team, so gates can't be turned off. Ask an Academy admin to configure release leads.",
+    LEADS_NOT_CONFIGURED: "No release leads are configured for this team, so gates can't be turned off. Add a lead in the Release leads roster below, or run: kb-release leads <team> add <name>",
     NOT_IN_LEADS: "That name isn't a release lead for this team.",
 };
-const _RELEASE_GATES_NO_LEADS_HINT = "No release leads are configured for this team \u2014 gates can't be turned off here.";
+const _RELEASE_GATES_NO_LEADS_HINT = "No release leads are configured for this team \u2014 add one in the Release leads roster below (or: kb-release leads <team> add <name>) first.";
+const _RELEASE_GATES_MODAL_DEFAULTS = {
+    title: 'TURN RELEASE GATES OFF',
+    consequence: 'Failing release gates will be logged only; promotions will no longer be refused.',
+    confirmLabel: 'TURN GATES OFF',
+};
 const _RELEASE_GATES_UNCHANGED_NOTE = 'Unchanged \u2014 gates still enforced.';
 
 /** Pull a human-readable reason out of an error body (`code` map, then "error", then "message"). */
@@ -21353,7 +21360,10 @@ function _focusReleaseGatesCheckbox() {
  * dialogs: overlay display flex/none, pause/resume auto-refresh, backdrop + Escape close;
  * additionally Tab is trapped inside the dialog and focus moves in on open.
  */
-function _pickReleaseGatesLead(leads) {
+function _pickReleaseGatesLead(leads, opts) {
+    // XACA-1485-003: optional {title, consequence, confirmLabel} reword the shared modal for the
+    // roster editor. Omitted -> the XACA-1482 "turn gates off" copy, so enforcement is unchanged.
+    const o = Object.assign({}, _RELEASE_GATES_MODAL_DEFAULTS, opts || {});
     return new Promise((resolve) => {
         const overlay = _relGateEl('release-gates-lead-modal');
         const select = _relGateEl('release-gates-lead-select');
@@ -21361,6 +21371,12 @@ function _pickReleaseGatesLead(leads) {
         const cancelBtn = _relGateEl('release-gates-lead-cancel');
         const closeBtn = _relGateEl('release-gates-lead-close');
         if (!overlay || !select || !confirmBtn || !cancelBtn) { resolve(null); return; }
+
+        const titleEl = _relGateEl('release-gates-lead-title');
+        const consequenceEl = _relGateEl('release-gates-lead-consequence');
+        if (titleEl) titleEl.textContent = o.title;
+        if (consequenceEl) consequenceEl.textContent = o.consequence;
+        confirmBtn.textContent = o.confirmLabel;
 
         select.textContent = '';
         leads.forEach((name) => {
@@ -21481,6 +21497,271 @@ async function onReleaseGatesChange() {
         _setReleaseGatesStatus('Save failed', 'error');
     }
     _focusReleaseGatesCheckbox();
+}
+
+// =============================================================================
+// RELEASE LEADS — XACA-1485-003
+// Roster editor for releaseConfig.leads via /api/release-leads. Fail-closed: any
+// load problem empties the list and disables every control. Names are user data and
+// are rendered via textContent only. Adding to an EMPTY roster sends no actor (the
+// bootstrap rule); every other change asks which current lead authorizes it, reusing
+// the shared release-gates lead modal. A refused change leaves the rendered roster as
+// it was and shows the server's reason.
+// =============================================================================
+
+// Last known-good roster response; used to revert after a refused/failed POST.
+let _lastGoodReleaseLeads = null;
+
+function _showReleaseLeadsError(message) {
+    const row = _relGateEl('release-leads-error-row');
+    const text = _relGateEl('release-leads-error-text');
+    if (text) text.textContent = message;
+    if (row) row.style.display = '';
+}
+
+function _hideReleaseLeadsError() {
+    const row = _relGateEl('release-leads-error-row');
+    const text = _relGateEl('release-leads-error-text');
+    if (text) text.textContent = '';
+    if (row) row.style.display = 'none';
+}
+
+function _setReleaseLeadsStatus(text, cls) {
+    const el = _relGateEl('release-leads-status');
+    if (!el) return;
+    el.textContent = text;
+    el.className = 'team-config-status' + (cls ? ' ' + cls : '');
+}
+
+function _setReleaseLeadsControlsDisabled(disabled) {
+    const input = _relGateEl('release-leads-input');
+    const addBtn = _relGateEl('release-leads-add');
+    if (input) input.disabled = disabled;
+    if (addBtn) addBtn.disabled = disabled;
+    const list = _relGateEl('release-leads-list');
+    if (list && Array.isArray(list.children)) {
+        list.children.forEach((row) => {
+            (row.children || []).forEach((c) => { if (c.isRemoveButton) c.disabled = disabled; });
+        });
+    }
+}
+
+function _focusReleaseLeadsInput() {
+    const input = _relGateEl('release-leads-input');
+    if (input && !input.disabled && typeof input.focus === 'function') input.focus();
+}
+
+/** Client-side mirror of the server's name rules (the server stays authoritative). */
+function _releaseLeadNameProblem(raw) {
+    const name = (typeof raw === 'string') ? raw.trim() : '';
+    if (!name) return 'Enter a lead name first.';
+    if (name.length > 64) return 'A lead name can be at most 64 characters.';
+    if (/[\u0000-\u001f\u007f-\u009f]/.test(name)) return 'A lead name cannot contain control characters.';
+    return null;
+}
+
+/** Fetch the roster for CONFIG.team and render. Safe to call repeatedly. */
+async function loadReleaseLeads() {
+    const list = _relGateEl('release-leads-list');
+    if (!list) return; // section not present in this build
+    try {
+        const response = await apiFetch(apiUrl('/api/release-leads'));
+        const data = await response.json().catch(() => null);
+        if (!response.ok) {
+            throw new Error(_releaseGatesReason(data, response.status));
+        }
+        _renderReleaseLeads(data);
+    } catch (err) {
+        console.error('[release-leads] Failed to load:', err);
+        _renderReleaseLeadsFailClosed(`Failed to load release leads: ${err.message}`);
+    }
+}
+
+function _validReleaseLeadsBody(data) {
+    return !!data && typeof data === 'object' && Array.isArray(data.leads) &&
+        data.leads.every((n) => typeof n === 'string');
+}
+
+/** Render from a GET/POST response body. Malformed body -> fail-closed. */
+function _renderReleaseLeads(data) {
+    if (!_validReleaseLeadsBody(data)) {
+        _renderReleaseLeadsFailClosed('Release leads returned an unrecognised value; the roster cannot be edited here.');
+        return;
+    }
+    _lastGoodReleaseLeads = data;
+    const list = _relGateEl('release-leads-list');
+    if (!list) return;
+    // Only an explicit writable:false disables (older servers omit the field; the POST is the authority).
+    const writable = data.writable !== false;
+
+    list.textContent = '';
+    data.leads.forEach((name) => {
+        const row = document.createElement('div');
+        row.className = 'release-lead-item';
+        row.setAttribute('role', 'listitem');
+        const label = document.createElement('span');
+        label.className = 'release-lead-name';
+        label.textContent = name;
+        row.appendChild(label);
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'modal-btn modal-btn-cancel release-lead-remove';
+        btn.textContent = 'REMOVE';
+        btn.setAttribute('aria-label', 'Remove release lead ' + name);
+        btn.isRemoveButton = true;
+        btn.disabled = !writable;
+        btn.onclick = writable ? () => onReleaseLeadRemove(name) : null;
+        row.appendChild(btn);
+        list.appendChild(row);
+    });
+
+    const empty = _relGateEl('release-leads-empty');
+    if (empty) empty.style.display = data.leads.length ? 'none' : '';
+
+    const input = _relGateEl('release-leads-input');
+    const addBtn = _relGateEl('release-leads-add');
+    if (input) {
+        input.disabled = !writable;
+        input.onkeydown = writable ? (ev) => {
+            if (ev && ev.key === 'Enter') {
+                if (typeof ev.preventDefault === 'function') ev.preventDefault();
+                onReleaseLeadAdd();
+            }
+        } : null;
+    }
+    if (addBtn) {
+        addBtn.disabled = !writable;
+        addBtn.onclick = writable ? onReleaseLeadAdd : null;
+    }
+
+    if (typeof data.configWarning === 'string' && data.configWarning) {
+        _showReleaseLeadsError(data.configWarning);
+    } else if (!writable) {
+        _showReleaseLeadsError('releaseConfig is malformed, so release leads cannot be changed here until the board is repaired.');
+    } else {
+        _hideReleaseLeadsError();
+    }
+}
+
+function _renderReleaseLeadsFailClosed(message) {
+    _lastGoodReleaseLeads = null;
+    const list = _relGateEl('release-leads-list');
+    if (list) list.textContent = '';
+    const empty = _relGateEl('release-leads-empty');
+    if (empty) empty.style.display = 'none';
+    const input = _relGateEl('release-leads-input');
+    const addBtn = _relGateEl('release-leads-add');
+    if (input) { input.disabled = true; input.onkeydown = null; }
+    if (addBtn) { addBtn.disabled = true; addBtn.onclick = null; }
+    _setReleaseLeadsStatus('', '');
+    _showReleaseLeadsError(message);
+}
+
+function _flashReleaseLeadsSaved(text) {
+    const el = _relGateEl('release-leads-status');
+    if (!el) return;
+    el.textContent = text;
+    el.className = 'team-config-status saved';
+    setTimeout(() => {
+        if (el.className === 'team-config-status saved') {
+            el.textContent = '';
+            el.className = 'team-config-status';
+        }
+    }, 2000);
+}
+
+/** Current non-empty lead names from the last good response ([] when unknown). */
+function _currentReleaseLeads() {
+    return (_lastGoodReleaseLeads && Array.isArray(_lastGoodReleaseLeads.leads))
+        ? _lastGoodReleaseLeads.leads.filter((n) => typeof n === 'string' && n.trim()) : [];
+}
+
+/** POST one roster change. `actor` is undefined for add-to-empty. Never mutates the DOM roster on failure. */
+async function _postReleaseLeads(op, name, actor) {
+    const payload = { team: CONFIG.team, op: op, name: name };
+    if (actor) payload.actor = actor;
+
+    _setReleaseLeadsControlsDisabled(true);
+    _setReleaseLeadsStatus('Saving...', 'saving');
+    _hideReleaseLeadsError();
+
+    try {
+        const response = await apiFetch(apiUrl('/api/release-leads'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        const result = await response.json().catch(() => null);
+        if (!response.ok) {
+            throw new Error(_releaseGatesReason(result, response.status));
+        }
+        if (!_validReleaseLeadsBody(result)) {
+            throw new Error('malformed response from server');
+        }
+        _renderReleaseLeads(result); // from the response, never the request
+        if (result.changed === true) {
+            _flashReleaseLeadsSaved('Saved');
+            // The enforcement section's actor list / "no leads" hint depends on the roster.
+            if (typeof loadReleaseGateEnforcement === 'function') loadReleaseGateEnforcement();
+        } else {
+            _flashReleaseLeadsSaved('No change needed');
+        }
+    } catch (err) {
+        console.error('[release-leads] Change failed:', err);
+        if (_lastGoodReleaseLeads) {
+            _renderReleaseLeads(_lastGoodReleaseLeads);
+        } else {
+            _renderReleaseLeadsFailClosed('Could not confirm the current release leads.');
+        }
+        _showReleaseLeadsError(`Change refused: ${err.message}`);
+        _setReleaseLeadsStatus('Unchanged', 'error');
+    }
+    _focusReleaseLeadsInput();
+}
+
+async function onReleaseLeadAdd() {
+    const input = _relGateEl('release-leads-input');
+    if (!input || input.disabled) return;
+    const name = (typeof input.value === 'string') ? input.value.trim() : '';
+    const problem = _releaseLeadNameProblem(name);
+    if (problem) {
+        _setReleaseLeadsStatus(problem, 'error');
+        _focusReleaseLeadsInput();
+        return;
+    }
+    const leads = _currentReleaseLeads();
+    let actor;
+    if (leads.length) {
+        actor = await _pickReleaseGatesLead(leads, {
+            title: 'ADD RELEASE LEAD',
+            consequence: `Adding "${name}" gives them release-lead authority for this team.`,
+            confirmLabel: 'ADD LEAD',
+        });
+        if (!actor) {
+            _setReleaseLeadsStatus('Unchanged — no lead added.', '');
+            _focusReleaseLeadsInput();
+            return;
+        }
+    }
+    await _postReleaseLeads('add', name, actor);
+    if (_currentReleaseLeads().indexOf(name) !== -1) input.value = '';
+}
+
+async function onReleaseLeadRemove(name) {
+    if (typeof name !== 'string' || !name) return;
+    const leads = _currentReleaseLeads();
+    if (!leads.length) return; // nothing to remove / unknown state: send nothing
+    const actor = await _pickReleaseGatesLead(leads, {
+        title: 'REMOVE RELEASE LEAD',
+        consequence: `Removing "${name}" revokes their release-lead authority for this team.`,
+        confirmLabel: 'REMOVE LEAD',
+    });
+    if (!actor) {
+        _setReleaseLeadsStatus('Unchanged — lead not removed.', '');
+        _focusReleaseLeadsInput();
+        return;
+    }
+    await _postReleaseLeads('remove', name, actor);
 }
 
 // =============================================================================

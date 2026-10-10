@@ -18640,3 +18640,9 @@ body.lcars-asset-banner-warn-active .lcars-modal-overlay .lcars-modal {
     font-size: 0.8rem;
     opacity: 0.85;
 }
+
+/* XACA-1485-003: Release Leads roster (SETTINGS > TEAM CONFIG > Release Gates) */
+.release-leads-list { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+.release-lead-item { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 2px 8px; border-left: 4px solid var(--lcars-orange, #ff9900); }
+.release-lead-name { word-break: break-word; }
+.release-lead-remove { padding: 2px 10px; }

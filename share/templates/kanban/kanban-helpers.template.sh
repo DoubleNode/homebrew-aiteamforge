@@ -26924,6 +26924,127 @@ kb-release-branches() {
     return 0
 }
 
+# XACA-1485-002: kb-release leads <team> [add|remove <name>] [--actor <lead>]
+# Show / edit releaseConfig.leads -- a thin client of
+#   GET  /api/release-leads?team=<t>
+#   POST /api/release-leads   {team, op, name, actor}
+# Same shape and exit codes as `kb-release enforcement` (404 and any other status map to 4). The SERVER
+# validates and checks the lead (an empty roster may be bootstrapped by anyone). No offline fallback.
+# --actor defaults to $USER (_kb_release_default_actor); the server ignores it for the bootstrap add.
+kb-release-leads() {
+    local team="" op="" name="" opt_actor="" have_name=0
+    local usage="Usage: kb-release leads <team> [add|remove <name>] [--actor <lead>]"
+
+    while [[ $# -gt 0 ]]; do
+        case "${1-}" in
+            --actor|--by)
+                if [[ $# -lt 2 ]]; then echo "Error: ${1-} needs a value" >&2; echo "$usage" >&2; return 2; fi
+                opt_actor="${2-}"; shift 2 ;;
+            --help|-h)
+                echo "$usage"
+                echo ""
+                echo "Show (no op) or edit releaseConfig.leads, the roster of release leads for a team."
+                echo "  add <name>     add a lead (the first lead may be added by anyone)"
+                echo "  remove <name>  remove a lead (the last lead cannot be removed)"
+                echo "Changing a non-empty roster needs a listed release lead (--actor, default \$USER);"
+                echo "the SERVER validates and decides. There is no offline fallback: LCARS must be running."
+                echo ""
+                echo "Exit codes: 0 ok (incl. no change), 2 usage/rejected (400), 3 refused (403 not a lead,"
+                echo "            409 last lead / releaseConfig not an object),"
+                echo "            4 transport/server error (curl failure, 404, 5xx, unparseable reply)"
+                return 0 ;;
+            -*)
+                echo "Error: Unknown option: ${1-}" >&2; echo "$usage" >&2; return 2 ;;
+            *)
+                if [[ -z "$team" ]]; then
+                    team="${1-}"
+                elif [[ -z "$op" ]]; then
+                    op="${1-}"
+                elif (( ! have_name )); then
+                    name="${1-}"; have_name=1
+                else
+                    echo "Error: Unexpected argument: ${1-}" >&2; echo "$usage" >&2; return 2
+                fi
+                shift ;;
+        esac
+    done
+
+    if [[ -z "$team" ]]; then
+        echo "Error: team is required" >&2; echo "$usage" >&2; return 2
+    fi
+    if ! _kb_release_valid_token "$team"; then
+        echo "Error: invalid team: $team" >&2; return 2
+    fi
+    if [[ -n "$op" && "$op" != "add" && "$op" != "remove" ]]; then
+        echo "Error: op must be exactly 'add' or 'remove' (got: $op)" >&2; echo "$usage" >&2; return 2
+    fi
+    if [[ -n "$op" ]] && (( ! have_name )); then
+        echo "Error: '$op' needs a lead name" >&2; echo "$usage" >&2; return 2
+    fi
+    if [[ -n "$op" && -z "${name//[[:space:]]/}" ]]; then
+        echo "Error: lead name must not be empty" >&2; echo "$usage" >&2; return 2
+    fi
+    if [[ -z "$op" && -n "$opt_actor" ]]; then
+        echo "Error: --actor only applies when adding or removing a lead" >&2; echo "$usage" >&2; return 2
+    fi
+
+    local payload="" err rc
+    if [[ -z "$op" ]]; then
+        _kb_release_enf_request GET "$team" "" release-leads leads || return 4
+    else
+        [[ -z "$opt_actor" ]] && opt_actor=$(_kb_release_default_actor)
+        payload=$(jq -n --arg team "$team" --arg op "$op" --arg name "$name" --arg actor "$opt_actor" \
+            '{team: $team, op: $op, name: $name, actor: $actor}') || return 4
+        _kb_release_enf_request POST "$team" "$payload" release-leads leads || return 4
+    fi
+
+    if [[ "$_KB_REL_CODE" != "200" ]]; then
+        err=$(printf '%s' "$_KB_REL_BODY" | jq -r '.error // .message // empty' 2>/dev/null)
+        case "$_KB_REL_CODE" in
+            400) rc=2; echo "Error: request rejected (HTTP 400) — leads unchanged" >&2 ;;
+            403) rc=3; echo "Refused: not a release lead — leads unchanged (HTTP 403)" >&2 ;;
+            409) rc=3; echo "Refused: leads unchanged (HTTP 409)" >&2 ;;
+            *)   rc=4; echo "Error: leads request failed (HTTP ${_KB_REL_CODE:-?})" >&2 ;;
+        esac
+        if [[ -n "$err" ]]; then
+            echo "  $err" >&2
+        elif [[ "$rc" == "4" && -n "$_KB_REL_BODY" ]]; then
+            echo "  $_KB_REL_BODY" >&2
+        fi
+        return $rc
+    fi
+
+    local r_leads r_warn r_changed
+    if ! printf '%s' "$_KB_REL_BODY" | jq -e '(.leads | type) == "array"' >/dev/null 2>&1; then
+        echo "Error: unparseable response from LCARS (no leads list): $_KB_REL_BODY" >&2
+        return 4
+    fi
+    r_leads=$(printf '%s' "$_KB_REL_BODY" | jq -r '.leads | join(", ")' 2>/dev/null)
+    r_warn=$(printf '%s' "$_KB_REL_BODY" | jq -r '.configWarning // empty' 2>/dev/null)
+
+    if [[ -z "$op" ]]; then
+        if [[ -z "$r_leads" ]]; then
+            echo "$team: (no release leads configured)"
+        else
+            echo "$team: release leads:"
+            printf '%s' "$_KB_REL_BODY" | jq -r '.leads[] | "  " + .' 2>/dev/null
+        fi
+    else
+        local verb="added" prep="to"
+        [[ "$op" == "remove" ]] && { verb="removed"; prep="from"; }
+        r_changed=$(printf '%s' "$_KB_REL_BODY" | jq -r '.changed // empty' 2>/dev/null)
+        if [[ "$r_changed" == "true" ]]; then
+            echo "✓ $team: $verb release lead '$name' (leads: ${r_leads:-none})"
+        else
+            local state="already a lead"
+            [[ "$op" == "remove" ]] && state="not a lead"
+            echo "✓ $team: '$name' is $state — no change (leads: ${r_leads:-none})"
+        fi
+    fi
+    [[ -n "$r_warn" ]] && echo "Warning: $r_warn"
+    return 0
+}
+
 # ---------------------------------------------------------------------------
 # XACA-1347-007: stage test runner wiring.  test / walkthrough / new-sha.
 #
@@ -28112,6 +28233,10 @@ kb-release() {
             # XACA-1484-004: show/set releaseConfig.branches.integration/production (server decides)
             kb-release-branches "$@"
             ;;
+        leads)
+            # XACA-1485-002: show/edit releaseConfig.leads (server decides)
+            kb-release-leads "$@"
+            ;;
         test)
             # XACA-1347-007: run the current stage's automated providers
             kb-release-test "$@"
@@ -28180,6 +28305,8 @@ kb-release() {
             echo "                                              Show/set gateEnforcement via the server (XACA-1482)"
             echo "  kb-release branches <team> [--integration <ref>] [--production <ref>] [--actor <lead>]"
             echo "                                              Show/set the integration/production branches via the server (XACA-1484)"
+            echo "  kb-release leads <team> [add|remove <name>] [--actor <lead>]"
+            echo "                                              Show/edit the release-lead roster via the server (XACA-1485)"
             echo "  kb-release test <id> [--repo-dir PATH] [--include-scheduled] [--dry-run] [--only-missing] [--provider NAME]..."
             echo "                                              Run the current stage's automated test providers (XACA-1347)"
             echo "  kb-release walkthrough <id> [--provider NAME] [--lead NAME]"
@@ -28237,6 +28364,10 @@ kb-release() {
             echo "Branches (XACA-1484): kb-release branches <team> [--integration <ref>] [--production <ref>] [--actor <lead>]"
             echo "  Show or set releaseConfig.branches.integration/production (the PR base kb-pr-base reports)."
             echo "  Any change needs a listed release lead; server-validated; no offline fallback. Same exit codes."
+            echo ""
+            echo "Leads (XACA-1485): kb-release leads <team> [add|remove <name>] [--actor <lead>]"
+            echo "  Show or edit releaseConfig.leads. The first lead may be added by anyone; later changes need a"
+            echo "  listed lead (--actor, default \$USER); the last lead cannot be removed. Same exit codes (404 -> 4)."
             ;;
         *)
             echo "Unknown subcommand: $subcmd"
