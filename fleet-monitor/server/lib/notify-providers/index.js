@@ -28,8 +28,8 @@
  *  - Error messages NEVER carry destinations, params or secrets.
  *  - A FOREIGN exception's text may embed the target (a URL in a fetch error,
  *    a token in a library message): attemptSend records its TYPE only.
- *  - Only the `test` provider is registered by default. Real channels land in
- *    XACA-1401 (Teams/Slack/email/push) and XACA-1402 (SMS).
+ *  - defaultRegistry() registers `test` plus the XACA-1401 channels (teams,
+ *    slack, email, pushover, ntfy). SMS lands in XACA-1402.
  */
 
 class NotifyError extends Error {
@@ -37,6 +37,18 @@ class NotifyError extends Error {
 }
 class NotifyConfigError extends NotifyError {}
 class NotifySendError extends NotifyError {}
+
+/**
+ * Safe label for a FOREIGN error: its type name only if it looks like an
+ * identifier. A thrown object's `name` is attacker/library controlled text and
+ * may embed a URL or token in a derived (e.g. URL-encoded) form the dispatcher's
+ * exact-match scrubber cannot catch (XACA-1401-006).
+ */
+function errorTypeName(err, preferCtor = false) {
+    const ctor = err && err.constructor && err.constructor.name;
+    const raw = preferCtor ? (ctor || (err && err.name)) : (err && (err.name || ctor));
+    return typeof raw === 'string' && /^[A-Za-z][A-Za-z0-9_]{0,39}$/.test(raw) ? raw : 'Error';
+}
 
 const NAME_RE = /^[a-z][a-z0-9-]{0,31}$/;
 
@@ -90,8 +102,7 @@ async function attemptSend(provider, connection, message, signal) {
         return out;
     } catch (err) {
         if (err instanceof NotifyError) return { ok: false, error: err.message };
-        const type = (err && err.constructor && err.constructor.name) || 'Error';
-        return { ok: false, error: `provider error (${type})` };
+        return { ok: false, error: `provider error (${errorTypeName(err, true)})` };
     }
 }
 
@@ -139,12 +150,24 @@ function createTestProvider() {
 }
 
 function defaultRegistry() {
+    // Required lazily: each provider module requires this file for the error
+    // classes, so a top-level require here would be a cycle (XACA-1401-005).
+    const { createTeamsProvider } = require('./teams');
+    const { createSlackProvider } = require('./slack');
+    const { createEmailProvider } = require('./email');
+    const { createPushoverProvider } = require('./pushover');
+    const { createNtfyProvider } = require('./ntfy');
     const reg = createProviderRegistry();
     reg.register('test', createTestProvider());
+    reg.register('teams', createTeamsProvider());
+    reg.register('slack', createSlackProvider());
+    reg.register('email', createEmailProvider());
+    reg.register('pushover', createPushoverProvider());
+    reg.register('ntfy', createNtfyProvider());
     return reg;
 }
 
 module.exports = {
     NotifyError, NotifyConfigError, NotifySendError,
-    createProviderRegistry, attemptSend, createTestProvider, defaultRegistry,
+    createProviderRegistry, attemptSend, createTestProvider, defaultRegistry, errorTypeName,
 };
