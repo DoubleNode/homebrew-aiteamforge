@@ -253,6 +253,9 @@ describe('disabled store', () => {
             await ROUTE_CALLS.post(m, 'academy', fake()),
         ];
         for (const r of rs) assert.equal(r.status, 503, r.text);
+        // XACA-1488-012: the team-key gate's 503 must be byte-identical to guard()'s (no doubled prefix).
+        for (const r of rs) assert.equal(r.text, rs[0].text, 'every disabled-store 503 body is identical');
+        assert.equal((rs[0].body.message.match(/notify store disabled/g) || []).length, 1, rs[0].text);
         assert.equal(fs.existsSync(m.storeFile), false);
         assert.equal(fs.existsSync(m.receiptFile), false);
     });

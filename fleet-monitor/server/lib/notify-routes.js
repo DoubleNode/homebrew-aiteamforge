@@ -132,7 +132,10 @@ function makeRequireNotifyTeamKey(store, bindTeam, preBind) {
             return next();
         } catch (e) {
             if (e && e.code === 'store_disabled') {
-                return res.status(503).json({ error: 'store_disabled', message: `notify store disabled: ${e.message}` });
+                // Same body as guard(): the reason comes from store.status(), not e.message (which already carries the prefix).
+                let reason = null;
+                try { reason = store.status().reason; } catch (_) { reason = null; }
+                return res.status(503).json({ error: 'store_disabled', message: `notify store disabled: ${reason || 'unavailable'}` });
             }
             return res.status(500).json({ error: 'internal_error', message: 'internal error' });
         }
