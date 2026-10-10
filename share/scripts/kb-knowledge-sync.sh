@@ -364,6 +364,14 @@ case "$AC_QUIESCE_SECONDS" in ''|*[!0-9]*) AC_QUIESCE_SECONDS=900 ;; esac
 QUARANTINE_FILE="${KB_KNOWLEDGE_SYNC_QUARANTINE_FILE:-${STATE_FILE%.json}.quarantine}"
 AUTOCOMMIT_MAX_PATHS=200
 ENTRY_MAX_BYTES=262144
+# XACA-1487: generated INDEX.md files get their own, larger bound. An INDEX is
+# reproducible from its entry files (SPEC.md §5, "entry files win"), not
+# authored, and it grows with every entry (agents/emh/INDEX.md passed
+# ENTRY_MAX_BYTES at 264,485 bytes and was held forever). 2 MiB keeps the
+# guard against a runaway generator. scripts/kb-knowledge-sync-health-check.sh
+# READS this line (grep) for its 75% early warning, so keep it one literal
+# `INDEX_MAX_BYTES=<digits>` assignment.
+INDEX_MAX_BYTES=2097152
 COMMIT_ATTEMPTS_PER_TICK=2
 QUARANTINE_MAX_LINES=500
 HOOK_ERROR_BACKOFF_SECONDS=86400
@@ -731,13 +739,18 @@ _ac_editor_artifact() {
 
 # §4.3 tests 2–4 on the worktree file, BEFORE hashing (so a file still being
 # typed never writes a loose object). Prints the hold reason on failure.
+# _ac_precheck <repo-relative-path> [<class>] — <class> is _ac_classify's first
+# word ("index" or "entry"). Only "index" gets INDEX_MAX_BYTES (XACA-1487); a
+# missing or any other class gets the SMALLER ENTRY_MAX_BYTES (fail-closed).
 _ac_precheck() {
-    local abs="$REPO_DIR/$1" sz m now age
+    local abs="$REPO_DIR/$1" cls="${2:-}" sz m now age max
+    max="$ENTRY_MAX_BYTES"
+    [ "${cls%% *}" = "index" ] && max="$INDEX_MAX_BYTES"
     if [ ! -f "$abs" ] || [ -L "$abs" ]; then echo "not-regular-file"; return 1; fi
     if [ -x "$abs" ]; then echo "executable"; return 1; fi
     sz="$(wc -c < "$abs" 2>/dev/null || echo 0)"
     sz=$(( sz + 0 ))
-    if [ "$sz" -lt 1 ] || [ "$sz" -gt "$ENTRY_MAX_BYTES" ]; then echo "size-out-of-bounds"; return 1; fi
+    if [ "$sz" -lt 1 ] || [ "$sz" -gt "$max" ]; then echo "size-out-of-bounds"; return 1; fi
     m="$(_ac_mtime "$abs")"
     case "$m" in ''|*[!0-9]*) echo "mtime-unreadable"; return 1 ;; esac
     now="$(date +%s)"
@@ -1374,7 +1387,7 @@ _ac_autocommit() {
     # 2. hash + validate on the blob.
     while IFS="$_AC_TAB" read -r p cls <&4; do
         [ -n "$p" ] || continue
-        if ! reason="$(_ac_precheck "$p")"; then
+        if ! reason="$(_ac_precheck "$p" "$cls")"; then
             _ac_hold "$p" "$reason" "mtime:$(_ac_mtime "$REPO_DIR/$p")"
             continue
         fi
