@@ -5664,6 +5664,9 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         # XACA-1482: releaseConfig.gateEnforcement setter
         elif path == '/api/release-gate-enforcement':
             self.handle_update_release_gate_enforcement()
+        # XACA-1484-004: releaseConfig.branches.integration / .production setter
+        elif path == '/api/release-branches':
+            self.handle_update_release_branches()
         # XACA-0281 Phase A.3: Team account config endpoints
         elif path == '/api/team-config/account/save':
             self.handle_team_account_save()
@@ -17652,6 +17655,190 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             print(f"[LCARS] ERROR updating release gate enforcement: {e}")
             self._send_json_response({'success': False, 'error': str(e)}, status=500)
 
+    # ------------------------------------------------------------------
+    # XACA-1484-004: supported setter for releaseConfig.branches.integration / .production
+    # ------------------------------------------------------------------
+    # The ONLY writer of those two keys (kb-release branches calls it; there is no offline
+    # fallback). Validation is release_branches.effective_branches on the WOULD-BE
+    # releaseConfig, i.e. the very function kb-pr-base, the branch cut and the promote gate
+    # read with, so what this accepts can never be something they then refuse. Mirrors
+    # XACA-1482's handler structure (locked write, lead check, audit, fresh re-read).
+
+    _RELEASE_BRANCHES_ALLOWED_KEYS = {'team', 'integration', 'production', 'actor'}
+    _RELEASE_BRANCHES_SETTABLE = ('integration', 'production')
+
+    def _release_branches_fields(self, team, release_config, writable=True):
+        """GET payload for `release_config` (a dict, {} when the board has none). A config the
+        validator refuses reports null branch fields plus a configWarning (never a guessed
+        default: kb-pr-base fails closed on the same config)."""
+        branches = release_config.get('branches') if isinstance(release_config, dict) else None
+        raw = branches if isinstance(branches, dict) else {}
+        out = {
+            'team': team, 'integration': None, 'production': None, 'releasePrefix': None, 'mode': None,
+            'explicit': {k: k in raw for k in self._RELEASE_BRANCHES_SETTABLE},
+            'configWarning': None, 'writable': writable, 'leads': self._lead_names(release_config),
+        }
+        if _release_branches is None:
+            out['configWarning'] = 'release_branches module unavailable; cannot validate releaseConfig.branches'
+            return out
+        try:
+            eff = _release_branches.effective_branches(release_config)
+        except ValueError as e:
+            out['configWarning'] = str(e)
+            return out
+        for k in ('integration', 'production', 'releasePrefix', 'mode'):
+            out[k] = eff[k]
+        return out
+
+    def serve_release_branches(self, query_string: str):
+        """GET /api/release-branches?team=<team> (XACA-1484-004).
+
+        Response: {team, integration, production, releasePrefix, mode, explicit{integration,production},
+        configWarning, writable, leads}. Values are effective_branches() output (defaults filled in);
+        `explicit` says which of the two settable keys are actually present on the board. An invalid
+        config gives null values + configWarning. Unknown/missing team -> 400, no board -> 404.
+        """
+        try:
+            params = parse_qs(query_string) if query_string else {}
+            team = params.get('team', [None])[0]
+            if not team or team not in TEAM_KANBAN_DIRS:
+                self._send_json_response({'error': 'Unknown team: %s' % (team,)}, status=400)
+                return
+            board, err, status = self._read_board_shared_for_gate(team)
+            if err:
+                self._send_json_response({'error': err}, status=status)
+                return
+            board_is_obj = isinstance(board, dict)
+            raw_rc = board.get('releaseConfig') if board_is_obj else None
+            rc_ok = board_is_obj and ('releaseConfig' not in board or isinstance(raw_rc, dict))
+            raw_br = raw_rc.get('branches') if isinstance(raw_rc, dict) else None
+            writable = rc_ok and (raw_br is None or isinstance(raw_br, dict))
+            payload = self._release_branches_fields(team, self._release_cfg(board), writable=writable)
+            if not writable and payload['configWarning'] is None:
+                payload['configWarning'] = (
+                    "the board file, releaseConfig or releaseConfig.branches is not a JSON object; "
+                    "this setter refuses to write until the board is repaired")
+            self._send_json_response(payload)
+        except Exception as e:
+            print(f"[LCARS] ERROR serving release branches: {e}")
+            self._send_json_response({'error': str(e)}, status=500)
+
+    def handle_update_release_branches(self):
+        """POST /api/release-branches (XACA-1484-004).
+
+        Body {team, integration?, production?, actor?}; at least one of integration/production.
+        Status codes: 400 bad request (unknown team/keys, nothing to set, non-string value, or a value
+        release_branches.effective_branches refuses -- board unchanged), 403 actor is not a listed
+        release lead (ANY change needs one; fails closed: empty/absent leads = nobody), 404 no board,
+        409 releaseConfig / releaseConfig.branches present but not an object, 500 write failure/module
+        unavailable, 200 ok. Re-posting values already explicit on the board is 200 {changed: false}
+        with no write and no audit. integration == production is allowed (the validator allows it).
+        Every OTHER releaseConfig / branches key is preserved untouched. Success body is
+        {success: true, changed, previous, ...GET fields} from a FRESH re-read (`previous` = the effective
+        {integration, production} before this call). Every change appends one audit record
+        {at, team, from, to, actor} where from/to are the effective {integration, production}.
+        """
+        try:
+            if _release_branches is None:
+                return self._send_json_response(
+                    {'success': False, 'error': 'release_branches module unavailable; refusing to write'},
+                    status=500)
+            body, err = self._read_release_json_body()
+            if err:
+                return self._send_json_response({'success': False, 'error': err}, status=400)
+            unknown = set(body) - self._RELEASE_BRANCHES_ALLOWED_KEYS
+            if unknown:
+                return self._send_json_response(
+                    {'success': False, 'error': 'Unknown key(s): %s' % ', '.join(sorted(unknown))}, status=400)
+            team = body.get('team')
+            if not isinstance(team, str) or team not in TEAM_KANBAN_DIRS:
+                return self._send_json_response({'success': False, 'error': 'Unknown team: %s' % (team,)}, status=400)
+            wanted = {k: body[k] for k in self._RELEASE_BRANCHES_SETTABLE if k in body}
+            if not wanted:
+                return self._send_json_response(
+                    {'success': False, 'error': 'give at least one of: integration, production'}, status=400)
+            for k, v in wanted.items():
+                if not isinstance(v, str):
+                    return self._send_json_response(
+                        {'success': False, 'error': '%s must be a string, got %r' % (k, v)}, status=400)
+            actor = None
+            if 'actor' in body:
+                actor = body['actor']
+                if not isinstance(actor, str) or not actor.strip():
+                    return self._send_json_response(
+                        {'success': False, 'error': 'actor, when given, must be a non-empty string'}, status=400)
+                actor = actor.strip()
+
+            payload = None
+            audit = None
+            with self._board_write_transaction(team):
+                board_file = self._get_board_file(team)
+                if not board_file.exists():
+                    raise _DeferredResponse.json(
+                        {'success': False, 'error': 'No board for team %r' % team}, 404)
+                board = self._read_board_raw_locked(team)
+                if not isinstance(board, dict):
+                    raise _DeferredResponse.json({'success': False, 'error': 'Board file is not a JSON object'}, 409)
+                if 'releaseConfig' in board and not isinstance(board['releaseConfig'], dict):
+                    raise _DeferredResponse.json(
+                        {'success': False,
+                         'error': 'releaseConfig is %s, not an object; refusing to overwrite it. '
+                                  'Repair the board first.' % type(board['releaseConfig']).__name__}, 409)
+                rcfg = board.get('releaseConfig') or {}
+                if rcfg.get('branches') is not None and not isinstance(rcfg.get('branches'), dict):
+                    raise _DeferredResponse.json(
+                        {'success': False,
+                         'error': 'releaseConfig.branches is %s, not an object; refusing to overwrite it. '
+                                  'Repair the board first.' % type(rcfg['branches']).__name__}, 409)
+                old_br = rcfg.get('branches') or {}
+                already = all(isinstance(old_br.get(k), str) and old_br[k] == v for k, v in wanted.items())
+                if already:
+                    payload = dict(self._release_branches_fields(team, rcfg), success=True, changed=False)
+                    payload['previous'] = {k: payload[k] for k in self._RELEASE_BRANCHES_SETTABLE}
+                else:
+                    new_br = dict(old_br)
+                    new_br.update(wanted)
+                    new_rcfg = dict(rcfg)
+                    new_rcfg['branches'] = new_br
+                    try:
+                        new_eff = _release_branches.effective_branches(new_rcfg)   # the consumers' own validator
+                    except ValueError as e:
+                        raise _DeferredResponse.json({'success': False, 'error': str(e)}, 400)
+                    try:
+                        old_eff = _release_branches.effective_branches(rcfg)
+                    except ValueError:
+                        old_eff = None   # already-invalid config: this write may be the repair
+                    is_lead, reason = self._actor_is_lead(actor, rcfg)
+                    if not is_lead:
+                        raise _DeferredResponse.json(
+                            {'success': False, 'error': reason, 'code': self._lead_reason_code(rcfg)}, 403)
+                    board['releaseConfig'] = new_rcfg
+                    self._atomic_write_json(board_file, board)
+                    keys = self._RELEASE_BRANCHES_SETTABLE
+                    audit = {'at': self._get_timestamp(), 'team': team, 'actor': actor,
+                             'from': None if old_eff is None else {k: old_eff[k] for k in keys},
+                             'to': {k: new_eff[k] for k in keys}}
+                    # Fresh re-read of what is now on disk, never an echo of the request.
+                    after = self._release_cfg(self._read_board_raw_locked(team))
+                    payload = dict(self._release_branches_fields(team, after), success=True, changed=True)
+                    payload['previous'] = audit['from']   # effective values before the write (null if it was invalid)
+            if audit is not None:
+                # Fire-and-forget like every release activity record; outside the board lock.
+                try:
+                    log_activity('release_branches_changed', self._GATE_ENFORCEMENT_AUDIT_TARGET, 'release',
+                                 field='branches', old_value=json.dumps(audit['from'], sort_keys=True),
+                                 new_value=json.dumps(audit['to'], sort_keys=True),
+                                 context=json.dumps(audit, sort_keys=True), team=team)
+                except Exception as log_err:  # pragma: no cover
+                    print(f"[LCARS] Warning: release branches audit failed for {team}: {log_err}")
+            return self._send_json_response(payload)
+        except _DeferredResponse as deferred:
+            deferred.emit(self)
+            return
+        except Exception as e:
+            print(f"[LCARS] ERROR updating release branches: {e}")
+            self._send_json_response({'success': False, 'error': str(e)}, status=500)
+
     def _write_team_paths_registry(self, team_paths_file: Path, data: dict) -> None:
         """Atomically write *data* as the team-paths.json registry at *team_paths_file*.
 
@@ -20882,6 +21069,9 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         # XACA-1482: releaseConfig.gateEnforcement (resolved mode + explicit flag)
         elif path == '/api/release-gate-enforcement':
             self.serve_release_gate_enforcement(parsed.query)
+        # XACA-1484-004: releaseConfig.branches (integration / production, validated)
+        elif path == '/api/release-branches':
+            self.serve_release_branches(parsed.query)
         # XACA-0281 Phase A.3: Team account config endpoints
         elif path == '/api/team-config/account/current':
             self.serve_team_account_current(parsed.query)

@@ -26645,10 +26645,13 @@ kb-release-waive() {
 # ---------------------------------------------------------------------------
 
 # Send one request to the caller team's LCARS release-gate-enforcement endpoint.
-# Usage: _kb_release_enf_request <GET|POST> <team|""> [json-payload]
+# Usage: _kb_release_enf_request <GET|POST> <team|""> [json-payload] [endpoint] [subcmd]
+# endpoint defaults to release-gate-enforcement and subcmd to enforcement (XACA-1484-004 reuses this
+# one curl site for /api/release-branches, so the XACA-1099 S4 capture-site pin does not move).
 # Sets _KB_REL_CODE / _KB_REL_BODY. rc 0 = HTTP response received, 1 = no response.
 _kb_release_enf_request() {
     local method="${1-}" team="${2-}" payload="${3-}"
+    local endpoint="${4:-release-gate-enforcement}" subcmd="${5:-enforcement}"
     _KB_REL_CODE=""
     _KB_REL_BODY=""
 
@@ -26666,7 +26669,7 @@ _kb_release_enf_request() {
         echo "Warning: no LCARS port known for team '$ctx_team', falling back to 8080" >&2
         port="8080"
     }
-    url="http://localhost:${port}/api/release-gate-enforcement"
+    url="http://localhost:${port}/api/${endpoint}"
 
     _kb_lcars_auth_args
     # One curl call for both methods so curl_exit=$? sits directly on curl's close (XACA-1099 S4).
@@ -26694,11 +26697,11 @@ _kb_release_enf_request() {
         if [[ "$method" == "POST" ]]; then
             case "$curl_exit" in
                 18|28|52|55|56)
-                    echo "  the request may have been applied on the server — re-run \`kb-release enforcement ${team}\` to check" >&2
+                    echo "  the request may have been applied on the server — re-run \`kb-release ${subcmd} ${team}\` to check" >&2
                     ;;
             esac
         fi
-        echo "  (gateEnforcement is only changed by the server; there is no offline fallback)" >&2
+        echo "  (releaseConfig is only changed by the server; there is no offline fallback)" >&2
         return 1
     fi
     return 0
@@ -26796,6 +26799,117 @@ kb-release-enforcement() {
             echo "✓ $team: gate enforcement set to $r_mode $how"
         else
             echo "✓ $team: gate enforcement already $r_mode $how — no change"
+        fi
+    fi
+    [[ -n "$r_warn" ]] && echo "Warning: $r_warn"
+    return 0
+}
+
+# XACA-1484-004: kb-release branches <team> [--integration <ref>] [--production <ref>] [--actor <lead>]
+# Show / set releaseConfig.branches.integration and .production -- a thin client of
+#   GET  /api/release-branches?team=<t>
+#   POST /api/release-branches   {team, integration?, production?, actor?}
+# Same shape and exit codes as `kb-release enforcement`; the SERVER validates (the very
+# release_branches.effective_branches that kb-pr-base uses) and checks the lead. No offline fallback.
+kb-release-branches() {
+    local team="" opt_actor="" opt_int="" opt_prod="" have_int=0 have_prod=0
+    local usage="Usage: kb-release branches <team> [--integration <ref>] [--production <ref>] [--actor <lead>]"
+
+    while [[ $# -gt 0 ]]; do
+        case "${1-}" in
+            --integration|--production|--actor|--by)
+                if [[ $# -lt 2 ]]; then echo "Error: ${1-} needs a value" >&2; echo "$usage" >&2; return 2; fi
+                case "${1-}" in
+                    --integration) opt_int="${2-}"; have_int=1 ;;
+                    --production)  opt_prod="${2-}"; have_prod=1 ;;
+                    *)             opt_actor="${2-}" ;;
+                esac
+                shift 2 ;;
+            --help|-h)
+                echo "$usage"
+                echo ""
+                echo "Show (no --integration/--production) or set releaseConfig.branches for a team."
+                echo "  integration  the branch PRs target and release branches are cut from (default develop)"
+                echo "  production   the production branch, hotfix source (default master)"
+                echo "The two may be the same branch. Other branches keys (releasePrefix, mode) are untouched."
+                echo "Any change needs a listed release lead (--actor); the SERVER validates and decides."
+                echo "There is no offline fallback: the LCARS server must be running."
+                echo ""
+                echo "Exit codes: 0 ok, 2 usage/rejected (400), 3 refused (403 not a lead, 409),"
+                echo "            4 transport/server error (curl failure, 5xx, unparseable reply)"
+                return 0 ;;
+            -*)
+                echo "Error: Unknown option: ${1-}" >&2; echo "$usage" >&2; return 2 ;;
+            *)
+                if [[ -z "$team" ]]; then
+                    team="${1-}"
+                else
+                    echo "Error: Unexpected argument: ${1-}" >&2; echo "$usage" >&2; return 2
+                fi
+                shift ;;
+        esac
+    done
+
+    if [[ -z "$team" ]]; then
+        echo "Error: team is required" >&2; echo "$usage" >&2; return 2
+    fi
+    if ! _kb_release_valid_token "$team"; then
+        echo "Error: invalid team: $team" >&2; return 2
+    fi
+    if (( have_int )) && [[ -z "$opt_int" ]]; then echo "Error: --integration needs a non-empty value" >&2; return 2; fi
+    if (( have_prod )) && [[ -z "$opt_prod" ]]; then echo "Error: --production needs a non-empty value" >&2; return 2; fi
+    if [[ -n "$opt_actor" ]] && (( ! have_int && ! have_prod )); then
+        echo "Error: --actor only applies when setting a branch" >&2; echo "$usage" >&2; return 2
+    fi
+
+    local payload="" err rc old_int old_prod
+    if (( ! have_int && ! have_prod )); then
+        _kb_release_enf_request GET "$team" "" release-branches branches || return 4
+    else
+        payload=$(jq -n --arg team "$team" --arg actor "$opt_actor" --arg i "$opt_int" --arg p "$opt_prod" \
+            --argjson hi "$have_int" --argjson hp "$have_prod" \
+            '{team: $team} + (if $hi == 1 then {integration: $i} else {} end)
+                           + (if $hp == 1 then {production: $p} else {} end)
+                           + (if $actor == "" then {} else {actor: $actor} end)') || return 4
+        _kb_release_enf_request POST "$team" "$payload" release-branches branches || return 4
+    fi
+
+    if [[ "$_KB_REL_CODE" != "200" ]]; then
+        err=$(printf '%s' "$_KB_REL_BODY" | jq -r '.error // .message // empty' 2>/dev/null)
+        case "$_KB_REL_CODE" in
+            400) rc=2; echo "Error: request rejected (HTTP 400) — branches unchanged" >&2 ;;
+            403) rc=3; echo "Refused: not a release lead — branches unchanged (HTTP 403)" >&2 ;;
+            409) rc=3; echo "Refused: releaseConfig or its branches is not an object — branches unchanged (HTTP 409)" >&2 ;;
+            *)   rc=4; echo "Error: branches request failed (HTTP ${_KB_REL_CODE:-?})" >&2 ;;
+        esac
+        if [[ -n "$err" ]]; then
+            echo "  $err" >&2
+        elif [[ "$rc" == "4" && -n "$_KB_REL_BODY" ]]; then
+            echo "  $_KB_REL_BODY" >&2
+        fi
+        return $rc
+    fi
+
+    local r_int r_prod r_warn r_changed
+    r_int=$(printf '%s' "$_KB_REL_BODY" | jq -r '.integration // empty' 2>/dev/null)
+    r_prod=$(printf '%s' "$_KB_REL_BODY" | jq -r '.production // empty' 2>/dev/null)
+    r_warn=$(printf '%s' "$_KB_REL_BODY" | jq -r '.configWarning // empty' 2>/dev/null)
+    if [[ -z "$r_int" || -z "$r_prod" ]]; then
+        echo "Error: unparseable or invalid response from LCARS (no integration/production): $_KB_REL_BODY" >&2
+        [[ -n "$r_warn" ]] && echo "  $r_warn" >&2
+        return 4
+    fi
+
+    if (( ! have_int && ! have_prod )); then
+        echo "$team: integration = $r_int, production = $r_prod"
+    else
+        r_changed=$(printf '%s' "$_KB_REL_BODY" | jq -r '.changed // empty' 2>/dev/null)
+        if [[ "$r_changed" == "true" ]]; then
+            old_int=$(printf '%s' "$_KB_REL_BODY" | jq -r '.previous.integration // "?"' 2>/dev/null)
+            old_prod=$(printf '%s' "$_KB_REL_BODY" | jq -r '.previous.production // "?"' 2>/dev/null)
+            echo "✓ $team: integration $old_int → $r_int, production $old_prod → $r_prod"
+        else
+            echo "✓ $team: integration = $r_int, production = $r_prod — no change"
         fi
     fi
     [[ -n "$r_warn" ]] && echo "Warning: $r_warn"
@@ -27986,6 +28100,10 @@ kb-release() {
             # XACA-1482-002: show/set releaseConfig.gateEnforcement (server decides)
             kb-release-enforcement "$@"
             ;;
+        branches)
+            # XACA-1484-004: show/set releaseConfig.branches.integration/production (server decides)
+            kb-release-branches "$@"
+            ;;
         test)
             # XACA-1347-007: run the current stage's automated providers
             kb-release-test "$@"
@@ -28052,6 +28170,8 @@ kb-release() {
             echo "                                              Lead-approved gate waiver"
             echo "  kb-release enforcement <team> [enforce|report] [--actor <lead>]"
             echo "                                              Show/set gateEnforcement via the server (XACA-1482)"
+            echo "  kb-release branches <team> [--integration <ref>] [--production <ref>] [--actor <lead>]"
+            echo "                                              Show/set the integration/production branches via the server (XACA-1484)"
             echo "  kb-release test <id> [--repo-dir PATH] [--include-scheduled] [--dry-run] [--only-missing] [--provider NAME]..."
             echo "                                              Run the current stage's automated test providers (XACA-1347)"
             echo "  kb-release walkthrough <id> [--provider NAME] [--lead NAME]"
@@ -28105,6 +28225,10 @@ kb-release() {
             echo "Enforcement (XACA-1482): kb-release enforcement <team> [enforce|report] [--actor <lead>]"
             echo "  Show or set releaseConfig.gateEnforcement. Exit: 0 ok, 2 usage/400, 3 refused (403/409),"
             echo "  4 transport/server error."
+            echo ""
+            echo "Branches (XACA-1484): kb-release branches <team> [--integration <ref>] [--production <ref>] [--actor <lead>]"
+            echo "  Show or set releaseConfig.branches.integration/production (the PR base kb-pr-base reports)."
+            echo "  Any change needs a listed release lead; server-validated; no offline fallback. Same exit codes."
             ;;
         *)
             echo "Unknown subcommand: $subcmd"

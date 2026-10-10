@@ -105,7 +105,10 @@ code = prefix[1:]
 try:
     import aiteamforge_paths as paths
     import aiteamforge_registry as reg
-    teams = paths.list_teams()
+    # XACA-1484-012: read-only caller (kb-pr runs this on every handoff) -> side-effect-free
+    # view. A bare list_teams() goes through load_config(), which QUARANTINES/reseeds a
+    # structurally invalid operator registry. read_config_view() peeks and never writes.
+    teams = paths.list_teams(config=paths.read_config_view())
 except Exception as e:  # registry unreadable: report, never guess
     sys.exit("cannot load team registry: %s" % e)
 found = None
