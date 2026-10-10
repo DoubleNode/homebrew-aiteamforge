@@ -26901,6 +26901,14 @@ kb-release-branches() {
     fi
 
     if (( ! have_int && ! have_prod )); then
+        # XACA-1484-014: the server's explicit{integration,production} says whether each value is recorded on
+        # the board or is the kb-pr-base fallback. Mark only the fallback; a missing/non-boolean flag (old
+        # server) prints no annotation rather than a guess. jq `// empty` would swallow `false`, so test type.
+        local x_int x_prod
+        x_int=$(printf '%s' "$_KB_REL_BODY" | jq -r '(.explicit? | objects | .integration) | if type == "boolean" then tostring else "" end' 2>/dev/null)
+        x_prod=$(printf '%s' "$_KB_REL_BODY" | jq -r '(.explicit? | objects | .production) | if type == "boolean" then tostring else "" end' 2>/dev/null)
+        [[ "$x_int" == "false" ]] && r_int="$r_int (default, not recorded)"
+        [[ "$x_prod" == "false" ]] && r_prod="$r_prod (default, not recorded)"
         echo "$team: integration = $r_int, production = $r_prod"
     else
         r_changed=$(printf '%s' "$_KB_REL_BODY" | jq -r '.changed // empty' 2>/dev/null)
