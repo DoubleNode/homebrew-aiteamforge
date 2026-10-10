@@ -18646,3 +18646,4 @@ body.lcars-asset-banner-warn-active .lcars-modal-overlay .lcars-modal {
 .release-lead-item { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 2px 8px; border-left: 4px solid var(--lcars-orange, #ff9900); }
 .release-lead-name { word-break: break-word; }
 .release-lead-remove { padding: 2px 10px; }
+.release-lead-remove:disabled, #release-leads-add:disabled { opacity: 0.45; cursor: not-allowed; }

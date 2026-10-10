@@ -52,19 +52,36 @@ var ELEMENT_IDS = [
     'release-gates-lead-close',
 ];
 
+/**
+ * HTMLCollection-like: indexed + length + item(), but NOT an Array (no map/forEach/filter),
+ * so code that does Array.isArray(el.children) or el.children.forEach misbehaves like it
+ * would in a real browser (XACA-1485-012).
+ */
+function makeCollection(arr) {
+    var c = { length: arr.length, item: function (i) { return arr[i] || null; } };
+    arr.forEach(function (x, i) { c[i] = x; });
+    c[Symbol.iterator] = function () { return arr[Symbol.iterator](); };
+    return c;
+}
+function kidsOf(el) { return Array.from(el.children); }
+
 function makeElement(id) {
+    var kids = [];
     var el = {
         id: id, checked: false, disabled: false, onchange: null, onclick: null, onkeydown: null,
-        className: '', value: '', style: { display: '' }, children: [], focusCount: 0, attrs: {},
+        className: '', value: '', style: { display: '' }, focusCount: 0, attrs: {},
         innerHTMLWrites: 0,
-        appendChild: function (c) { el.children.push(c); return c; },
+        appendChild: function (c) { kids.push(c); return c; },
         setAttribute: function (k, v) { el.attrs[k] = v; },
         focus: function () { el.focusCount++; },
     };
     var text = '';
     Object.defineProperty(el, 'textContent', {
         get: function () { return text; },
-        set: function (v) { text = v; if (v === '') el.children = []; },
+        set: function (v) { text = v; if (v === '') kids.length = 0; },
+    });
+    Object.defineProperty(el, 'children', {
+        get: function () { return makeCollection(kids); },
     });
     // Names are user data: nothing may ever assign innerHTML.
     Object.defineProperty(el, 'innerHTML', {
@@ -128,10 +145,10 @@ function postsOf(env) {
     return env.apiFetchCalls.filter(function (c) { return isLeadsUrl(c.url) && c.init && c.init.method === 'POST'; });
 }
 function names(env) {
-    return env.el['release-leads-list'].children.map(function (row) { return row.children[0].textContent; });
+    return kidsOf(env.el['release-leads-list']).map(function (row) { return row.children[0].textContent; });
 }
 function removeButtons(env) {
-    return env.el['release-leads-list'].children.map(function (row) { return row.children[1]; });
+    return kidsOf(env.el['release-leads-list']).map(function (row) { return row.children[1]; });
 }
 function assertFailClosed(env) {
     assert.equal(env.el['release-leads-list'].children.length, 0);
@@ -249,7 +266,7 @@ test('add on non-empty roster: goes through the lead modal and sends the chosen 
     assert.equal(env.el['release-gates-lead-title'].textContent, 'ADD RELEASE LEAD');
     assert.match(env.el['release-gates-lead-consequence'].textContent, /Thok/);
     assert.equal(env.el['release-gates-lead-confirm'].textContent, 'ADD LEAD');
-    assert.deepEqual(env.el['release-gates-lead-select'].children.map(function (o) { return o.value; }), ['Nahla', 'Reno']);
+    assert.deepEqual(kidsOf(env.el['release-gates-lead-select']).map(function (o) { return o.value; }), ['Nahla', 'Reno']);
     env.el['release-gates-lead-select'].value = 'Reno';
     clickModal(env, 'confirm');
     await p;
@@ -294,13 +311,13 @@ test('refused POST (403 and 409): roster unchanged, reason shown, still editable
     ];
     for (var i = 0; i < cases.length; i++) {
         var c = cases[i];
-        var env = seeded(roster(['Nahla']), function () { return Promise.resolve(resp(c[0], c[1])); });
+        var env = seeded(roster(['Nahla', 'Reno']), function () { return Promise.resolve(resp(c[0], c[1])); });
         await env.sandbox.loadReleaseLeads();
         var p = removeButtons(env)[0].onclick();
         await tick();
         clickModal(env, 'confirm');
         await p;
-        assert.deepEqual(names(env), ['Nahla']);
+        assert.deepEqual(names(env), ['Nahla', 'Reno']);
         assert.equal(env.el['release-leads-error-row'].style.display, '');
         assert.match(env.el['release-leads-error-text'].textContent, c[2]);
         assert.equal(env.el['release-leads-add'].disabled, false);
@@ -337,7 +354,8 @@ test('successful change re-calls loadReleaseGateEnforcement; changed:false does 
 test('client-side name validation sends nothing', async function () {
     var env = seeded(roster([]), function () { throw new Error('must not POST'); });
     await env.sandbox.loadReleaseLeads();
-    var bad = ['', '   ', 'a'.repeat(65), 'tab\tname', 'nl\nname'];
+    var bad = ['', '   ', 'a'.repeat(65), 'tab\tname', 'nl\nname',
+        'zw\u200bsp', 'rlo\u202ename', 'ls\u2028name', 'ps\u2029name', 'bom\ufeffname'];
     for (var i = 0; i < bad.length; i++) {
         env.el['release-leads-input'].value = bad[i];
         await env.sandbox.onReleaseLeadAdd();
@@ -349,4 +367,62 @@ test('client-side name validation sends nothing', async function () {
 test('1482 enforcement copy now points at the roster editor / kb-release leads', function () {
     assert.doesNotMatch(SRC, /Ask an Academy admin/);
     assert.match(SRC, /kb-release leads <team> add <name>/);
+});
+
+test('mid-POST: ADD and every per-row REMOVE are disabled (children is an HTMLCollection, not an Array)', async function () {
+    var release;
+    var gate = new Promise(function (r) { release = r; });
+    var env = seeded(roster(['Nahla', 'Reno']), function () {
+        return gate.then(function () { return resp(200, roster(['Nahla'], { changed: true })); });
+    });
+    await env.sandbox.loadReleaseLeads();
+    assert.equal(Array.isArray(env.el['release-leads-list'].children), false);
+    env.el['release-leads-input'].value = 'Thok';
+    var p = env.sandbox.onReleaseLeadAdd();
+    await tick();
+    clickModal(env, 'confirm'); // lead picked -> POST starts and parks on `gate`
+    await tick();
+    assert.equal(postsOf(env).length, 1);
+    assert.equal(env.el['release-leads-add'].disabled, true);
+    assert.equal(env.el['release-leads-input'].disabled, true);
+    removeButtons(env).forEach(function (b) { assert.equal(b.disabled, true, 'REMOVE must be disabled mid-POST'); });
+    release();
+    await p;
+});
+
+test('mid-POST re-enable never unlocks the last lead REMOVE', async function () {
+    var env = seeded(roster(['Nahla']));
+    await env.sandbox.loadReleaseLeads();
+    env.sandbox._setReleaseLeadsControlsDisabled(true);
+    removeButtons(env).forEach(function (b) { assert.equal(b.disabled, true); });
+    env.sandbox._setReleaseLeadsControlsDisabled(false);
+    assert.equal(removeButtons(env)[0].disabled, true);
+    assert.equal(env.el['release-leads-add'].disabled, false);
+});
+
+test('last lead: REMOVE is disabled with an explanatory title; two leads re-enable it', async function () {
+    var env = seeded(roster(['Nahla']));
+    await env.sandbox.loadReleaseLeads();
+    var b = removeButtons(env)[0];
+    assert.equal(b.disabled, true);
+    assert.match(b.title, /last release lead cannot be removed/);
+    assert.match(b.attrs['aria-description'], /add another lead first/);
+    await env.sandbox.onReleaseLeadRemove('Nahla');   // defensive: sends nothing, no modal
+    assert.equal(postsOf(env).length, 0);
+    assert.equal(env.el['release-gates-lead-modal'].style.display, 'none');
+
+    var env2 = seeded(roster(['Nahla', 'Reno']));
+    await env2.sandbox.loadReleaseLeads();
+    removeButtons(env2).forEach(function (x) { assert.equal(x.disabled, false); assert.equal(x.title, undefined); });
+});
+
+test('buttons use the settings-page lcars-button classes, not the modal-scoped modal-btn', async function () {
+    var env = seeded(roster(['Nahla', 'Reno']));
+    await env.sandbox.loadReleaseLeads();
+    removeButtons(env).forEach(function (x) {
+        assert.match(x.className, /\blcars-button\b/);
+        assert.doesNotMatch(x.className, /modal-btn/);
+    });
+    var html = fs.readFileSync(path.join(__dirname, '../index.html'), 'utf8');
+    assert.match(html, /class="lcars-button team-config-save-btn" id="release-leads-add"/);
 });

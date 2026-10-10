@@ -21533,15 +21533,27 @@ function _setReleaseLeadsStatus(text, cls) {
     el.className = 'team-config-status' + (cls ? ' ' + cls : '');
 }
 
+const _RELEASE_LAST_LEAD_HINT = 'The last release lead cannot be removed \u2014 add another lead first.';
+
+/** Whether per-row REMOVE must stay disabled on its own (last remaining lead). */
+function _releaseLeadsRemoveLocked() {
+    return _currentReleaseLeads().length <= 1;
+}
+
 function _setReleaseLeadsControlsDisabled(disabled) {
     const input = _relGateEl('release-leads-input');
     const addBtn = _relGateEl('release-leads-add');
     if (input) input.disabled = disabled;
     if (addBtn) addBtn.disabled = disabled;
     const list = _relGateEl('release-leads-list');
-    if (list && Array.isArray(list.children)) {
-        list.children.forEach((row) => {
-            (row.children || []).forEach((c) => { if (c.isRemoveButton) c.disabled = disabled; });
+    if (list && list.children) {
+        // children is an HTMLCollection in a real DOM (not an Array): always go through Array.from.
+        // Re-enabling must not unlock the last lead's REMOVE (XACA-1485-013).
+        const lastLeadLocked = _releaseLeadsRemoveLocked();
+        Array.from(list.children).forEach((row) => {
+            Array.from(row.children || []).forEach((c) => {
+                if (c.isRemoveButton) c.disabled = disabled || lastLeadLocked;
+            });
         });
     }
 }
@@ -21556,7 +21568,10 @@ function _releaseLeadNameProblem(raw) {
     const name = (typeof raw === 'string') ? raw.trim() : '';
     if (!name) return 'Enter a lead name first.';
     if (name.length > 64) return 'A lead name can be at most 64 characters.';
-    if (/[\u0000-\u001f\u007f-\u009f]/.test(name)) return 'A lead name cannot contain control characters.';
+    // Mirrors the server: Unicode Cc (control), Cf (format: zero-width, bidi overrides, BOM), Zl, Zp.
+    if (/[\u0000-\u001f\u007f-\u009f\u00ad\u0600-\u0605\u061c\u06dd\u070f\u08e2\u180e\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u206f\ufeff\ufff9-\ufffb]/.test(name)) {
+        return 'A lead name cannot contain control, invisible or line-separator characters.';
+    }
     return null;
 }
 
@@ -21605,11 +21620,17 @@ function _renderReleaseLeads(data) {
         row.appendChild(label);
         const btn = document.createElement('button');
         btn.type = 'button';
-        btn.className = 'modal-btn modal-btn-cancel release-lead-remove';
+        btn.className = 'lcars-button team-config-save-btn release-lead-remove';
         btn.textContent = 'REMOVE';
         btn.setAttribute('aria-label', 'Remove release lead ' + name);
         btn.isRemoveButton = true;
-        btn.disabled = !writable;
+        // The last remaining lead cannot be removed (server answers 409 LAST_LEAD); say why up front.
+        const lastLead = data.leads.length <= 1;
+        btn.disabled = !writable || lastLead;
+        if (lastLead) {
+            btn.title = _RELEASE_LAST_LEAD_HINT;
+            btn.setAttribute('aria-description', _RELEASE_LAST_LEAD_HINT);
+        }
         btn.onclick = writable ? () => onReleaseLeadRemove(name) : null;
         row.appendChild(btn);
         list.appendChild(row);
@@ -21751,6 +21772,10 @@ async function onReleaseLeadRemove(name) {
     if (typeof name !== 'string' || !name) return;
     const leads = _currentReleaseLeads();
     if (!leads.length) return; // nothing to remove / unknown state: send nothing
+    if (leads.length === 1) { // last lead: the server would 409; don't even ask
+        _setReleaseLeadsStatus(_RELEASE_LAST_LEAD_HINT, 'error');
+        return;
+    }
     const actor = await _pickReleaseGatesLead(leads, {
         title: 'REMOVE RELEASE LEAD',
         consequence: `Removing "${name}" revokes their release-lead authority for this team.`,

@@ -26948,6 +26948,8 @@ kb-release-leads() {
                 echo "  remove <name>  remove a lead (the last lead cannot be removed)"
                 echo "Changing a non-empty roster needs a listed release lead (--actor, default \$USER);"
                 echo "the SERVER validates and decides. There is no offline fallback: LCARS must be running."
+                echo "Names are case-sensitive and should match the person's \$USER. A name starting with '-'"
+                echo "is not accepted by this CLI (it is parsed as an option)."
                 echo ""
                 echo "Exit codes: 0 ok (incl. no change), 2 usage/rejected (400), 3 refused (403 not a lead,"
                 echo "            409 last lead / releaseConfig not an object),"

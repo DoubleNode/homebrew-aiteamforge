@@ -17668,6 +17668,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     _RELEASE_LEADS_ALLOWED_KEYS = {'team', 'op', 'name', 'actor'}
     _RELEASE_LEADS_OPS = ('add', 'remove')
     _RELEASE_LEADS_MAX_NAME = 64
+    # Unicode categories rejected in a name: Cc control, Cf format (zero-width, bidi overrides, BOM),
+    # Zl line separator, Zp paragraph separator. A name that looks identical but differs invisibly
+    # would be a lead nobody can see or remove.
+    _RELEASE_LEADS_BAD_CATEGORIES = frozenset(('Cc', 'Cf', 'Zl', 'Zp'))
 
     def _release_leads_fields(self, team, release_config, writable=True):
         """GET payload for `release_config` (a dict, {} when the board has none). configWarning
@@ -17683,8 +17687,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 # Duplicates collapse by design; only entries that are not valid names are "dropped".
                 bad = sum(1 for x in raw if not (isinstance(x, str) and x.strip()))
                 if bad:
-                    warning = ("releaseConfig.leads has %d entr%s that are not valid names; they are ignored "
-                               "and will be dropped on the next change" % (bad, 'y' if bad == 1 else 'ies'))
+                    warning = ("releaseConfig.leads has %d %s that %s not valid names; %s ignored "
+                               "and will be dropped on the next change"
+                               % (bad, 'entry' if bad == 1 else 'entries', 'is' if bad == 1 else 'are',
+                                  'it is' if bad == 1 else 'they are'))
         return {'team': team, 'leads': leads, 'configured': len(leads) > 0,
                 'writable': writable, 'configWarning': warning}
 
@@ -17755,9 +17761,11 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 return self._send_json_response(
                     {'success': False, 'error': 'name must be a non-empty string'}, status=400)
             name = name.strip()
-            if any(unicodedata.category(c) == 'Cc' for c in name):
+            if any(unicodedata.category(c) in self._RELEASE_LEADS_BAD_CATEGORIES for c in name):
                 return self._send_json_response(
-                    {'success': False, 'error': 'name must not contain control characters'}, status=400)
+                    {'success': False,
+                     'error': 'name must not contain control, invisible (zero-width/bidi) or '
+                              'line-separator characters'}, status=400)
             if len(name) > self._RELEASE_LEADS_MAX_NAME:
                 return self._send_json_response(
                     {'success': False, 'error': 'name must be at most %d characters' % self._RELEASE_LEADS_MAX_NAME},
@@ -17809,6 +17817,11 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     self._atomic_write_json(board_file, board)
                     audit = {'at': self._get_timestamp(), 'team': team, 'op': op, 'name': name,
                              'actor': actor, 'before': before, 'after': after}
+                    # A malformed prior value (non-list, junk entries) is overwritten by the clean list:
+                    # keep the RAW prior value in the audit trail, only when it differs from `before`.
+                    raw_before = rcfg.get('leads') if 'leads' in rcfg else None
+                    if 'leads' in rcfg and raw_before != before:
+                        audit['rawBefore'] = raw_before
                     # Fresh re-read of what is now on disk, never an echo of the request.
                     fresh = self._release_cfg(self._read_board_raw_locked(team))
                     payload = dict(self._release_leads_fields(team, fresh), success=True, changed=True)
