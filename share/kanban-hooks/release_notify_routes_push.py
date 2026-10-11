@@ -63,6 +63,14 @@ class RoutesPushError(Exception):
     """Message is a static reason, safe to print."""
 
 
+KEY_RESOLVER_UNAVAILABLE = "key-resolver-unavailable"
+
+
+class KeyResolverUnavailable(RoutesPushError):
+    """The key resolver itself could not load or crashed: a machine problem, so it is an
+    error even under --if-configured (a genuinely unminted key stays a quiet skip)."""
+
+
 # ---------------------------------------------------------------- resolvers
 # resolve_fm_url / resolve_team_key: imported from release_notify_hub (single home).
 
@@ -92,7 +100,9 @@ def _team_key(team: str, env=None, secret_resolver: Optional[Callable[[str, str]
     """The hub module's resolver plus this module's static errors and fnt_ format check."""
     try:
         key = hub.resolve_team_key(team, env, secret_resolver)
-    except hub.HubSkip:
+    except hub.HubSkip as skip:
+        if skip.reason == hub.RESOLVER_UNAVAILABLE:
+            raise KeyResolverUnavailable(KEY_RESOLVER_UNAVAILABLE) from None
         raise RoutesPushError("no team notify key available (mint one with the FM admin API and store it as "
                               "$RELEASE_<TEAM>_NOTIFY_KEY or in the vault)") from None
     if not key.startswith(KEY_PREFIX) or not re.match(r"^[A-Za-z0-9_-]+$", key):
@@ -254,11 +264,15 @@ class RoutesPusher:
                 return res
             try:
                 key = (self._key_resolver or (lambda t: _team_key(t, self._env, self._secret_resolver)))(self.team)
+            except KeyResolverUnavailable:
+                raise
             except RoutesPushError:
                 if if_configured:
                     res.update(ok=True, action="skipped", reason="no_key")
                     return res
                 raise
+            except Exception:  # noqa: BLE001 - resolver crashed: machine fault, not an unminted key
+                raise KeyResolverUnavailable(KEY_RESOLVER_UNAVAILABLE) from None
             self._put(fm_url, key, payload)
             self._write_state(digest)
             res.update(ok=True, action="pushed", reason=reason)

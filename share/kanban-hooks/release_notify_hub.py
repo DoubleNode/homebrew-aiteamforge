@@ -13,7 +13,7 @@ WHERE THINGS COME FROM (reuses existing conventions, invents none)
     FLEET_MONITOR_API, then fleet-config.json in ~/.aiteamforge and ~/.dev-team;
     same order as fleet-monitor/client/kanban-reporter.sh; NO default URL).
     This is the single resolver; `kb-notify routes push` imports it from here.
-  * Team notify key: $KB_NOTIFY_TEAM_KEY, else the team-bound JIT secret
+  * Team notify key: the team-bound JIT secret
     resolver (the one NotifyEngine already passes to every provider). Refs in order:
         env:RELEASE_<TEAM>_NOTIFY_KEY
         vault:fleet-monitor/<team>-notify-key
@@ -26,7 +26,9 @@ this module emits is a static string.
 
 HTTP OUTCOME CLASSES (what the engine does with each)
   unreachable   connection error / timeout       -> fallback chain
-  server-error  HTTP 5xx                          -> fallback chain
+  server-error  HTTP 5xx                          -> fallback chain, UNLESS the body
+                                                  reports delivered > 0 (e.g. receipt_write_failed):
+                                                  then ok, no fallback, warning code
   rejected      HTTP 4xx and 3xx (auth/validation/unknown team/no routes pushed;
                 a redirect is refused because it would forward the key)
                                                   -> NOT a fallback trigger; ok:false
@@ -61,6 +63,19 @@ FLEET_CONFIG_PATHS = (".aiteamforge/fleet-config.json", ".dev-team/fleet-config.
 ERROR_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,39}(?![\s\S])")
 MAX_TITLE = 200  # mirrors notify-routes.js validateNotifyBody
 MAX_BODY = 4000
+RESOLVER_UNAVAILABLE = "resolver-unavailable"  # HubSkip reason: the key resolver could not load
+
+
+def clamp_utf16(text: str, limit: int) -> str:
+    """Cut `text` to at most `limit` UTF-16 code units (what JS `.length` counts), at a
+    code-point boundary so no surrogate pair is split. Python slicing counts code points,
+    so an emoji (2 units) would otherwise overshoot FM's limit and draw a 400 (notice lost)."""
+    units = 0
+    for i, ch in enumerate(text):
+        units += 2 if ord(ch) > 0xFFFF else 1
+        if units > limit:
+            return text[:i]
+    return text
 
 
 # ---------------------------------------------------------------- errors
@@ -177,20 +192,25 @@ resolve_hub_url = resolve_fm_url  # earlier name
 
 def resolve_team_key(team: str, env: Optional[Mapping[str, str]] = None,
                      secret_resolver: Optional[Callable[[str, str], str]] = None) -> str:
-    """THE team notify key resolver. First hit wins: $KB_NOTIFY_TEAM_KEY, then the
-    team-bound refs from key_refs() through `secret_resolver` (default:
+    """THE team notify key resolver. First hit wins across the team-bound refs from
+    key_refs() (env RELEASE_<TEAM>_NOTIFY_KEY, then vault) through `secret_resolver` (default:
     release_config_validate.resolve_secret_ref). HubSkip('no-key') when none
     resolves; resolver exception text is never forwarded. The key's FORMAT is
     the caller's concern (HubProvider.validate_target checks `fnt_`)."""
-    env = os.environ if env is None else env
-    explicit = (env.get("KB_NOTIFY_TEAM_KEY") or "").strip()
-    if explicit:
-        return explicit
     if secret_resolver is None:
         try:
             secret_resolver = rn._load_script_module("release_config_validate").resolve_secret_ref
-        except Exception:  # noqa: BLE001
+        except rn.NotifyConfigError:
+            # The validator module needs `jsonschema`, an OPTIONAL dependency (absent on stock
+            # /usr/bin/python3). That is a known degraded mode, not a fault: resolve only this
+            # team's own env ref (isolation holds); the vault ref needs the module.
+            source = os.environ if env is None else env
+            value = source.get(key_refs(team)[0][len("env:"):])
+            if isinstance(value, str) and value.strip():
+                return value.strip()
             raise HubSkip("no-key") from None
+        except Exception:  # noqa: BLE001 - resolver present but broken: a machine fault, not "no key"
+            raise HubSkip(RESOLVER_UNAVAILABLE) from None
     for ref_name in key_refs(team):
         try:
             value = secret_resolver(ref_name, team)
@@ -286,10 +306,13 @@ class HubProvider(rn.NotifyProvider):
     def deliver(self, target: rn.Target, message: rn.NoticeMessage) -> HubOutcome:
         """One POST. HubDeliveryError (kind/fallback) on every non-success."""
         o = target.options
+        title = o.get("title") or ""
+        if not title.strip():  # FM rejects a blank title (400); use the default instead
+            title = "%s: %s" % (o["team"], o["type"])
         payload: Dict[str, Any] = {
             "team": o["team"], "type": o["type"],
-            "title": (o.get("title") or "%s: %s" % (o["team"], o["type"]))[:MAX_TITLE],
-            "body": (message.text or "")[:MAX_BODY],
+            "title": clamp_utf16(title, MAX_TITLE),
+            "body": clamp_utf16(message.text or "", MAX_BODY),
         }
         for k in ("severity", "ref"):
             if o.get(k):
@@ -305,6 +328,12 @@ class HubProvider(rn.NotifyProvider):
             raise HubDeliveryError("unreachable", "transport-error") from None
 
         if status >= 500:
+            # A 5xx whose parseable body reports delivery (receipt_write_failed carries
+            # result.delivered > 0) means the notice already went out: no fallback (duplicate).
+            sent = _delivered_in_5xx(raw)
+            if sent > 0:
+                reason = "hub-receipt-write-failed" if _error_code(raw) == "receipt_write_failed" else "hub-5xx-delivered"
+                return HubOutcome(True, sent, 0, 0, True, reason, status)
             raise HubDeliveryError("server-error", "http-%d" % status, status)
         if status >= 300 or status < 200:
             raise HubDeliveryError("rejected", "http-%d" % status, status, _error_code(raw))
@@ -333,6 +362,18 @@ class HubProvider(rn.NotifyProvider):
 
 def _count(value: Any) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def _delivered_in_5xx(raw: bytes) -> int:
+    """delivered count from a 5xx JSON body (top level or under `result`); 0 if absent/unparseable."""
+    try:
+        doc = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError, AttributeError):
+        return 0
+    if not isinstance(doc, dict):
+        return 0
+    res = doc.get("result")
+    return max(_count(doc.get("delivered")), _count(res.get("delivered")) if isinstance(res, dict) else 0)
 
 
 def _error_code(raw: bytes) -> str:

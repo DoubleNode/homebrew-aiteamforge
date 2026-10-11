@@ -439,7 +439,10 @@ class NotifyEngine:
             return None
         hub_info.update(delivered=outcome.delivered, failed=outcome.failed, suppressed=outcome.suppressed)
         if outcome.ok:
-            hub_info.update(status="delivered", reason="suppressed" if outcome.delivered == 0 else "")
+            hub_info.update(status="delivered",
+                            reason=outcome.reason or ("suppressed" if outcome.delivered == 0 else ""))
+            if outcome.reason and outcome.delivered > 0:
+                hub_info["warning"] = outcome.reason  # delivered, but FM flagged a problem (static code)
             attempts.append({"path": "hub", "ok": True, "reason": hub_info["reason"] or "delivered"})
         else:
             hub_info.update(status="delivered-nothing", reason=outcome.reason, fallback=False,
