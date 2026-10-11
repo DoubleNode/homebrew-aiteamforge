@@ -429,12 +429,20 @@ test('a later failure AFTER a prior success does not poison the cache -- latest 
         await mod._test.waitForInFlight();
         assert.equal(mod._test.getState().latestTapVersion, '7.7.7');
 
-        // Let the cache go stale, then fail the next attempt.
+        // Let the cache go stale, then fail the next attempt. The staleness
+        // gate is strict `>`: at exactly fetchedAt + TTL the cache is still
+        // fresh (no fetch); 1 ms later it is stale. Pinning both sides means
+        // a `>` -> `>=` regression fails here.
         global.fetch = mockFetchSequence([{ reject: new Error('simulated outage') }]);
-        mod._test.clock.advance(mod._test.constants.TAP_VERSION_CACHE_TTL_MS + 1); // staleness gate is strict `>`
+        mod._test.clock.advance(mod._test.constants.TAP_VERSION_CACHE_TTL_MS);
+        mod.getLatestTapVersion();
+        await mod._test.waitForInFlight();
+        assert.equal(global.fetch.getCallCount(), 0, 'a read at exactly fetchedAt + TTL must NOT re-fetch (staleness gate is strict `>`)');
 
+        mod._test.clock.advance(1);
         mod.getLatestTapVersion(); // attempt #2 -- fails
         await mod._test.waitForInFlight();
+        assert.equal(global.fetch.getCallCount(), 1, 'a read 1 ms past TTL must re-fetch');
         const state = mod._test.getState();
         assert.equal(state.latestTapVersion, '7.7.7', 'a failed refresh must leave the previously-cached value untouched');
         assert.equal(state.latestTapVersionFailureCount, 1);
