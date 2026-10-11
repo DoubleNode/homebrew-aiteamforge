@@ -65,8 +65,8 @@
     function validateQuietHours(q) {
         var errs = {};
         if (!q || !q.enabled) return errs;
-        if (!HHMM.test(q.start || '')) errs.start = 'Enter a start time (HH:MM, 24-hour).';
-        if (!HHMM.test(q.end || '')) errs.end = 'Enter an end time (HH:MM, 24-hour).';
+        if (!HHMM.test(q.start || '')) errs.start = 'Enter a start time.';
+        if (!HHMM.test(q.end || '')) errs.end = 'Enter an end time.';
         if (!errs.start && !errs.end && q.start === q.end) {
             errs.end = 'Start and end must be different times.';
         }
@@ -236,7 +236,9 @@
             return out;
         }
         out.level = 'error';
-        out.headline = 'Delivery failed on every connection.';
+        out.headline = (failed > 0 && suppressed > 0)
+            ? 'Not delivered: ' + failed + ' connection(s) failed, ' + suppressed + ' suppressed.'
+            : 'Delivery failed on every connection.';
         return out;
     }
 
@@ -334,6 +336,10 @@
             el.testNote = h('p', { class: 'notif-hint' });
             el.quiet = buildQuietFieldset();
             el.result = h('div', { class: 'notif-result', 'aria-live': 'polite' });
+            // XACA-1406-012: ONE persistent live region, created here and never re-created, so
+            // screen readers reliably announce SEND TEST outcomes. The inline receipt in the
+            // rebuilt table stays as the visual record.
+            el.live = h('div', { class: 'notif-sr', role: 'status', 'aria-live': 'polite', 'aria-atomic': 'true', 'data-notif': 'test-live' });
             el.panel.appendChild(el.banner);
             el.panel.appendChild(el.bar);
             el.panel.appendChild(el.connNote);
@@ -341,6 +347,7 @@
             el.panel.appendChild(el.testNote);
             el.panel.appendChild(el.quiet);
             el.panel.appendChild(el.result);
+            el.panel.appendChild(el.live);
             root.appendChild(el.panel);
 
             el.saveBtn.addEventListener('click', save);
@@ -454,6 +461,7 @@
             S.tests = {};
             S.saveResult = null;
             S.pushResult = null;
+            el.live.textContent = '';
             renderAll();
             if (!team) {
                 S.status = 'error';
@@ -569,6 +577,7 @@
             var t = S.tests[typeId];
             if (t && t.pending) return;
             S.tests[typeId] = { pending: true, view: null };
+            el.live.textContent = '';
             renderMatrix();
             doFetch(urlFor('/api/notify-config/test'), {
                 method: 'POST',
@@ -580,13 +589,34 @@
                 var body = r.body;
                 if (!isObj(body)) body = { ok: false, error: 'fm-error', message: 'Unreadable response (HTTP ' + r.status + ').' };
                 if (body.ok !== true && !body.error && !isObj(body.result)) body.error = 'fm-error';
-                S.tests[typeId] = { pending: false, view: classifyTestResult(body, connLabel) };
+                var view = classifyTestResult(body, connLabel);
+                S.tests[typeId] = { pending: false, view: view };
                 S.focusAfterRender = { test: typeId };
                 renderMatrix();
+                el.live.textContent = liveSummary(typeLabel(typeId), view);
             });
         }
 
         // ---- rendering --------------------------------------------------
+        function typeLabel(typeId) {
+            for (var i = 0; i < S.catalog.length; i++) {
+                if (S.catalog[i].id === typeId) return S.catalog[i].label || typeId;
+            }
+            return typeId;
+        }
+
+        // One sentence for the persistent live region ("Test for X: delivered to 1 of 2 connections").
+        function liveSummary(label, view) {
+            var total = view.lines.length;
+            if (!total) return 'Test for ' + label + ': ' + view.headline;
+            var counts = { delivered: 0, failed: 0, suppressed: 0 };
+            view.lines.forEach(function (l) { if (has(counts, l.status)) counts[l.status]++; });
+            var text = 'Test for ' + label + ': delivered to ' + counts.delivered + ' of ' + total + ' connection' + (total === 1 ? '' : 's');
+            if (counts.failed) text += ', ' + counts.failed + ' failed';
+            if (counts.suppressed) text += ', ' + counts.suppressed + ' suppressed';
+            return text + '.';
+        }
+
         function connLabel(id) {
             for (var i = 0; i < S.conn.list.length; i++) {
                 if (S.conn.list[i].id === id) return S.conn.list[i].label || id;
@@ -681,6 +711,14 @@
             var unknown = S.conn.loaded ? unknownConnectionIds(S.model.routes, known) : [];
             var cols = S.conn.list.map(function (c) { return { id: c.id, label: c.label || c.id, provider: c.provider, enabled: c.enabled !== false, unknown: false }; })
                 .concat(unknown.map(function (id) { return { id: id, label: id, provider: 'unknown', enabled: true, unknown: true }; }));
+            // XACA-1406-013: Fleet Monitor connections failed to load. Show the connection ids that
+            // already appear in config.routes as READ-ONLY columns so current routing stays visible.
+            var readOnly = !!S.conn.error;
+            if (readOnly) {
+                cols = unknownConnectionIds(S.model.routes, []).map(function (id) {
+                    return { id: id, label: id, provider: 'details unavailable', enabled: true, unknown: false, readonly: true };
+                });
+            }
 
             var table = h('table', { class: 'notif-matrix' });
             var thead = h('thead');
@@ -692,6 +730,7 @@
                 th.appendChild(h('span', { class: 'notif-conn-label', text: c.label }));
                 th.appendChild(h('span', { class: 'notif-conn-provider', text: c.provider }));
                 if (!c.enabled) th.appendChild(h('span', { class: 'notif-conn-flag', text: 'DISABLED' }));
+                if (c.readonly) th.appendChild(h('span', { class: 'notif-conn-flag', text: 'READ ONLY' }));
                 if (c.unknown) {
                     th.appendChild(h('span', { class: 'notif-conn-flag notif-conn-warn', text: 'UNKNOWN CONNECTION' }));
                     var rm = h('button', { type: 'button', class: 'notif-btn notif-btn-small', 'data-remove-conn': c.id, 'aria-label': 'Remove unknown connection ' + c.id + ' from all routes', text: 'REMOVE' });
@@ -709,7 +748,7 @@
             S.catalog.forEach(function (entry) {
                 var tr = h('tr', { 'data-type': entry.id });
                 var descId = 'notif-desc-' + entry.id;
-                var th = h('th', { scope: 'row', class: 'notif-col-type', title: entry.description || '' }, [
+                var th = h('th', { scope: 'row', class: 'notif-col-type', title: entry.description || '', 'aria-describedby': entry.description ? descId : null }, [
                     h('span', { class: 'notif-type-label', text: entry.label || entry.id }),
                     h('span', { class: 'notif-type-id', text: entry.id }),
                     entry.description ? h('span', { class: 'notif-sr', id: descId, text: entry.description }) : null
@@ -730,6 +769,16 @@
 
                 cols.forEach(function (c) {
                     var routed = Array.isArray(S.model.routes[entry.id]) && S.model.routes[entry.id].indexOf(c.id) !== -1;
+                    if (c.readonly) {
+                        tr.appendChild(h('td', { class: 'notif-col-conn' }, [
+                            h('span', {
+                                class: 'notif-ro' + (routed ? ' on' : ''), role: 'img', 'data-type': entry.id, 'data-conn': c.id,
+                                'aria-label': (entry.label || entry.id) + ' is routed to ' + c.label + ': ' + (routed ? 'ON' : 'OFF') + ' (read only)',
+                                text: routed ? 'ON' : 'OFF'
+                            })
+                        ]));
+                        return;
+                    }
                     var btn = h('button', {
                         type: 'button', class: 'notif-toggle' + (routed ? ' on' : ''),
                         'data-type': entry.id, 'data-conn': c.id,
@@ -774,7 +823,11 @@
             }
             if (cols.some(function (c) { return !c.enabled; })) {
                 sc.appendChild(h('p', { class: 'notif-hint', 'data-notif': 'disabled-note', text:
-                    'Dimmed columns are disabled connections. You can still route to them, but Fleet Monitor will not deliver until they are enabled.' }));
+                    'Shaded columns with a dashed edge are disabled connections. You can still route to them, but Fleet Monitor will not deliver until they are enabled.' }));
+            }
+            if (readOnly && cols.length) {
+                sc.appendChild(h('p', { class: 'notif-hint', 'data-notif': 'readonly-note', text:
+                    'Connection details unavailable \u2014 Fleet Monitor connections could not be loaded. These columns show the connection ids already in the routes, read only.' }));
             }
             var orphanTypes = Object.keys(S.model.routes).filter(function (t) {
                 return !S.catalog.some(function (e) { return e.id === t; });

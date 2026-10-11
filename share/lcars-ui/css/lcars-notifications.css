@@ -61,7 +61,10 @@
 .notif-conn-provider { display: block; font-size: 10px; color: var(--lcars-blue); }
 .notif-conn-flag { display: block; font-size: 10px; margin-top: 2px; color: var(--lcars-amber, #ffaa00); }
 .notif-conn-warn { font-weight: bold; }
-.notif-col-disabled { opacity: 0.55; }
+/* Disabled connection (XACA-1406-011): NEVER opacity -- it dims operable text below WCAG 1.4.3.
+   Signalled by a solid tint, dashed edges and the DISABLED text flag; all text keeps full colour. */
+.notif-matrix { --notif-disabled-bg: #1f1f2e; }
+.notif-matrix .notif-col-disabled { background-color: var(--notif-disabled-bg); border-left: 1px dashed var(--lcars-blue); border-right: 1px dashed var(--lcars-blue); }
 .notif-col-unknown { outline: 1px dashed var(--lcars-amber, #ffaa00); outline-offset: -3px; }
 .notif-col-sev { min-width: 150px; }
 .notif-col-conn { min-width: 96px; }
@@ -69,6 +72,9 @@
 .notif-toggle { min-width: 58px; min-height: 30px; font-family: 'Antonio', sans-serif; font-size: 12px; letter-spacing: 1px; border-radius: 15px; border: 2px solid var(--lcars-blue); background: transparent; color: var(--lcars-blue); cursor: pointer; }
 .notif-toggle.on, .notif-toggle[aria-pressed="true"] { background: var(--lcars-green, #99ff99); border-color: var(--lcars-green, #99ff99); color: var(--lcars-black, #000); font-weight: bold; }
 .notif-toggle:hover { filter: brightness(1.2); }
+/* Read-only state shown when Fleet Monitor connections could not be loaded (XACA-1406-013). */
+.notif-ro { display: inline-block; min-width: 58px; padding: 4px 0; font-size: 12px; letter-spacing: 1px; border-radius: 15px; border: 2px dashed var(--lcars-blue); color: var(--lcars-blue); }
+.notif-ro.on { color: var(--lcars-green, #99ff99); border-color: var(--lcars-green, #99ff99); font-weight: bold; }
 
 .notif-receipt-row td { text-align: left; background: rgba(0, 0, 0, 0.5); }
 /* Keep the receipt in view when the matrix is scrolled sideways. */

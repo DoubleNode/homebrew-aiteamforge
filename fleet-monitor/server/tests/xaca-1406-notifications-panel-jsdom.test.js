@@ -382,19 +382,48 @@ const CONN_ERRORS = [
     ['fm-error', /Fleet Monitor returned an error/]
 ];
 for (const [code, re] of CONN_ERRORS) {
-    test('connections load error "' + code + '" renders its message; rows + severity + quiet hours stay, no connection columns', async () => {
+    test('connections load error "' + code + '" renders its message; rows + severity + quiet hours stay, routes shown read-only', async () => {
         const env = await setup({ routes: { 'GET /api/notify-config/connections': json(code === 'unauthorized' ? 401 : 502, { error: code, message: 'static' }) } });
         const note = q(env, '[data-notif="conn-error"]');
         assert.ok(note, 'conn error note rendered');
         assert.match(note.textContent, re);
-        assert.equal(qa(env, 'thead th[data-conn]').length, 0);
-        assert.equal(qa(env, 'button.notif-toggle').length, 0);
+        assert.equal(qa(env, 'button.notif-toggle').length, 0, 'nothing is toggleable');
         assert.equal(qa(env, 'tbody tr[data-type]').length, 3, 'type rows remain');
         assert.equal(qa(env, 'select[data-sev-for]').length, 3, 'severity selects remain');
         assert.ok(q(env, '#notif-qh-enabled'), 'quiet hours remains');
         // existing routes are not dropped when saving without connections
     });
 }
+
+test('XACA-1406-013: connections failed to load -> route ids from config.routes shown as read-only columns with ON/OFF and accessible names', async () => {
+    const env = await setup({ routes: { 'GET /api/notify-config/connections': json(502, { error: 'fm-unreachable', message: 'x' }) } });
+    assert.deepEqual(qa(env, 'thead th[data-conn]').map((t) => t.getAttribute('data-conn')), ['ops-slack', 'pager-sms']);
+    const th = q(env, 'thead th[data-conn="ops-slack"]');
+    assert.match(th.textContent, /ops-slack/);
+    assert.match(th.textContent, /details unavailable/);
+    assert.match(th.textContent, /READ ONLY/);
+    assert.equal(th.querySelector('button'), null, 'no REMOVE button in read-only columns');
+    assert.match(q(env, '[data-notif="readonly-note"]').textContent, /Fleet Monitor connections could not be loaded/);
+    const ro = (t, c) => q(env, '.notif-ro[data-type="' + t + '"][data-conn="' + c + '"]');
+    assert.equal(ro('release-cut', 'ops-slack').textContent, 'ON');
+    assert.equal(ro('release-cut', 'pager-sms').textContent, 'OFF');
+    assert.equal(ro('gate-failed', 'pager-sms').textContent, 'ON');
+    assert.match(ro('gate-failed', 'pager-sms').getAttribute('aria-label'), /Gate failed is routed to pager-sms: ON/);
+    assert.equal(qa(env, '.notif-ro').length, 6);
+    // clicking changes nothing and the form stays clean
+    ro('release-cut', 'ops-slack').click();
+    assert.equal(ro('release-cut', 'ops-slack').textContent, 'ON');
+    assert.equal(q(env, '.notif-dirty').getAttribute('data-dirty'), 'false');
+});
+
+test('XACA-1406-013: connections failed AND no routes -> no columns and no read-only note', async () => {
+    const env = await setup({ routes: {
+        'GET /api/notify-config': configResp(v2({ routes: {} })),
+        'GET /api/notify-config/connections': json(502, { error: 'fm-unreachable', message: 'x' })
+    } });
+    assert.equal(qa(env, 'thead th[data-conn]').length, 0);
+    assert.equal(q(env, '[data-notif="readonly-note"]'), null);
+});
 
 test('saving while connections failed to load still sends the loaded routes unchanged', async () => {
     const env = await setup({ routes: {
@@ -603,4 +632,181 @@ test('index.html registers the NOTIFICATIONS section: sidebar button, tab-bar bu
     assert.match(html, /css\/lcars-notifications\.css/);
     const lcars = fs.readFileSync(path.join(path.dirname(INDEX_HTML), 'js', 'lcars.js'), 'utf8');
     assert.match(lcars, /const SECTIONS = \[[^\]]*'notifications'/);
+});
+
+// XACA-1406-012: persistent live region --------------------------------------
+test('XACA-1406-012: one persistent role=status live region receives the SEND TEST summary across renders', async () => {
+    const env = await setup({ routes: { 'POST /api/notify-config/test': json(200, {
+        ok: true, deliveredVia: 'hub',
+        result: { ok: true, routed: true, delivered: 1, failed: 1, suppressed: 0, severity: 'high', warnings: [],
+            receipts: [{ connectionId: 'ops-slack', provider: 'slack', ok: true }, { connectionId: 'pager-sms', provider: 'pushover', ok: false, error: 'boom' }] }
+    }) } });
+    const live = q(env, '[data-notif="test-live"]');
+    assert.ok(live, 'live region exists from panel creation');
+    assert.equal(live.getAttribute('role'), 'status');
+    assert.equal(live.getAttribute('aria-live'), 'polite');
+    assert.equal(live.closest('table'), null, 'not inside the re-rendered table');
+    assert.equal(live.textContent, '');
+    q(env, '[data-test-for="gate-failed"]').click();
+    await settle();
+    assert.equal(q(env, '[data-notif="test-live"]'), live, 'same node after the matrix re-rendered');
+    assert.equal(live.textContent, 'Test for Gate failed: delivered to 1 of 2 connections, 1 failed.');
+    // a second test on another type reuses the very same node
+    q(env, '[data-test-for="ci-down"]').click();
+    await settle();
+    assert.equal(q(env, '[data-notif="test-live"]'), live);
+    assert.match(live.textContent, /^Test for CI down: /);
+    // the inline visual receipt is still there
+    assert.ok(q(env, '[data-receipt-for="gate-failed"] [data-receipt-level]'));
+    assert.equal(qa(env, '[data-notif="test-live"]').length, 1);
+});
+
+test('XACA-1406-012: a test with no receipts announces the headline; quiet-hours errors are locale-neutral', async () => {
+    const env = await setup({ routes: { 'POST /api/notify-config/test': json(200, { ok: false, error: 'forbidden' }) } });
+    q(env, '[data-test-for="ci-down"]').click();
+    await settle();
+    assert.equal(q(env, '[data-notif="test-live"]').textContent, 'Test for CI down: key belongs to another team (403)');
+    const errs = env.api.validateQuietHours({ enabled: true, start: '', end: '', timezone: 'UTC' });
+    assert.doesNotMatch(errs.start + errs.end, /24-hour|HH:MM/);
+});
+
+test('XACA-1406-013 extra: row header describes itself via aria-describedby pointing at the description node', async () => {
+    const env = await setup();
+    const th = q(env, 'tr[data-type="gate-failed"] th[scope="row"]');
+    const id = th.getAttribute('aria-describedby');
+    assert.equal(id, 'notif-desc-gate-failed');
+    assert.equal(q(env, '#' + id).textContent, 'A merge gate failed.');
+});
+
+test('index.html: the Integrations comment sits directly above the integrations section', () => {
+    const html = fs.readFileSync(INDEX_HTML, 'utf8');
+    assert.match(html, /<!-- Integrations -->\s*<section class="integrations-section"/);
+    assert.doesNotMatch(html, /<!-- Integrations -->\s*<!-- Notifications/);
+});
+
+// XACA-1406-011: WCAG 1.4.3 contrast of the disabled-connection column ---------
+const CSS_NOTIF = path.join(LCARS_UI, 'css', 'lcars-notifications.css');
+const CSS_THEME = path.join(LCARS_UI, 'css', 'lcars-fleet-theme.css');
+
+function cssRules(css) {
+    const out = [];
+    const re = /([^{}]+)\{([^{}]*)\}/g;
+    css = css.replace(/\/\*[\s\S]*?\*\//g, '');
+    let m;
+    while ((m = re.exec(css))) {
+        const decls = {};
+        m[2].split(';').forEach((d) => {
+            const i = d.indexOf(':');
+            if (i > 0) decls[d.slice(0, i).trim()] = d.slice(i + 1).trim();
+        });
+        out.push({ sel: m[1].split(',').map((x) => x.trim().replace(/\s+/g, ' ')), decls });
+    }
+    return out;
+}
+function hexToRgb(h) {
+    const m = /^#([0-9a-f]{6})$/i.exec(h);
+    if (!m) throw new Error('not a #rrggbb colour: ' + h);
+    return [0, 2, 4].map((i) => parseInt(m[1].slice(i, i + 2), 16));
+}
+function relLum(rgb) {
+    const [r, g, b] = rgb.map((v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); });
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+function contrast(a, b) {
+    const [hi, lo] = [relLum(a), relLum(b)].sort((x, y) => y - x);
+    return (hi + 0.05) / (lo + 0.05);
+}
+function mix(fg, bg, a) { return fg.map((v, i) => a * v + (1 - a) * bg[i]); }
+
+// Later selector in the list wins; within one selector the last declaration wins.
+function resolveProp(rules, selectors, props) {
+    let val = null;
+    selectors.forEach((sel) => {
+        rules.filter((r) => r.sel.includes(sel)).forEach((r) => {
+            props.forEach((p) => { if (r.decls[p] !== undefined) val = r.decls[p]; });
+        });
+    });
+    return val;
+}
+function resolveColor(val, tokens, bgBehind) {
+    if (val === 'transparent') return bgBehind;
+    let m;
+    while ((m = /^var\((--[\w-]+)(?:,\s*([^)]*))?\)$/.exec(val))) {
+        if (m[1] in tokens) val = tokens[m[1]];
+        else if (m[2]) val = m[2].trim();
+        else throw new Error('unknown token ' + m[1]);
+    }
+    return hexToRgb(val);
+}
+
+const COL = '.notif-matrix .notif-col-disabled';
+const HEAD = '.notif-matrix thead th';
+// [name, fg selectors, bg selectors (cascade order), min ratio]
+const DISABLED_VARIANTS = [
+    ['OFF toggle label',        ['.notif-toggle'],                  [COL, '.notif-toggle'],                  4.5],
+    ['ON toggle label',         ['.notif-toggle', '.notif-toggle.on'], [COL, '.notif-toggle', '.notif-toggle.on'], 4.5],
+    ['header connection label', [HEAD],                             [HEAD, COL],                             4.5],
+    ['provider sublabel',       ['.notif-conn-provider'],           [HEAD, COL],                             4.5],
+    ['DISABLED flag',           ['.notif-conn-flag'],               [HEAD, COL],                             4.5],
+    ['dashed column edge (non-text)', null,                         [HEAD, COL],                             3.0]
+];
+
+function disabledColumnContrast(notifCss, themeCss) {
+    const theme = cssRules(themeCss);
+    const tokens = {};
+    theme.filter((r) => r.sel.includes(':root')).forEach((r) => Object.assign(tokens, r.decls));
+    const rules = theme.concat(cssRules(notifCss));
+    // component-local custom properties (e.g. --notif-disabled-bg on .notif-matrix) behave like tokens
+    rules.filter((r) => r.sel.includes('.notif-matrix')).forEach((r) => {
+        for (const k in r.decls) { if (k.startsWith('--')) tokens[k] = r.decls[k]; }
+    });
+    const black = resolveColor('var(--lcars-black)', tokens);
+    // Group opacity on the disabled cell/header (the old defect) composites text AND background over the page.
+    const opRule = rules.filter((r) => r.sel.some((x) => /\.notif-col-disabled$/.test(x)) && r.decls.opacity !== undefined).pop();
+    const op = opRule ? parseFloat(opRule.decls.opacity) : 1;
+    return DISABLED_VARIANTS.map((v) => {
+        let bg = black;
+        v[2].forEach((sel) => {
+            const raw = resolveProp(rules, [sel], ['background', 'background-color']);
+            if (raw !== null) bg = resolveColor(raw, tokens, bg);
+        });
+        let fg;
+        if (v[1]) {
+            fg = resolveColor(resolveProp(rules, v[1], ['color']), tokens, bg);
+        } else {
+            const edge = resolveProp(rules, [COL], ['border-left']);
+            // No edge declared == no non-text signal at all: score it 1:1 so it FAILS rather than throws.
+            const em = edge && /(var\([^)]*\))/.exec(edge);
+            fg = em ? resolveColor(em[1], tokens, bg) : bg;
+        }
+        const ratio = contrast(mix(fg, black, op), mix(bg, black, op));
+        return { name: v[0], ratio, min: v[3], pass: ratio >= v[3] };
+    });
+}
+
+test('contrast math sanity: black/white 21:1, identical 1:1', () => {
+    assert.ok(Math.abs(contrast([0, 0, 0], [255, 255, 255]) - 21) < 1e-9);
+    assert.ok(Math.abs(contrast([10, 20, 30], [10, 20, 30]) - 1) < 1e-9);
+});
+
+test('XACA-1406-011: disabled-connection columns keep every text >= 4.5:1 and the edge >= 3:1 (WCAG 1.4.3 / 1.4.11)', () => {
+    const results = disabledColumnContrast(fs.readFileSync(CSS_NOTIF, 'utf8'), fs.readFileSync(CSS_THEME, 'utf8'));
+    assert.equal(results.length, DISABLED_VARIANTS.length);
+    const bad = results.filter((r) => !r.pass).map((r) => r.name + ' = ' + r.ratio.toFixed(2) + ':1 (< ' + r.min + ')');
+    assert.deepEqual(bad, []);
+    console.log('CONTRAST ' + results.map((r) => r.name + '=' + r.ratio.toFixed(2)).join(' | '));
+});
+
+test('XACA-1406-011 NEGATIVE CONTROL: re-adding opacity:0.55 on the disabled column fails the checker', () => {
+    const css = fs.readFileSync(CSS_NOTIF, 'utf8') + '\n.notif-col-disabled { opacity: 0.55; }\n';
+    const results = disabledColumnContrast(css, fs.readFileSync(CSS_THEME, 'utf8'));
+    const failed = results.filter((r) => !r.pass).map((r) => r.name);
+    assert.ok(failed.includes('OFF toggle label') && failed.includes('header connection label') && failed.includes('provider sublabel'),
+        'expected the dimmed variants to fail, got: ' + failed.join(', '));
+});
+
+test('XACA-1406-011: no opacity anywhere on a disabled-column selector', () => {
+    cssRules(fs.readFileSync(CSS_NOTIF, 'utf8'))
+        .filter((r) => r.sel.some((x) => /notif-col-disabled/.test(x)))
+        .forEach((r) => assert.equal(r.decls.opacity, undefined, r.sel.join(',') + ' must not set opacity'));
 });

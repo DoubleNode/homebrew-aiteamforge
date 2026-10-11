@@ -18209,6 +18209,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             out = {'ok': ok, 'deliveredVia': 'hub' if delivered > 0 else 'none', 'result': result}
             if not ok:
                 out['reason'] = ('no-route' if not routed
+                                 else 'failed-and-suppressed' if failed and suppressed
                                  else 'all-connections-failed' if failed else 'nothing-delivered')
             self._send_json_response(out)
         except _NotifyApiError as e:

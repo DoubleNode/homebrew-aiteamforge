@@ -142,6 +142,12 @@ test('classifyTestResult: ok / suppressed / partial / not-routed / error', () =>
 
     v = N.classifyTestResult({ ok: false, result: { receipts: [rcpt('a', { ok: false, error: 'x' })] } }, label);
     assert.equal(v.level, 'error');
+    assert.equal(v.headline, 'Delivery failed on every connection.');
+
+    // 1 failed + 1 suppressed must not claim every connection failed (PR #1135 tester observation)
+    v = N.classifyTestResult({ ok: false, result: { receipts: [rcpt('a', { ok: false, error: 'x' }), rcpt('b', { ok: false, suppressed: 'dedupe' })] } }, label);
+    assert.equal(v.level, 'error');
+    assert.equal(v.headline, 'Not delivered: 1 connection(s) failed, 1 suppressed.');
 
     v = N.classifyTestResult(null, label);
     assert.equal(v.level, 'error');
