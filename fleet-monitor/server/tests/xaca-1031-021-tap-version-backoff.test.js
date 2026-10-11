@@ -45,6 +45,17 @@
  * to server.js) exposes the functions plus a couple of read-only test hooks
  * for internal state and the pending in-flight promise.
  *
+ * -- FAKE CLOCK (XACA-1499) ------------------------------------------------
+ * Every `Date.now()` in the extracted region is rewritten to
+ * `__testClock.now()`, and each loaded module carries its OWN `__testClock`
+ * (starts at a fixed epoch, moves ONLY when a test calls
+ * `mod._test.clock.advance(ms)`). No test sleeps and no assertion depends on
+ * elapsed wall time, so the backoff/TTL windows are symbolic numbers and the
+ * suite cannot flake under CI load (XACA-0967 had to widen real-time windows
+ * as a stopgap; this removes the cause). The substitution is count-guarded:
+ * if server.js gains or loses a `Date.now()` in this region the suite throws
+ * FATAL instead of silently running on wall-clock time.
+ *
  * global.fetch is stubbed per test (Node's fetch is a global, not an
  * import, so this needs no module mocking machinery) -- no real network
  * call is ever made by this suite.
@@ -140,8 +151,12 @@ for (const anchor of [
 // Shrink the two timing constants from hours/minutes to milliseconds so the
 // suite runs fast and deterministically. Only the numeric literal on the
 // RHS of these two exact declarations is touched -- the logic is untouched.
-const TEST_TTL_MS = 4000; // XACA-0967: must be >= 4 x TEST_MIN_RETRY_MS or the backoff cap clamps the doubling asserts
-const TEST_MIN_RETRY_MS = 1000; // XACA-0967: was 50; a 50 ms wall-clock window flaked under CI load
+// XACA-1499: these are SYMBOLIC now -- time is faked, nothing sleeps, so
+// small values cost nothing (XACA-0967's wall-clock widening to 1000/4000 is
+// reverted). TTL must stay >= 4 x MIN_RETRY or the backoff cap clamps the
+// doubling asserts.
+const TEST_TTL_MS = 200;
+const TEST_MIN_RETRY_MS = 50;
 
 function substituteConst(src, name, replacementLiteral) {
     const re = new RegExp(`^const ${name} = .*;.*$`, 'm');
@@ -153,6 +168,36 @@ function substituteConst(src, name, replacementLiteral) {
 
 extracted = substituteConst(extracted, 'TAP_VERSION_CACHE_TTL_MS', TEST_TTL_MS);
 extracted = substituteConst(extracted, 'TAP_VERSION_FETCH_MIN_RETRY_MS', TEST_MIN_RETRY_MS);
+
+// XACA-1499: replace the wall clock with a controllable one. Guarded like
+// substituteConst -- the occurrence count (fetchLatestTapVersion's
+// fetchedAt stamp + getLatestTapVersion's `now`) must match exactly, and no
+// `Date.now(` may survive, or the seam is broken and we fail loudly.
+const EXPECTED_DATE_NOW_COUNT = 2;
+// Large fixed epoch: module state starts at 0, so a clock near 0 would make
+// the very first read "fresh" and nothing would ever fetch.
+const TEST_CLOCK_START_MS = 1_700_000_000_000;
+
+function substituteClock(src) {
+    const found = (src.match(/Date\.now\(\)/g) || []).length;
+    if (found !== EXPECTED_DATE_NOW_COUNT) {
+        throw new Error(`FATAL: expected ${EXPECTED_DATE_NOW_COUNT} 'Date.now()' in the extracted region, found ${found} -- extraction seam broken.`);
+    }
+    const out = src.replace(/Date\.now\(\)/g, '__testClock.now()');
+    if (/Date\.now\(/.test(out)) {
+        throw new Error("FATAL: 'Date.now(' still present after clock substitution -- extraction seam broken.");
+    }
+    return `const __testClock = {
+    t: ${TEST_CLOCK_START_MS},
+    now() { return this.t; },
+    advance(ms) { this.t += ms; },
+    set(ms) { this.t = ms; },
+};
+
+${out}`;
+}
+
+extracted = substituteClock(extracted);
 
 const FOOTER = `
 module.exports = {
@@ -166,6 +211,7 @@ module.exports = {
             latestTapVersionLastAttemptAt,
             latestTapVersionFailureCount,
         }),
+        clock: __testClock,
         waitForInFlight: () => latestTapVersionFetchInFlight || Promise.resolve(),
         constants: { TAP_VERSION_CACHE_TTL_MS, TAP_VERSION_FETCH_MIN_RETRY_MS, TAP_VERSION_FETCH_TIMEOUT_MS },
     },
@@ -182,10 +228,10 @@ extracted += FOOTER;
  * delete cache entries.
  */
 let moduleCounter = 0;
-function loadFreshModule() {
+function loadFreshModule(source = extracted) {
     moduleCounter += 1;
     const tmpFile = path.join(os.tmpdir(), `xaca1031021-tapversion-${process.pid}-${moduleCounter}.js`);
-    fs.writeFileSync(tmpFile, extracted);
+    fs.writeFileSync(tmpFile, source);
     // eslint-disable-next-line global-require, import/no-dynamic-require
     const mod = require(tmpFile);
     fs.unlinkSync(tmpFile);
@@ -277,14 +323,49 @@ test('a repeat read DURING the backoff window does NOT trigger another network a
         await mod._test.waitForInFlight();
         assert.equal(global.fetch.getCallCount(), 1, 'sanity: first attempt happened');
 
-        // Immediately re-read, well inside the backoff(1) window (TEST_MIN_RETRY_MS).
+        // Re-read inside the backoff(1) window. The fake clock has not moved,
+        // so this is deterministic; then step to one ms short of the boundary.
+        const { clock, constants } = mod._test;
+        const backoff = constants.TAP_VERSION_FETCH_MIN_RETRY_MS;
         mod.getLatestTapVersion();
         await mod._test.waitForInFlight();
         assert.equal(global.fetch.getCallCount(), 1, 'a read inside the backoff window must NOT re-attempt the network');
+        clock.advance(backoff - 1);
+        mod.getLatestTapVersion();
+        await mod._test.waitForInFlight();
+        assert.equal(global.fetch.getCallCount(), 1, 'a read 1 ms before the backoff boundary must NOT re-attempt the network');
         assert.equal(mod._test.getState().latestTapVersionFailureCount, 1, 'failure count must not double-count a call that never actually fetched');
     } finally {
         global.fetch = realFetch;
     }
+});
+
+test('negative control: removing the backoff gate makes the retry-storm scenario re-fetch (proves the fake-clock test is not vacuous)', async () => {
+    // Mutant is built ONLY from the extracted+substituted string. If a future
+    // server.js edit changes the gate text, the mutation no-ops and this
+    // assertion fails loudly instead of silently defanging the control.
+    const GATE = 'isStale && readyToRetry &&';
+    assert.ok(extracted.includes(GATE), 'gate text not found in extracted source -- negative control would be vacuous');
+    const mutantSource = extracted.replace(GATE, 'isStale &&');
+    assert.notEqual(mutantSource, extracted, 'mutant must differ from the original source');
+
+    async function run(source) {
+        const mod = loadFreshModule(source);
+        const realFetch = global.fetch;
+        global.fetch = mockFetchSequence([{ reject: new Error('simulated outage') }]);
+        try {
+            mod.getLatestTapVersion(); // attempt #1 -- fails
+            await mod._test.waitForInFlight();
+            mod.getLatestTapVersion(); // read inside the backoff window
+            await mod._test.waitForInFlight();
+            return global.fetch.getCallCount();
+        } finally {
+            global.fetch = realFetch;
+        }
+    }
+
+    assert.equal(await run(extracted), 1, 'unmutated module must NOT re-fetch inside the backoff window');
+    assert.equal(await run(mutantSource), 2, 'mutant without the backoff gate MUST re-fetch (the real assertion would catch it)');
 });
 
 test('once the backoff window elapses, the next stale read DOES retry', async () => {
@@ -296,8 +377,8 @@ test('once the backoff window elapses, the next stale read DOES retry', async ()
         await mod._test.waitForInFlight();
         assert.equal(global.fetch.getCallCount(), 1);
 
-        // Wait longer than backoff(1) == TEST_MIN_RETRY_MS.
-        await new Promise((r) => setTimeout(r, mod._test.constants.TAP_VERSION_FETCH_MIN_RETRY_MS + 30));
+        // Advance exactly backoff(1) == TEST_MIN_RETRY_MS (retry gate is `>=`).
+        mod._test.clock.advance(mod._test.constants.TAP_VERSION_FETCH_MIN_RETRY_MS);
 
         mod.getLatestTapVersion(); // attempt #2 -- backoff window has elapsed
         await mod._test.waitForInFlight();
@@ -320,7 +401,7 @@ test('a recovered upstream is picked up on the next attempt, and resets the fail
         await mod._test.waitForInFlight();
         assert.equal(mod._test.getState().latestTapVersionFailureCount, 1);
 
-        await new Promise((r) => setTimeout(r, mod._test.constants.TAP_VERSION_FETCH_MIN_RETRY_MS + 30));
+        mod._test.clock.advance(mod._test.constants.TAP_VERSION_FETCH_MIN_RETRY_MS);
 
         mod.getLatestTapVersion(); // attempt #2 -- succeeds
         await mod._test.waitForInFlight();
@@ -350,7 +431,7 @@ test('a later failure AFTER a prior success does not poison the cache -- latest 
 
         // Let the cache go stale, then fail the next attempt.
         global.fetch = mockFetchSequence([{ reject: new Error('simulated outage') }]);
-        await new Promise((r) => setTimeout(r, mod._test.constants.TAP_VERSION_CACHE_TTL_MS + 30));
+        mod._test.clock.advance(mod._test.constants.TAP_VERSION_CACHE_TTL_MS + 1); // staleness gate is strict `>`
 
         mod.getLatestTapVersion(); // attempt #2 -- fails
         await mod._test.waitForInFlight();
