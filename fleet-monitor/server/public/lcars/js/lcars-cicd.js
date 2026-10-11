@@ -415,10 +415,16 @@
 
     // XACA-1468-011: attribution is optional and untrusted. Absent, null, array
     // or non-object -> {}; a missing/empty/non-scalar sub-key renders as the dash.
-    function attrCell(attr, key, cls) {
+    // trunc=true (AGENT): the text sits in an inner .cicd-attr-trunc span (max-width is
+    // ignored on a table cell, so the cap must live on an inline-block child) whose title
+    // carries the full escaped value, so an ellipsised name is still readable.
+    function attrCell(attr, key, cls, trunc) {
         var v = attr && typeof attr === 'object' && !Array.isArray(attr) ? attr[key] : null;
         var ok = (typeof v === 'string' && v !== '') || typeof v === 'number';
-        return '<td class="' + cls + '">' + (ok ? esc(v) : dashHtml()) + '</td>';
+        var inner = !ok ? dashHtml()
+            : trunc ? '<span class="cicd-attr-trunc" title="' + esc(v) + '">' + esc(v) + '</span>'
+            : esc(v);
+        return '<td class="' + cls + '">' + inner + '</td>';
     }
 
     function jobRowHtml(j, idx) {
@@ -431,7 +437,7 @@
             '<td class="cicd-wrap">' + esc(j.branch) + '</td>' +
             attrCell(j.attribution, 'item', 'cicd-wrap cicd-attr-item') +
             attrCell(j.attribution, 'team', 'cicd-wrap cicd-attr-team') +
-            attrCell(j.attribution, 'agent', 'cicd-wrap cicd-attr-agent') +
+            attrCell(j.attribution, 'agent', 'cicd-wrap cicd-attr-agent', true) +
             '<td class="cicd-num">' + durHtml(j.durationSeconds) + '</td>' +
             '<td class="cicd-num">' + numOrDash(j.minutes) + '</td>' +
             '<td>' + resultHtml(j.result) + '</td>' +
@@ -444,10 +450,10 @@
             : '<tr><td colspan="11" class="cicd-sub">No recent jobs reported</td></tr>';
         return '<h3 class="cicd-subhead">RECENT JOBS</h3>' +
             '<div class="cicd-jobs-wrap" tabindex="0" role="region" aria-label="Recent CI jobs" data-cicd-focus="jobs-wrap">' +
-            '<table class="cicd-jobs"><caption class="cicd-sr-only">Recent CI jobs, newest first</caption>' +
+            '<table class="cicd-jobs"><caption class="cicd-sr-only">Recent CI jobs, newest first. Ticket, team and agent come from the commit\'s Kanban trailers; agent is the one that made the commit.</caption>' +
             '<thead><tr><th scope="col">TIME</th><th scope="col">RUNNER</th><th scope="col">WORKFLOW/JOB</th>' +
             '<th scope="col">BRANCH</th><th scope="col">TICKET</th><th scope="col">TEAM</th>' +
-            '<th scope="col" title="Agent that made the commit" aria-label="Agent that made the commit">AGENT</th>' +
+            '<th scope="col">AGENT</th>' +
             '<th scope="col">DUR</th><th scope="col">MIN</th>' +
             '<th scope="col">RESULT</th><th scope="col">LOG</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
     }

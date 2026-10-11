@@ -1582,7 +1582,17 @@
    and wrap. The table scrolls inside .cicd-jobs-wrap, never the page. */
 .cicd-jobs .cicd-attr-item { white-space: nowrap; }
 .cicd-jobs .cicd-attr-team { min-width: 70px; }
-.cicd-jobs .cicd-attr-agent { min-width: 140px; max-width: 240px; }
+.cicd-jobs .cicd-attr-agent { min-width: 140px; }
+/* max-width is ignored on a table cell, so the cap lives on an inner inline-block; the full
+   value is in its title attribute. */
+.cicd-jobs .cicd-attr-trunc {
+    display: inline-block;
+    max-width: 240px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    vertical-align: bottom;
+}
 
 .cicd-jobs .cicd-num {
     text-align: right;

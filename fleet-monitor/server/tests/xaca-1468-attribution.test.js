@@ -77,12 +77,51 @@ describe('UI', () => {
         assert.equal(row(env, '1').children.length, heads.length);
     });
 
-    test('AGENT header says it is the agent that made the commit', () => {
+    test('the sr-only caption explains the attribution columns once; AGENT header is plain', () => {
         const env = render([mkJob('1')]);
-        const th = Array.from(env.el.querySelectorAll('.cicd-jobs th')).find((t) => norm(t) === 'AGENT');
-        assert.ok(th, 'AGENT header exists');
-        assert.match(th.getAttribute('title') || '', /made the commit/i);
-        assert.match(th.getAttribute('aria-label') || '', /made the commit/i);
+        const caption = env.el.querySelector('.cicd-jobs caption');
+        assert.ok(caption, 'caption exists');
+        assert.ok(caption.classList.contains('cicd-sr-only'), 'caption is sr-only');
+        assert.match(norm(caption), /Ticket, team and agent come from the commit's Kanban trailers/i);
+        assert.match(norm(caption), /agent is the one that made the commit/i);
+        const ths = Array.from(env.el.querySelectorAll('.cicd-jobs th'));
+        ['TICKET', 'TEAM', 'AGENT'].forEach((name) => {
+            const th = ths.find((t) => norm(t) === name);
+            assert.ok(th, name + ' header exists');
+            assert.equal(th.getAttribute('title'), null, name + ' has no title');
+            assert.equal(th.getAttribute('aria-label'), null, name + ' has no aria-label');
+        });
+    });
+
+    test('AGENT text sits in a .cicd-attr-trunc span whose title is the escaped full value', () => {
+        const long = 'academy:chancellor (Captain Nahla Ake of the Federation Academy Engineering Lab)';
+        const env = render([mkJob('1', { attribution: { item: 'XACA-1468', team: 'academy', agent: long } })]);
+        const span = attr(env, '1', 'agent').querySelector('span.cicd-attr-trunc');
+        assert.ok(span, 'truncation span exists');
+        assert.equal(span.getAttribute('title'), long);
+        assert.equal(norm(span), long);
+        // ticket and team cells carry no truncation span
+        assert.equal(attr(env, '1', 'item').querySelector('.cicd-attr-trunc'), null);
+        // hostile value: the title attribute is escaped, not an injection point
+        const evil = '"><img src=x onerror=alert(1)>';
+        const env2 = render([mkJob('2', { attribution: { agent: evil } })]);
+        const s2 = attr(env2, '2', 'agent').querySelector('span.cicd-attr-trunc');
+        assert.equal(s2.getAttribute('title'), evil);
+        assert.equal(env2.el.querySelectorAll('img').length, 0);
+        assert.equal(env2.el.querySelectorAll('[onerror]').length, 0);
+        // unreported agent: dash only, no span
+        const env3 = render([mkJob('3')]);
+        assert.equal(attr(env3, '3', 'agent').querySelector('.cicd-attr-trunc'), null);
+    });
+
+    test('stylesheet caps the truncation span, not the table cell', () => {
+        const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'lcars', 'css', 'lcars-dashboards.css'), 'utf8');
+        const m = css.match(/\.cicd-jobs \.cicd-attr-trunc\s*\{([^}]*)\}/);
+        assert.ok(m, '.cicd-attr-trunc rule exists');
+        ['display:\\s*inline-block', 'max-width:\\s*240px', 'overflow:\\s*hidden', 'text-overflow:\\s*ellipsis', 'white-space:\\s*nowrap', 'vertical-align:\\s*bottom']
+            .forEach((p) => assert.match(m[1], new RegExp(p)));
+        const cell = css.match(/\.cicd-jobs \.cicd-attr-agent\s*\{([^}]*)\}/);
+        assert.ok(cell && !/max-width/.test(cell[1]), 'no max-width on the table cell');
     });
 
     test('hostile values render as text, never markup (every column)', () => {

@@ -4173,7 +4173,113 @@ kb-pr() {
     # Never changes kb-pr's exit status - a failure here is a warning only.
     _kb_ci_priority_pr_hook || true
     _kb_pr_base_check || true
+    _kb_pr_trailers_hook || true
     return $_kb_pr_rc
+}
+
+# _kb_pr_trailers_apply <owner/repo> <branch>   (XACA-1468 round-1 gate fix)
+# Best-effort: when <branch> has an OPEN PR whose body lacks a `Kanban-Item:` trailer, insert the
+# Kanban-* set of the PR's LAST commit that carries one as its own paragraph immediately BEFORE
+# the trailing "Generated with" paragraph (or append it when there is none), via
+# `gh pr edit --body-file`. Read-modify-write on the PR body only; never touches a body that
+# already has Kanban-Item, never runs without a PR or without trailers. Commits come from
+# `gh pr view --json commits` (the PR's own commits - `git log` cannot bound a branch without
+# knowing the remote base name, and falling back to older develop history would stamp the
+# wrong ticket). NOTE: the PR-open event itself predates this edit; the PR-event jobs of later
+# `synchronize` events carry the trailers. Every failure is silent: always returns 0.
+_kb_pr_trailers_apply() {
+    local repo="${1-}" branch="${2-}" json tmp="" n=""
+    [[ -n "$repo" && -n "$branch" ]] || return 0
+    command -v gh >/dev/null 2>&1 || return 0
+    command -v python3 >/dev/null 2>&1 || return 0
+    json=$(_kb_pr_trailers_gh pr view "$branch" --repo "$repo" --json number,state,body,commits 2>/dev/null) || return 0
+    [[ -n "$json" ]] || return 0
+    tmp=$(mktemp "${TMPDIR:-/tmp}/kb-pr-trailers.XXXXXX" 2>/dev/null) || return 0
+    n=$(printf '%s' "$json" | python3 -I -c '
+import json, re, sys
+PAT = re.compile(r"^(Kanban-Item|Kanban-Team|Kanban-Agent): ([ -~]{1,120})$")
+KEYS = ("Kanban-Item", "Kanban-Team", "Kanban-Agent")
+TL = re.compile(r"[A-Za-z0-9-]+: ")
+def paras(text):
+    t = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip("\n")
+    return [p for p in re.split(r"\n[ \t]*\n", t) if p.strip()]
+def shaped(p):
+    ls = [l for l in p.split("\n") if l.strip()]
+    return bool(ls) and all(TL.match(l) or (i > 0 and l[:1] in " \t") for i, l in enumerate(ls))
+def kanban_set(text):
+    ps = paras(text)
+    for i in range(len(ps) - 1, -1, -1):
+        if shaped(ps[i]):
+            k = {}
+            for l in ps[i].split("\n"):
+                m = PAT.match(l.rstrip())
+                if m:
+                    k.setdefault(m.group(1), m.group(2).strip())
+            return k
+    return {}
+d = json.load(sys.stdin)
+if d.get("state") != "OPEN" or not isinstance(d.get("number"), int):
+    sys.exit(1)
+body = d.get("body") or ""
+if re.search(r"(?m)^Kanban-Item: ", body):
+    sys.exit(1)
+chosen = None
+for c in reversed(d.get("commits") or []):
+    k = kanban_set(c.get("messageBody"))
+    if "Kanban-Item" in k:
+        chosen = k
+        break
+if chosen is None:
+    sys.exit(1)
+block = "\n".join("%s: %s" % (k, chosen[k]) for k in KEYS if k in chosen)
+body = body.replace("\r\n", "\n").rstrip("\n")
+ms = list(re.finditer(r"(?m)^🤖 Generated with", body))
+if ms and "\n\n" not in body[ms[-1].start():]:
+    pre = body[:ms[-1].start()].rstrip("\n")
+    new = (pre + "\n\n" if pre else "") + block + "\n\n" + body[ms[-1].start():] + "\n"
+else:
+    new = (body + "\n\n" if body else "") + block + "\n"
+open(sys.argv[1], "w", encoding="utf-8").write(new)
+print(d["number"])
+' "$tmp" 2>/dev/null) || n=""
+    if [[ "$n" =~ ^[0-9]+$ ]]; then
+        _kb_pr_trailers_gh pr edit "$n" --repo "$repo" --body-file "$tmp" >/dev/null 2>&1 \
+            || echo "⚠️  kb-pr: could not add Kanban trailers to PR #$n body (non-fatal)." >&2
+    fi
+    rm "$tmp" 2>/dev/null || true
+    return 0
+}
+
+# gh with a bounded runtime when timeout/gtimeout exists (gh has its own HTTP limits otherwise).
+_kb_pr_trailers_gh() {
+    if command -v timeout >/dev/null 2>&1; then timeout 20 gh "$@"
+    elif command -v gtimeout >/dev/null 2>&1; then gtimeout 20 gh "$@"
+    else gh "$@"; fi
+}
+
+# _kb_pr_trailers_hook   (XACA-1468)
+# kb-pr tail: resolve the ticket's branch + repo the same way _kb_pr_base_check does, then
+# _kb_pr_trailers_apply. Always returns 0 (kb-pr ignores it anyway).
+_kb_pr_trailers_hook() {
+    local tgt item board_file idx branch cur repo
+    tgt=$(_kb_ci_priority_target "" 2>/dev/null) || return 0
+    item="${tgt%%$'\t'*}"
+    board_file="${tgt#*$'\t'}"
+    command -v gh >/dev/null 2>&1 || return 0
+    idx=$(_kb_find_by_id "$board_file" "$item" 2>/dev/null)
+    [[ "$idx" =~ ^[0-9]+$ ]] || return 0
+    branch=$(_kb_jq_read "$board_file" ".backlog[$idx].worktreeBranch // empty" -r 2>/dev/null)
+    if [[ -z "$branch" ]]; then
+        cur=$(git branch --show-current 2>/dev/null)
+        local _cur_lc _id_lc
+        _cur_lc=$(printf '%s' "$cur" | tr '[:upper:]' '[:lower:]')
+        _id_lc=$(printf '%s' "$item" | tr '[:upper:]' '[:lower:]')
+        [[ -n "$cur" && "$_cur_lc" =~ (^|[^a-z0-9])${_id_lc}([^0-9]|$) ]] && branch="$cur"
+    fi
+    [[ -n "$branch" ]] || return 0
+    repo=$(_kb_ci_priority_resolve_repo "$item" "$board_file" "$idx" 2>/dev/null) || return 0
+    _kb_pr_trailers_apply "$repo" "$branch" || true
+    return 0
 }
 
 # _kb_pr_base_resolve <ITEM-ID>   (XACA-1483)
@@ -4728,7 +4834,13 @@ if chosen is None:
     sys.exit(1)
 add_co(bco)
 lines = ["%s: %s" % (k, chosen[k]) for k in KEYS if k in chosen] + co
-rest = bps[:bi] + bps[bi + 1:] if (bk and bi >= 0) else bps
+# The PR body trailer paragraph was harvested above, so it must not ALSO stay in the summary
+# (that duplicated every Co-Authored-By line). Drop only the harvested lines; keep the rest.
+rest = bps
+if bi >= 0:
+    kept = [l for l in bps[bi].split("\n") if not (PAT.match(l.rstrip()) or COA.match(l.rstrip()))]
+    para = "\n".join(kept).strip()
+    rest = bps[:bi] + ([para] if para else []) + bps[bi + 1:]
 summary = "\n\n".join(rest).strip()
 sys.stdout.write((summary + "\n\n" if summary else "") + "\n".join(lines) + "\n")
 ' 2>/dev/null) || return 1
