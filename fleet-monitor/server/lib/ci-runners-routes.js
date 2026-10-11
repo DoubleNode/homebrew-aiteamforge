@@ -150,6 +150,34 @@ function copyJobCommon(j, where) {
     };
 }
 
+// XACA-1468: job attribution. Informational, NOT a security boundary: any
+// failure drops ONLY the field (the job is kept), never the push.
+const ATTR_ITEM_RE = /^[A-Z]{3,5}-[0-9]{3,5}$/;
+const ATTR_TEAM_RE = /^[a-z0-9][a-z0-9-]{0,47}$/;
+const ATTR_AGENT_MAX = 96;
+const ATTR_FIELDS = ['item', 'team', 'agent'];
+
+/** Returns a fresh {item?,team?,agent?} or null when absent/invalid. Never throws. */
+function sanitizeAttribution(a) {
+    if (!isObj(a)) return null;
+    const present = Object.getOwnPropertyNames(a);
+    if (present.length === 0 || present.some((k) => !ATTR_FIELDS.includes(k))) return null;
+    const out = {};
+    if (a.item !== undefined) {
+        if (typeof a.item !== 'string' || !ATTR_ITEM_RE.test(a.item)) return null;
+        out.item = a.item;
+    }
+    if (a.team !== undefined) {
+        if (typeof a.team !== 'string' || !ATTR_TEAM_RE.test(a.team)) return null;
+        out.team = a.team;
+    }
+    if (a.agent !== undefined) {
+        if (!cleanStr(a.agent, ATTR_AGENT_MAX)) return null;
+        out.agent = a.agent;
+    }
+    return out;
+}
+
 /** A completed jobs[] record. Throws ValidationError (caller drops + reports it). */
 function validateJob(j) {
     const out = copyJobCommon(j, 'job');
@@ -167,7 +195,10 @@ function validateJob(j) {
         }
         durationSeconds = j.durationSeconds;
     }
-    return { ...out, runner: j.runner, endedAt: j.endedAt, result: j.result, minutes: j.minutes, durationSeconds };
+    const rec = { ...out, runner: j.runner, endedAt: j.endedAt, result: j.result, minutes: j.minutes, durationSeconds };
+    const attribution = sanitizeAttribution(j.attribution);
+    if (attribution) rec.attribution = attribution;   // invalid -> field dropped, job kept
+    return rec;
 }
 
 function validateRunner(r, i) {
@@ -406,7 +437,7 @@ function contractCurrentJob(cj) {
 function contractJob(j, osByRunner) {
     const { durationSeconds, minutes, os } = jobAccounting(j, osByRunner);
     const urls = splitUrls(j);
-    return {
+    const out = {
         id: j.id,
         runner: j.runner,
         os,
@@ -423,6 +454,9 @@ function contractJob(j, osByRunner) {
         runUrl: urls.runUrl,
         jobUrl: urls.jobUrl,
     };
+    const attribution = sanitizeAttribution(j.attribution);   // omitted when absent
+    if (attribution) out.attribution = attribution;
+    return out;
 }
 
 /**

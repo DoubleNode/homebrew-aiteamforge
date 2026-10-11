@@ -97,7 +97,7 @@ trap cleanup EXIT
 # ============================================================================
 ci_py() {
 cat <<'PY'
-import sys, os, re, json, glob, subprocess, time, calendar
+import sys, os, re, json, glob, subprocess, time, calendar, stat
 
 TS_RE = re.compile(r'^\[(\d{4})-(\d\d)-(\d\d) (\d\d):(\d\d):(\d\d)(?:\.\d+)?Z ')
 RESULT_RE = re.compile(r'(?:Job result after all job steps finish|Finishing job with result|completed with result)\s*:\s*([A-Za-z]+)')
@@ -116,6 +116,13 @@ CTRL_RE = re.compile(r'[\x00-\x1f\x7f]')
 HOST_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,254}')
 EVENT_RE = re.compile(r'^[A-Za-z0-9_.-]{1,64}$')
 JOBNUM_RE = re.compile(r'^[0-9]{1,20}$')
+# XACA-1468: job attribution (informational, NOT a security boundary). Same
+# patterns as ci-runner-job-started.sh (the writer) and ci-runners-routes.js
+# (the server); the reader re-validates because the file is not trusted.
+ATTR_ITEM_RE = re.compile(r'[A-Z]{3,5}-[0-9]{3,5}')
+ATTR_TEAM_RE = re.compile(r'[a-z0-9][a-z0-9-]{0,47}')
+ATTR_AGENT_MAX = 96
+ATTR_MAX_BYTES = 4096
 MAX_FILES = 60
 HEAD = 1048576
 TAIL = 524288
@@ -175,6 +182,42 @@ def branch_of(text):
         return safe_str(ref[len('refs/heads/'):], 255)
     return None
 
+def clean_attribution(a):
+    # Keep only validated keys (item/team/agent); None when nothing survives.
+    # fullmatch, never `$`: `$` would accept a trailing newline.
+    if not isinstance(a, dict):
+        return None
+    out = {}
+    v = a.get('item')
+    if isinstance(v, str) and ATTR_ITEM_RE.fullmatch(v):
+        out['item'] = v
+    v = a.get('team')
+    if isinstance(v, str) and ATTR_TEAM_RE.fullmatch(v):
+        out['team'] = v
+    v = a.get('agent')
+    if safe_str(v, ATTR_AGENT_MAX):
+        out['agent'] = v
+    return out or None
+
+def read_attribution(rdir, run_id):
+    # <runner-dir>/_attribution/<run_id>.json, written by ci-runner-job-started.sh.
+    # ONLY the three validated fields are ever returned (NO RAW LOGS). Any error,
+    # a non-regular file (symlink included) or a file over 4 KB means no attribution.
+    try:
+        if not run_id or not JOBNUM_RE.fullmatch(run_id):
+            return None
+        p = os.path.join(rdir, '_attribution', run_id + '.json')
+        st = os.lstat(p)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > ATTR_MAX_BYTES:
+            return None
+        with open(p, 'rb') as f:
+            data = f.read(ATTR_MAX_BYTES + 1)
+        if len(data) > ATTR_MAX_BYTES:
+            return None
+        return clean_attribution(json.loads(data.decode('utf-8')))
+    except Exception:
+        return None
+
 def parse_file(runner, path, now, busy_age, default_repo):
     text = read_text(path)
     stamps = []
@@ -223,6 +266,10 @@ def parse_file(runner, path, now, busy_age, default_repo):
     base = {'id': jid, 'workflow': workflow, 'jobName': job_name, 'repo': repo,
             'runUrl': run_url, 'startedAt': iso(started),
             'branch': branch_of(text), 'event': ev, 'jobUrl': job_url}
+    # XACA-1468: attribution from the SAME runner dir whose _diag this log is in.
+    attr = read_attribution(os.path.dirname(os.path.dirname(path)), run_id)
+    if attr:
+        base['attribution'] = attr
     if result is not None:
         kind = {'succeeded': 'success', 'succeededwithissues': 'success', 'failed': 'failure',
                 'canceled': 'cancelled', 'cancelled': 'cancelled'}.get(result, 'unknown')
@@ -314,6 +361,24 @@ def load(path):
     except Exception:
         return None
 
+def valid_attribution(j):
+    # Absent key is valid; present means a dict of ONLY item/team/agent, each valid.
+    if 'attribution' not in j:
+        return True
+    a = j['attribution']
+    if not isinstance(a, dict) or not a or not set(a) <= {'item', 'team', 'agent'}:
+        return False
+    for k, v in a.items():
+        if not isinstance(v, str):
+            return False
+        if k == 'item' and not ATTR_ITEM_RE.fullmatch(v):
+            return False
+        if k == 'team' and not ATTR_TEAM_RE.fullmatch(v):
+            return False
+        if k == 'agent' and not safe_str(v, ATTR_AGENT_MAX):
+            return False
+    return True
+
 def valid_job(j):
     try:
         return (ID_RE.match(j['id']) and NAME_RE.match(j['runner']) and len(j['workflow']) <= 128
@@ -326,7 +391,8 @@ def valid_job(j):
                 and 0 <= j['durationSeconds'] <= 432000
                 and (j['branch'] is None or safe_str(j['branch'], 255))
                 and (j['event'] is None or EVENT_RE.match(j['event']))
-                and (j['jobUrl'] is None or (URL_RE.match(j['jobUrl']) and '/job/' in j['jobUrl'])))
+                and (j['jobUrl'] is None or (URL_RE.match(j['jobUrl']) and '/job/' in j['jobUrl']))
+                and valid_attribution(j))
     except Exception:
         return False
 

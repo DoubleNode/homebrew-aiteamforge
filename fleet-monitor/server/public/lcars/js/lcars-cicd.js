@@ -397,6 +397,8 @@
         var jobs = [];
         machines.forEach(function(m) {
             (m && Array.isArray(m.recentJobs) ? m.recentJobs : []).forEach(function(j) {
+                // XACA-1468-011: the row object itself is carried through, so the
+                // optional `attribution` {item,team,agent} rides along untouched.
                 if (j && typeof j === 'object') jobs.push(j);
             });
         });
@@ -411,6 +413,14 @@
         return jobs.slice(0, MAX_JOBS_RENDERED);
     }
 
+    // XACA-1468-011: attribution is optional and untrusted. Absent, null, array
+    // or non-object -> {}; a missing/empty/non-scalar sub-key renders as the dash.
+    function attrCell(attr, key, cls) {
+        var v = attr && typeof attr === 'object' && !Array.isArray(attr) ? attr[key] : null;
+        var ok = (typeof v === 'string' && v !== '') || typeof v === 'number';
+        return '<td class="' + cls + '">' + (ok ? esc(v) : dashHtml()) + '</td>';
+    }
+
     function jobRowHtml(j, idx) {
         var label = j.job != null ? j.job : j.workflow;
         var stamp = utcStamp(j.startedAt);
@@ -419,6 +429,9 @@
             '<td class="cicd-wrap">' + esc(j.runner) + '</td>' +
             '<td class="cicd-wrap">' + esc(j.workflow) + (j.job != null && j.job !== j.workflow ? ' / ' + esc(j.job) : '') + '</td>' +
             '<td class="cicd-wrap">' + esc(j.branch) + '</td>' +
+            attrCell(j.attribution, 'item', 'cicd-wrap cicd-attr-item') +
+            attrCell(j.attribution, 'team', 'cicd-wrap cicd-attr-team') +
+            attrCell(j.attribution, 'agent', 'cicd-wrap cicd-attr-agent') +
             '<td class="cicd-num">' + durHtml(j.durationSeconds) + '</td>' +
             '<td class="cicd-num">' + numOrDash(j.minutes) + '</td>' +
             '<td>' + resultHtml(j.result) + '</td>' +
@@ -428,12 +441,14 @@
     function jobsHtml(jobs) {
         var rows = jobs.length
             ? jobs.map(jobRowHtml).join('')
-            : '<tr><td colspan="8" class="cicd-sub">No recent jobs reported</td></tr>';
+            : '<tr><td colspan="11" class="cicd-sub">No recent jobs reported</td></tr>';
         return '<h3 class="cicd-subhead">RECENT JOBS</h3>' +
             '<div class="cicd-jobs-wrap" tabindex="0" role="region" aria-label="Recent CI jobs" data-cicd-focus="jobs-wrap">' +
             '<table class="cicd-jobs"><caption class="cicd-sr-only">Recent CI jobs, newest first</caption>' +
             '<thead><tr><th scope="col">TIME</th><th scope="col">RUNNER</th><th scope="col">WORKFLOW/JOB</th>' +
-            '<th scope="col">BRANCH</th><th scope="col">DUR</th><th scope="col">MIN</th>' +
+            '<th scope="col">BRANCH</th><th scope="col">TICKET</th><th scope="col">TEAM</th>' +
+            '<th scope="col" title="Agent that made the commit" aria-label="Agent that made the commit">AGENT</th>' +
+            '<th scope="col">DUR</th><th scope="col">MIN</th>' +
             '<th scope="col">RESULT</th><th scope="col">LOG</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
     }
 

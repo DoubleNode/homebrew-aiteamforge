@@ -4661,6 +4661,81 @@ _kb_merge_record_safe() {
     return 0
 }
 
+# _kb_squash_body <PR#>   (XACA-1468-002)
+# Print a squash-merge body for PR <PR#> that ENDS in a final paragraph of real
+# `Key: value` trailers (Kanban-Item / Kanban-Team / Kanban-Agent, then Co-Authored-By),
+# so the runner's job-started hook sees them on the develop push. Why: GitHub's default
+# squash body lists branch commits as "* subject" bullets, so trailers nested in them no
+# longer parse, and a custom --body also replaces the Co-Authored-By trailers GitHub would
+# have carried -- hence those are harvested here too.
+# Kanban-* set = the PR body's (its LAST trailer-shaped paragraph; PR bodies end in the
+# "Generated with" line so that is not the literal last paragraph) when it has a
+# Kanban-Item, else that of the LAST commit that has a Kanban-Item. Never a mix of sources.
+# rc 0 + body on stdout ONLY when a Kanban-Item was found; rc 1 + no output otherwise
+# (no trailers, gh/python failure, bad JSON) so the caller keeps today's behaviour.
+# Never blocks a merge: every failure path is "print nothing, return 1".
+_kb_squash_body() {
+    local pr="${1-}" json body
+    [[ -n "$pr" ]] || return 1
+    command -v python3 >/dev/null 2>&1 || return 1
+    json=$(gh pr view "$pr" --json body,commits 2>/dev/null) || return 1
+    [[ -n "$json" ]] || return 1
+    body=$(printf '%s' "$json" | python3 -I -c '
+import json, re, sys
+KEYS = ("Kanban-Item", "Kanban-Team", "Kanban-Agent")
+PAT = re.compile(r"^(Kanban-Item|Kanban-Team|Kanban-Agent): ([ -~]{1,120})$")
+COA = re.compile(r"^Co-authored-by: ([ -~]{1,100}) <([^<>\s@]{1,64}@[^<>\s]{1,128})>$", re.I)
+TL = re.compile(r"[A-Za-z0-9-]+: ")
+def paras(text):
+    t = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip("\n")
+    return [p for p in re.split(r"\n[ \t]*\n", t) if p.strip()]
+def shaped(p):
+    ls = [l for l in p.split("\n") if l.strip()]
+    return bool(ls) and all(TL.match(l) or (i > 0 and l[:1] in " \t") for i, l in enumerate(ls))
+def harvest(text):
+    ps = paras(text)
+    for i in range(len(ps) - 1, -1, -1):
+        if shaped(ps[i]):
+            k, co = {}, []
+            for l in ps[i].split("\n"):
+                l = l.rstrip()
+                m = PAT.match(l)
+                if m:
+                    k.setdefault(m.group(1), m.group(2).strip())
+                elif COA.match(l):
+                    co.append(l)
+            return k, co, i, ps
+    return {}, [], -1, ps
+d = json.load(sys.stdin)
+commits = d.get("commits") or []
+bk, bco, bi, bps = harvest(d.get("body"))
+chosen = bk if "Kanban-Item" in bk else None
+co, seen = [], set()
+def add_co(lines):
+    for l in lines:
+        if l.lower() not in seen:
+            seen.add(l.lower()); co.append(l)
+for c in commits:
+    _, cco, _, _ = harvest(c.get("messageBody"))
+    add_co(cco)
+if chosen is None:
+    for c in reversed(commits):
+        k, _, _, _ = harvest(c.get("messageBody"))
+        if "Kanban-Item" in k:
+            chosen = k
+            break
+if chosen is None:
+    sys.exit(1)
+add_co(bco)
+lines = ["%s: %s" % (k, chosen[k]) for k in KEYS if k in chosen] + co
+rest = bps[:bi] + bps[bi + 1:] if (bk and bi >= 0) else bps
+summary = "\n\n".join(rest).strip()
+sys.stdout.write((summary + "\n\n" if summary else "") + "\n".join(lines) + "\n")
+' 2>/dev/null) || return 1
+    [[ -n "$body" ]] || return 1
+    printf '%s\n' "$body"
+}
+
 # kb-merge — wrap `gh pr merge` with worktree-lock fallback handling.
 # When the auto-merge loop runs from inside a worktree, `gh pr merge --delete-branch`
 # fails locally because the develop branch is checked out elsewhere. The API merge
@@ -4679,8 +4754,18 @@ kb-merge() {
     local strategy="${2:---squash}"
 
     # Capture combined output so we can pattern-match on the worktree-lock error.
-    local out
-    if out=$(gh pr merge "$pr" "$strategy" --delete-branch --admin 2>&1); then
+    local out squash_body="" merged=1
+    # XACA-1468-002: a squash keeps the Kanban-* trailers as a real final paragraph.
+    # No trailers / any failure -> squash_body stays empty and the call is exactly as before.
+    if [[ "$strategy" == "--squash" ]]; then
+        squash_body=$(_kb_squash_body "$pr" 2>/dev/null) || squash_body=""
+    fi
+    if [[ -n "$squash_body" ]]; then
+        out=$(gh pr merge "$pr" "$strategy" --delete-branch --admin --body "$squash_body" 2>&1) && merged=0
+    else
+        out=$(gh pr merge "$pr" "$strategy" --delete-branch --admin 2>&1) && merged=0
+    fi
+    if [[ "$merged" -eq 0 ]]; then
         echo "$out"
         _kb_merge_record_safe "$pr"
         return 0

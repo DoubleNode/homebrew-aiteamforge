@@ -1553,7 +1553,7 @@
 .cicd-jobs {
     width: 100%;
     border-collapse: collapse;
-    min-width: 720px;
+    min-width: 960px;
     font-size: 12px;
     color: var(--lcars-peach);
 }
@@ -1576,6 +1576,13 @@
 }
 
 .cicd-jobs .cicd-wrap { overflow-wrap: anywhere; }
+
+/* XACA-1468-011: attribution columns. Ticket ids and team slugs are short and
+   unbroken; agent names can be long ("academy:chancellor (Captain ...)") so cap
+   and wrap. The table scrolls inside .cicd-jobs-wrap, never the page. */
+.cicd-jobs .cicd-attr-item { white-space: nowrap; }
+.cicd-jobs .cicd-attr-team { min-width: 70px; }
+.cicd-jobs .cicd-attr-agent { min-width: 140px; max-width: 240px; }
 
 .cicd-jobs .cicd-num {
     text-align: right;
