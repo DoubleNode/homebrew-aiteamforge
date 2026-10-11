@@ -215,6 +215,7 @@ describe('018: focus survives a refresh for every control', () => {
             const dom = poolDom();
             const doc = dom.window.document, el = doc.getElementById('p');
             dom.window.LCARSCIPool.render(poolBody({ mx: row.m }), el, { document: doc });
+            el.querySelector('[data-cicd-pool-toggle]').click(); // XACA-1476: expand the collapsed card so its controls are focusable
             const find = () => el.querySelector('[data-cicd-pool-control="mx:' + row.control + '"]');
             const before = find();
             assert.ok(before, row.control + ' control exists');
@@ -243,6 +244,7 @@ describe('018: focus survives a refresh for every control', () => {
         const dom = poolDom();
         const doc = dom.window.document, el = doc.getElementById('p');
         dom.window.LCARSCIPool.render(poolBody({ mx: machine({}) }), el, { document: doc });
+        el.querySelector('[data-cicd-pool-toggle]').click(); // XACA-1476: expand so the control is focusable
         el.querySelector('[data-cicd-pool-control="mx:pause"]').focus();
         dom.window.LCARSCIPool.render(poolBody({ mx: machine({ paused: true, state: 'paused' }) }), el, { document: doc });
         assert.equal(doc.activeElement, el.querySelector('[data-cicd-pool-control="mx:resume"]'));
@@ -254,6 +256,7 @@ describe('019: the pause dialog is modal', () => {
         const dom = poolDom();
         const doc = dom.window.document, el = doc.getElementById('p');
         dom.window.LCARSCIPool.render(poolBody({ mx: machine({}) }), el, { document: doc });
+        el.querySelector('[data-cicd-pool-toggle]').click(); // XACA-1476: expand so the invoker is focusable on return
         const opener = el.querySelector('[data-cicd-pool-control="mx:pause"]');
         opener.click();
         const dlg = el.querySelector('[role="dialog"]');

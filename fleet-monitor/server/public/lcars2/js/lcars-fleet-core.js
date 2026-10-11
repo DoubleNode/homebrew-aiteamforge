@@ -597,7 +597,7 @@ window.LCARS_CORE = window.LCARS_CORE || {};
 
     LCARS.sections = {
         // Available sections in order (XACA-0540: added 'engines'; XACA-1393: 'accessories')
-        list: ['overview', 'organizations', 'machines', 'settings', 'engines', 'accessories'],
+        list: ['overview', 'organizations', 'machines', 'settings', 'engines', 'accessories', 'notifications'],
 
         // Current state
         active: 'overview',

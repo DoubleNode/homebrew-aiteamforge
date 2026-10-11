@@ -575,6 +575,13 @@ body {
     background: var(--lcars-black);
     color: var(--lcars-teal);
 }
+/* NOTIFICATIONS (XACA-1405) needs its own colour for the same XACA-1474 reason. Violet is used by no other
+   sidebar button and is not the frame colour (blue); purple (MACHINES) and lavender (ACCESSORIES) are taken. */
+.sidebar-button[data-section="notifications"] { background: var(--lcars-violet); }
+.sidebar-button[data-section="notifications"].active {
+    background: var(--lcars-black);
+    color: var(--lcars-violet);
+}
 /* ACCESSORIES (XACA-1393) needs its own colour for the same XACA-1474 reason. Lavender is used
    by neither the frame (blue) nor any other button; yellow/red/green are status colours here. */
 .sidebar-button[data-section="accessories"] { background: var(--lcars-lavender); }

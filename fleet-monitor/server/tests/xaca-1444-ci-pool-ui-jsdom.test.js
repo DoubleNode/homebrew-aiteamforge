@@ -64,6 +64,12 @@ function card(env, id) {
         .find((c) => c.getAttribute('data-cicd-pool-machine-card') === id) || null;
 }
 function btn(env, id, action) { return card(env, id).querySelector('[data-cicd-pool-action="' + action + '"]'); }
+// XACA-1476: machine controls live in a collapsed details panel (display:none); a hidden element is not a
+// focusable area, so a keyboard/AT user must expand the card first. Mirror that before focusing a control.
+function expand(env, id) {
+    const t = card(env, id).querySelector('[data-cicd-pool-toggle]');
+    if (t.getAttribute('aria-expanded') !== 'true') t.click();
+}
 function dialog(env) { return env.el.querySelector('[role="dialog"]'); }
 function setup(body, fetchImpl) {
     const env = loadImpl();
@@ -157,6 +163,8 @@ test('dormant Enable is aria-disabled, focusable, described, and clicking never 
     assert.equal(b.hasAttribute('disabled'), false);
     const why = env.document.getElementById(b.getAttribute('aria-describedby'));
     assert.ok(why && why.textContent.includes('dormant'), 'describedby resolves to visible reason text');
+    expand(env, 'm2mini');
+    assert.equal(b.closest('[data-cicd-pool-details]').hasAttribute('hidden'), false, 'expanded: controls are reachable');
     b.focus();
     assert.equal(env.document.activeElement, b, 'aria-disabled control stays focusable');
     const cmd = card(env, 'm2mini').querySelector('[data-cicd-pool-command]');
@@ -293,6 +301,7 @@ test('declining the second confirmation sends nothing more', async () => {
 
 test('dialog: focus moves in, Escape closes, focus returns to the invoker', async () => {
     const env = setup(fixture('mixed'));
+    expand(env, 'm4mini');
     const inv = btn(env, 'm4mini', 'pause');
     inv.focus();
     inv.click();
@@ -302,6 +311,33 @@ test('dialog: focus moves in, Escape closes, focus returns to the invoker', asyn
         new env.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
     assert.equal(dialog(env), null, 'Escape closes');
     assert.equal(env.document.activeElement, btn(env, 'm4mini', 'pause'), 'focus returned to the invoker');
+});
+
+test('XACA-1492-011: a successful pause whose refresh already replaced the invoker lands focus on the card\'s new action', async () => {
+    const f = mkFetch();
+    const env = setup(fixture('mixed'), f);
+    expand(env, 'm4mini');
+    const inv = btn(env, 'm4mini', 'pause');
+    inv.focus();
+    inv.click();
+    const d = dialog(env);
+    assert.ok(d.contains(env.document.activeElement), 'focus moved into the dialog');
+    // A poll lands while the dialog is open: the machine now reads paused, so the card is rebuilt and the
+    // Pause invoker is replaced by Resume (focus is in the dialog, so no in-card refocus applies).
+    const paused = fixture('mixed', (b) => { b.machines.m4mini.paused = true; });
+    env.api.render(paused, env.el, env.opts);
+    assert.equal(inv.isConnected, false, 'the invoker node was replaced by the refresh');
+    assert.equal(btn(env, 'm4mini', 'pause'), null, 'no Pause control remains to restore to');
+    d.querySelector('[data-cicd-pool-dlg="confirm"]').click();
+    await settle();
+    assert.equal(f.calls.length, 1);
+    assert.equal(dialog(env), null, 'dialog closed');
+    // closeDialog could not restore focus (invoker gone); the dialog is removed so focus is on body.
+    assert.equal(env.document.activeElement, env.document.body, 'focus is lost until the post-write refresh renders');
+    env.api.render(paused, env.el, env.opts);   // the refresh that follows the successful write
+    const resume = btn(env, 'm4mini', 'resume');
+    assert.ok(resume, 'the card now offers Resume');
+    assert.equal(env.document.activeElement, resume, 'focus lands on the new action, not body or the detached invoker');
 });
 
 test('failures and 401 are announced; nothing throws', async () => {
@@ -326,6 +362,7 @@ test('repeated render is idempotent: same nodes, no duplicates, focus and dialog
     assert.equal(card(env, 'm4mini'), before, 'unchanged card node is untouched');
     assert.equal(env.el.querySelectorAll('[data-cicd-pool-machine-card]').length, 6);
     assert.equal(env.el.querySelectorAll('[data-cicd-pool-root]').length, 1);
+    expand(env, 'm4mini');
     const b = btn(env, 'm4mini', 'pause');
     b.focus();
     const changed = fixture('mixed', (d) => { d.machines.m4mini.capacity.load1 = 3.3; });

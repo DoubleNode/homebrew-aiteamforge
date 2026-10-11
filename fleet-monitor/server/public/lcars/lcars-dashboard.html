@@ -96,7 +96,7 @@
     <link href="https://fonts.googleapis.com/css2?family=Antonio:wght@400;500;600;700&display=swap" rel="stylesheet">
 
     <!-- LCARS Fleet Core Framework -->
-    <link rel="stylesheet" href="css/lcars-fleet.css?v=20261008d">
+    <link rel="stylesheet" href="css/lcars-fleet.css?v=20261010a">
     <!-- LCARS Kiosk Mode Styles (shared) -->
     <link rel="stylesheet" href="../shared/css/lcars-kiosk.css?v=20260825e">
     <!-- LCARS Fleet Theme (Red/Blue Color Scheme) -->
@@ -110,6 +110,8 @@
     <!-- XACA-1444: CI/CD pool machine cards + queue (shared assets) -->
     <link rel="stylesheet" href="../shared/css/lcars-ci-pool.css?v=20261008b">
     <link rel="stylesheet" href="../shared/css/lcars-ci-queue.css?v=20261008a">
+    <!-- NOTIFICATIONS section styles (XACA-1405), shared with lcars2 -->
+    <link rel="stylesheet" href="../shared/css/lcars-notify-connections.css?v=20261010a">
     <!-- Chart.js: CDN with local fallback for offline/CDN-unavailable environments -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
     <script>window.Chart || document.write('<script src="js/vendor/chart.umd.min.js"><\/script>')</script>
@@ -237,6 +239,10 @@
                 <!-- ACCESSORIES button - UPS / power accessories (XACA-1393-004); last button, after CI/CD -->
                 <div class="sidebar-button" data-section="accessories">
                     <span>ACCESSORIES</span>
+                </div>
+                <!-- NOTIFICATIONS button - notification hub connections (XACA-1405); last button, after ACCESSORIES -->
+                <div class="sidebar-button" data-section="notifications">
+                    <span>NOTIFICATIONS</span>
                 </div>
                 <div class="sidebar-spacer"></div>
                 <div class="sidebar-info stacked">
@@ -871,6 +877,27 @@
                     </section>
                 </div><!-- End ACCESSORIES section -->
 
+                <!-- ═══════════════════════════════════════════════════════════════════ -->
+                <!-- SECTION: NOTIFICATIONS - hub connections (XACA-1405, EPIC-0068)    -->
+                <!-- Admin-key gated; populated by lcars-notify-connections.js from      -->
+                <!-- /api/notify/{status,connections,receipts}                           -->
+                <!-- ═══════════════════════════════════════════════════════════════════ -->
+                <div class="lcars-section" data-section="notifications">
+                    <section>
+                        <div class="section-header cyan">
+                            <span class="section-title">NOTIFICATION CONNECTIONS</span>
+                            <div class="section-bar"></div>
+                        </div>
+                        <div id="notify-status"></div>
+                        <div id="notify-toolbar"></div>
+                        <div id="notify-form-panel" class="notify-form-panel" hidden></div>
+                        <div id="notify-content">
+                            <div class="empty-state"><div class="empty-state-text">LOADING CONNECTIONS...</div></div>
+                        </div>
+                        <div id="notify-live" class="notify-sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
+                    </section>
+                </div><!-- End NOTIFICATIONS section -->
+
             </div>
         </main>
     </div>
@@ -889,7 +916,7 @@
     <!-- XACA-0398-003: admin-tier fetch wrapper + LCARS unlock dialog. Must load before
          any script that calls window.fleetApiFetch (engines, dashboards, nickname). -->
     <script src="js/fleet-api-auth.js"></script>
-    <script src="js/lcars-fleet-core.js?v=20261008a"></script>
+    <script src="js/lcars-fleet-core.js?v=20261010a"></script>
     <!-- Secret Vault offline-mode warning popup (XACA-0538-005): loaded after fleet-core,
          which calls window.VaultOfflinePopup.check() at startup. -->
     <script src="js/vault-offline-popup.js"></script>
@@ -938,6 +965,8 @@
     <script src="js/lcars-cicd.js?v=20261008b"></script>
     <!-- ACCESSORIES section (XACA-1393-004) — fed by lcars-dashboard-app.js via window.LCARSAccessories.render() -->
     <script src="js/lcars-accessories.js?v=20261009a"></script>
+    <!-- NOTIFICATIONS section (XACA-1405) — self-polling while its section is active; admin-key gated -->
+    <script src="js/lcars-notify-connections.js?v=20261010c"></script>
     <!-- LCARS Sound Engine (XACA-0533) — button tap audio feedback with persistent mute -->
     <script src="js/lcars-sound.js?v=1.3"></script>
 </body>

@@ -35,9 +35,11 @@
 
 const { requireAdminKey, isAdminAuthorized, getAuthPosture, extractHeaderCredential, sendUnauthorized } = require('./auth-middleware');
 const { TEAM_RE, SEVERITIES } = require('./notify-team-routes');
-const { NotifyStoreError } = require('./notify-store');
-const { createNotifyDispatcher, NotifyDispatchError } = require('./notify-dispatcher');
+const { NotifyStoreError, NotifyCryptoError } = require('./notify-store');
+const { createNotifyDispatcher, NotifyDispatchError, withTimeout, DEFAULT_SEND_TIMEOUT_MS } = require('./notify-dispatcher');
 const { createReceiptLog } = require('./notify-receipts');
+const { attemptSend, NotifyError, errorTypeName } = require('./notify-providers');
+const { scrubText, sensitiveValues } = require('./notify-scrub');
 
 const TYPE_RE = /^[a-z][a-z0-9-]{0,31}$/;
 const REF_RE = /^[A-Za-z0-9][A-Za-z0-9._:/#-]{0,127}$/;
@@ -45,6 +47,14 @@ const NOTIFY_KEYS = ['team', 'type', 'title', 'body', 'ref', 'severity'];
 const MAX_TITLE = 200;
 const MAX_BODY = 4000;
 const MAX_RECEIPTS = 200;
+const MAX_TEST_ERROR = 200;
+// Operator "send test" (XACA-1405): fixed text, info severity, team 'fleet'. No caller-supplied
+// content, so nothing here can carry a secret or a destination.
+const TEST_MESSAGE = Object.freeze({
+    team: 'fleet', type: 'test', severity: 'info',
+    title: 'Fleet Monitor test notification',
+    body: 'Test send from the Notification Connections screen. No action needed.',
+});
 
 /** Field-naming validation errors; values are never echoed. Returns message or null. */
 function validateNotifyBody(b) {
@@ -146,7 +156,9 @@ function makeRequireNotifyTeamKey(store, bindTeam, preBind) {
  * @param {import('express').Application|import('express').Router} app
  * @param {{store: object, registry: {has:Function,get:Function,names?:Function}}} deps
  */
-function registerNotifyRoutes(app, { store, registry, isRegisteredTeam, dispatcher, receipts }) {
+function registerNotifyRoutes(app, { store, registry, isRegisteredTeam, dispatcher, receipts, sendTimeoutMs }) {
+    // Test-send timeout; the injectable value exists so the timeout path is testable in milliseconds.
+    const testTimeoutMs = Number.isFinite(sendTimeoutMs) && sendTimeoutMs > 0 ? sendTimeoutMs : DEFAULT_SEND_TIMEOUT_MS;
     // Defaults: one receipt log shared by the dispatcher and GET /api/notify/receipts.
     // When injecting `dispatcher`, inject the SAME `receipts` it writes to.
     const receiptLog = receipts || createReceiptLog();
@@ -192,6 +204,65 @@ function registerNotifyRoutes(app, { store, registry, isRegisteredTeam, dispatch
     app.delete('/api/notify/connections/:id', requireAdminKey, guard((req, res) => {
         store.deleteConnection(req.params.id);
         res.json({ deleted: req.params.id });
+    }));
+
+    // ----- operator test (XACA-1405): validate the stored config, optionally make ONE send.
+    // Admin tier. Body {send?: boolean}. The result is {ok, validated, sent, error?}: the error
+    // is a fixed phrase or the provider layer's sanitised text, scrubbed of this connection's own
+    // secret/param values and bounded; destinations and secrets never appear. A real send goes
+    // through attemptSend (the dispatcher's own send path, same timeout) and writes a type 'test'
+    // receipt so the connection's "last delivery" reflects it. Dedupe, rate limit, quiet hours and
+    // the severity gate are deliberately bypassed: the operator asked for this one.
+    const testsInFlight = new Set();
+    app.post('/api/notify/connections/:id/test', requireAdminKey, guard(async (req, res) => {
+        try {
+            const b = req.body === undefined || req.body === null ? {} : req.body;
+            if (typeof b !== 'object' || Array.isArray(b)
+                || Object.keys(b).some((k) => k !== 'send')
+                || (b.send !== undefined && typeof b.send !== 'boolean')) {
+                return res.status(400).json({ error: 'invalid', message: 'body must be {send?: boolean}' });
+            }
+            const id = req.params.id;
+            let conn;
+            try { conn = store.resolveConnection(id); } catch (e) {
+                if (e instanceof NotifyCryptoError) {
+                    return res.status(409).json({ error: 'secrets_unreadable', message: `stored secrets of connection '${id}' are unreadable (the store encryption secret changed?); edit the connection and resupply them` });
+                }
+                throw e;
+            }
+            if (!conn) return res.status(404).json({ error: 'not_found', message: 'connection not found' });
+            const sensitive = sensitiveValues(conn);
+            const fail = (validated, text) => res.json({ ok: false, validated, sent: false, error: scrubText(text, sensitive, MAX_TEST_ERROR) });
+            if (!registry.has(conn.provider)) return fail(false, 'unknown provider');
+            const provider = registry.get(conn.provider);
+            try { provider.validate(conn); } catch (e) {
+                return fail(false, e instanceof NotifyError ? e.message : `provider error (${errorTypeName(e, true)})`);
+            }
+            if (b.send !== true) return res.json({ ok: true, validated: true, sent: false });
+
+            if (testsInFlight.has(id)) {
+                return res.status(409).json({ error: 'conflict', message: 'a test send for this connection is already in progress' });
+            }
+            testsInFlight.add(id);
+            let out;
+            try {
+                const controller = new AbortController();
+                out = await withTimeout(attemptSend(provider, conn, TEST_MESSAGE, controller.signal), testTimeoutMs, controller);
+            } finally { testsInFlight.delete(id); }
+            const okSend = out.ok === true;
+            const error = okSend ? '' : scrubText(out.error, sensitive, MAX_TEST_ERROR);
+            const fields = {
+                team: TEST_MESSAGE.team, type: TEST_MESSAGE.type, severity: TEST_MESSAGE.severity,
+                connectionId: id, provider: conn.provider, ok: okSend, error,
+            };
+            if (out.providerMessageId) fields.providerMessageId = out.providerMessageId;
+            if (okSend && provider.asyncDelivery === true) fields.stage = 'accepted';
+            const result = okSend ? { ok: true, validated: true, sent: true } : { ok: false, validated: true, sent: false, error };
+            try { receiptLog.append(receiptLog.newReceipt(fields)); } catch (_) {
+                throw new NotifyDispatchError('receipt write failed', 'receipt_write_failed', 500, result);
+            }
+            return res.json(result);
+        } catch (e) { return sendError(res, e); }
     }));
 
     // ----- team routes (XACA-1400-002): scoped by well-formed id AND registered team.

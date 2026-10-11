@@ -1136,6 +1136,12 @@ body {
     background: var(--lcars-black);
     color: var(--lcars-lavender);
 }
+/* NOTIFICATIONS (XACA-1405): own colour (the XACA-1474 defect otherwise). Violet matches v1. */
+.sidebar-button[data-section="notifications"] { background: var(--lcars-violet, #aa77dd); }
+.sidebar-button[data-section="notifications"].active {
+    background: var(--lcars-black);
+    color: var(--lcars-violet, #aa77dd);
+}
 
 /* ---------------------------------------------------------------------------
    BUTTONS (btn-lcars) — shared with engines modals

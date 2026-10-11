@@ -30,11 +30,13 @@
     <link href="https://fonts.googleapis.com/css2?family=Antonio:wght@400;500;600;700&display=swap" rel="stylesheet">
 
     <!-- LCARS Fleet Core Framework -->
-    <link rel="stylesheet" href="css/lcars-fleet.css?v=20261008d">
+    <link rel="stylesheet" href="css/lcars-fleet.css?v=20261010a">
     <!-- LCARS Kiosk Mode Styles (shared) -->
     <link rel="stylesheet" href="../shared/css/lcars-kiosk.css?v=20260825e">
     <!-- LCARS Fleet Theme (Red/Blue Color Scheme) -->
     <link rel="stylesheet" href="css/lcars-fleet-theme.css?v=20261009a">
+    <!-- NOTIFICATIONS section styles (XACA-1405), shared with lcars/ -->
+    <link rel="stylesheet" href="../shared/css/lcars-notify-connections.css?v=20261010a">
     <!-- XACA-0989: collapsible divisions + compact session chips (shared) -->
     <link rel="stylesheet" href="../shared/css/lcars-division-collapse.css?v=20260827a">
 </head>
@@ -143,6 +145,10 @@
                      .sidebar-button + .sidebar-spacer draws the closing bar (XACA-0953). -->
                 <div class="sidebar-button" data-section="accessories">
                     <span>ACCESSORIES</span>
+                </div>
+                <!-- NOTIFICATIONS button - hub connections (XACA-1405). Appended last, same as ACCESSORIES. -->
+                <div class="sidebar-button" data-section="notifications">
+                    <span>NOTIFICATIONS</span>
                 </div>
                 <div class="sidebar-spacer"></div>
                 <div class="sidebar-info stacked">
@@ -567,6 +573,26 @@
                     </section>
                 </div><!-- End ACCESSORIES section -->
 
+                <!-- ═══════════════════════════════════════════════════════════════════ -->
+                <!-- SECTION: NOTIFICATIONS - hub connections (XACA-1405, EPIC-0068)    -->
+                <!-- Admin-key gated; rendered by ../lcars/js/lcars-notify-connections.js -->
+                <!-- ═══════════════════════════════════════════════════════════════════ -->
+                <div class="lcars-section" data-section="notifications">
+                    <section>
+                        <div class="section-header" style="border-color: var(--lcars-violet, #aa77dd);">
+                            <span class="section-title" style="color: var(--lcars-violet, #aa77dd);">NOTIFICATION CONNECTIONS</span>
+                            <div class="section-bar" style="background: var(--lcars-violet, #aa77dd);"></div>
+                        </div>
+                        <div id="notify-status"></div>
+                        <div id="notify-toolbar"></div>
+                        <div id="notify-form-panel" class="notify-form-panel" hidden></div>
+                        <div id="notify-content">
+                            <div class="empty-state"><div class="empty-state-text">LOADING CONNECTIONS...</div></div>
+                        </div>
+                        <div id="notify-live" class="notify-sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
+                    </section>
+                </div><!-- End NOTIFICATIONS section -->
+
             </div>
         </main>
     </div>
@@ -604,6 +630,8 @@
          the app script below, which calls window.LCARS_MACHINE_HEALTH.deriveMachineHealth(). -->
     <script src="js/lcars-machine-health.js?v=20260904a"></script>
     <script src="js/lcars-academy-config.js?v=20260906a"></script>
+    <!-- NOTIFICATIONS section (XACA-1405): shared with lcars/; needs fleet-api-auth.js + the lcars:sectionChange event above -->
+    <script src="../lcars/js/lcars-notify-connections.js?v=20261010c"></script>
     <script src="js/lcars-fleet-dashboard-app.js?v=20261009a"></script>
 </body>
 </html>

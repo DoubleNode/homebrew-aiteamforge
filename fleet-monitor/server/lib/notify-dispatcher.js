@@ -202,4 +202,4 @@ function createNotifyDispatcher(opts = {}) {
     return { dispatch };
 }
 
-module.exports = { createNotifyDispatcher, NotifyDispatchError, resolveSeverity, SEVERITIES, DEFAULT_SEND_TIMEOUT_MS };
+module.exports = { createNotifyDispatcher, NotifyDispatchError, resolveSeverity, SEVERITIES, DEFAULT_SEND_TIMEOUT_MS, withTimeout };
