@@ -959,7 +959,7 @@ function createDispatcher(deps) {
  * @param {object}   [opts.logger]
  * @param {Function} [opts.fetch]   GitHub transport (tests)
  * @param {Function} [opts.now]
- * @returns {{store, assignments, dispatcher, audit, alerts, reports, save: Function, start: Function, stop: Function}}
+ * @returns {{store, assignments, dispatcher, audit, alerts, reports, fallbackReader, save: Function, start: Function, stop: Function}}
  */
 function wireCiPool(app, opts) {
     const o = opts || {};
@@ -1000,13 +1000,31 @@ function wireCiPool(app, opts) {
             return createWatcher({ github, allowlist, getAllowlist, onJob, log, now: o.now, resolvePriority: priority.resolve });
         },
     });
-    registerCiPoolRoutes(app, { store, assignments, dispatcher, audit, reports, now: o.now, logger });
+    // XACA-1465-004: the CI/CD fallback-switch reader runs whenever App credentials exist, INDEPENDENT
+    // of FLEET_CI_DISPATCHER (the routing variables matter even while the dispatcher is dormant). With
+    // no credentials there is no reader: `fallback` stays null and ZERO GitHub calls are made.
+    let fallbackReader = null;
+    if (hasCredentials(env)) {
+        const { createFallbackReader } = require('./ci-fallback-reader');
+        fallbackReader = createFallbackReader({ github, store, now: o.now, logger });
+    }
+    registerCiPoolRoutes(app, {
+        store, assignments, dispatcher, audit, reports, now: o.now, logger,
+        onFallbackSwitchesChanged: () => { if (fallbackReader) fallbackReader.onSwitchesChanged(); },
+    });
 
     return {
-        store, assignments, dispatcher, audit, alerts, reports,
+        store, assignments, dispatcher, audit, alerts, reports, fallbackReader,
         save: () => store.save(),
-        start: () => dispatcher.start(),
-        stop: () => dispatcher.stop(),
+        // The reader starts BEFORE dispatcher.start(), which returns early when the dispatcher is dormant.
+        start: () => {
+            if (fallbackReader) { try { fallbackReader.start(); } catch (e) { logger.error(`[CI-FALLBACK] reader failed to start: ${e && e.message}`); } }
+            return dispatcher.start();
+        },
+        stop: () => {
+            if (fallbackReader) { try { fallbackReader.stop(); } catch (_) { /* best effort */ } }
+            return dispatcher.stop();
+        },
     };
 }
 

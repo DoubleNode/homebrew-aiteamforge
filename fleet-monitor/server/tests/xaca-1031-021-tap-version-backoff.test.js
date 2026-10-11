@@ -140,8 +140,8 @@ for (const anchor of [
 // Shrink the two timing constants from hours/minutes to milliseconds so the
 // suite runs fast and deterministically. Only the numeric literal on the
 // RHS of these two exact declarations is touched -- the logic is untouched.
-const TEST_TTL_MS = 200;
-const TEST_MIN_RETRY_MS = 50;
+const TEST_TTL_MS = 4000; // XACA-0967: must be >= 4 x TEST_MIN_RETRY_MS or the backoff cap clamps the doubling asserts
+const TEST_MIN_RETRY_MS = 1000; // XACA-0967: was 50; a 50 ms wall-clock window flaked under CI load
 
 function substituteConst(src, name, replacementLiteral) {
     const re = new RegExp(`^const ${name} = .*;.*$`, 'm');

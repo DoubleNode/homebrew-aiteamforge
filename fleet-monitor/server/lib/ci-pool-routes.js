@@ -16,6 +16,8 @@
  *   GET  /api/ci-pool                         open, REDACTED (same posture as GET /api/ci-runners)
  *   PUT  /api/ci-pool/machines/:machine       admin          enabled, paused(+reason), prefers, thresholds
  *   PUT  /api/ci-pool/config                  admin          allowlist, poolLabel, jobClasses, thresholds
+ *   GET  /api/ci-pool/fallback-switches      admin          the routing switches the fallback-switch reader polls (XACA-1465-003)
+ *   PUT  /api/ci-pool/fallback-switches      admin          replace that list ({switches:[...]}; {switches:null} resets to defaults)
  *   POST   /api/ci-pool/machines/:machine/key            admin   mint the agent key (fcp_), shown ONCE
  *   DELETE /api/ci-pool/machines/:machine/key            admin   revoke it
  *   POST   /api/ci-pool/machines/:machine/telemetry-key  admin   mint the telemetry key (fct_), shown ONCE
@@ -275,6 +277,7 @@ const iso = (ms) => (Number.isFinite(ms) ? new Date(ms).toISOString() : null);
  * @param {Function} [deps.now]        () => epoch ms
  * @param {Map}      [deps.reports]    machine -> {receivedAt, capacity, slots, agentVersion, pauseMarker?}; shared with the dispatcher
  * @param {Function} [deps.hostAuth]   middleware override (tests only: proves the auth matrix catches a weaker gate)
+ * @param {Function} [deps.onFallbackSwitchesChanged] XACA-1465-003: called with the new list after a successful PUT (never on a refused one); errors are logged, never fail the request
  * @param {object}   [deps.logger]
  *
  * Gate names are load-bearing: tests/xaca-0398-003-admin-tier.test.js reads the middleware
@@ -525,6 +528,37 @@ function registerCiPoolRoutes(app, deps) {
             return res.status(200).json({ success: true, config: store.getConfig() });
         } catch (error) {
             log.error('[CI-POOL] error updating config:', error && error.message);
+            return res.status(500).json({ error: 'Internal server error' });
+        }
+    });
+
+    // ------------------------------------------- fallback-switch list (XACA-1465-003)
+    app.get('/api/ci-pool/fallback-switches', requireAdminKey, (req, res) => {
+        try {
+            return res.status(200).json({ schemaVersion: SCHEMA_VERSION, switches: store.getFallbackSwitches() });
+        } catch (error) {
+            log.error('[CI-POOL] error reading fallback switches:', error && error.message);
+            return res.status(500).json({ error: 'Internal server error' });
+        }
+    });
+
+    app.put('/api/ci-pool/fallback-switches', requireAdminKey, (req, res) => {
+        try {
+            const body = req.body;
+            if (!isPlainObject(body)) return res.status(400).json({ error: 'body must be a JSON object' });
+            const extra = Object.keys(body).filter((k) => k !== 'switches');
+            if (extra.length) return res.status(400).json({ error: `unknown field "${extra[0]}"` });
+            if (!has(body, 'switches')) return res.status(400).json({ error: 'switches: required (an array, or null to reset to defaults)' });
+            const result = store.setFallbackSwitches(body.switches);
+            if (!result.ok) return storeFailure(res, result);
+            const switches = store.getFallbackSwitches();
+            audit('fallback-switches', { by: 'operator', state: body.switches === null ? 'reset' : 'set', reason: `count=${switches.length}` });
+            if (typeof d.onFallbackSwitchesChanged === 'function') {
+                try { d.onFallbackSwitchesChanged(switches); } catch (e) { log.error('[CI-POOL] onFallbackSwitchesChanged failed:', e && e.message); }
+            }
+            return res.status(200).json({ success: true, switches });
+        } catch (error) {
+            log.error('[CI-POOL] error updating fallback switches:', error && error.message);
             return res.status(500).json({ error: 'Internal server error' });
         }
     });

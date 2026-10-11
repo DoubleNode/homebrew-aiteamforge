@@ -50,10 +50,15 @@ const PURPOSE_PERMISSIONS = Object.freeze({
     // "Pull requests: read"; when an installation lacks it the token mint fails and the resolver
     // fails toward NORMAL (never upward).
     pulls:   Object.freeze({ pull_requests: 'read' }),
+    // XACA-1465-001: the CI/CD FALLBACK SWITCH reader reads a repo Actions variable. Needs the App's
+    // "Variables: read"; when an installation lacks it the token mint fails and the reader reports
+    // UNKNOWN (never armed).
+    variables: Object.freeze({ actions_variables: 'read' }),
 });
 
 const OWNER_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 const REPO_RE = /^[A-Za-z0-9._-]{1,100}$/;
+const VARIABLE_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]{0,254}$/;
 
 class GithubError extends Error {
     /**
@@ -370,7 +375,39 @@ function createGithubClient(opts = {}) {
         }));
     }
 
-    return { getInstallationId, getToken, conditionalGet, generateJitConfig, deleteRunner, getRateState, listBranchPullLabels };
+    // ---- repository variables (XACA-1465-001) ----------------------------------
+    /**
+     * Read one repo Actions variable under the least-privilege 'variables' purpose.
+     * Optional `{etag}` sends If-None-Match (a 304 does not spend rate limit).
+     * @returns {Promise<{found:true,value:string,updatedAt:string|null,etag:string|null}
+     *   | {found:false} | {notModified:true,etag:string|null}>}
+     */
+    async function getRepoVariable(owner, repo, name, { etag } = {}) {
+        checkRepo(owner, repo);
+        if (typeof name !== 'string' || !VARIABLE_NAME_RE.test(name)) {
+            throw new GithubError('BAD_ARGS', 'invalid variable name');
+        }
+        const sendEtag = typeof etag === 'string' && etag !== '' && !/[\u0000-\u001f\u007f]/.test(etag) ? etag : null;
+        const res = await withToken({ owner, repo, purpose: 'variables' }, (token) => http('GET',
+            '/repos/{owner}/{repo}/actions/variables/{name}',
+            `/repos/${owner}/${repo}/actions/variables/${name}`,
+            { bearer: token, headers: sendEtag ? { 'If-None-Match': sendEtag } : undefined }));
+        if (res.status === 304) return { notModified: true, etag: sendEtag };
+        if (res.status === 404) return { found: false };
+        if (res.status !== 200) {
+            throw new GithubError('HTTP', `GET /repos/{owner}/{repo}/actions/variables/{name} failed: HTTP ${res.status}`, { status: res.status });
+        }
+        const data = await parseBody(res);
+        if (!data || typeof data.value !== 'string') throw new GithubError('BAD_RESPONSE', 'variable response malformed');
+        return {
+            found: true,
+            value: data.value,
+            updatedAt: typeof data.updated_at === 'string' ? data.updated_at : null,
+            etag: (res.headers && res.headers.get('etag')) || null,
+        };
+    }
+
+    return { getInstallationId, getToken, conditionalGet, generateJitConfig, deleteRunner, getRateState, listBranchPullLabels, getRepoVariable };
 }
 
 // ============================================================================

@@ -96,7 +96,7 @@
     <link href="https://fonts.googleapis.com/css2?family=Antonio:wght@400;500;600;700&display=swap" rel="stylesheet">
 
     <!-- LCARS Fleet Core Framework -->
-    <link rel="stylesheet" href="css/lcars-fleet.css?v=20261010a">
+    <link rel="stylesheet" href="css/lcars-fleet.css?v=20261011b">
     <!-- LCARS Kiosk Mode Styles (shared) -->
     <link rel="stylesheet" href="../shared/css/lcars-kiosk.css?v=20260825e">
     <!-- LCARS Fleet Theme (Red/Blue Color Scheme) -->
@@ -106,7 +106,7 @@
     <!-- LCARS Kiosk Health & Status Screen Styles -->
     <link rel="stylesheet" href="css/lcars-kiosk-health.css?v=20260825e">
     <!-- LCARS Dashboard Admin Styles -->
-    <link rel="stylesheet" href="css/lcars-dashboards.css?v=20261008b">
+    <link rel="stylesheet" href="css/lcars-dashboards.css?v=20261011a">
     <!-- XACA-1444: CI/CD pool machine cards + queue (shared assets) -->
     <link rel="stylesheet" href="../shared/css/lcars-ci-pool.css?v=20261008b">
     <link rel="stylesheet" href="../shared/css/lcars-ci-queue.css?v=20261008a">
@@ -149,6 +149,7 @@
             <div class="top-sidebar">
                 <div class="top-sidebar-content">
                     <span class="stardate" id="stardate">2026.006</span>
+                    <time class="utc-clock" id="utc-clock" datetime=""><span class="visually-hidden">UTC time: </span><span id="utc-clock-value">--:--:-- UTC</span></time>
                     <span class="top-divider"></span>
                     <span class="lcars-version">LCARS 02-048</span>
                     <span class="top-divider"></span>
@@ -178,6 +179,10 @@
                  null-safe, so it no-ops with the markup gone and the metrics can be
                  resurfaced without rebuilding the plumbing. Do not delete that code. -->
             <div class="lcars-data-bar">
+                <!-- XACA-1465-013: REFRESH pill on the LEFT of the bar (before the spacer), NOT in the
+                     sidebar. Bound by id in js/lcars-dashboard-app.js; runs the 60 s tick now. -->
+                <div class="legend-pill refresh-pill" id="fleet-refresh-pill"
+                     role="button" tabindex="0" aria-label="Refresh now">REFRESH</div>
                 <div class="mode-bar-spacer"></div>
                 <div class="mode-bar-separator">&#9482;</div>
                 <div class="utility-cluster">
@@ -944,7 +949,7 @@
          lcars2 dashboards), loaded BEFORE the app script below, which calls
          window.LCARS_MACHINE_HEALTH.deriveMachineHealth(). -->
     <script src="../lcars2/js/lcars-machine-health.js?v=20260904a"></script>
-    <script src="js/lcars-dashboard-app.js?v=20261008a"></script>
+    <script src="js/lcars-dashboard-app.js?v=20261011c"></script>
     <!-- Dashboard Admin UI Module -->
     <script src="js/lcars-dashboards-ui.js"></script>
     <!-- LCARS Analytics: Knowledge Base Charts Module -->
@@ -962,7 +967,7 @@
     <!-- CI/CD runner fleet section (XACA-1388) — load after core so lcars:sectionChange is available -->
     <script src="../shared/js/lcars-ci-pool.js?v=20261008b"></script>
     <script src="../shared/js/lcars-ci-queue.js?v=20261007d"></script>
-    <script src="js/lcars-cicd.js?v=20261008b"></script>
+    <script src="js/lcars-cicd.js?v=20261011a"></script>
     <!-- ACCESSORIES section (XACA-1393-004) — fed by lcars-dashboard-app.js via window.LCARSAccessories.render() -->
     <script src="js/lcars-accessories.js?v=20261009a"></script>
     <!-- NOTIFICATIONS section (XACA-1405) — self-polling while its section is active; admin-key gated -->

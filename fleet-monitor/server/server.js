@@ -3393,7 +3393,7 @@ const ciPool = wireCiPool(app, { dataDir: path.join(__dirname, 'data') });
 // XACA-1387-003: self-hosted CI runner telemetry. Store flushed by the periodic save + shutdown
 // hooks below (same pattern as pushed boards). XACA-1422: POST /api/ci-runners-push is gated by
 // the pool store's per-host telemetry keys, not the fleet token.
-const ciRunnersStore = registerCiRunnersRoutes(app, { poolStore: ciPool.store });
+const ciRunnersStore = registerCiRunnersRoutes(app, { poolStore: ciPool.store, fallbackReader: ciPool.fallbackReader });
 
 // ============================================================================
 // ADMIN-TIER OPERATOR SESSION (XACA-0398-003)

@@ -148,7 +148,7 @@ describe('server.js call sites (structural)', () => {
         assert.equal(calls.length, 1);
         assert.match(src, /const ciPool = wireCiPool\(app, \{ dataDir: path\.join\(__dirname, 'data'\) \}\);/);
         assert.ok(src.indexOf('wireCiPool(app,') < src.indexOf('registerCiRunnersRoutes(app,'));
-        assert.match(src, /registerCiRunnersRoutes\(app, \{ poolStore: ciPool\.store \}\)/);
+        assert.match(src, /registerCiRunnersRoutes\(app, \{ poolStore: ciPool\.store, fallbackReader: ciPool\.fallbackReader \}\)/);
     });
 
     test('ciPool.save() is in the periodic save block and both shutdown handlers', () => {

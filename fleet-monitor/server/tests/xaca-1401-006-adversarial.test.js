@@ -20,6 +20,7 @@
 const { test, describe, after } = require('node:test');
 const assert = require('node:assert/strict');
 const net = require('net');
+const path = require('path');
 const { execFileSync } = require('child_process');
 const H = require('./xaca-1400-007-helpers');
 const {
@@ -603,7 +604,9 @@ describe('4. payload integrity', () => {
 
 // ===========================================================================
 describe('5. Teams parity with kanban-hooks/release_notify_teams.py', () => {
-    const PY = `${process.env.HOME}/dev-team/kanban-hooks`;
+    // XACA-0967: resolve relative to THIS checkout (was $HOME/dev-team, which tested the
+    // main checkout in a worktree and failed 9 tests under a clean HOME).
+    const PY = path.join(__dirname, '..', '..', '..', 'kanban-hooks');
     let havePython = true;
     try { execFileSync('python3', ['-I', '--version'], { stdio: 'ignore' }); } catch (_e) { havePython = false; }
     const pyPayload = (shape, text) => JSON.parse(execFileSync('python3', ['-I', '-c',

@@ -238,6 +238,38 @@ body {
     z-index: 25;
 }
 
+/* UTC clock (XACA-1495) - same row as stardate, to its right. The sibling
+   .top-divider spans are display:none, so the separator is a left border.
+   Fixed offset clears the widest stardate (e.g. 43000.0) at 12px. */
+.top-sidebar-content .utc-clock {
+    position: fixed;
+    top: 28px;
+    left: calc(var(--sidebar-width) + 20px + 64px);
+    padding-left: 8px;
+    border-left: 2px solid var(--lcars-blue);
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.1;
+    color: var(--lcars-blue);
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+    z-index: 25;
+}
+
+/* Generic visually-hidden utility (XACA-1495-010): readable by screen readers,
+   zero layout footprint, never display:none. */
+.visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
 /* LCARS version - below stardate */
 .top-sidebar-content .lcars-version {
     position: fixed;
@@ -1108,6 +1140,13 @@ body.kiosk-active .kiosk-fab {
         left: calc(var(--sidebar-width) + 18px);
     }
 
+    .top-sidebar-content .utc-clock {
+        top: 25px;
+        left: calc(var(--sidebar-width) + 18px + 54px);
+        padding-left: 6px;
+        font-size: 10px;
+    }
+
     .top-sidebar-content::after {
         top: 55px;
         height: 1px;
@@ -1740,6 +1779,18 @@ body.kiosk-active .kiosk-fab {
    ring from the base rule, which measures 17.12:1 and 4.48:1 respectively. */
 .lcars-data-bar .legend-pill.active:not(.offline-pill):focus-visible {
     outline-color: var(--lcars-cyan);
+}
+
+/* XACA-1465-013: REFRESH pill sits alone at the LEFT of the bar, before the spacer. */
+.lcars-data-bar .legend-pill.refresh-pill {
+    margin-right: 0;
+    margin-left: 8px;
+}
+.lcars-data-bar .legend-pill.refresh-pill[aria-busy="true"],
+.lcars-data-bar .legend-pill.refresh-pill[aria-disabled="true"] {
+    opacity: 0.55;
+    cursor: progress;
+    filter: none;
 }
 
 @media (max-width: 600px) {

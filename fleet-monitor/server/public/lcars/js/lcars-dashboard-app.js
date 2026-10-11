@@ -164,19 +164,37 @@
         loadDashboardLinks();
 
         // Set up auto-refresh
-        refreshTimer = setInterval(fetchFleetData, CONFIG.refreshInterval);
+        startRefreshTimer();
 
-        // Update stardate
+        // Update stardate and UTC clock (single 1 s tick)
         updateStardate();
-        setInterval(updateStardate, 1000);
+        updateUtcClock();
+        setInterval(function() {
+            updateStardate();
+            updateUtcClock();
+        }, 1000);
 
         // Start "Last:" timer
         startLastSeenTimer();
 
         // Listen for refresh events
-        document.addEventListener('lcars:refresh', function() {
-            fetchFleetData();
+        document.addEventListener('lcars:refresh', function(ev) {
+            lastRefreshPromise = fetchFleetData({ manual: !!(ev && ev.detail && ev.detail.manual) });
         });
+
+        // XACA-1465-013: top-bar REFRESH pill. Dispatches lcars:refresh directly -- NOT
+        // LCARS_CORE.sections.refresh(), whose animation step pulls `active` off the section
+        // and replays the entry animation (resets CI/CD scroll + focus).
+        var refreshPill = document.getElementById('fleet-refresh-pill');
+        if (refreshPill) {
+            refreshPill.addEventListener('click', activateManualRefresh);
+            refreshPill.addEventListener('keydown', function(ev) {
+                if (ev.key === 'Enter' || ev.key === ' ' || ev.key === 'Spacebar') {
+                    ev.preventDefault();   // Space would otherwise scroll the page
+                    activateManualRefresh();
+                }
+            });
+        }
 
         // Listen for section change events to initialize admin panel
         document.addEventListener('lcars:sectionChange', function(e) {
@@ -342,13 +360,65 @@
     // DATA FETCHING
     // ============================================================================
 
-    async function fetchFleetData() {
+    // Single owner of the automatic-refresh interval: clear-then-set, so a restart can
+    // never leave two intervals running.
+    function startRefreshTimer() {
+        if (refreshTimer) clearInterval(refreshTimer);
+        refreshTimer = setInterval(function() { fetchFleetData(); }, CONFIG.refreshInterval);
+    }
+
+    let manualRefreshBusy = false;
+    let refreshConfirmTimer = null;
+    // XACA-1465-020: brief visible result on the pill. aria-label stays "Refresh now" (stable);
+    // no extra live region is added (the page has none for this, and the 60 s tick must stay quiet).
+    function setRefreshPillText(text) {
+        const pill = document.getElementById('fleet-refresh-pill');
+        if (pill) pill.textContent = text;
+    }
+    function cancelRefreshConfirm() {
+        if (refreshConfirmTimer) { clearTimeout(refreshConfirmTimer); refreshConfirmTimer = null; }
+        setRefreshPillText('REFRESH');
+    }
+    async function activateManualRefresh() {
+        if (manualRefreshBusy) return;   // double-activation while in flight is ignored
+        manualRefreshBusy = true;
+        cancelRefreshConfirm();          // a click during the confirmation starts fresh
+        const pill = document.getElementById('fleet-refresh-pill');
+        if (pill) {
+            pill.setAttribute('aria-busy', 'true');
+            pill.setAttribute('aria-disabled', 'true');
+        }
+        let ok = false;
+        try {
+            // The lcars:refresh listener forwards detail.manual into fetchFleetData({ manual })
+            // and records its promise in lastRefreshPromise (dispatch is synchronous).
+            lastRefreshPromise = null;
+            document.dispatchEvent(new CustomEvent('lcars:refresh', { detail: { manual: true } }));
+            if (lastRefreshPromise) ok = (await lastRefreshPromise.catch(function() { return false; })) === true;
+        } finally {
+            manualRefreshBusy = false;
+            if (pill) {
+                pill.removeAttribute('aria-busy');
+                pill.removeAttribute('aria-disabled');
+                setRefreshPillText(ok ? 'REFRESHED' : 'REFRESH FAILED');
+                refreshConfirmTimer = setTimeout(function() {
+                    refreshConfirmTimer = null;
+                    setRefreshPillText('REFRESH');
+                }, 1500);
+            }
+            startRefreshTimer();   // next automatic tick is a full interval away
+        }
+    }
+    let lastRefreshPromise = null;
+
+    async function fetchFleetData(opts) {
+        const manual = !!(opts && opts.manual === true);
         // XACA-1388: CI/CD section refreshes on this cycle ONLY while it is the visible
         // section. Kept outside the try so a /api/fleet failure doesn't freeze CI data.
         // LCARSCICD.refresh() never throws or rejects; it is not awaited on purpose.
         if (window.LCARSCICD && window.LCARS_CORE && LCARS_CORE.sections &&
             LCARS_CORE.sections.active === 'cicd') {
-            window.LCARSCICD.refresh();
+            window.LCARSCICD.refresh(manual ? { force: true } : undefined);
         }
         try {
             const response = await fetch(CONFIG.apiBase + '/api/fleet');
@@ -381,9 +451,11 @@
                     LCARSAnalyticsKnowledge.refresh();
                 }
             }
+            return true;
         } catch (error) {
             console.error('[LCARS] Failed to fetch fleet data:', error);
             updateConnectionStatus(false);
+            return false;   // XACA-1465-020: lets the REFRESH pill report the outcome
         }
     }
 
@@ -3339,6 +3411,18 @@
 
         const stardate = CONFIG.stardateOffset + (year - 2024) * 1000 + (dayOfYear / 365 * 1000);
         updateElement('stardate', stardate.toFixed(1));
+    }
+
+    function updateUtcClock() {
+        const el = document.getElementById('utc-clock');
+        if (!el) return;
+        // Write ONLY the value span: the <time> also holds a visually-hidden
+        // "UTC time: " prefix (its accessible name) that textContent would wipe.
+        const val = document.getElementById('utc-clock-value');
+        if (!val) return;
+        const iso = new Date().toISOString();
+        val.textContent = iso.slice(11, 19) + ' UTC';
+        el.setAttribute('datetime', iso);
     }
 
     function formatTimestamp(timestamp) {

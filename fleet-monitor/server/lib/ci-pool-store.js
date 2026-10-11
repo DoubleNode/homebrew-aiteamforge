@@ -76,7 +76,26 @@ const MACHINE_FIELDS = ['enabled', 'paused', 'pausedBy', 'pausedAt', 'pauseReaso
 // and defaultMachine() is unchanged. 'shadow' = decide and record, never mint (per-host rollback R1).
 const OPTIONAL_MACHINE_FIELDS = ['mode'];
 const MACHINE_MODES = ['live', 'shadow'];
-const TOP_FIELDS = ['schemaVersion', 'config', 'machines'];
+// XACA-1465-003: `fallbackSwitches` is OPTIONAL at the top level (absent = never set = defaults), so a pool
+// written before it existed stays valid and defaultPool() is unchanged. An explicit [] means "read nothing".
+const TOP_FIELDS = ['schemaVersion', 'config', 'machines', 'fallbackSwitches'];
+
+const SWITCH_OWNER_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
+const SWITCH_REPO_RE = /^[A-Za-z0-9._-]{1,100}$/;
+const SWITCH_VARIABLE_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const SWITCH_LABEL_RE = /^[\x20-\x7e]{1,32}$/;   // printable ASCII, trimmed by the validator
+// XACA-1465-017: `fallsBackTo` is OPTIONAL -- names another switch (same owner/repo) the workflow's `||` chain
+// falls through to when this variable is unset/empty (CI_LINUX_RUNNER_HEAVY -> CI_LINUX_RUNNER).
+const SWITCH_FIELDS = ['owner', 'repo', 'variable', 'label', 'fallsBackTo'];
+const MAX_SWITCH_VARIABLE = 255;
+const MAX_FALLBACK_SWITCHES = 20;
+
+/** Routing switches read when none were ever configured: dev-team's three. Frozen, deep. */
+const DEFAULT_FALLBACK_SWITCHES = Object.freeze([
+    Object.freeze({ owner: 'DoubleNode', repo: 'dev-team', variable: 'CI_LINUX_RUNNER', label: 'LINUX' }),
+    Object.freeze({ owner: 'DoubleNode', repo: 'dev-team', variable: 'CI_MACOS_RUNNER', label: 'MACOS' }),
+    Object.freeze({ owner: 'DoubleNode', repo: 'dev-team', variable: 'CI_LINUX_RUNNER_HEAVY', label: 'LINUX HEAVY', fallsBackTo: 'CI_LINUX_RUNNER' }),
+]);
 
 const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -193,11 +212,66 @@ function validateMachine(m, id) {
     return errs;
 }
 
+/** Validate the fallback-switch list. Returns problem strings (empty = valid). */
+function validateFallbackSwitches(list, where = 'fallbackSwitches') {
+    if (!Array.isArray(list)) return [`${where}: must be an array`];
+    if (list.length > MAX_FALLBACK_SWITCHES) return [`${where}: at most ${MAX_FALLBACK_SWITCHES} entries`];
+    const errs = [];
+    const seen = new Set();
+    list.forEach((e, i) => {
+        const w = `${where}[${i}]`;
+        if (!isPlainObject(e)) { errs.push(`${w}: must be an object`); return; }
+        errs.push(...unknownFields(e, SWITCH_FIELDS, w));
+        const str = (f) => (typeof e[f] === 'string' ? e[f] : null);
+        if (str('owner') === null || !SWITCH_OWNER_RE.test(e.owner)) errs.push(`${w}.owner: must be a GitHub owner name`);
+        if (str('repo') === null || !SWITCH_REPO_RE.test(e.repo)) errs.push(`${w}.repo: must be a repository name`);
+        if (str('variable') === null || e.variable.length > MAX_SWITCH_VARIABLE || !SWITCH_VARIABLE_RE.test(e.variable)) {
+            errs.push(`${w}.variable: must be an Actions variable name (letters, digits, underscore; max ${MAX_SWITCH_VARIABLE})`);
+        }
+        if (str('label') === null || e.label !== e.label.trim() || !SWITCH_LABEL_RE.test(e.label)) {
+            errs.push(`${w}.label: must be 1-32 printable characters with no leading/trailing space`);
+        }
+        if (errs.length === 0 || !errs.some((m) => m.startsWith(w))) {
+            const key = `${e.owner}/${e.repo}/${e.variable}`.toLowerCase();
+            if (seen.has(key)) errs.push(`${w}: duplicate (owner, repo, variable)`);
+            seen.add(key);
+        }
+    });
+    // XACA-1465-017: fallsBackTo must name ANOTHER switch of the SAME owner/repo in this list; no cycles.
+    const keyOf = (e) => `${e.owner}/${e.repo}/${e.variable}`.toLowerCase();
+    const byKey = new Map();
+    list.forEach((e) => {
+        if (isPlainObject(e) && typeof e.owner === 'string' && typeof e.repo === 'string' && typeof e.variable === 'string') byKey.set(keyOf(e), e);
+    });
+    const linkTarget = (e) => (isPlainObject(e) && typeof e.fallsBackTo === 'string'
+        ? byKey.get(`${e.owner}/${e.repo}/${e.fallsBackTo}`.toLowerCase()) : undefined);
+    list.forEach((e, i) => {
+        if (!isPlainObject(e) || !has(e, 'fallsBackTo')) return;
+        const w = `${where}[${i}].fallsBackTo`;
+        if (typeof e.fallsBackTo !== 'string' || e.fallsBackTo.length > MAX_SWITCH_VARIABLE || !SWITCH_VARIABLE_RE.test(e.fallsBackTo)) {
+            errs.push(`${w}: must be an Actions variable name`); return;
+        }
+        if (typeof e.variable === 'string' && e.fallsBackTo.toLowerCase() === e.variable.toLowerCase()) {
+            errs.push(`${w}: cannot refer to itself`); return;
+        }
+        if (!linkTarget(e)) { errs.push(`${w}: must name another switch of the same owner/repo in the list`); return; }
+        let cur = linkTarget(e);
+        const trail = new Set([keyOf(e)]);
+        while (cur) {
+            if (trail.has(keyOf(cur))) { errs.push(`${w}: forms a cycle`); return; }
+            trail.add(keyOf(cur));
+            cur = linkTarget(cur);
+        }
+    });
+    return errs;
+}
+
 function validatePool(p) {
     if (!isPlainObject(p)) return ['pool: must be an object'];
     const errs = unknownFields(p, TOP_FIELDS, 'pool');
     if (p.schemaVersion !== SCHEMA_VERSION) errs.push(`pool.schemaVersion: must be ${SCHEMA_VERSION}`);
     errs.push(...validateConfig(p.config));
+    if (has(p, 'fallbackSwitches')) errs.push(...validateFallbackSwitches(p.fallbackSwitches));
     if (!isPlainObject(p.machines)) {
         errs.push('pool.machines: must be an object');
     } else {
@@ -384,7 +458,29 @@ function createPoolStore(opts) {
         return verifyHash(id, 'telemetryKeyHash', secret);
     }
 
+    /** Configured routing switches, or dev-team's defaults when never set. Always a defensive copy. */
+    const getFallbackSwitches = () => clone(has(pool, 'fallbackSwitches') ? pool.fallbackSwitches : DEFAULT_FALLBACK_SWITCHES);
+
+    /**
+     * Replace the switch list. `null` clears it back to "never set" (defaults). `[]` is stored and means
+     * "read nothing". Entries are stored as the validated {owner, repo, variable, label} only.
+     */
+    function setFallbackSwitches(list) {
+        const next = clone(pool);
+        if (list === null) {
+            delete next.fallbackSwitches;
+        } else {
+            const errs = validateFallbackSwitches(list);
+            if (errs.length) return { ok: false, error: errs.join('; ') };
+            next.fallbackSwitches = list.map((e) => (has(e, 'fallsBackTo')
+                ? { owner: e.owner, repo: e.repo, variable: e.variable, label: e.label, fallsBackTo: e.fallsBackTo }
+                : { owner: e.owner, repo: e.repo, variable: e.variable, label: e.label }));
+        }
+        return commit(next);
+    }
+
     return {
+        getFallbackSwitches, setFallbackSwitches,
         load, save, getConfig, updateConfig, listMachines, getMachine, upsertMachine,
         setHostSecret, clearHostSecret, verifyHostSecret,
         setTelemetrySecret, clearTelemetrySecret, verifyTelemetrySecret, file,
@@ -393,7 +489,7 @@ function createPoolStore(opts) {
 
 module.exports = {
     SCHEMA_VERSION, GIB, DEFAULT_THRESHOLDS, DEFAULT_JOB_CLASSES, THRESHOLD_BOUNDS,
-    MACHINE_ID_RE, REPO_RE,
+    MACHINE_ID_RE, REPO_RE, DEFAULT_FALLBACK_SWITCHES, MAX_FALLBACK_SWITCHES, validateFallbackSwitches,
     defaultPool, defaultConfig, defaultMachine, validatePool, validateConfig, validateMachine,
     hashSecret, createPoolStore,
 };

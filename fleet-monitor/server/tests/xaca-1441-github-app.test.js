@@ -497,7 +497,8 @@ describe('secrets never leak (sentinel)', () => {
         const g = harness();
         assert.deepEqual(Object.keys(g.client).sort(),
             // XACA-1479-005 added listBranchPullLabels: it returns PR numbers + label names only.
-            ['conditionalGet', 'deleteRunner', 'generateJitConfig', 'getInstallationId', 'getRateState', 'getToken', 'listBranchPullLabels']);
+            // XACA-1465-001 added getRepoVariable: it returns the variable value/etag only.
+            ['conditionalGet', 'deleteRunner', 'generateJitConfig', 'getInstallationId', 'getRateState', 'getRepoVariable', 'getToken', 'listBranchPullLabels']);
         assert.ok(!JSON.stringify(g.client.getRateState()).includes('PRIVATE'));
     });
 });
