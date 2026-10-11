@@ -326,6 +326,18 @@ function registerNotifyRoutes(app, { store, registry, isRegisteredTeam, dispatch
         res.json({ team, config: rec.config, catalog: rec.catalog, updatedAt: rec.updatedAt });
     }));
 
+    // ----- team-visible connection list (XACA-1406-001): so a team's LCARS can offer connection
+    // names in its routing UI without ever holding the admin key. Each entry is built FIELD BY FIELD
+    // from an allowlist -- never spread from the stored record -- so config, params, secrets, targets
+    // and "set" flags cannot leak, now or when the record grows a new field. A stored connection has
+    // no on/off flag of its own (it exists, or it was deleted), so `enabled` is true for every entry.
+    app.get('/api/notify/teams/:team/connections', teamKeyGate, teamGate((req, res, team) => {
+        const connections = store.listConnections().map((c) => ({
+            id: c.id, provider: c.provider, label: c.label, enabled: true,
+        }));
+        res.json({ team, connections });
+    }));
+
     // ----- dispatch (XACA-1400-003): same team scoping as routes; key gate is team-bound (XACA-1488-004).
     app.post('/api/notify', dispatchKeyGate, guard(async (req, res) => {
         try {

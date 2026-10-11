@@ -643,7 +643,7 @@ const FLEET_MIDDLEWARE_ROUTES = [
 // `fnt_` key bound to the team the request targets) — deliberately NOT the fleet tier, so the fleet token
 // cannot push routes or dispatch for a team. Only in notify-routes.js. Gate identifiers are the local
 // consts bound to makeRequireNotifyTeamKey(...) in registerNotifyRoutes.
-const NOTIFY_TEAM_KEY_ROUTES = ['PUT /api/notify/routes/:team', 'GET /api/notify/routes/:team', 'POST /api/notify'];
+const NOTIFY_TEAM_KEY_ROUTES = ['PUT /api/notify/routes/:team', 'GET /api/notify/routes/:team', 'GET /api/notify/teams/:team/connections', 'POST /api/notify']; // connections list: XACA-1406-001
 const NOTIFY_TEAM_KEY_GATES = ['teamKeyGate', 'dispatchKeyGate'];
 const FLEET_GUARD_ROUTES = ['POST /api/msg', 'GET /api/msg', 'POST /api/msg/ack'];
 
@@ -729,7 +729,7 @@ describe('route inventory — every admin route is on the admin gate (static)', 
         const fleet = regs.filter((r) => r.gate === 'requireApiKey').length + FLEET_GUARD_ROUTES.length;
         assert.equal(admin, 38);
         assert.equal(fleet, 10);
-        assert.equal(regs.filter((r) => NOTIFY_TEAM_KEY_GATES.includes(r.gate)).length, 3);
+        assert.equal(regs.filter((r) => NOTIFY_TEAM_KEY_GATES.includes(r.gate)).length, 4);
         assert.equal(regs.filter((r) => r.gate === 'ciHostKey').length, 2);
         assert.equal(regs.filter((r) => r.gate === 'ciTelemetryKey').length, 1);
     });
@@ -745,7 +745,7 @@ describe('route inventory — every admin route is on the admin gate (static)', 
         assert.ok(!/requireApiKey/.test(src), 'ci-runners-routes.js must not reference the fleet gate at all');
     });
 
-    test('the notify team-key set is exactly the 3 notify team routes, only in notify-routes.js, never the fleet gate (XACA-1488)', () => {
+    test('the notify team-key set is exactly the 4 notify team routes, only in notify-routes.js, never the fleet gate (XACA-1488)', () => {
         const derived = regs.filter((r) => NOTIFY_TEAM_KEY_GATES.includes(r.gate));
         assert.deepEqual(derived.map(key).sort(), [...NOTIFY_TEAM_KEY_ROUTES].sort());
         assert.ok(derived.every((r) => r.file === 'lib/notify-routes.js'));

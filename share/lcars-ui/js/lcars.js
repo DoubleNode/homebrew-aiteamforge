@@ -87,6 +87,7 @@ const TEAM_SCOPED_PREFIXES = [
     '/api/board-settings',   // XACA-1083-005: per-team requireEpicOnStart/requireReleaseOnStart
     '/api/release-gate-enforcement', // XACA-1482-003: per-team releaseConfig.gateEnforcement
     '/api/release-leads',    // XACA-1485-003: per-team releaseConfig.leads roster
+    '/api/notify-config',    // XACA-1406: per-team notify routing (also covers /connections and /test)
 ];
 
 function apiUrl(path, extraParams) {
@@ -173,7 +174,7 @@ const KNOWLEDGE_DEBOUNCE_MS = 150;
 let activeSection = 'startup';
 let activeSectionIndex = 0;
 const SECTION_KEY = 'lcars-active-section';
-const SECTIONS = ['startup', 'daily-overview', 'home', 'todos', 'calendar', 'workflow', 'details', 'backlog', 'change-req', 'epics', 'releases', 'roadmap', 'knowledge-graph', 'team-config', 'integrations', 'rag-engines', 'backups', 'commands', 'export-import', 'persona-browser', 'role-matcher', 'change-history', 'usage'];
+const SECTIONS = ['startup', 'daily-overview', 'home', 'todos', 'calendar', 'workflow', 'details', 'backlog', 'change-req', 'epics', 'releases', 'roadmap', 'knowledge-graph', 'team-config', 'integrations', 'notifications', 'rag-engines', 'backups', 'commands', 'export-import', 'persona-browser', 'role-matcher', 'change-history', 'usage'];
 const STARTUP_DELAY = 4000; // 4 seconds
 
 // Mode state machine (XACA-0164)
@@ -10510,6 +10511,14 @@ function switchSection(sectionName, skipAnimation = false) {
     // If same section, do nothing
     if (previousSection === sectionName) return;
 
+    // XACA-1406: leaving NOTIFICATIONS with unsaved edits asks first. Declining keeps the
+    // user where they are; accepting discards the edits (so a mode switch that re-enters
+    // switchSection does not ask twice).
+    if (previousSection === 'notifications' && window.lcarsNotifications &&
+        !window.lcarsNotifications.canLeave()) {
+        return;
+    }
+
     // Guard: section must be valid for current mode — XACA-0164-007
     // Startup is always allowed regardless of mode (boot sequence).
     const sectionEl = document.querySelector(`.${getSectionClass(sectionName)}`);
@@ -10704,6 +10713,11 @@ function switchSection(sectionName, skipAnimation = false) {
     // Load todos when switching to todos section (XACA-0101)
     if (sectionName === 'todos') {
         loadTodos();
+    }
+
+    // Load notification routing when switching to notifications section (XACA-1406)
+    if (sectionName === 'notifications' && window.lcarsNotifications) {
+        window.lcarsNotifications.onSectionShown();
     }
 
     // Load team config when switching to team-config section (XACA-0292)
@@ -20449,6 +20463,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         btn.addEventListener('click', () => {
             // Don't allow clicks during startup — mirrors sidebar-button guard above
             if (activeSection === 'startup') return;
+            // XACA-1406: ask before a mode switch strands unsaved Notifications edits.
+            if (activeSection === 'notifications' && window.lcarsNotifications &&
+                !window.lcarsNotifications.canLeave()) return;
             switchMode(btn.dataset.modeTarget);
         });
     });

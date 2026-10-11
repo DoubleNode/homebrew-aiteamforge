@@ -722,6 +722,7 @@ body {
 .sidebar-button[data-section="details"] { background: var(--lcars-cyan); }
 .sidebar-button[data-section="backlog"] { background: var(--lcars-purple); }
 .sidebar-button[data-section="integrations"] { background: var(--lcars-orange); }
+.sidebar-button[data-section="notifications"] { background: var(--lcars-amber); } /* XACA-1406 */
 .sidebar-button[data-section="releases"] { background: var(--lcars-green); }
 .sidebar-button[data-section="epics"] { background: var(--lcars-purple); }
 .sidebar-button[data-section="calendar"] { background: var(--lcars-amber); }
@@ -779,6 +780,10 @@ body {
 .sidebar-button[data-section="integrations"].active {
     background: var(--lcars-black);
     color: var(--lcars-orange);
+}
+.sidebar-button[data-section="notifications"].active {
+    background: var(--lcars-black);
+    color: var(--lcars-amber);
 }
 .sidebar-button[data-section="releases"].active {
     background: var(--lcars-black);
@@ -1282,6 +1287,7 @@ body {
 .lcars-content > .commands-section,
 .lcars-content > .backups-section,
 .lcars-content > .integrations-section,
+.lcars-content > .notifications-section,
 .lcars-content > .rag-engines-section,
 .lcars-content > .knowledge-graph-section,
 .lcars-content > .team-config-section,
@@ -1315,6 +1321,7 @@ body {
 .lcars-content > .commands-section.active,
 .lcars-content > .backups-section.active,
 .lcars-content > .integrations-section.active,
+.lcars-content > .notifications-section.active,
 .lcars-content > .rag-engines-section.active,
 .lcars-content > .knowledge-graph-section.active,
 .lcars-content > .team-config-section.active,
@@ -7274,6 +7281,7 @@ body {
     .lcars-content > .commands-section.active,
     .lcars-content > .backups-section.active,
     .lcars-content > .integrations-section.active,
+    .lcars-content > .notifications-section.active,
     .lcars-content > .rag-engines-section.active {
         padding-bottom: calc(60px + env(safe-area-inset-bottom, 0px)); /* 40px tabbar + 10px gap + scroll buffer */
     }

@@ -38,7 +38,7 @@
     <link rel="stylesheet" href="css/lcars-fleet.css">
     <link rel="stylesheet" href="css/lcars-fleet-theme.css">
     <!-- KanBan-specific overrides (Division/Org color coordination) -->
-    <link rel="stylesheet" href="css/lcars.css?v=32.52">
+    <link rel="stylesheet" href="css/lcars.css?v=32.53">
     <!-- Activity Timeline Panel -->
     <link rel="stylesheet" href="css/lcars-activity.css">
     <!-- Claude Usage Indicator widget (XACA-0243-004/005) -->
@@ -47,6 +47,8 @@
     <link rel="stylesheet" href="css/lcars-cr-tab.css?v=1.7">
     <!-- XACA-0334-005: Daily Overview grid + card styles -->
     <link rel="stylesheet" href="css/daily-overview.css">
+    <!-- XACA-1406: Notifications routing panel -->
+    <link rel="stylesheet" href="css/lcars-notifications.css">
     <script src="js/usage-helpers.js"></script>
     <!-- XACA-0395-007: Central fetch wrapper injecting the API-key auth header on
          mutating requests. No dependencies (does not touch the DOM or any other
@@ -180,6 +182,9 @@
                     </div>
                     <div class="sidebar-button" data-section="integrations">
                         <span>INTEGRATIONS</span>
+                    </div>
+                    <div class="sidebar-button" data-section="notifications">
+                        <span>NOTIFICATIONS</span>
                     </div>
                     <div class="sidebar-button" data-section="backups">
                         <span>BACKUPS</span>
@@ -1124,6 +1129,16 @@
                 </section>
 
                 <!-- Integrations -->
+                <!-- Notifications (XACA-1406): notice type x connection routing, severity, quiet hours -->
+                <section class="notifications-section" data-mode="settings">
+                    <div class="section-header orange">
+                        <span class="section-title">NOTIFICATIONS</span>
+                        <div class="section-bar"></div>
+                    </div>
+                    <!-- Populated at runtime by lcars-notifications.js -->
+                    <div id="notifications-root" class="notifications-root"></div>
+                </section>
+
                 <section class="integrations-section" data-mode="settings">
                     <div class="section-header green">
                         <span class="section-title">EXTERNAL INTEGRATIONS</span>
@@ -1923,6 +1938,9 @@
             </div>
             <div class="tabbar-button" data-section="integrations">
                 <span class="tabbar-label">INTEGR</span>
+            </div>
+            <div class="tabbar-button" data-section="notifications">
+                <span class="tabbar-label">NOTIFY</span>
             </div>
             <div class="tabbar-button" data-section="rag-engines">
                 <span class="tabbar-label">RAG</span>
@@ -2823,7 +2841,7 @@
     <script src="js/vendor/jspdf.umd.min.js?v=1"></script>
 <!-- XACA-0292-005: Reusable filter-bar component — must load before lcars.js -->
 <script src="js/lcars-filter-bar.js?v=1.2"></script>
-<script src="js/lcars.js?v=4.15"></script>
+<script src="js/lcars.js?v=4.16"></script>
 <!-- XACA-0293-001: CR cycle-time compute module — must load before lcars-cr-tab.js (no DOM/network deps) -->
 <script src="js/lcars-cr-metrics.js"></script>
 <!-- XACA-0293-013: Shared poll bus — single 5s interval for all tile modules; must load after lcars-cr-metrics.js and before tile scripts -->
@@ -2854,6 +2872,7 @@
 <!-- XACA-0281-022: Per-team account picker dropdown — must load after lcars.js (needs apiUrl, showToast, CONFIG) -->
 <!-- XACA-0395: cache-buster ADDED (previously unversioned) — same reason as daily-overview.js. -->
 <script src="js/lcars-team-account.js?v=1.9"></script>
+<script src="js/lcars-notifications.js?v=1.0"></script>
 <!-- XACA-0630: Estimation Accuracy carousel panel — must load after lcars.js (depends on currentHomePanel, escapeHtml) -->
 <script src="js/lcars-estimates.js?v=1.0"></script>
 

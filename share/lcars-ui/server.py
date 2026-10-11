@@ -4639,6 +4639,338 @@ def inject_asset_version_meta(served_html):
         return served_html
 
 
+# ===========================================================================
+# XACA-1406: team LCARS Notifications panel -- server half (EPIC-0068 item 7)
+#
+# Routes (all keyed by team; contract: kanban/plans/XACA-1406/XACA-1406_upstream_contracts.md):
+#   GET  /api/notify-config?team=T              read notify.json (v2) + merged notice-type catalog
+#   POST /api/notify-config                     validate, write atomically, then push routes to FM
+#   GET  /api/notify-config/connections?team=T  FM's team-visible connection list (proxied)
+#   POST /api/notify-config/test                one real hub notice for a type (proxied)
+#
+# What lives here vs elsewhere (nothing is re-implemented):
+#   * schema + cross-checks: scripts/release_config_validate.py (validate_notify_config,
+#     notify_v2_semantic_errors) -- it needs `jsonschema`, an OPTIONAL dependency; without it a
+#     save answers 503 validator-unavailable and writes nothing (fail closed, GET still works).
+#   * catalog / effective severity: kanban-hooks/release_notify_routing.py
+#   * FM URL, team key, no-redirect opener: kanban-hooks/release_notify_hub.py
+#   * the push: `kb-notify routes push --team T --json --force`, as a subprocess.
+#
+# SECRETS: the team `fnt_` key lives only in a local variable and the request header. No response,
+# log line or exception text ever carries the key, a URL, or raw exception text -- every message
+# below is a fixed string, and logs name the exception TYPE only.
+# ===========================================================================
+
+_NOTIFY_FM_TIMEOUT_SECONDS = 10.0
+_NOTIFY_PUSH_TIMEOUT_SECONDS = 45.0
+_NOTIFY_MAX_BODY_BYTES = 256 * 1024
+_NOTIFY_MAX_FM_RESPONSE_BYTES = 256 * 1024
+_NOTIFY_MAX_CONNECTIONS = 200
+_NOTIFY_V2_TAG = 'release-notify/v2'   # the only schema POST accepts
+_NOTIFY_TEAM_RE = re.compile(r'^[a-z0-9][a-z0-9-]*(?![\s\S])')
+_NOTIFY_CODE_RE = re.compile(r'^[a-z][a-z0-9_]{0,39}(?![\s\S])')
+_NOTIFY_KB_NOTIFY = Path(__file__).resolve().parent.parent / 'scripts' / 'kb-notify'
+_NOTIFY_CONFIG_LOCK = threading.Lock()   # one notify.json read-modify-write at a time
+
+# error code -> (HTTP status, fixed message). 401/403 are never used as OUR status for an upstream
+# auth failure: LCARS's own client treats those as "log in again".
+_NOTIFY_ERRORS = {
+    'unknown-team': (400, 'Unknown team.'),
+    'invalid': (400, 'Request is not valid.'),
+    'unknown-type': (400, 'Unknown notice type.'),
+    'too-large': (413, 'Request body too large.'),
+    'catalog-unavailable': (500, 'The notice-type catalog could not be loaded.'),
+    'unreadable': (500, 'The team notify.json could not be read.'),
+    'write-failed': (500, 'The team notify.json could not be written.'),
+    'validator-unavailable': (503, 'The config validator is not available on this machine (jsonschema is missing); nothing was saved.'),
+    'no-fm-url': (503, 'Fleet Monitor is not configured on this machine.'),
+    'no-key': (503, 'No notify key is available for this team.'),
+    'key-resolver-unavailable': (503, 'The notify key resolver could not be loaded.'),
+    'unauthorized': (502, 'Fleet Monitor did not accept this team\'s notify key.'),
+    'forbidden': (502, 'This team\'s notify key is not valid for this team.'),
+    'fm-unreachable': (502, 'Fleet Monitor could not be reached.'),
+    'fm-error': (502, 'Fleet Monitor returned an unexpected response.'),
+}
+
+
+class _NotifyApiError(Exception):
+    """Carries a code from _NOTIFY_ERRORS; `extra` holds fixed, non-sensitive fields only."""
+
+    def __init__(self, code, extra=None):
+        super().__init__(code)
+        self.code = code
+        self.extra = extra or {}
+
+
+def _notify_error_body(code, extra=None):
+    status, message = _NOTIFY_ERRORS[code]
+    body = {'error': code, 'message': message}
+    body.update(extra or {})
+    return status, body
+
+
+def _notify_kanban_dir(team):
+    return Path(TEAM_KANBAN_DIRS[team])
+
+
+def _notify_config_path(team):
+    return _notify_kanban_dir(team) / 'config' / 'notify.json'
+
+
+def _notify_routing():
+    """release_notify_routing (kanban-hooks is already on sys.path); None if unloadable."""
+    try:
+        import release_notify_routing as rr  # noqa: PLC0415
+        return rr
+    except Exception as e:  # noqa: BLE001
+        print(f"[LCARS] notify-config: routing module unavailable ({type(e).__name__})")
+        return None
+
+
+def _notify_validators():
+    """(validate_notify_config, notify_v2_semantic_errors) from scripts/release_config_validate.
+
+    Loaded through release_notify._load_script_module (the same loader kb-notify uses), which
+    turns a missing `jsonschema` into NotifyConfigError. Any failure -> validator-unavailable."""
+    try:
+        import release_notify as rn  # noqa: PLC0415
+        mod = rn._load_script_module('release_config_validate')
+        return mod.validate_notify_config, mod.notify_v2_semantic_errors
+    except Exception as e:  # noqa: BLE001
+        print(f"[LCARS] notify-config: validator unavailable ({type(e).__name__})")
+        raise _NotifyApiError('validator-unavailable') from None
+
+
+def _notify_label(type_id):
+    return str(type_id).replace('-', ' ').title()
+
+
+def _notify_load_catalog(team):
+    """Merged catalog (canonical + the team layer) as the contract's list shape."""
+    rr = _notify_routing()
+    if rr is None:
+        raise _NotifyApiError('catalog-unavailable')
+    try:
+        merged = rr.load_catalog(_notify_kanban_dir(team))
+    except Exception as e:  # noqa: BLE001 - NoticeRoutingError messages are fixed, but stay uniform
+        print(f"[LCARS] notify-config: catalog load failed ({type(e).__name__})")
+        raise _NotifyApiError('catalog-unavailable') from None
+    entries = [{'id': tid, 'label': _notify_label(tid), 'description': ent.get('description', ''),
+                'defaultSeverity': ent.get('defaultSeverity')} for tid, ent in merged.items()]
+    return merged, entries, list(rr.SEVERITIES)
+
+
+def _notify_read_file(team):
+    """(exists, parsed-or-None). Raises _NotifyApiError('unreadable') for a present-but-broken file."""
+    path = _notify_config_path(team)
+    try:
+        raw = path.read_text(encoding='utf-8')
+    except FileNotFoundError:
+        return False, None
+    except (OSError, UnicodeDecodeError):
+        raise _NotifyApiError('unreadable') from None
+    try:
+        return True, json.loads(raw)
+    except ValueError:
+        raise _NotifyApiError('unreadable') from None
+
+
+def _notify_atomic_write(path, doc):
+    """Temp file in the SAME directory + fsync + os.replace: a reader sees the old or the new
+    file, never a partial one. A leftover temp file is removed on any failure."""
+    import tempfile  # noqa: PLC0415
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+    except OSError:
+        mode = 0o644
+    fd, tmp = tempfile.mkstemp(prefix='.notify.json.', suffix='.tmp', dir=str(path.parent))
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            json.dump(doc, f, indent=2)
+            f.write('\n')
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _notify_clip(value, limit=200):
+    return value[:limit] if isinstance(value, str) else ''
+
+
+def _notify_run_push(team):
+    """`kb-notify routes push --team T --json --force`: argv list, no shell, bounded. Returns the
+    CLI's one JSON line reduced to an allowlist; every failure is a static {ok:false} dict."""
+    def fail(reason):
+        return {'ok': False, 'action': 'error', 'error': reason, 'team': team}
+    if not _NOTIFY_TEAM_RE.match(team):
+        return fail('invalid-team')
+    env = dict(os.environ)
+    env.pop('TMUX', None)
+    env.pop('TMUX_PANE', None)
+    env['KB_NOTIFY_KANBAN_DIR'] = str(_notify_kanban_dir(team))   # push reads the file we just wrote
+    argv = [sys.executable, str(_NOTIFY_KB_NOTIFY), 'routes', 'push', '--team', team, '--json', '--force']
+    try:
+        proc = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                              timeout=_NOTIFY_PUSH_TIMEOUT_SECONDS, env=env, check=False)
+    except subprocess.TimeoutExpired:
+        return fail('push-timeout')
+    except Exception as e:  # noqa: BLE001
+        print(f"[LCARS] notify-config: push spawn failed ({type(e).__name__})")
+        return fail('push-unavailable')
+    lines = [ln for ln in proc.stdout.decode('utf-8', 'replace').splitlines() if ln.strip()]
+    try:
+        doc = json.loads(lines[-1]) if lines else None
+    except ValueError:
+        doc = None
+    if not isinstance(doc, dict) or not isinstance(doc.get('ok'), bool):
+        return fail('push-bad-output')
+    out = {'ok': doc['ok'] and proc.returncode == 0}
+    for k in ('action', 'reason', 'error', 'team', 'hash'):
+        if isinstance(doc.get(k), str):
+            out[k] = _notify_clip(doc[k])
+    if isinstance(doc.get('routeTypes'), (int, list)) and not isinstance(doc.get('routeTypes'), bool):
+        rt = doc['routeTypes']
+        out['routeTypes'] = rt if isinstance(rt, int) else [_notify_clip(x, 64) for x in rt[:64] if isinstance(x, str)]
+    return out
+
+
+def _notify_hub():
+    try:
+        import release_notify_hub as hub  # noqa: PLC0415
+        return hub
+    except Exception as e:  # noqa: BLE001
+        print(f"[LCARS] notify-config: hub client unavailable ({type(e).__name__})")
+        raise _NotifyApiError('key-resolver-unavailable') from None
+
+
+_NOTIFY_SKIP_CODES = {
+    'no-url': 'no-fm-url', 'bad-url': 'no-fm-url', 'insecure-url': 'no-fm-url',
+    'no-key': 'no-key', 'bad-key': 'no-key',
+    'resolver-unavailable': 'key-resolver-unavailable',
+}
+
+
+def _notify_fm_endpoint(team):
+    """(hub module, base URL, team key). Raises _NotifyApiError with the mapped code."""
+    hub = _notify_hub()
+    try:
+        url = hub.resolve_fm_url()
+        key = hub.resolve_team_key(team)
+    except Exception as e:  # noqa: BLE001
+        reason = getattr(e, 'reason', None) if isinstance(e, hub.HubSkip) else None
+        if reason is None:
+            print(f"[LCARS] notify-config: FM endpoint resolution failed ({type(e).__name__})")
+        raise _NotifyApiError(_NOTIFY_SKIP_CODES.get(reason, 'key-resolver-unavailable')) from None
+    if not isinstance(key, str) or not key.startswith('fnt_'):
+        raise _NotifyApiError('no-key')   # FM only honours fnt_ team keys; never send anything else
+    return hub, url, key
+
+
+def _notify_fm_request(hub, url, key, method, path, payload=None):
+    """One bounded request through hub.build_opener_for (no redirects, no proxy on loopback).
+    Returns (status, raw_bytes); 4xx/5xx come back as values. Transport failure -> fm-unreachable."""
+    import urllib.error  # noqa: PLC0415
+    import urllib.request  # noqa: PLC0415
+    full = url + path
+    headers = {'Accept': 'application/json', 'Authorization': 'Bearer ' + key}
+    data = None
+    if payload is not None:
+        data = json.dumps(payload).encode('utf-8')
+        headers['Content-Type'] = 'application/json'
+    req = urllib.request.Request(full, data=data, headers=headers, method=method)
+    try:
+        with hub.build_opener_for(full).open(req, timeout=_NOTIFY_FM_TIMEOUT_SECONDS) as resp:
+            return resp.status, resp.read(_NOTIFY_MAX_FM_RESPONSE_BYTES)
+    except urllib.error.HTTPError as err:
+        try:
+            body = err.read(_NOTIFY_MAX_FM_RESPONSE_BYTES)
+        except Exception:  # noqa: BLE001
+            body = b''
+        return err.code, body
+    except Exception as e:  # noqa: BLE001 - refused, DNS, TLS, timeout: all "unreachable"
+        print(f"[LCARS] notify-config: FM request failed ({type(e).__name__})")
+        raise _NotifyApiError('fm-unreachable') from None
+
+
+def _notify_status_error(status, raw):
+    """Map a non-2xx FM status to our error. FM's own fixed code (never its text) rides along."""
+    if status == 401:
+        return _NotifyApiError('unauthorized')
+    if status == 403:
+        return _NotifyApiError('forbidden')
+    extra = {'status': status}
+    try:
+        code = json.loads(raw.decode('utf-8')).get('error')
+        if isinstance(code, str) and _NOTIFY_CODE_RE.match(code):
+            extra['fmCode'] = code
+    except (ValueError, UnicodeDecodeError, AttributeError):
+        pass
+    return _NotifyApiError('fm-error', extra)
+
+
+def _notify_clean_connections(doc):
+    """Re-allowlist FM's list on this side too: {id, provider, label, enabled} and nothing else."""
+    items = doc.get('connections') if isinstance(doc, dict) else None
+    if not isinstance(items, list):
+        raise _NotifyApiError('fm-error')
+    out = []
+    for c in items[:_NOTIFY_MAX_CONNECTIONS]:
+        if not isinstance(c, dict) or not isinstance(c.get('id'), str):
+            continue
+        out.append({'id': _notify_clip(c['id'], 64), 'provider': _notify_clip(c.get('provider'), 64),
+                    'label': _notify_clip(c.get('label'), 120), 'enabled': c.get('enabled') is not False})
+    return out
+
+
+_NOTIFY_RECEIPT_KEYS = ('id', 'ts', 'connectionId', 'provider', 'ok', 'error', 'suppressed', 'stage')
+
+
+def _notify_clean_result(doc):
+    """FM's dispatch result reduced to counts, warnings and allowlisted per-connection receipts."""
+    out = {}
+    if not isinstance(doc, dict):
+        return out
+    for k in ('ok', 'routed'):
+        if isinstance(doc.get(k), bool):
+            out[k] = doc[k]
+    for k in ('team', 'type', 'severity', 'reason'):
+        if isinstance(doc.get(k), str):
+            out[k] = _notify_clip(doc[k], 64)
+    for k in ('delivered', 'failed', 'suppressed'):
+        v = doc.get(k)
+        out[k] = v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else 0
+    if isinstance(doc.get('warnings'), list):
+        out['warnings'] = [_notify_clip(w) for w in doc['warnings'][:20] if isinstance(w, str)]
+    receipts = []
+    for r in (doc.get('receipts') if isinstance(doc.get('receipts'), list) else [])[:_NOTIFY_MAX_CONNECTIONS]:
+        if isinstance(r, dict):
+            receipts.append({k: (_notify_clip(r[k]) if isinstance(r[k], str) else r[k])
+                             for k in _NOTIFY_RECEIPT_KEYS
+                             if k in r and isinstance(r[k], (str, bool))})
+    out['receipts'] = receipts
+    return out
+
+
+def _notify_effective_severity(team, notice_type, catalog):
+    """The type's EFFECTIVE severity from the SAVED config (override > catalog default)."""
+    rr = _notify_routing()
+    exists, doc = _notify_read_file(team)
+    config = doc if exists and rr is not None and rr.is_v2(doc) else {}
+    try:
+        return rr.effective_severity(config, catalog, notice_type)[0]
+    except Exception:  # noqa: BLE001 - e.g. a hand-edited bad override: fall back to the catalog default
+        return catalog[notice_type]['defaultSeverity']
+
+
+
 class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     """Custom handler for LCARS Kanban Monitor"""
 
@@ -5670,6 +6002,11 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         # XACA-1484-004: releaseConfig.branches.integration / .production setter
         elif path == '/api/release-branches':
             self.handle_update_release_branches()
+        # XACA-1406: team Notifications panel (save + test notice)
+        elif path == '/api/notify-config':
+            self.handle_notify_config_save()
+        elif path == '/api/notify-config/test':
+            self.handle_notify_config_test()
         # XACA-0281 Phase A.3: Team account config endpoints
         elif path == '/api/team-config/account/save':
             self.handle_team_account_save()
@@ -17696,6 +18033,190 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         return {'team': team, 'leads': leads, 'configured': len(leads) > 0,
                 'writable': writable, 'configWarning': warning}
 
+    # ------------------------------------------------------------------
+    # XACA-1406: team Notifications panel API (module-level helpers above the class)
+    # ------------------------------------------------------------------
+
+    def _notify_send_error(self, err):
+        status, body = _notify_error_body(err.code, err.extra)
+        self._send_json_response(body, status=status)
+
+    def _notify_team_from_query(self, query_string):
+        params = parse_qs(query_string) if query_string else {}
+        team = params.get('team', [None])[0] or LCARS_TEAM
+        if not isinstance(team, str) or team not in TEAM_KANBAN_DIRS:
+            raise _NotifyApiError('unknown-team')
+        return team
+
+    def _notify_read_body(self, allowed_keys):
+        """(body dict, team). Raises _NotifyApiError: too-large / invalid / unknown-team."""
+        body, err = self._read_release_json_body(max_bytes=_NOTIFY_MAX_BODY_BYTES)
+        if err:
+            raise _NotifyApiError('too-large' if err.startswith(self._BODY_TOO_LARGE) else 'invalid')
+        if set(body) - set(allowed_keys):
+            raise _NotifyApiError('invalid')
+        team = body.get('team')
+        if not isinstance(team, str) or team not in TEAM_KANBAN_DIRS:
+            raise _NotifyApiError('unknown-team')
+        return body, team
+
+    def serve_notify_config(self, query_string: str):
+        """GET /api/notify-config?team=T (XACA-1406-001).
+
+        {team, exists, config, sourceVersion, catalog[{id,label,description,defaultSeverity}], severities}.
+        A v1 file (or any non-v2 file) reads as config:null, sourceVersion:1 -- the panel starts from
+        an empty v2 config and POST keeps the v1 `aliases`. No file: exists:false, sourceVersion:null.
+        """
+        try:
+            team = self._notify_team_from_query(query_string)
+            _merged, catalog, severities = _notify_load_catalog(team)
+            exists, doc = _notify_read_file(team)
+            rr = _notify_routing()
+            if not exists:
+                config, version = None, None
+            elif rr.is_v2(doc):
+                config, version = doc, 2
+            else:
+                config, version = None, 1
+            self._send_json_response({'team': team, 'exists': exists, 'config': config,
+                                      'sourceVersion': version, 'catalog': catalog,
+                                      'severities': severities})
+        except _NotifyApiError as e:
+            self._notify_send_error(e)
+        except Exception as e:  # noqa: BLE001 - never echo exception text
+            print(f"[LCARS] ERROR serving notify-config ({type(e).__name__})")
+            self._send_json_response({'error': 'internal', 'message': 'Internal error.'}, status=500)
+
+    def handle_notify_config_save(self):
+        """POST /api/notify-config {team, config} (XACA-1406-001/-004).
+
+        Validates with the v2 schema plus the catalog cross-checks BEFORE touching disk (400 invalid +
+        details[] and nothing written), keeps the existing `aliases` when the incoming config omits
+        them, writes the team's kanban/config/notify.json atomically, then runs
+        `kb-notify routes push --force`. A failed push never undoes the save: it is reported as
+        {ok:true, saved:true, push:{ok:false,...}}.
+        """
+        try:
+            body, team = self._notify_read_body({'team', 'config'})
+            config = body.get('config')
+            rr = _notify_routing()
+            if rr is None:
+                raise _NotifyApiError('catalog-unavailable')
+            if not isinstance(config, dict):
+                raise _NotifyApiError('invalid', {'details': ['$: config must be an object']})
+            if not rr.is_v2(config):
+                raise _NotifyApiError('invalid', {'details': ["$.$schema: must be '%s'" % _NOTIFY_V2_TAG]})
+            validate, semantic = _notify_validators()
+            with _NOTIFY_CONFIG_LOCK:
+                try:
+                    exists, existing = _notify_read_file(team)
+                except _NotifyApiError:
+                    exists, existing = True, None   # a corrupt file is replaced, not a reason to refuse the save
+                doc = dict(config)
+                if 'aliases' not in doc and isinstance(existing, dict) and isinstance(existing.get('aliases'), dict):
+                    doc['aliases'] = copy.deepcopy(existing['aliases'])
+                errors = list(validate(doc)) or list(semantic(doc, _notify_kanban_dir(team)))
+                if errors:
+                    raise _NotifyApiError('invalid', {'details': [_notify_clip(str(x), 300) for x in errors[:50]]})
+                try:
+                    _notify_atomic_write(_notify_config_path(team), doc)
+                except OSError as e:
+                    print(f"[LCARS] notify-config: write failed ({type(e).__name__})")
+                    raise _NotifyApiError('write-failed') from None
+            push = _notify_run_push(team)
+            self._send_json_response({'ok': True, 'saved': True, 'push': push})
+        except _NotifyApiError as e:
+            self._notify_send_error(e)
+        except Exception as e:  # noqa: BLE001
+            print(f"[LCARS] ERROR saving notify-config ({type(e).__name__})")
+            self._send_json_response({'error': 'internal', 'message': 'Internal error.'}, status=500)
+
+    def serve_notify_connections(self, query_string: str):
+        """GET /api/notify-config/connections?team=T (XACA-1406-001).
+
+        Proxies FM's team-key-gated GET /api/notify/teams/:team/connections and answers
+        {team, connections:[{id,provider,label,enabled}]} or {error, message}: no-fm-url, no-key,
+        key-resolver-unavailable, unauthorized (FM 401), forbidden (FM 403), fm-unreachable, fm-error.
+        """
+        try:
+            import urllib.parse as _up  # noqa: PLC0415
+            team = self._notify_team_from_query(query_string)
+            hub, url, key = _notify_fm_endpoint(team)
+            status, raw = _notify_fm_request(hub, url, key, 'GET',
+                                             '/api/notify/teams/%s/connections' % _up.quote(team, safe=''))
+            if not 200 <= status < 300:
+                raise _notify_status_error(status, raw)
+            try:
+                doc = json.loads(raw.decode('utf-8'))
+            except (ValueError, UnicodeDecodeError):
+                raise _NotifyApiError('fm-error') from None
+            self._send_json_response({'team': team, 'connections': _notify_clean_connections(doc)})
+        except _NotifyApiError as e:
+            self._notify_send_error(e)
+        except Exception as e:  # noqa: BLE001
+            print(f"[LCARS] ERROR serving notify connections ({type(e).__name__})")
+            self._send_json_response({'error': 'internal', 'message': 'Internal error.'}, status=500)
+
+    def handle_notify_config_test(self):
+        """POST /api/notify-config/test {team, type} (XACA-1406-003).
+
+        Sends ONE real notice through Fleet Monitor's POST /api/notify with the team's own key (the hub
+        routing path; there is no local fallback). Severity is the type's EFFECTIVE severity from the
+        saved config. {ok, deliveredVia:'hub'|'none', warning?, result}. FM may legitimately suppress a
+        repeat (dedupe/quiet hours): that is ok:true, deliveredVia:'none'. A 5xx whose body shows
+        delivered>0 is ok:true with a warning. ok:false adds a top-level `reason`.
+        """
+        try:
+            body, team = self._notify_read_body({'team', 'type'})
+            notice_type = body.get('type')
+            if not isinstance(notice_type, str):
+                raise _NotifyApiError('invalid')
+            merged, _catalog, _sev = _notify_load_catalog(team)
+            if notice_type not in merged:
+                raise _NotifyApiError('unknown-type')
+            severity = _notify_effective_severity(team, notice_type, merged)
+            hub, url, key = _notify_fm_endpoint(team)
+            payload = {'team': team, 'type': notice_type,
+                       'title': 'Test notice: %s' % notice_type,
+                       'body': 'Test from the LCARS Notifications panel. No action needed.',
+                       'severity': severity}
+            status, raw = _notify_fm_request(hub, url, key, 'POST', '/api/notify', payload)
+            if status >= 500:
+                if hub._delivered_in_5xx(raw) <= 0:
+                    raise _notify_status_error(status, raw)
+                doc = json.loads(raw.decode('utf-8'))
+                inner = doc.get('result') if isinstance(doc.get('result'), dict) else doc
+                receipt_failed = hub._error_code(raw) == 'receipt_write_failed'
+                self._send_json_response({
+                    'ok': True, 'deliveredVia': 'hub',
+                    'warning': ('The notice was delivered, but Fleet Monitor could not record its receipt.'
+                                if receipt_failed else
+                                'The notice was delivered, but Fleet Monitor reported an error afterwards.'),
+                    'result': _notify_clean_result(inner)})
+                return
+            if not 200 <= status < 300:
+                raise _notify_status_error(status, raw)
+            try:
+                doc = json.loads(raw.decode('utf-8'))
+            except (ValueError, UnicodeDecodeError):
+                doc = None
+            if not isinstance(doc, dict) or not isinstance(doc.get('ok'), bool) or 'routed' not in doc:
+                raise _NotifyApiError('fm-error')
+            result = _notify_clean_result(doc)
+            delivered, failed, suppressed = result['delivered'], result['failed'], result['suppressed']
+            routed = bool(doc.get('routed'))
+            ok = (doc['ok'] and delivered > 0) or (routed and failed == 0 and suppressed > 0)
+            out = {'ok': ok, 'deliveredVia': 'hub' if delivered > 0 else 'none', 'result': result}
+            if not ok:
+                out['reason'] = ('no-route' if not routed
+                                 else 'all-connections-failed' if failed else 'nothing-delivered')
+            self._send_json_response(out)
+        except _NotifyApiError as e:
+            self._notify_send_error(e)
+        except Exception as e:  # noqa: BLE001
+            print(f"[LCARS] ERROR sending notify test ({type(e).__name__})")
+            self._send_json_response({'error': 'internal', 'message': 'Internal error.'}, status=500)
+
     def serve_release_leads(self, query_string: str):
         """GET /api/release-leads?team=<team> (XACA-1485).
 
@@ -21284,6 +21805,11 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         # XACA-1484-004: releaseConfig.branches (integration / production, validated)
         elif path == '/api/release-branches':
             self.serve_release_branches(parsed.query)
+        # XACA-1406: team Notifications panel (notify.json v2 + FM connections)
+        elif path == '/api/notify-config':
+            self.serve_notify_config(parsed.query)
+        elif path == '/api/notify-config/connections':
+            self.serve_notify_connections(parsed.query)
         # XACA-0281 Phase A.3: Team account config endpoints
         elif path == '/api/team-config/account/current':
             self.serve_team_account_current(parsed.query)
