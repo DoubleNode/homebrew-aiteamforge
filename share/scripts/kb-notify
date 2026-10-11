@@ -7,18 +7,28 @@ secretRef the provider resolves just-in-time and this CLI never sees or prints.
 
   kb-notify send --to <alias> (--template <name> --data <json> | --text <str>)
                  [--ref REL-xxxx|CR-xxxx] [--team T] [--json]
-  kb-notify send --type <notice-type> [--ref REL-xxxx|CR-xxxx] [--team T] --dry-run
+  kb-notify send --type <notice-type> [--text S] [--title S] [--ref REL-xxxx|CR-xxxx]
+                 [--team T] [--json]
+                 (XACA-1403: deliver through the Fleet Monitor hub with the team's
+                 notify key; if the hub is unconfigured/unreachable/5xx fall back to
+                 direct aliases, then a macOS notification. Prints type + deliveredVia;
+                 --json prints the receipt, FROZEN contract for XACA-1406: one object
+                 with ok, deliveredVia and, on failure, error.)
+  kb-notify send --type <notice-type> [--ref ...] [--team T] --dry-run
                  (XACA-1399: resolve severity, hub connections, quiet hours and
-                 dedupe key from the team's notify.json v2 and print them as
-                 JSON. Hub delivery arrives with XACA-1403; without --dry-run
-                 this exits 1 rather than pretend to send.)
+                 dedupe key from the team's notify.json v2 and print them as JSON;
+                 sends nothing.)
   kb-notify test --to <alias> [--team T]     (verifies route + secret; sends NOTHING)
+  kb-notify routes push [--team T] [--dry-run] [--force] [--if-configured] [--json]
+                 (XACA-1403: PUT the team's notify.json v2 routes to the hub; skipped
+                 when unchanged, refreshed hourly; exit 1 + ok:false on any failure)
 
 Exit codes:
   0  ok (send: delivered and receipted; test: route and secret are good;
      send --type --dry-run: resolution printed)
   1  notify failure: config/alias/template/secret problem, an UNKNOWN --type,
-     or the provider failed. A delivery failure ALSO writes an ok:false receipt. Never retried.
+     or the provider failed (send --type: receipt ok:false). A delivery failure
+     ALSO writes an ok:false receipt. Never retried.
   2  usage error (argparse; bad --data, --ref, missing argument)
   3  RECEIPT_FAILED: the receipt could not be written (the notice may have gone)
 
@@ -94,15 +104,53 @@ def build_parser():
                    help="notice type from the catalog (e.g. gate-blocked); resolves routing from the team's "
                         "notify.json v2. Exactly one of --to / --type")
     s.add_argument("--dry-run", action="store_true",
-                   help="with --type: print the resolution as JSON and send nothing (required until XACA-1403)")
+                   help="with --type: print the resolution as JSON and send nothing")
     body = s.add_mutually_exclusive_group(required=False)
     body.add_argument("--template", help="notice template name (profiles/notice/<name>.md)")
     body.add_argument("--text", help="literal message text")
+    s.add_argument("--title", help="with --type: notice title (default: '<team>: <type>')")
     s.add_argument("--data", type=_data, default=None, help="JSON object of template facts (with --template)")
     s.add_argument("--ref", type=_ref, help="REL-/CR- record that receives the receipt")
     s.add_argument("--json", action="store_true", help="print the receipt as JSON")
     add("test", "verify route and secret resolve; sends nothing")
+    r = sub.add_parser("routes", help="manage the team's hub routes", description="manage the team's hub routes")
+    rsub = r.add_subparsers(dest="routes_command", metavar="<action>")
+    rsub.required = True
+    rp = rsub.add_parser("push", help="push the team's notify.json v2 routes to the Fleet Monitor hub",
+                         description="PUT the team's notify.json v2 routes (and team notice types) to the hub. "
+                                     "Skips when unchanged since the last good push (hourly refresh).")
+    rp.add_argument("--team", help="team id (default: $KB_TEAM)")
+    rp.add_argument("--dry-run", action="store_true", help="validate and report what would happen; no network")
+    rp.add_argument("--force", action="store_true", help="push even if unchanged")
+    rp.add_argument("--if-configured", action="store_true",
+                    help="reporter mode: a team with no v2 notify.json or no key is a quiet skip, not an error")
+    rp.add_argument("--json", action="store_true", help="print the result as JSON")
     return p
+
+
+def _report_type_receipt(receipt, args):
+    """Print a `send --type` receipt and return the exit code. The --json shape
+    (ok, deliveredVia, error on failure) is a frozen contract (XACA-1406)."""
+    if args.json:
+        print(json.dumps(receipt, sort_keys=True))
+    elif receipt["ok"]:
+        # "sent" only when something was shown; otherwise say why nothing was.
+        hub = receipt.get("hub") or {}
+        if receipt["deliveredVia"] == "none" and hub.get("localSuppressed"):
+            word = "suppressed (%s)" % hub["localSuppressed"]
+        elif receipt["deliveredVia"] == "hub" and not hub.get("delivered"):
+            word = "suppressed (%s)" % (hub.get("reason") or "suppressed")
+        elif receipt["deliveredVia"] == "none":
+            word = "suppressed (none-delivered)"
+        else:
+            word = "sent"
+        print("kb-notify: %s type=%s deliveredVia=%s receipt=%s" % (
+            word, receipt["type"], receipt["deliveredVia"], receipt["id"]))
+    if not receipt["ok"]:
+        print("kb-notify: delivery failed type=%s deliveredVia=%s receipt=%s: %s" % (
+            receipt["type"], receipt["deliveredVia"], receipt["id"], receipt["error"]), file=sys.stderr)
+        return EXIT_NOTIFY_ERROR
+    return EXIT_OK
 
 
 def main(argv=None, _engine_factory=None):
@@ -110,10 +158,11 @@ def main(argv=None, _engine_factory=None):
     if args.command == "send":
         if (args.to is None) == (args.notice_type is None):
             build_parser().error("send needs exactly one of --to <alias> or --type <notice-type>")
-        if args.notice_type is not None and (args.template is not None or args.text is not None
-                                             or args.data is not None):
-            build_parser().error("--type takes no --template/--text/--data (the message comes from the notice type)")
+        if args.notice_type is not None and (args.template is not None or args.data is not None):
+            build_parser().error("--type takes no --template/--data (use --text and --title)")
         if args.notice_type is None:
+            if args.title is not None:
+                build_parser().error("--title is only valid with --type")
             if args.template is None and args.text is None:
                 build_parser().error("send --to needs --template or --text")
             if args.dry_run:
@@ -128,6 +177,9 @@ def main(argv=None, _engine_factory=None):
         print("kb-notify: release_notify.py not found", file=sys.stderr)
         return EXIT_NOTIFY_ERROR
     sys.path.insert(0, str(hooks))
+    if args.command == "routes":  # XACA-1403-002: no engine, no secrets resolved by this CLI
+        import release_notify_routes_push as rp  # noqa: PLC0415 - path set just above
+        return rp.run_cli(team, args)
     import release_notify as rn  # noqa: PLC0415 - path set just above
 
     try:
@@ -137,13 +189,12 @@ def main(argv=None, _engine_factory=None):
             print("kb-notify: test ok provider=%s alias=%s" % (provider, args.to))
             return EXIT_OK
         if args.command == "send" and args.notice_type is not None:
-            result = engine.resolve_type(args.notice_type, ref=args.ref)  # unknown type -> NotifyConfigError
-            if not args.dry_run:
-                print("kb-notify: hub delivery for --type is not available yet (XACA-1403); "
-                      "re-run with --dry-run to see the resolution", file=sys.stderr)
-                return EXIT_NOTIFY_ERROR
-            print(json.dumps(result, sort_keys=True))
-            return EXIT_OK
+            if args.dry_run:
+                result = engine.resolve_type(args.notice_type, ref=args.ref)  # unknown type -> NotifyConfigError
+                print(json.dumps(result, sort_keys=True))
+                return EXIT_OK
+            receipt = engine.send_type(args.notice_type, text=args.text, title=args.title, ref=args.ref)
+            return _report_type_receipt(receipt, args)
         receipt = engine.send(args.to, template=args.template, data=args.data,
                               text=args.text, ref=args.ref)
     except rn.NotifyReceiptError as exc:

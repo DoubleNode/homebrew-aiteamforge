@@ -2949,6 +2949,107 @@ _xaca1225_fleet_unconfigured_reason() {
     fi
 }
 
+# ----------------------------------------------------------------------------
+# Notify route push (XACA-1403-002, moved here from kanban-reporter.sh, which no
+# cron/LaunchAgent runs and sync-tap.sh does not mirror).
+#
+# Pushes each team's notify.json v2 routes to the Fleet Monitor hub through
+# `kb-notify routes push --team <t> --if-configured`. Cadence: this reporter
+# (cron, every minute), THROTTLED here to once per 5 minutes because every call
+# spawns python; the module's own content hash + hourly refresh then decides
+# whether a PUT actually happens.
+#
+# Best effort by contract: nothing here may fail or slow the reporter. Output is
+# discarded (kb-notify never prints a key, and we do not give it the chance), a
+# failure logs ONE static line, a missing kb-notify is a quiet no-op, and each
+# call is bounded (no timeout(1) on stock macOS, so a poll-and-kill loop).
+#
+# kb-notify lookup, first hit wins: $FLEET_NOTIFY_ROUTES_BIN (override), dev
+# tree (<reporter dir>/../../scripts), $AITEAMFORGE_DIR/scripts, default
+# consumer root ~/aiteamforge/scripts, flattened sibling (share/scripts layout),
+# then PATH.
+#
+# State: $FLEET_NOTIFY_ROUTES_STATE_DIR (default ~/.aiteamforge/run)/
+# notify-routes-push-last holds the epoch of the last attempt. Written BEFORE
+# the attempt, so a failing push is also throttled rather than retried each
+# minute. bash 3.2 safe: no associative arrays, no mapfile.
+# ----------------------------------------------------------------------------
+push_notify_routes() {
+    [ "${FLEET_NOTIFY_ROUTES_DISABLE:-0}" = "1" ] && return 0
+    local reporter_dir tool="" candidate
+    reporter_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || reporter_dir=""
+    local candidates=()
+    [ -n "${FLEET_NOTIFY_ROUTES_BIN:-}" ] && candidates+=("$FLEET_NOTIFY_ROUTES_BIN")
+    if [ -n "$reporter_dir" ]; then
+        candidates+=("$reporter_dir/../../scripts/kb-notify")
+    fi
+    [ -n "${AITEAMFORGE_DIR:-}" ] && candidates+=("$AITEAMFORGE_DIR/scripts/kb-notify")
+    candidates+=("$HOME/aiteamforge/scripts/kb-notify")
+    if [ -n "$reporter_dir" ]; then
+        candidates+=("$reporter_dir/kb-notify")
+    fi
+    for candidate in "${candidates[@]}"; do
+        if [ -f "$candidate" ] && [ -x "$candidate" ]; then tool="$candidate"; break; fi
+    done
+    if [ -z "$tool" ]; then
+        tool="$(command -v kb-notify 2>/dev/null)" || tool=""
+    fi
+    [ -n "$tool" ] || return 0
+
+    local state_dir="${FLEET_NOTIFY_ROUTES_STATE_DIR:-$HOME/.aiteamforge/run}"
+    local stamp_file="$state_dir/notify-routes-push-last"
+    mkdir -p "$state_dir" 2>/dev/null || return 0
+    local now last_epoch=0 interval="${FLEET_NOTIFY_ROUTES_INTERVAL:-300}"
+    case "$interval" in ''|*[!0-9]*) interval=300 ;; esac
+    now=$(date +%s)
+    if [ -f "$stamp_file" ]; then
+        read -r last_epoch < "$stamp_file" 2>/dev/null || true
+        case "$last_epoch" in ''|*[!0-9]*) last_epoch=0 ;; esac
+    fi
+    if [ $((now - last_epoch)) -lt "$interval" ]; then
+        return 0
+    fi
+    printf '%s\n' "$now" > "$stamp_file" 2>/dev/null || return 0
+
+    # Bounds (XACA-1403 hardening): an epoch-seconds deadline per team (10 s) and
+    # a total budget across all teams (20 s). Epoch time, not a sleep counter: on a
+    # loaded machine "100 x sleep 0.1" stretched to ~21 s per hung team. Once the
+    # budget is spent the remaining teams are skipped (they retry next cycle, since
+    # the stamp only throttles to 5 min) with one static log line.
+    local team np_pid np_start np_deadline np_budget_end np_now np_hung
+    np_start=$(date +%s)
+    np_budget_end=$((np_start + 20))
+    while IFS= read -r team; do
+        [ -n "$team" ] || continue
+        np_now=$(date +%s)
+        if [ "$np_now" -ge "$np_budget_end" ]; then
+            echo "  [warn] notify routes push budget spent; remaining teams skipped until next cycle" >&2
+            break
+        fi
+        np_deadline=$((np_now + 10))
+        [ "$np_deadline" -gt "$np_budget_end" ] && np_deadline=$np_budget_end
+        "$tool" routes push --team "$team" --if-configured >/dev/null 2>&1 &
+        np_pid=$!
+        np_hung=0
+        while kill -0 "$np_pid" 2>/dev/null; do
+            if [ "$(date +%s)" -ge "$np_deadline" ]; then
+                np_hung=1
+                # No job control here, so the child shares our process group and a
+                # group kill would hit the reporter itself: kill its children first.
+                pkill -KILL -P "$np_pid" 2>/dev/null || true
+                kill -KILL "$np_pid" 2>/dev/null || true
+                break
+            fi
+            sleep 0.1
+        done
+        # wait reaps the child (a killed one reports non-zero, which is the warning).
+        if ! wait "$np_pid" 2>/dev/null || [ "$np_hung" -eq 1 ]; then
+            echo "  [warn] notify routes push failed for a team (run: kb-notify routes push --team <team>)" >&2
+        fi
+    done <<< "$(discover_team_names)"
+    return 0
+}
+
 main() {
     echo "=== Fleet Status Reporter ==="
     echo "Machine: $HOSTNAME ($IP_ADDRESS)"
@@ -2979,6 +3080,7 @@ main() {
         echo ""
         echo "Checking kb-msg relay for cross-machine mail..."
         pull_messages || true
+        push_notify_routes || true
         echo ""
         echo "Done."
         exit 0
@@ -3023,6 +3125,7 @@ main() {
         echo ""
         echo "Checking kb-msg relay for cross-machine mail..."
         pull_messages || true
+        push_notify_routes || true
         exit 1
     fi
 
@@ -3030,6 +3133,9 @@ main() {
     echo ""
     echo "Checking kb-msg relay for cross-machine mail..."
     pull_messages || true
+
+    # Notify routes (XACA-1403-002; throttled to 5 min, best-effort).
+    push_notify_routes || true
 
     # Weekly token aggregates (XACA-1300-003; throttled, best-effort).
     echo ""

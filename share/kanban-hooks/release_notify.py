@@ -190,7 +190,10 @@ def default_registry() -> ProviderRegistry:
     from release_notify_teams import TeamsProvider  # lazy: it imports this module
 
     reg = ProviderRegistry()
+    from release_notify_hub import HubProvider  # lazy: it imports this module (XACA-1403)
+
     reg.register("teams", TeamsProvider)
+    reg.register("hub", HubProvider)
     for name in ("slack", "sms", "email"):
         reg.register(name, lambda n=name: UnimplementedProvider(n))
     return reg
@@ -242,7 +245,8 @@ class NotifyEngine:
 
     def __init__(self, team: str, *, kanban_dir=None, registry: Optional[ProviderRegistry] = None,
                  secret_resolver=None, validate_config=None, render_template=None,
-                 board_read=None, board_update=None, clock=None, terminal: str = "") -> None:
+                 board_read=None, board_update=None, clock=None, terminal: str = "",
+                 macos_notifier=None) -> None:
         if not isinstance(team, str) or not TEAM_RE.match(team):
             raise NotifyConfigError("invalid team id %r" % (team,))  # e.g. '../x' must never reach a path
         self.team = team
@@ -255,6 +259,7 @@ class NotifyEngine:
         self._board_update = board_update
         self._clock = clock or _utc_now
         self.terminal = terminal
+        self._macos_notifier = macos_notifier  # (title, body) -> '' | reason code; test seam (XACA-1403)
 
     # -- paths / config ----------------------------------------------------
     def kanban_dir(self) -> Path:
@@ -336,6 +341,145 @@ class NotifyEngine:
         if isinstance(provider, UnimplementedProvider):
             provider._refuse()  # a seam is unroutable: config error, no receipt
         return provider, self._context(aliases)
+
+    # -- typed send: hub first, local fallback chain (XACA-1403) -----------
+    def send_type(self, notice_type: str, *, text: Optional[str] = None, title: Optional[str] = None,
+                  ref: Optional[str] = None) -> Dict[str, Any]:
+        """Deliver one `--type` notice and persist its receipt (EPIC-0068 D1).
+
+        Order: (1) Fleet Monitor hub when an FM URL and the team's notify key
+        resolve; (2) ONLY if the hub was skipped, unreachable or answered 5xx:
+        the direct aliases whose name equals a connection id in
+        routes[notice_type], then a macOS notification; (3) otherwise ok:false.
+        A 4xx from the hub is a rejection and is NOT a fallback trigger. One hub
+        attempt, no retries. Raises NotifyConfigError (no receipt) when nothing
+        was routable: unknown type, v1 config, no route for the type."""
+        if ref is not None:
+            self._check_ref(ref)
+        resolved = self.resolve_type(notice_type, ref=ref)  # NotifyConfigError for unknown type / v1
+        connections = list(resolved["connections"])
+        if not connections:
+            raise NotifyConfigError("no route for notice type '%s' in notify.json" % notice_type)
+        body = (text or "").strip()
+        head = (title or "").strip() or "%s: %s" % (self.team, notice_type)
+        attempts: List[Dict[str, Any]] = []
+        hub_info: Dict[str, Any] = {}
+        delivered_via, provider_name, ok, error = "none", "none", False, ""
+
+        # 1. hub
+        hub_outcome = self._try_hub(notice_type, head, body, resolved["severity"], ref, attempts, hub_info)
+        if hub_outcome is not None and hub_info["status"] == "delivered":
+            delivered_via, provider_name, ok = "hub", "hub", True
+        elif hub_outcome is not None and not hub_info.get("fallback"):
+            error = hub_info["error"]  # rejected / bad-response / delivered nothing: no fallback
+        elif resolved["suppressed"]:
+            # fallbacks honor quiet hours too; the hub applies its own rules server-side
+            delivered_via, provider_name, ok = "none", "none", True
+            hub_info["localSuppressed"] = "quiet-hours"
+            attempts.append({"path": "fallback", "ok": True, "reason": "quiet-hours"})
+        else:
+            # 2. direct aliases, 3. macOS
+            direct = self._try_direct(connections, "%s\n%s" % (head, body) if body else head, attempts)
+            if direct:
+                delivered_via, provider_name, ok = "direct:" + direct, direct, True
+            else:
+                reason = self._macos(head, body)
+                attempts.append({"path": "macos-local", "ok": reason == "", "reason": reason or "shown"})
+                if reason == "":
+                    delivered_via, provider_name, ok = "macos-local", "macos", True
+                else:
+                    error = "all delivery paths failed (hub %s)" % hub_info.get("reason", "unavailable")
+        if not ok and not error:
+            error = "delivery failed"
+        receipt: Dict[str, Any] = {
+            "id": "ntc-" + uuid.uuid4().hex[:12], "ts": self._clock(), "provider": provider_name,
+            "alias": "", "template": "", "type": notice_type, "severity": resolved["severity"],
+            "ok": ok, "error": error, "deliveredVia": delivered_via,
+            "hub": {k: v for k, v in hub_info.items() if k not in ("error", "fallback")},
+            "attempts": attempts,
+        }
+        self._write_receipt(ref, receipt)
+        return receipt
+
+    def _try_hub(self, notice_type, head, body, severity, ref, attempts, hub_info):
+        """Run the single hub attempt. Fills hub_info {status, reason, ...}.
+        Returns None when the hub path was skipped (then hub_info['fallback'] is True)."""
+        import release_notify_hub as hub  # noqa: PLC0415 - sibling module
+        try:
+            registry = self._registry or default_registry()
+            if "hub" not in registry.names():
+                raise hub.HubSkip("hub-not-registered")
+            provider = registry.get("hub")
+            ctx = self._context({})
+            target = provider.resolve_target(notice_type, ctx, title=head, severity=severity, ref=ref)
+            provider.validate_target(target)
+        except hub.HubSkip as skip:
+            hub_info.update(status="skipped", reason=skip.reason, fallback=True)
+            attempts.append({"path": "hub", "ok": False, "reason": "skipped:" + skip.reason})
+            return None
+        except NotifyError as exc:  # resolver refusals etc.; text is ours, never a secret
+            hub_info.update(status="skipped", reason="hub-config-error", fallback=True)
+            attempts.append({"path": "hub", "ok": False, "reason": "skipped:hub-config-error"})
+            return None
+        try:
+            outcome = provider.deliver(target, NoticeMessage(text=body))
+        except hub.HubDeliveryError as exc:
+            hub_info.update(status=exc.kind, reason=exc.reason, fallback=exc.fallback,
+                            error="hub %s (%s)%s" % (exc.kind, exc.reason, " code=" + exc.error_code if exc.error_code else ""))
+            if exc.http_status:
+                hub_info["httpStatus"] = exc.http_status
+            if exc.error_code:
+                hub_info["errorCode"] = exc.error_code
+            attempts.append({"path": "hub", "ok": False, "reason": "%s:%s" % (exc.kind, exc.reason)})
+            return exc
+        except Exception as exc:  # noqa: BLE001 - foreign failure: type only
+            hub_info.update(status="unreachable", reason="provider-error-" + type(exc).__name__,
+                            fallback=True, error="hub provider error (%s)" % type(exc).__name__)
+            attempts.append({"path": "hub", "ok": False, "reason": "unreachable:provider-error"})
+            return None
+        hub_info.update(delivered=outcome.delivered, failed=outcome.failed, suppressed=outcome.suppressed)
+        if outcome.ok:
+            hub_info.update(status="delivered", reason="suppressed" if outcome.delivered == 0 else "")
+            attempts.append({"path": "hub", "ok": True, "reason": hub_info["reason"] or "delivered"})
+        else:
+            hub_info.update(status="delivered-nothing", reason=outcome.reason, fallback=False,
+                            error="hub delivered nothing (%s)" % outcome.reason)
+            attempts.append({"path": "hub", "ok": False, "reason": "nothing-delivered:" + outcome.reason})
+        return outcome
+
+    def _try_direct(self, connections, text, attempts) -> str:
+        """Send to every route connection id that is also a local alias. Returns
+        the first delivering provider's name, or ''. Failures are static codes."""
+        try:
+            aliases = self.load_aliases()
+        except NotifyError:
+            return ""
+        first = ""
+        for cid in connections:
+            if cid not in aliases:
+                continue
+            try:
+                provider, ctx = self._route(cid, aliases)
+                target = provider.resolve_target(cid, ctx)
+                provider.validate_target(target)
+                provider.send(target, NoticeMessage(text=text))
+            except NotifyError as exc:  # engine/provider messages are secret-free by contract
+                attempts.append({"path": "direct:" + str(aliases[cid].get("provider", "?")), "ok": False,
+                                 "alias": cid, "reason": type(exc).__name__})
+                continue
+            except Exception as exc:  # noqa: BLE001
+                attempts.append({"path": "direct", "ok": False, "alias": cid, "reason": type(exc).__name__})
+                continue
+            name = provider.name
+            attempts.append({"path": "direct:" + name, "ok": True, "alias": cid, "reason": "delivered"})
+            first = first or name
+        return first
+
+    def _macos(self, head: str, body: str) -> str:
+        if self._macos_notifier is not None:
+            return self._macos_notifier(head, body)
+        import release_notify_hub as hub  # noqa: PLC0415
+        return hub.macos_notify(head, body)
 
     # -- test (-005) -------------------------------------------------------
     def test(self, alias: str) -> str:
