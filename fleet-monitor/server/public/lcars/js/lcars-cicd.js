@@ -50,6 +50,8 @@
 
     var _lastGood = null;        // last successfully rendered payload
     var _inflight = null;        // de-dupes overlapping refresh() calls
+    var _inflightForce = false;  // XACA-1465-014: was the in-flight refresh a forced one?
+    var _forcedPending = null;   // XACA-1465-014: ONE forced refresh chained after an unforced in-flight one
     var _loggedUnavailable = false;
 
     // =========================================================================
@@ -224,7 +226,82 @@
     // HTML BUILDERS
     // =========================================================================
 
+    function strOrNull(v) {
+        return typeof v === 'string' && v !== '' ? v : null;
+    }
+
+    /** One pill for one configured routing switch (XACA-1465). Strict: only
+     *  armed === true is green. Tooltip + sr-only text carry the WHY. */
+    function switchPillHtml(sw) {
+        var s = sw && typeof sw === 'object' ? sw : {};
+        var state = s.armed === true ? 'SELF-HOSTED' : (s.armed === false ? 'HOSTED' : 'UNKNOWN');
+        var cls = state === 'SELF-HOSTED' ? 'selfhosted' : (state === 'HOSTED' ? 'fallback' : 'unknown');
+        var word = state === 'HOSTED' ? 'HOSTED FALLBACK' : state;
+        var label = strOrNull(s.label) || strOrNull(s.variable) || 'SWITCH';
+        var repoPath = [strOrNull(s.owner), strOrNull(s.repo)].filter(Boolean).join('/');
+        var id = [repoPath, strOrNull(s.variable)].filter(Boolean).join('/');
+        var tip = (id || label) + ': ' + word;
+        if (state === 'UNKNOWN') {
+            tip += ' - ' + (strOrNull(s.reason) || 'reason not reported');
+        }
+        var err = strOrNull(s.error);
+        if (err) tip += ' (last read failed: ' + err + ')';
+        var via = strOrNull(s.fallsBackTo);   // optional (server may omit): chain-resolved switch
+        if (via) tip += ' (follows ' + via + ')';
+        return '<span class="cicd-pill ' + cls + '" data-cicd-switch="' + esc(id) + '" data-cicd-state="' + state + '"' +
+            ' title="' + esc(tip) + '">' +
+            (state === 'SELF-HOSTED' ? '<span aria-hidden="true">●</span> ' : '') +
+            esc(label) + ': ' + word +
+            '<span class="cicd-sr-only"> (' + esc(tip) + ')</span>' +
+            '</span>';
+    }
+
+    /** XACA-1465-019: visible WHY for UNKNOWN / errored switches (tooltips are not reachable by
+     *  keyboard or touch). Returns '' when every switch is healthy so the markup is unchanged. */
+    function switchReasonsHtml(switches) {
+        var parts = [];
+        switches.forEach(function(sw) {
+            var s = sw && typeof sw === 'object' ? sw : {};
+            var unknown = !(s.armed === true || s.armed === false);
+            var err = strOrNull(s.error);
+            if (!unknown && !err) return;
+            var label = strOrNull(s.label) || strOrNull(s.variable) || 'SWITCH';
+            var bits = [];
+            if (unknown) bits.push(strOrNull(s.reason) || 'reason not reported');
+            if (err) bits.push('last read failed (' + err + ')');
+            parts.push(esc(label) + ': ' + esc(bits.join('; ')));
+        });
+        return parts.length
+            ? '<span class="cicd-sub cicd-reasons" data-cicd-switch-reasons="">' + parts.join(' &middot; ') + '</span>'
+            : '';
+    }
+
+    /** switches[] grouped by owner/repo; group label only when >1 repo. */
+    function switchesHtml(switches) {
+        if (!switches.length) {
+            return '<span class="cicd-sub" data-cicd-switches-empty="">NO SWITCHES CONFIGURED</span>';
+        }
+        var order = [];
+        var groups = {};
+        switches.forEach(function(sw) {
+            var o = sw && typeof sw === 'object' ? sw : {};
+            var key = [strOrNull(o.owner), strOrNull(o.repo)].filter(Boolean).join('/');
+            if (!Object.prototype.hasOwnProperty.call(groups, key)) { groups[key] = []; order.push(key); }
+            groups[key].push(sw);
+        });
+        var showLabels = order.length > 1;
+        return order.map(function(key) {
+            return '<span class="cicd-pill-group" data-cicd-repo="' + esc(key) + '">' +
+                (showLabels ? '<span class="cicd-group-label">' + esc(key.split('/').pop() || key) + '</span>' : '') +
+                groups[key].map(switchPillHtml).join('') +
+                '</span>';
+        }).join('') + switchReasonsHtml(switches);
+    }
+
     function pillsHtml(fallback) {
+        if (fallback && typeof fallback === 'object' && Array.isArray(fallback.switches)) {
+            return switchesHtml(fallback.switches);
+        }
         var out = '';
         ['linux', 'macos'].forEach(function(os) {
             var state = fallbackState(fallback, os);
@@ -640,12 +717,38 @@
             !isNaN(ts(data.generatedAt));
     }
 
-    function doRefresh() {
+    // XACA-1465-013: transient note about a forced switch re-read. Lives in its OWN slot so
+    // setStatus()/render() never clobber it, and writing it never moves focus or scroll.
+    function setRefreshNote(container, info) {
+        var host = slot(container, 'status');
+        if (!host || !host.parentNode) return;
+        var el = host.parentNode.querySelector('[data-cicd-slot="refresh-note"]');
+        if (!el) {
+            if (!info) return;
+            el = container.ownerDocument.createElement('span');
+            el.className = 'cicd-sub';
+            el.setAttribute('data-cicd-slot', 'refresh-note');
+            el.setAttribute('role', 'status');
+            host.parentNode.appendChild(el);
+        }
+        var text = '';
+        if (info && info.throttled) {
+            var n = Number(info.retryAfterSec);
+            text = 'switch re-read throttled' + (isFinite(n) && n >= 0 ? ' (retry in ' + Math.ceil(n) + 's)' : '');
+        } else if (info && info.ran) {
+            text = 'switches re-read';
+        }
+        el.textContent = text;   // textContent: server-supplied values can never inject markup
+    }
+
+    function doRefresh(force) {
         var container = document.getElementById(CONTAINER_ID);
         if (!container) return Promise.resolve();
+        var url = CI_RUNNERS_API;
+        if (force) url += (url.indexOf('?') >= 0 ? '&' : '?') + 'refresh=1';
         // Resolve window.fetch at call time (tests and the auth wrapper both swap it).
         return Promise.resolve().then(function() {
-            return window.fetch(CI_RUNNERS_API, { credentials: 'same-origin' });
+            return window.fetch(url, { credentials: 'same-origin' });
         }).then(function(resp) {
             if (resp && resp.status === 404) {
                 if (!_loggedUnavailable) {
@@ -660,9 +763,13 @@
                 if (!validPayload(data)) throw new Error('unexpected payload');
                 _loggedUnavailable = false;
                 render(data, container);
+                setRefreshNote(container, force && data.refresh && typeof data.refresh === 'object' ? data.refresh : null);
                 return null;
             });
         }).catch(function(err) {
+            try {
+                setRefreshNote(container, null);   // XACA-1465-020: a stale "re-read" note must not outlive a failed fetch
+            } catch (e) { /* never reject */ }
             try {
                 renderFailure(container);
             } catch (e) { /* never reject */ }
@@ -715,9 +822,23 @@
         });
     }
 
-    function refresh() {
-        if (_inflight) return _inflight;
-        _inflight = Promise.all([doRefresh(), doPoolRefresh()]).then(function() { _inflight = null; }, function() { _inflight = null; });
+    function refresh(opts) {
+        var force = !!(opts && opts.force === true);
+        if (_inflight) {
+            if (!force || _inflightForce) return _inflight;
+            // XACA-1465-014: a forced request must not be swallowed by an in-flight AUTO refresh
+            // (it would send no ?refresh=1 and show no note). Chain ONE forced run after it;
+            // further forced requests while that is pending join it. No focus/scroll side effects.
+            if (!_forcedPending) {
+                _forcedPending = _inflight.then(function() {
+                    _forcedPending = null;
+                    return refresh({ force: true });
+                });
+            }
+            return _forcedPending;
+        }
+        _inflightForce = force;
+        _inflight = Promise.all([doRefresh(force), doPoolRefresh()]).then(function() { _inflight = null; }, function() { _inflight = null; });
         return _inflight;
     }
 

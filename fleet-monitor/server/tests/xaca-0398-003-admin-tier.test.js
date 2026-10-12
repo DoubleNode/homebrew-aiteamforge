@@ -22,7 +22,7 @@
  *   3. Cookie login + CSRF — login/logout/session routes, each CSRF layer
  *      rejecting on its own, header auth unaffected, cookie refused on the
  *      fleet tier, rate limit, no echo of the token.
- *   4. Route inventory (static, source-derived) — the 38 admin routes are on
+ *   4. Route inventory (static, source-derived) — the 40 admin routes are on
  *      requireAdminKey, the 10 fleet routes stay on the fleet gate, the 3 notify
  *      team routes are on the per-team key gate, and every
  *      mutating route anywhere is gated or deliberately allowlisted.
@@ -579,7 +579,7 @@ describe('cookie on an admin route — each CSRF layer rejects on its own', () =
 // 4. Route inventory (static, source-derived)
 // ===========================================================================
 
-// The 38 admin-tier routes (19 from the design's §1 tier classification + 2 XACA-1441 + 4 XACA-1422 mint/revoke + 3 XACA-1392 accessories + 7 XACA-1400 notify + 2 XACA-1488 notify team-key mint/revoke + 1 XACA-1405 notify test). This is
+// The 40 admin-tier routes (19 from the design's §1 tier classification + 2 XACA-1441 + 2 XACA-1465 fallback-switches GET/PUT + 4 XACA-1422 mint/revoke + 3 XACA-1392 accessories + 7 XACA-1400 notify + 2 XACA-1488 notify team-key mint/revoke + 1 XACA-1405 notify test). This is
 // the EXPECTED list — deliberately not derived from source, so a route moved
 // back to requireApiKey disappears from the source-derived admin set and the
 // equality assertion below fails.
@@ -606,6 +606,9 @@ const ADMIN_ROUTES = [
     // XACA-1441: CI pool operator routes (machine enable/pause, pool config).
     { method: 'PUT',    path: '/api/ci-pool/machines/:machine',                  file: 'lib/ci-pool-routes.js' },
     { method: 'PUT',    path: '/api/ci-pool/config',                             file: 'lib/ci-pool-routes.js' },
+    // XACA-1465-003: operator-editable list of routing switches the FALLBACK SWITCH panel reads.
+    { method: 'GET',    path: '/api/ci-pool/fallback-switches',                  file: 'lib/ci-pool-routes.js' },
+    { method: 'PUT',    path: '/api/ci-pool/fallback-switches',                  file: 'lib/ci-pool-routes.js' },
     // XACA-1422: per-host credential mint (shown once) and revoke, for both key kinds.
     { method: 'POST',   path: '/api/ci-pool/machines/:machine/key',              file: 'lib/ci-pool-routes.js' },
     { method: 'DELETE', path: '/api/ci-pool/machines/:machine/key',              file: 'lib/ci-pool-routes.js' },
@@ -684,12 +687,12 @@ describe('route inventory — every admin route is on the admin gate (static)', 
     const regs = deriveRegistrations();
     const key = (r) => `${r.method} ${r.path}`;
 
-    test('exactly 38 expected admin routes, no duplicates', () => {
-        assert.equal(ADMIN_ROUTES.length, 38);
-        assert.equal(new Set(ADMIN_ROUTES.map(key)).size, 38);
+    test('exactly 40 expected admin routes, no duplicates', () => {
+        assert.equal(ADMIN_ROUTES.length, 40);
+        assert.equal(new Set(ADMIN_ROUTES.map(key)).size, 40);
     });
 
-    test('the source-derived requireAdminKey set equals the 38 expected admin routes exactly', () => {
+    test('the source-derived requireAdminKey set equals the 40 expected admin routes exactly', () => {
         const derived = regs.filter((r) => r.gate === 'requireAdminKey').map((r) => `${r.file} ${key(r)}`).sort();
         const expected = ADMIN_ROUTES.map((r) => `${r.file} ${key(r)}`).sort();
         assert.deepEqual(derived, expected);
@@ -724,10 +727,10 @@ describe('route inventory — every admin route is on the admin gate (static)', 
         assert.ok(!/checkAdminKey|requireAdminKey/.test(src));
     });
 
-    test('tier totals: 38 admin + 10 fleet + 2 ci-host + 1 ci-telemetry + 3 notify-team-key = 54 guarded', () => {
+    test('tier totals: 40 admin + 10 fleet + 2 ci-host + 1 ci-telemetry + 3 notify-team-key = 56 guarded', () => {
         const admin = regs.filter((r) => r.gate === 'requireAdminKey').length;
         const fleet = regs.filter((r) => r.gate === 'requireApiKey').length + FLEET_GUARD_ROUTES.length;
-        assert.equal(admin, 38);
+        assert.equal(admin, 40);
         assert.equal(fleet, 10);
         assert.equal(regs.filter((r) => NOTIFY_TEAM_KEY_GATES.includes(r.gate)).length, 4);
         assert.equal(regs.filter((r) => r.gate === 'ciHostKey').length, 2);

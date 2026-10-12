@@ -537,8 +537,9 @@ function buildContractResponse(records, now, { jobsLimit = DEFAULT_JOBS_LIMIT, r
         generatedAt: now.toISOString(),
         staleAfterSeconds: STALE_THRESHOLD_MS / 1000,
         offlineAfterSeconds: OFFLINE_THRESHOLD_MS / 1000,
-        // Needs server-side GitHub API access to read the XACA-1386 repo
-        // variables; out of scope. null = "not reported" (contract rule 3).
+        // XACA-1465: the route replaces this with the fallback reader's snapshot
+        // (the XACA-1386 routing repo variables). null = "not reported" (contract
+        // rule 3): no GitHub App credentials, so nothing is read.
         fallback: null,
         summary: machines.length ? summary : null,
         machines,
@@ -1031,6 +1032,9 @@ function parseJobsLimit(raw) {
 // Routes
 // ---------------------------------------------------------------------------
 
+// XACA-1465-012: upper bound on how long ?refresh=1 waits for GitHub before serving the current snapshot.
+const REFRESH_TIMEOUT_MS = 8000;
+
 /**
  * Mount the routes. opts.file overrides the store path (tests); otherwise
  * FLEET_CI_RUNNERS_FILE, otherwise data/ci-runners.json. The rollups live
@@ -1089,9 +1093,33 @@ function registerCiRunnersRoutes(app, opts = {}) {
         }
     });
 
-    app.get('/api/ci-runners', (req, res) => {
+    // XACA-1465: opts.fallbackReader (lib/ci-fallback-reader.js) is absent when no App credentials exist.
+    const fallbackReader = opts.fallbackReader || null;
+    const refreshTimeoutMs = Number.isFinite(opts.refreshTimeoutMs) && opts.refreshTimeoutMs > 0 ? opts.refreshTimeoutMs : REFRESH_TIMEOUT_MS;
+
+    app.get('/api/ci-runners', async (req, res) => {
         try {
-            res.json(store.snapshot({ jobsLimit: parseJobsLimit(req.query.jobs) }));
+            // XACA-1465-012: ?refresh=1 (exactly) asks for a re-read of the routing variables first. It is
+            // NOT forced: the reader's minimum interval + coalescing bound GitHub spend per viewer.
+            let refresh;
+            if (req.query.refresh === '1') {
+                refresh = { ran: false, disabled: true };
+                if (fallbackReader) {
+                    let timer;
+                    const timeout = new Promise((resolve) => { timer = setTimeout(() => resolve({ ran: false, timedOut: true }), refreshTimeoutMs); });
+                    try {
+                        refresh = await Promise.race([Promise.resolve().then(() => fallbackReader.refreshNow()), timeout]);
+                    } catch (_) {
+                        refresh = { ran: false };   // never leak error detail
+                    } finally { clearTimeout(timer); }
+                }
+            }
+            const snap = store.snapshot({ jobsLimit: parseJobsLimit(req.query.jobs) });
+            snap.fallback = fallbackReader ? fallbackReader.snapshot() : null;
+            if (refresh !== undefined) snap.refresh = refresh;
+            // A refresh response must never be served from an intermediary cache.
+            if (refresh !== undefined) res.set('Cache-Control', 'no-store');
+            res.json(snap);
         } catch (error) {
             console.error('Error serving ci-runners:', error);
             res.status(500).json({ error: 'Internal server error' });

@@ -1365,6 +1365,20 @@
     text-transform: uppercase;
 }
 
+.cicd-pill-group {
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+}
+
+.cicd-group-label {
+    color: var(--lcars-tan);
+    font-size: 11px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+}
+
 .cicd-pill.selfhosted { background: var(--lcars-green); color: var(--lcars-black); }
 .cicd-pill.fallback   { background: var(--lcars-amber); color: var(--lcars-black); }
 .cicd-pill.unknown {
@@ -1397,6 +1411,11 @@
 .cicd-sub {
     font-size: 11px;
     color: var(--lcars-tan);
+}
+
+.cicd-reasons {
+    flex: 1 0 100%;
+    overflow-wrap: anywhere;
 }
 
 .cicd-stale-note {
