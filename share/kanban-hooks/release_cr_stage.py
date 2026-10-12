@@ -306,7 +306,8 @@ class ShellTools:
             bf = os.path.join(tmp, "body.md")
             with open(bf, "w", encoding="utf-8") as fh:
                 fh.write(body)
-            args = ["publish", "--doc", doc, "--key", key, "--title", title, "--body-file", bf]
+            args = ["publish", "--doc", doc, "--key", key, "--title", title, "--body-file", bf,
+                    "--body-format", "markdown"]
             if page_id:
                 args += ["--page-id", page_id, "--stored-version", str(stored_version)]
             rc, out = self._wiki(args)

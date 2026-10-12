@@ -214,7 +214,8 @@ def publish(board_path: str, cr_id: str, team: str, mode: str, activity_file: Op
             bf = Path(tmp) / "body.md"
             bf.write_text(body)
             cmd = _kb_wiki_bin() + ["publish", "--doc", DOC, "--key", cr_id, "--title", title,
-                                    "--body-file", str(bf), "--team", team, "--json"]
+                                    "--body-file", str(bf), "--body-format", "markdown",
+                                    "--team", team, "--json"]
             if os.environ.get("KB_CR_RECORD_CONFIG_DIR"):
                 cmd += ["--config-dir", os.environ["KB_CR_RECORD_CONFIG_DIR"]]
             if stored:

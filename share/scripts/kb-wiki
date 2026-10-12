@@ -38,7 +38,11 @@ must require BOTH before trusting the echoed doc/key. A mismatch is still exit 0
 
 WRITE VERBS
   publish       --doc D --key K --title S --body-file F
+                [--body-format {storage,markdown}]
                 [--page-id ID (--stored-version V | --expect-version N) [--adopt]] [--json]
+      --body-format storage (default) sends --body-file as-is (storage XHTML).
+      --body-format markdown converts it to storage XHTML first (same result on
+      the confluence and local providers; invalid values are exit 2).
       Identity is a label kb-wiki-<doc>-<key lowercased> (e.g.
       kb-wiki-testing-log-rel-5) stamped on create and required on update.
       Keys are CASE-INSENSITIVE: CR-Ab and CR-aB are the same record and the
@@ -53,11 +57,15 @@ WRITE VERBS
       carries the label; another key's page is always refused.
       JSON: {"pageId": "<id>", "url": "<url>", "version": <int>}
   patch-section --doc D --key K --page-id ID --heading H --body-file F
+                [--body-format {storage,markdown}]
                 (--stored-version V | --expect-version N) [--json]
       Replaces only the content under heading H (exit 1 if absent/ambiguous, or
       if the replacement holds a heading of the same or higher level). The
       section ends at the next same/higher heading or the close of the element
       enclosing the heading. Same location + identity guards as publish update.
+      --body-file is the SECTION BODY only (do not repeat heading H); markdown
+      is converted exactly as in publish, and a converted heading at or above
+      H's level is refused by the same-level rule above.
       JSON: the same {"pageId","url","version"} record.
 
 READ VERBS (provider-generic: no Confluence-only field at the top level)
@@ -132,6 +140,7 @@ DOC_TYPES = ("cr", "testing-log", "cr-record")
 KEY_RE = re.compile(r"^(REL|CR)-[A-Za-z0-9][A-Za-z0-9._-]*(?![\s\S])")  # not $: it matches before a final \n
 TEAM_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}(?![\s\S])")
 TEST_PROVIDER_VAR = "KB_WIKI_TEST_PROVIDER_FILE"  # test-only: a .py file defining make_provider()
+BODY_FORMATS = ("storage", "markdown")
 ALLOW_ANY_DIR_VAR = "RELEASE_CONFIG_VALIDATE_ALLOW_ANY_DIR"  # same hatch as the validator CLI
 
 
@@ -172,7 +181,11 @@ def build_parser():
         if key:
             s.add_argument("--key", required=True, type=_key, help="REL-/CR- id")
         if body:
-            s.add_argument("--body-file", required=True, help="rendered body (storage format)")
+            s.add_argument("--body-file", required=True,
+                           help="body file; its format is set by --body-format (default storage)")
+            s.add_argument("--body-format", choices=BODY_FORMATS, default="storage",
+                           help="format of --body-file: 'storage' (default) is sent as-is; "
+                                "'markdown' is converted to storage XHTML before publishing")
         if heading:
             s.add_argument("--heading", required=True, help="heading whose body is replaced")
         if title:
@@ -517,6 +530,20 @@ def _read_body(path):
         raise _Usage(f"cannot read --body-file ({type(exc).__name__})") from None
 
 
+def _convert_body(body, fmt):
+    """--body-format: 'storage' is returned untouched (byte-for-byte the legacy
+    path); 'markdown' goes through the pure converter. Providers never see
+    markdown, so Confluence and the local wiki store identical storage XHTML."""
+    if fmt == "storage":
+        return body
+    try:
+        from release_wiki_md2storage import md_to_storage
+    except ImportError:
+        raise _ConfigError("cannot import release_wiki_md2storage (needed for "
+                           "--body-format markdown)") from None
+    return md_to_storage(body)
+
+
 def _team_of(args):
     team = args.team or os.environ.get("KB_TEAM", "")
     if not team:
@@ -544,6 +571,9 @@ def _run(args):
         raise _Usage("--stored-version/--expect-version only apply with --page-id")
     body = _read_body(args.body_file)
     if not is_patch and not body.strip():
+        raise _Usage("--body-file is empty; refusing to publish a blank page")
+    body = _convert_body(body, getattr(args, "body_format", "storage"))
+    if not is_patch and not body.strip():  # markdown that converts to nothing is still blank
         raise _Usage("--body-file is empty; refusing to publish a blank page")
     if not is_patch and args.adopt and args.page_id is None:
         raise _Usage("--adopt only applies with --page-id")
