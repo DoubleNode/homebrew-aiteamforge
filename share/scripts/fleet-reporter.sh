@@ -1796,6 +1796,75 @@ _system_volatile_get() {
 # statement (not inside $( )) and read it back with _system_power_get.
 _SYSTEM_POWER_JSON=""
 
+# XACA-1473-002: UPS hardware serial (optional enrichment, never required).
+#
+# ONE `ioreg -r -c IOHIDDevice -l` call per cycle, only when pmset already
+# found a UPS. Bounded exactly like the pmset call below: 3s ceiling, SIGKILL,
+# no `wait` on a hung child, so a wedged ioreg can never stall the reporter.
+#
+# PARSER TRAP: the dump also carries other HID devices (a Magic Trackpad's
+# serial appears on a dozen lines), so the FIRST SerialNumber in the output is
+# the WRONG one. The awk scopes to the top-level device block ("+-o" at column
+# 0) whose "PrimaryUsagePage" = 132 (USB HID Power Device page) and reads the
+# SerialNumber inside that block only. If several blocks are 132, only the
+# FIRST is a candidate (the same first-device rule XACA-1391-011 pinned for
+# pmset): if it has no SerialNumber, a later 132 block never stands in.
+#
+# Validation: ^[A-Za-z0-9._-]{1,64}$ -- the server sanitizer (XACA-1473-003)
+# MUST use exactly this rule. Anything else (empty, too long, spaces, quotes,
+# control chars) is dropped: the serial is OMITTED, never "", null, or a
+# placeholder. Sets the module-level _SYSTEM_UPS_SERIAL (empty = absent); call
+# it as a plain statement, not inside $( ). Always returns 0.
+_SYSTEM_UPS_SERIAL=""
+
+_system_collect_ups_serial() {
+    _SYSTEM_UPS_SERIAL=""
+    command -v ioreg >/dev/null 2>&1 || return 0
+
+    local us_tmp="" us_pid="" us_i=0 us_rc=0 us_val=""
+    us_tmp="$(mktemp "${TMPDIR:-/tmp}/fleet-upsser.XXXXXX" 2>/dev/null)" || return 0
+    ioreg -r -c IOHIDDevice -l >"$us_tmp" 2>/dev/null &
+    us_pid=$!
+    while kill -0 "$us_pid" 2>/dev/null; do
+        if [ "$us_i" -ge 30 ]; then
+            # SIGKILL + disown, no `wait` (see _system_collect_power).
+            disown "$us_pid" 2>/dev/null || true
+            kill -9 "$us_pid" 2>/dev/null || true
+            rm "$us_tmp" 2>/dev/null || true
+            return 0
+        fi
+        sleep 0.1
+        us_i=$((us_i + 1))
+    done
+    wait "$us_pid" 2>/dev/null || us_rc=$?
+    if [ "$us_rc" -ne 0 ]; then
+        rm "$us_tmp" 2>/dev/null || true
+        return 0
+    fi
+    us_val="$(awk '
+        function emit() { if (in132) { print ser; found = 1; exit } }
+        /^\+-o / { emit(); in132 = 0; ser = ""; got = 0; next }
+        /"PrimaryUsagePage" = 132[ \t]*$/ { in132 = 1; next }
+        /^[ |]*"SerialNumber" = "/ {
+            if (!got) {
+                v = $0
+                sub(/^[ |]*"SerialNumber" = "/, "", v)
+                sub(/"[ \t]*$/, "", v)
+                ser = v; got = 1
+            }
+        }
+        END { if (!found) emit() }
+    ' "$us_tmp" 2>/dev/null || true)"
+    rm "$us_tmp" 2>/dev/null || true
+
+    case "$us_val" in
+        ''|*[!A-Za-z0-9._-]*) return 0 ;;
+    esac
+    [ "${#us_val}" -le 64 ] || return 0
+    _SYSTEM_UPS_SERIAL="$us_val"
+    return 0
+}
+
 _system_collect_power() {
     _SYSTEM_POWER_JSON=""
     command -v pmset >/dev/null 2>&1 || return 0
@@ -1924,6 +1993,16 @@ _system_collect_power() {
     done <<_SYSTEM_POWER_EOF
 $pw_out
 _SYSTEM_POWER_EOF
+
+    # XACA-1473-002: enrich a found UPS with its hardware serial. Only when a
+    # ups object was actually built; the key is absent unless a valid serial
+    # was read (never "" / null).
+    if [ "$pw_ups" != "null" ]; then
+        _system_collect_ups_serial
+        if [ -n "$_SYSTEM_UPS_SERIAL" ]; then
+            pw_ups="${pw_ups%\}},\"serial\":\"${_SYSTEM_UPS_SERIAL}\"}"
+        fi
+    fi
 
     [ -n "$pw_source" ] || return 0
     _SYSTEM_POWER_JSON="{\"source\":\"${pw_source}\",\"ups\":${pw_ups}}"

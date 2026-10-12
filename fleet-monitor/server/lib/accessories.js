@@ -52,6 +52,9 @@ const NICKNAME_MAX = 64;
 const NAME_MAX = 64;            // == server.js POWER_UPS_NAME_MAX; longer names are refused, never truncated
 
 const ACCESSORY_ID_RE = /^acc_[0-9a-f]{16}$/;
+// XACA-1473: optional hardware serial. MUST equal server.js POWER_UPS_SERIAL_RE (the
+// sanitizer already enforced it on the report path; this re-checks persisted records).
+const SERIAL_RE = /^[A-Za-z0-9._-]{1,64}$/;
 // Same shape ci-pool-store.js uses for a machine id; also what a UUID satisfies.
 const MACHINE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const CONTROL_RE = /[\u0000-\u001f\u007f]/;
@@ -71,14 +74,41 @@ const clone = (o) => JSON.parse(JSON.stringify(o));
  * every USB reconnect and strand the old record (and its attachments) as stale.
  * `ups.id` is kept as a volatile attribute (`upsId`, refreshed every report) only.
  *
- * ACCEPTED LIMIT: two identical-model UPSes on ONE data-link machine share a name
- * and therefore MERGE into one accessory. A hardware serial (ioreg
- * IOHIDDevice "SerialNumber") is the likely future key once its stability across a
- * reconnect is verified; changing the key means changing only this function.
+ * ORIGINAL LIMIT (XACA-1392): two identical-model UPSes on ONE data-link machine share a
+ * name and merged into one accessory. XACA-1473 lifts it when the reporter sends the
+ * hardware serial (ioreg IOHIDDevice "SerialNumber", verified stable across a reboot);
+ * without a serial the limit still applies.
+ *
+ * XACA-1473 (revised D2): the serial is now a MATCH KEY, not a re-key. This function is
+ * unchanged, so every existing id stays byte-identical (power-guard policies pin ids,
+ * e.g. acc_1b9f710a9764b3ff). It is ALSO the id minted for an accessory first seen WITH a
+ * serial whenever this id is still free, so a pre-1473 server can load that record on
+ * rollback (it drops only the serial). See accessoryIdForSerial for the one exception, and
+ * upsertFromReport / resolve for the matching order.
  */
 function accessoryId(dataLinkMachineId, upsName) {
     const h = crypto.createHash('sha256')
         .update(`${String(dataLinkMachineId)}\u0000${String(upsName)}`, 'utf8')
+        .digest('hex');
+    return `acc_${h.slice(0, 16)}`;
+}
+
+/**
+ * XACA-1473: id for a NEW accessory first discovered with a hardware serial whose
+ * machine+name id is ALREADY TAKEN by a same-name record holding a different serial (the
+ * genuine second same-model UPS on one machine). Every other new accessory gets the
+ * machine+name id, for rollback safety. A serial-id record cannot be represented on a
+ * pre-1473 server (it fails that server's id == accessoryId(machine, name) check and is
+ * dropped on its next save); unavoidable, since an old server would merge the two UPSes.
+ *
+ * Same acc_<16 hex> shape, distinct hash domain: the 'serial\u0000' prefix means no
+ * (machine, name) pair can hash the same input string as a (machine, serial) pair, because
+ * a machine id never contains NUL and the name-id input has exactly one NUL separator
+ * while this has two. Ids are opaque permanent handles: never re-minted once assigned.
+ */
+function accessoryIdForSerial(dataLinkMachineId, serial) {
+    const h = crypto.createHash('sha256')
+        .update(`serial\u0000${String(dataLinkMachineId)}\u0000${String(serial)}`, 'utf8')
         .digest('hex');
     return `acc_${h.slice(0, 16)}`;
 }
@@ -90,7 +120,16 @@ function cleanRecord(id, r) {
     if (typeof r.dataLinkMachineId !== 'string' || !r.dataLinkMachineId || r.dataLinkMachineId.length > 128) return null;
     if (typeof r.upsId !== 'string' || !r.upsId) return null;
     if (typeof r.name !== 'string' || !r.name || r.name.length > NAME_MAX) return null; // never truncate: the id hashes the FULL name
-    if (accessoryId(r.dataLinkMachineId, r.name) !== id) return null; // id must match its identity (machine + name)
+    // XACA-1473: an optional serial. A malformed one is DROPPED (treated as absent), never
+    // fatal by itself: the record then must validate as a machine+name record, and the next
+    // serialed report re-adopts it. A serial-derived id with a bad serial cannot be verified
+    // and is rejected below like any other id mismatch.
+    const serial = typeof r.serial === 'string' && SERIAL_RE.test(r.serial) ? r.serial : null;
+    // id must match its identity: machine + name (always allowed: records that adopted a
+    // serial keep their name id), or machine + serial (accessory first seen with a serial).
+    const nameIdOk = accessoryId(r.dataLinkMachineId, r.name) === id;
+    const serialIdOk = serial !== null && accessoryIdForSerial(r.dataLinkMachineId, serial) === id;
+    if (!nameIdOk && !serialIdOk) return null;
 
     const attached = Array.isArray(r.attachedMachineIds)
         ? Array.from(new Set(r.attachedMachineIds.filter((m) => typeof m === 'string' && MACHINE_ID_RE.test(m)))).slice(0, MAX_ATTACHED)
@@ -117,7 +156,7 @@ function cleanRecord(id, r) {
             .map((h) => ({ at: h.at, from: h.from, to: h.to }))
         : [];
 
-    return {
+    const out = {
         id,
         type: 'ups',
         name: r.name,
@@ -135,6 +174,8 @@ function cleanRecord(id, r) {
         createdAt: typeof r.createdAt === 'string' ? r.createdAt : null,
         updatedAt: typeof r.updatedAt === 'string' ? r.updatedAt : null,
     };
+    if (serial !== null) out.serial = serial; // absent -> no key (never null), like the wire
+    return out;
 }
 
 /**
@@ -262,14 +303,35 @@ function createRegistry(opts) {
         const u = power.ups;
         if (u.id === undefined || u.id === null || typeof u.name !== 'string' || !u.name || u.name.length > NAME_MAX) return null;
         const upsId = String(u.id); // volatile attribute, NOT identity (see accessoryId)
-        const id = accessoryId(machineId, u.name);
+        const serial = typeof u.serial === 'string' && SERIAL_RE.test(u.serial) ? u.serial : null;
+        const m = resolve(machineId, u.name, serial);
+        if (m.ambiguous) {
+            log(`accessories: ${m.ambiguous}; report from ${machineId} not applied`);
+            return null;
+        }
         const observedAt = nowFn().toISOString();
-        let rec = records.get(id);
+        let rec = m.rec;
         let flushNow = false;
 
         if (!rec) {
             if (records.size >= MAX_ACCESSORIES) {
                 log(`accessories: registry full (${MAX_ACCESSORIES}); ignoring new UPS ${upsId} from ${machineId}`);
+                return null;
+            }
+            // Minting a NEW id (XACA-1473, rollback-safe rule): prefer the machine+name id
+            // even when the report carries a serial, so a pre-1473 server (which only
+            // accepts id == accessoryId(machine, name)) still loads the record on rollback
+            // and merely drops its serial. Only when that name id is already TAKEN -- by a
+            // same-name record holding a DIFFERENT serial, i.e. a genuine second same-model
+            // UPS -- is a serial-derived id minted. That record is unavoidably not
+            // representable on an old server (which would merge the two UPSes anyway); an
+            // old server skips it as malformed on load. Accepted and left as is.
+            const nameId = accessoryId(machineId, u.name);
+            const id = serial !== null && records.has(nameId) ? accessoryIdForSerial(machineId, serial) : nameId;
+            if (records.has(id)) {
+                // Unreachable by construction (resolve() would have matched it); refuse rather
+                // than overwrite a record someone else owns.
+                log(`accessories: id ${id} already taken; report from ${machineId} not applied`);
                 return null;
             }
             rec = {
@@ -279,7 +341,14 @@ function createRegistry(opts) {
                 lastReading: null, seq: 0, state: 'unknown', stateSince: observedAt, history: [],
                 createdAt: observedAt, updatedAt: observedAt,
             };
+            if (serial !== null) rec.serial = serial;
             records.set(id, rec);
+            flushNow = true;
+        } else if (m.adopt) {
+            // XACA-1473 migration: a machine+name record learns its serial IN PLACE. id,
+            // nickname, attachments, state and history are untouched (power-guard pins ids).
+            rec.serial = serial;
+            if (rec.upsId !== upsId) rec.upsId = upsId;
             flushNow = true;
         } else if (rec.upsId !== upsId) {
             // Same UPS (same machine + name), new pmset HID id after a reconnect: update in
@@ -298,7 +367,50 @@ function createRegistry(opts) {
         rec.updatedAt = observedAt;
         dirty = true;
         if (flushNow) save();
-        return id;
+        return rec.id;
+    }
+
+    /**
+     * XACA-1473 matching (revised D2). Scoped to records whose data-link machine is
+     * `machineId` (a UPS moved to another host is a new accessory, exactly as before).
+     *
+     * With a serial:
+     *   1. a record on this machine whose stored serial === serial  -> that record
+     *      (its name is NOT compared or rewritten: a name id hashes the name, so the
+     *      name is frozen; the serial is the stronger key);
+     *   2. else the record on this machine with that name and NO serial yet -> adopt
+     *      (at most one can exist: serial-less records all carry the deterministic
+     *      machine+name id);
+     *   3. else none -> caller creates a new accessory: on the machine+name id if that id
+     *      is free (rollback-safe), else on a serial-derived id. So once X adopted
+     *      serial A, a same-name report with serial B creates a second accessory (serial
+     *      id, since X holds the name id) and never steals X.
+     * Without a serial (old reporter, or the serial was unreadable this cycle):
+     *   name fallback over ALL records on this machine with that name, serial-bearing
+     *   included. Exactly one -> that record (its stored serial is kept: a missing
+     *   serial never erases one). Zero -> create the machine+name accessory (today's
+     *   behaviour). Two or more (same-model UPSes already told apart by serial) ->
+     *   AMBIGUOUS: the report cannot say which UPS it is, so nothing is updated or
+     *   created (creating would duplicate one of them).
+     *
+     * Returns { rec|null, adopt:bool, ambiguous:string|null }.
+     */
+    function resolve(machineId, name, serial) {
+        const mine = [];
+        for (const r of records.values()) if (r.dataLinkMachineId === machineId) mine.push(r);
+        if (serial !== null) {
+            const bySerial = mine.find((r) => r.serial === serial);
+            if (bySerial) return { rec: bySerial, adopt: false, ambiguous: null };
+            const unclaimed = mine.find((r) => r.serial === undefined && r.name === name);
+            if (unclaimed) return { rec: unclaimed, adopt: true, ambiguous: null };
+            return { rec: null, adopt: false, ambiguous: null };
+        }
+        const byName = mine.filter((r) => r.name === name);
+        if (byName.length === 1) return { rec: byName[0], adopt: false, ambiguous: null };
+        if (byName.length > 1) {
+            return { rec: null, adopt: false, ambiguous: `serial-less report for "${name}" matches ${byName.length} accessories (${byName.map((r) => r.id).join(', ')})` };
+        }
+        return { rec: null, adopt: false, ambiguous: null };
     }
 
     // ------------------------------------------------- 003 attachment
@@ -380,7 +492,16 @@ function createRegistry(opts) {
         if (!host || host.status !== 'online') return 'unknown';
         const power = host.system && host.system.power;
         if (!power) return 'unknown';
-        if (!power.ups || power.ups.name !== rec.name) return 'unknown';
+        if (!power.ups) return 'unknown';
+        // XACA-1473: the report counts for THIS record only if it resolves to it with the
+        // same rule the upsert uses (serial first, then name; ambiguous -> nobody). With no
+        // serial anywhere this is exactly the old `ups.name === rec.name` check.
+        const u = power.ups;
+        const serial = typeof u.serial === 'string' && SERIAL_RE.test(u.serial) ? u.serial : null;
+        if (typeof u.name !== 'string') return 'unknown';
+        const m = resolve(rec.dataLinkMachineId, u.name, serial);
+        // (An adopt-pending match -- serialed report, serial-less record -- returns this rec too.)
+        if (m.rec !== rec) return 'unknown';
         if (power.source === 'ups') return 'on_battery';
         if (power.source === 'ac') return 'ac';
         return 'unknown';
@@ -524,6 +645,7 @@ function createRegistry(opts) {
 module.exports = {
     createRegistry,
     accessoryId,
+    accessoryIdForSerial,
     cleanRecord,
     SCHEMA_VERSION,
     DEFAULT_FILE,
@@ -532,6 +654,7 @@ module.exports = {
     MAX_HISTORY,
     NICKNAME_MAX,
     ACCESSORY_ID_RE,
+    SERIAL_RE,
     MACHINE_ID_RE,
     CONTROL_RE,
     STATES,

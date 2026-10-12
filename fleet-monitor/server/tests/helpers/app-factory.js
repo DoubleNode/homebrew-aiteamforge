@@ -292,6 +292,12 @@ const POWER_MINUTES_MAX = 525600; // one year -- beyond this is a bogus estimate
 // reporter would never send.
 const POWER_UPS_ID_RE = /^[0-9A-Za-z_.:-]{1,32}$/;
 const POWER_UPS_NAME_BAD_RE = /[\u0000-\u001f\u007f]/;
+// XACA-1473-003: optional hardware serial (reporter: ioreg SerialNumber). Same
+// charset/length rule the reporter enforces. DELIBERATE EXCEPTION to the
+// "any invalid field nulls the whole ups" rule above: a bad serial drops ONLY
+// the serial key (the UPS still reports); the rule stays for every other field.
+// Absent serial -> no key at all (never null).
+const POWER_UPS_SERIAL_RE = /^[A-Za-z0-9._-]{1,64}$/;
 
 function sanitizePowerBlock(power) {
     if (!power || typeof power !== 'object' || Array.isArray(power)) return null;
@@ -318,6 +324,9 @@ function sanitizePowerBlock(power) {
                 minutes_remaining: u.minutes_remaining,
                 present: u.present
             };
+            if (typeof u.serial === 'string' && POWER_UPS_SERIAL_RE.test(u.serial)) {
+                ups.serial = u.serial;
+            }
         }
     }
     return { source: power.source, ups: ups };

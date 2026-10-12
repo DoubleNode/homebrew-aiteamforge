@@ -140,7 +140,7 @@ test('percent 0 and charging:false/present:false survive (falsy is data)', () =>
 
 test('extra fields are stripped at both power and ups level', () => {
     const out = normalizeSystemBlock({
-        power: { source: 'ups', extra: 'x', ups: Object.assign(goodUps(), { serial: 'SECRET' }) }
+        power: { source: 'ups', extra: 'x', ups: Object.assign(goodUps(), { token: 'SECRET' }) }
     });
     assert.deepEqual(Object.getOwnPropertyNames(out.power).sort(), ['source', 'ups']);
     assert.deepEqual(Object.getOwnPropertyNames(out.power.ups).sort(),
