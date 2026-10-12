@@ -27,6 +27,12 @@
 #   6. launchctl bootout (ignored if not loaded) then bootstrap.
 # It does NOT arm anything: the seeded policy is enabled=false, dry_run=true.
 #
+# UPS SLEEP CHECK (XACA-1502): install and status also print an ADVISORY "ups-sleep:" line.
+# The Mac holding the UPS USB data link uses the separate "UPS Power" energy profile; if
+# that has sleep > 0 the Mac sleeps on battery, stops reporting, and the cooperative
+# shutdown never fires (XACA-1395 drill). Read-only: it never changes a setting and never
+# affects exit codes. Fix, if warned: sudo pmset -u sleep 0 womp 1
+#
 # UNINSTALL: bootout, remove the plist, the root-owned dir and the debounce counter
 # (runtime state). The policy and the logs under /Library/Logs/aiteamforge are LEFT in
 # place (evidence of what the guard saw).
@@ -79,6 +85,10 @@ Usage:
        bash install-power-guard.sh status                  read-only health report
 
 --dry-run prints what would happen, changes nothing and needs no root.
+
+install and status also print an advisory 'ups-sleep:' line: the Mac with the UPS USB
+data link must have sleep 0 in its 'UPS Power' energy profile, or it sleeps on battery and
+the cooperative shutdown never fires. Read-only; the fix is: sudo pmset -u sleep 0 womp 1
 EOF
 }
 
@@ -241,6 +251,110 @@ payload_preflight() {
   [ "$missing" = 0 ] || { err "Nothing was changed."; return 1; }
 }
 
+# ---- UPS power-profile sleep check (XACA-1502) ------------------------------
+# _pg_pmset_capture <pmset args...>: run pmset with a 3 s ceiling, output -> PG_PMSET_OUT.
+# Returns 0 ok | 1 pmset not found | 2 timed out | 3 failed / no output. No timeout(1) on
+# stock macOS, so poll the background pid (same approach as fleet-reporter's
+# _system_collect_power). Never aborts the caller under set -e: callers use `|| rc=$?`.
+PG_PMSET_OUT=""
+_pg_pmset_capture() {
+  PG_PMSET_OUT=""
+  command -v pmset >/dev/null 2>&1 || return 1
+  local tmp pid i=0 rc=0
+  tmp="$(mktemp "${TMPDIR:-/tmp}/power-guard-pmset.XXXXXX" 2>/dev/null)" || return 3
+  pmset "$@" >"$tmp" 2>/dev/null &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$i" -ge 30 ]; then
+      disown "$pid" 2>/dev/null || true
+      kill -9 "$pid" 2>/dev/null || true
+      rm "$tmp" 2>/dev/null || true
+      return 2
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  wait "$pid" 2>/dev/null || rc=$?
+  PG_PMSET_OUT="$(cat "$tmp" 2>/dev/null || true)"
+  rm "$tmp" 2>/dev/null || true
+  [ "$rc" -eq 0 ] || return 3
+  [ -n "$PG_PMSET_OUT" ] || return 3
+  return 0
+}
+
+# ups_sleep_check: ADVISORY. If this Mac holds a UPS data link, its "UPS Power" energy
+# profile must have sleep 0 or it sleeps on battery, stops reporting, and the cooperative
+# shutdown never fires (XACA-1395 drill, 2026-10-11). Prints "ups-sleep:" line(s); exactly
+# one outcome. Detect and advise only: never changes a power setting. Always returns 0.
+# Anything it cannot verify is "could not determine", never an OK.
+ups_sleep_check() {
+  local rc=0 line="" in_ups=0 saw_ups=0 has_ups=0 sleep_v="" womp_v="" k="" v="" rest=""
+
+  _pg_pmset_capture -g ps || rc=$?
+  case "$rc" in
+    0) ;;
+    1) info "ups-sleep: could not determine UPS sleep setting (pmset not found)"; return 0 ;;
+    2) info "ups-sleep: could not determine UPS sleep setting (pmset -g ps timed out)"; return 0 ;;
+    *) info "ups-sleep: could not determine UPS sleep setting (pmset -g ps failed)"; return 0 ;;
+  esac
+  # A UPS is a power-source device line (" -Name (id=..)") that is not the internal battery.
+  while IFS= read -r line; do
+    case "$line" in
+      " -InternalBattery"*) ;;
+      " -"*) has_ups=1 ;;
+    esac
+  done <<EOF
+$PG_PMSET_OUT
+EOF
+  if [ "$has_ups" = 0 ]; then
+    info "ups-sleep: not applicable (no UPS attached)"
+    return 0
+  fi
+
+  rc=0
+  _pg_pmset_capture -g custom || rc=$?
+  case "$rc" in
+    0) ;;
+    2) info "ups-sleep: could not determine UPS sleep setting (pmset -g custom timed out)"; return 0 ;;
+    *) info "ups-sleep: could not determine UPS sleep setting (pmset -g custom failed)"; return 0 ;;
+  esac
+  # Scope to the "UPS Power:" section: unindented header up to the next unindented header.
+  while IFS= read -r line; do
+    case "$line" in
+      "UPS Power:"*) in_ups=1; saw_ups=1; continue ;;
+      [[:space:]]*) ;;
+      *) in_ups=0; continue ;;
+    esac
+    [ "$in_ups" = 1 ] || continue
+    k=""; v=""; rest=""
+    read -r k v rest <<EOF2 || true
+$line
+EOF2
+    case "$k" in
+      sleep) sleep_v="$v" ;;
+      womp) womp_v="$v" ;;
+    esac
+  done <<EOF
+$PG_PMSET_OUT
+EOF
+  if [ "$saw_ups" = 0 ]; then
+    info "ups-sleep: could not determine UPS sleep setting (UPS attached but pmset -g custom has no 'UPS Power:' section)"
+    return 0
+  fi
+  case "$sleep_v" in
+    "") info "ups-sleep: could not determine UPS sleep setting (no 'sleep' value in the UPS Power profile)"; return 0 ;;
+    *[!0-9]*) info "ups-sleep: could not determine UPS sleep setting (non-numeric sleep value '$sleep_v')"; return 0 ;;
+  esac
+  if [ "$sleep_v" -eq 0 ]; then
+    info "ups-sleep: OK (UPS Power profile: sleep 0, womp ${womp_v:-unknown})"
+  else
+    info "ups-sleep: WARNING UPS Power profile has sleep $sleep_v (womp ${womp_v:-unknown}): this Mac holds the UPS data link, so it will sleep on battery, stop reporting, and the cooperative shutdown will never fire."
+    if [ "$womp_v" = "0" ]; then info "ups-sleep: WARNING womp is 0 too: wake-on-network is off, so it cannot be woken remotely."; fi
+    info "ups-sleep: fix (not applied; you own this machine's power policy): sudo pmset -u sleep 0 womp 1"
+  fi
+  return 0
+}
+
 require_root() {
   [ "$DRY" = 1 ] && return 0
   if [ "$(id -u)" != "0" ]; then
@@ -308,6 +422,7 @@ do_install() {
     launchctl bootout "system/${LABEL}" >/dev/null 2>&1 || true
     launchctl bootstrap system "$PLIST" || { err "launchctl bootstrap failed for $PLIST"; exit 1; }
   fi
+  ups_sleep_check || true
   info "power-guard $([ "$existed" = 1 ] && echo upgraded || echo installed). Log: ${LOG_DIR}/power-guard.log"
   info "It is DISARMED. Arm only after the supervised drill (XACA-1395)."
 }
@@ -348,6 +463,7 @@ do_status() {
   if user="$(resolve_user 2>/dev/null)" && uhome="$(resolve_user_home 2>/dev/null)"; then
     if [ -f "${uhome}/.aiteamforge/power-guard-policy.json" ]; then info "policy:   present (${uhome}/.aiteamforge/power-guard-policy.json)"; else info "policy:   ABSENT"; fi
   fi
+  ups_sleep_check || true
   return $rc
 }
 

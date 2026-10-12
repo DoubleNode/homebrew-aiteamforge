@@ -7,6 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- **XACA-1502** (Added): `share/scripts/power-guard/install-power-guard.sh` install and status print an advisory `ups-sleep:` check. When a UPS is attached (`pmset -g ps`) and the `UPS Power` profile in `pmset -g custom` has `sleep` != 0, it warns with the fix `sudo pmset -u sleep 0 womp 1`; otherwise OK / not applicable / could not determine. Read-only; exit codes unchanged. Mirror-only, byte-identical to the dev-team canonical file.
+
 ## [0.21.2] - 2026-10-12
 
 - **XACA-1506** (Changed, re-mirror): `fleet-monitor/server/` re-mirrored with XACA-1065's merged test-flake fix, which landed on dev-team (b9b30641, 903d70ff) without a tap sync and left `develop` red on `sync-tap-drift`. 52 files drifted and 4 are new: supertest listeners pinned to 127.0.0.1, the new `tests/helpers/loopback-request.js` helper, `tests/xaca-1065-loopback-request.test.js` and `tests/xaca-1065-loopback-guard.test.js`, and `scripts/flake-ab.sh`. Mirror-only, byte-identical to the dev-team canonical files.
