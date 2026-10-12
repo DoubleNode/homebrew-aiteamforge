@@ -20,12 +20,20 @@ from __future__ import annotations
 
 import re
 import sys
+import xml.etree.ElementTree as ET
 from typing import List, Optional, Tuple
 
-__all__ = ["md_to_storage"]
+__all__ = ["md_to_storage", "leading_h1_text"]
 
-_COMMENT_RE = re.compile(r"^[ \t]*<!--.*?-->[ \t]*$", re.DOTALL | re.MULTILINE)
-_CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+# A comment match may NEVER contain "-->" (XACA-1509-014): the tempered body
+# stops at the first terminator, so text after it can never be swallowed.
+# Block form: the comment (possibly multi-line) owns its whole line(s).
+_COMMENT_RE = re.compile(r"^[ \t]*<!--(?:(?!-->).)*-->[ \t]*$", re.DOTALL | re.MULTILINE)
+# Inline form (XACA-1509-011): single line, surrounding text is kept.
+_INLINE_COMMENT_RE = re.compile(r"<!--(?:(?!-->).)*-->")
+# Anything that is not a legal XML 1.0 Char (this also drops lone surrogates,
+# U+FFFE and U+FFFF). Tab/LF/CR survive; CR is normalised before this runs.
+_CTRL_RE = re.compile("[^\x09\x0a\x0d\x20-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]")
 _FENCE_RE = re.compile(r"^\s*```\s*([\w+#.-]*)\s*$")
 _HEADING_RE = re.compile(r"^\s{0,3}(#{1,6})\s+(.*?)(?:\s+#+)?\s*$")
 _HR_RE = re.compile(r"^\s{0,3}(?:-{3,}|\*{3,}|_{3,})\s*$")
@@ -47,6 +55,7 @@ _BOLD_RE = re.compile(r"\*\*(?=\S)(.+?)(?<=\S)\*\*|(?<!\w)__(?=\S)(.+?)(?<=\S)__
 _ITAL_RE = re.compile(
     r"(?<![\w*])\*(?=[^\s*])(.+?)(?<=[^\s*])\*(?![\w*])|(?<!\w)_(?=[^\s_])(.+?)(?<=[^\s_])_(?!\w)"
 )
+_EMPH_RE = re.compile(_BOLD_RE.pattern + "|" + _ITAL_RE.pattern)
 _PH_RE = re.compile("\x00(\\d+)\x00")
 _SAFE_SCHEME_RE = re.compile(r"^(?:https?|mailto):", re.IGNORECASE)
 _ANY_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
@@ -83,25 +92,67 @@ def _image_xml(alt: str, target: str) -> Optional[str]:
     return '<ac:image ac:alt="%s">%s</ac:image>' % (_esc(alt), ref)
 
 
-def _inline(text: str, autolink: bool = True) -> str:
-    """Render inline markdown. Complete elements are parked in placeholders so
-    emphasis processing can never cut through them or through attributes."""
-    store: List[str] = []
+def _restore(s: str, store: List[Tuple[str, str]]) -> str:
+    """Substitute placeholders back. Parked html may itself hold placeholders
+    (a link label), so repeat; an unknown index yields "" and never raises."""
+    def sub(m):
+        k = int(m.group(1))
+        return store[k][0] if k < len(store) else ""
+    for _ in range(8):
+        if "\x00" not in s:
+            break
+        s = _PH_RE.sub(sub, s)
+    return _PH_RE.sub("", s)
 
-    def park(html: str) -> str:
-        store.append(html)
+
+def _plain(s: str, store: List[Tuple[str, str]]) -> str:
+    """Placeholder-free plain text, for use inside XML attribute values."""
+    def sub(m):
+        k = int(m.group(1))
+        return store[k][1] if k < len(store) else ""
+    return _PH_RE.sub(sub, s)
+
+
+def _emph(s: str) -> str:
+    """Bold/italic in ONE left-to-right pass. re.sub matches never overlap and
+    each match's inner text is rendered recursively, so the emitted tags are
+    balanced by construction (XACA-1509-013)."""
+    def rep(m):
+        tag = "strong" if (m.group(1) or m.group(2)) else "em"
+        inner = m.group(1) or m.group(2) or m.group(3) or m.group(4)
+        return "<%s>%s</%s>" % (tag, _emph(inner), tag)
+    return _EMPH_RE.sub(rep, s)
+
+
+def _inline(text: str, autolink: bool = True,
+            store: Optional[List[Tuple[str, str]]] = None) -> str:
+    """Render inline markdown. Complete elements are parked in placeholders so
+    emphasis processing can never cut through them or through attributes.
+
+    ONE store is shared through the whole recursion (link labels are rendered
+    by a nested call); only the outermost call restores placeholders
+    (XACA-1509-012). Store entries are (html, plain-text) pairs."""
+    top = store is None
+    if store is None:
+        store = []
+
+    def park(html: str, plain: str = "") -> str:
+        store.append((html, plain))
         return "\x00%d\x00" % (len(store) - 1)
 
     def code(m):
-        return park("<code>%s</code>" % _esc(m.group(2).strip("\n")))
+        body = m.group(2).strip("\n")
+        return park("<code>%s</code>" % _esc(body), body)
 
     def img(m):
-        out = _image_xml(m.group(1), m.group(2))
-        return park(out) if out is not None else park(_esc(m.group(1)))
+        alt = _plain(m.group(1), store)
+        out = _image_xml(alt, _plain(m.group(2), store))
+        return park(out) if out is not None else park(_esc(alt), alt)
 
     def link(m):
-        label = _inline(m.group(1).replace("\\[", "[").replace("\\]", "]"), autolink=False)
-        url = m.group(2)
+        label = _inline(m.group(1).replace("\\[", "[").replace("\\]", "]"),
+                        autolink=False, store=store)
+        url = _plain(m.group(2), store)
         if not _safe_target(url):
             return park(label)
         return park('<a href="%s">%s</a>' % (_esc(url), label))
@@ -121,17 +172,16 @@ def _inline(text: str, autolink: bool = True) -> str:
         return park('<a href="%s">%s</a>' % (_esc(raw), _esc(raw))) + tail
 
     s = _CODE_RE.sub(code, text)
+    stripped = _INLINE_COMMENT_RE.sub("", s)  # code spans are parked: they keep "<!--"
+    if stripped != s:
+        s = stripped.strip()
     s = _IMG_RE.sub(img, s)
     s = _LINK_RE.sub(link, s)
-    s = _BR_RE.sub(lambda m: park("<br />"), s)
+    s = _BR_RE.sub(lambda m: park("<br />", " "), s)
     if autolink:  # never nest an <a> inside a link label
         s = _URL_RE.sub(url, s)
-    s = _esc(s)
-    s = _BOLD_RE.sub(lambda m: "<strong>%s</strong>" % (m.group(1) or m.group(2)), s)
-    s = _ITAL_RE.sub(lambda m: "<em>%s</em>" % (m.group(1) or m.group(2)), s)
-    # Restore (placeholders may be nested inside each other's already-final
-    # html only via link labels, which were rendered before parking).
-    return _PH_RE.sub(lambda m: store[int(m.group(1))], s)
+    s = _emph(_esc(s))
+    return _restore(s, store) if top else s
 
 
 # ------------------------------------------------------------------ tables
@@ -175,12 +225,26 @@ def _cell(content: str) -> str:
     return _inline(content)
 
 
+# A 2-column label/value table's first row is data (`| Subject: | ... |`), except
+# when it is one of these generic column-label pairs (`| Field | Value |`).
+_KV_HEADER_PAIRS = frozenset(
+    [(k, "value") for k in ("field", "key", "name", "property", "item", "setting")]
+    + [("area", "impact")])
+
+
+def _is_kv_header(row: List[str]) -> bool:
+    return tuple(c.strip().strip("*_").strip().rstrip(":").strip().lower() for c in row) in _KV_HEADER_PAIRS
+
+
 def _table(rows: List[List[str]], kv: bool) -> str:
     ncols = len(rows[0])
     width = max(len(r) for r in rows)
     rows = [r + [""] * (width - len(r)) for r in rows]
     out = ["<table><tbody>"]
     if kv and ncols == 2 and width == 2:
+        if _is_kv_header(rows[0]):
+            out.append("<tr><th>%s</th><th>%s</th></tr>" % (_cell(rows[0][0]), _cell(rows[0][1])))
+            rows = rows[1:]
         for r in rows:
             out.append("<tr><th>%s</th><td>%s</td></tr>" % (_cell(r[0]), _cell(r[1])))
     else:
@@ -205,20 +269,37 @@ def _starts_block(lines: List[str], i: int) -> bool:
                 or _LIST_RE.match(ln) or _IMG_LINE_RE.match(ln) or _is_table_start(lines, i))
 
 
+def _prep(text: str) -> List[str]:
+    text = (text or "").lstrip("\ufeff")  # a leading BOM would hide the first heading
+    text = _CTRL_RE.sub("", text.replace("\r\n", "\n").replace("\r", "\n"))
+    text = _COMMENT_RE.sub("", text)  # block-level HTML comments (template notes)
+    return text.expandtabs(4).split("\n")
+
+
+def leading_h1_text(text: str) -> Optional[str]:
+    """Text of the first non-blank line if it is a single-`#` heading (exactly
+    what drop_leading_h1 would drop), else None."""
+    for ln in _prep(text):
+        if ln.strip():
+            m = _HEADING_RE.match(ln)
+            return m.group(2) if m and len(m.group(1)) == 1 else None
+    return None
+
+
 def md_to_storage(text: str, *, kv_two_column: bool = True,
                   drop_leading_h1: bool = False) -> str:
     """Convert the CR/Testing-Log markdown subset to Confluence storage XHTML.
 
     Empty / whitespace-only input returns "". Whole-line HTML comments
-    (`<!-- ... -->`, possibly multi-line, as in the seed templates) are dropped. With drop_leading_h1 the first
+    (`<!-- ... -->`, possibly multi-line, as in the seed templates) are dropped;
+    inline comments are stripped and the surrounding text kept. A comment never
+    spans past its own first `-->`. Every block is verified well-formed and
+    falls back to escaped plain text if not. With drop_leading_h1 the first
     line is dropped only when it is the first non-blank line and is a
     single-`#` heading. A 2-column pipe table is a LABEL/VALUE table when
     kv_two_column (every row is data: first cell <th>, second <td>).
     """
-    text = (text or "").lstrip("\ufeff")  # a leading BOM would hide the first heading
-    text = _CTRL_RE.sub("", text.replace("\r\n", "\n").replace("\r", "\n"))
-    text = _COMMENT_RE.sub("", text)  # block-level HTML comments (template notes)
-    lines = text.expandtabs(4).split("\n")
+    lines = _prep(text)
     out: List[str] = []
     i, n = 0, len(lines)
 
@@ -232,65 +313,96 @@ def md_to_storage(text: str, *, kv_two_column: bool = True,
                 i = j + 1
 
     while i < n:
-        ln = lines[i]
-        if not ln.strip():
-            i += 1
-            continue
-
-        m = _FENCE_RE.match(ln)
-        if m:
-            lang, body = m.group(1), []
-            i += 1
-            while i < n and not re.match(r"^\s*```\s*$", lines[i]):
-                body.append(lines[i])
-                i += 1
-            i += 1  # closing fence (or EOF)
-            param = ('<ac:parameter ac:name="language">%s</ac:parameter>' % _esc(lang)) if lang else ""
-            cdata = "\n".join(body).replace("]]>", "]]]]><![CDATA[>")
-            out.append('<ac:structured-macro ac:name="code">%s<ac:plain-text-body>'
-                       "<![CDATA[%s]]></ac:plain-text-body></ac:structured-macro>" % (param, cdata))
-            continue
-
-        m = _HEADING_RE.match(ln)
-        if m:
-            lvl = len(m.group(1))
-            out.append("<h%d>%s</h%d>" % (lvl, _inline(m.group(2)), lvl))
-            i += 1
-            continue
-
-        if _is_table_start(lines, i):
-            rows = [_split_row(ln)]
-            i += 2
-            while i < n and lines[i].lstrip().startswith("|"):
-                rows.append(_split_row(lines[i]))
-                i += 1
-            out.append(_table(rows, kv_two_column))
-            continue
-
-        if _HR_RE.match(ln):
-            out.append("<hr />")
-            i += 1
-            continue
-
-        m = _IMG_LINE_RE.match(ln)
-        if m:
-            img = _image_xml(m.group(1), m.group(2))
-            out.append("<p>%s</p>" % (img if img is not None else _esc(m.group(1))))
-            i += 1
-            continue
-
-        if _LIST_RE.match(ln):
-            i = _list(lines, i, out)
-            continue
-
-        para = [ln.strip()]
-        i += 1
-        while i < n and lines[i].strip() and not _starts_block(lines, i):
-            para.append(lines[i].strip())
-            i += 1
-        out.append("<p>%s</p>" % _inline(" ".join(para)))
+        start, before = i, len(out)
+        i = _block(lines, i, out, kv_two_column)
+        if len(out) > before:
+            _guard(out, before, lines[start:i])
 
     return "\n".join(out)
+
+
+_ROOT_OPEN = '<r xmlns:ac="urn:xaca1509:ac" xmlns:ri="urn:xaca1509:ri">'
+
+
+def _well_formed(html: str) -> bool:
+    try:
+        ET.fromstring(_ROOT_OPEN + html + "</r>")
+        return True
+    except ET.ParseError:
+        return False
+
+
+def _guard(out: List[str], before: int, raw_lines: List[str]) -> None:
+    """Safety net (XACA-1509-013): a block that is not well-formed XML is
+    replaced by its escaped plain source text. Never emit malformed storage."""
+    if _well_formed("".join(out[before:])):
+        return
+    raw = " ".join(l.strip() for l in raw_lines if l.strip())
+    out[before:] = ["<p>%s</p>" % _esc(raw)]
+
+
+def _block(lines: List[str], i: int, out: List[str], kv_two_column: bool) -> int:
+    """Render ONE block starting at lines[i] into out; return the next index."""
+    n = len(lines)
+    ln = lines[i]
+    if not ln.strip():
+        i += 1
+        return i
+
+    m = _FENCE_RE.match(ln)
+    if m:
+        lang, body = m.group(1), []
+        i += 1
+        while i < n and not re.match(r"^\s*```\s*$", lines[i]):
+            body.append(lines[i])
+            i += 1
+        i += 1  # closing fence (or EOF)
+        param = ('<ac:parameter ac:name="language">%s</ac:parameter>' % _esc(lang)) if lang else ""
+        cdata = "\n".join(body).replace("]]>", "]]]]><![CDATA[>")
+        out.append('<ac:structured-macro ac:name="code">%s<ac:plain-text-body>'
+                   "<![CDATA[%s]]></ac:plain-text-body></ac:structured-macro>" % (param, cdata))
+        return i
+
+    m = _HEADING_RE.match(ln)
+    if m:
+        lvl = len(m.group(1))
+        out.append("<h%d>%s</h%d>" % (lvl, _inline(m.group(2)), lvl))
+        i += 1
+        return i
+
+    if _is_table_start(lines, i):
+        rows = [_split_row(ln)]
+        i += 2
+        while i < n and lines[i].lstrip().startswith("|"):
+            rows.append(_split_row(lines[i]))
+            i += 1
+        out.append(_table(rows, kv_two_column))
+        return i
+
+    if _HR_RE.match(ln):
+        out.append("<hr />")
+        i += 1
+        return i
+
+    m = _IMG_LINE_RE.match(ln)
+    if m:
+        img = _image_xml(m.group(1), m.group(2))
+        out.append("<p>%s</p>" % (img if img is not None else _esc(m.group(1))))
+        i += 1
+        return i
+
+    if _LIST_RE.match(ln):
+        i = _list(lines, i, out)
+        return i
+
+    para = [ln.strip()]
+    i += 1
+    while i < n and lines[i].strip() and not _starts_block(lines, i):
+        para.append(lines[i].strip())
+        i += 1
+    out.append("<p>%s</p>" % _inline(" ".join(para)))
+
+    return i
 
 
 def _list(lines: List[str], i: int, out: List[str]) -> int:

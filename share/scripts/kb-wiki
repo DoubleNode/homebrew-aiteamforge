@@ -530,7 +530,7 @@ def _read_body(path):
         raise _Usage(f"cannot read --body-file ({type(exc).__name__})") from None
 
 
-def _convert_body(body, fmt):
+def _convert_body(body, fmt, title=None):
     """--body-format: 'storage' is returned untouched (byte-for-byte the legacy
     path); 'markdown' goes through the pure converter. Providers never see
     markdown, so Confluence and the local wiki store identical storage XHTML."""
@@ -541,7 +541,15 @@ def _convert_body(body, fmt):
     except ImportError:
         raise _ConfigError("cannot import release_wiki_md2storage (needed for "
                            "--body-format markdown)") from None
-    return md_to_storage(body)
+    # XACA-1509-016: a leading `# H1` that equals the page title duplicates
+    # the Confluence page heading. Drop it only on an exact (whitespace-
+    # collapsed) match; a differing H1 carries information and is kept.
+    drop = False
+    if title is not None:
+        from release_wiki_md2storage import leading_h1_text
+        h1 = leading_h1_text(body)
+        drop = h1 is not None and " ".join(h1.split()) == " ".join(title.split())
+    return md_to_storage(body, drop_leading_h1=True) if drop else md_to_storage(body)
 
 
 def _team_of(args):
@@ -572,7 +580,8 @@ def _run(args):
     body = _read_body(args.body_file)
     if not is_patch and not body.strip():
         raise _Usage("--body-file is empty; refusing to publish a blank page")
-    body = _convert_body(body, getattr(args, "body_format", "storage"))
+    body = _convert_body(body, getattr(args, "body_format", "storage"),
+                         None if is_patch else args.title)
     if not is_patch and not body.strip():  # markdown that converts to nothing is still blank
         raise _Usage("--body-file is empty; refusing to publish a blank page")
     if not is_patch and args.adopt and args.page_id is None:
