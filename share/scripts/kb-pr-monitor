@@ -83,6 +83,10 @@
 # --no-merge runs every gate but stops short of kb-merge, still returning
 # 0/GATES_PASSED. For dry runs and tests.
 #
+# --item is also the merge's credit target (XACA-1503): kb-merge is invoked as
+# `kb-merge <PR> --item <ITEM-ID>`, so prMerged is recorded on --item rather
+# than on the ticket named in the PR head branch.
+#
 # BASE GATE (XACA-1483): every poll, right after the head SHA is read and
 # BEFORE any review/CI/mergeability/staleness gate, the PR's baseRefName must
 # equal `scripts/kb-pr-base <ITEM>` (the item's release branch, else the team
@@ -2300,7 +2304,10 @@ PR_FILTER_EOF
     # kb-merge wraps `gh pr merge` for the worktree-lock case (XACA-0467):
     # from a worktree --delete-branch fails locally even though the API merge
     # succeeded; kb-merge detects that and falls back to remote-only cleanup.
-    MERGE_OUT=$(_kbpm_helpers_run kb-merge "$PR_NUM")
+    # The merge is credited to --item (XACA-1503): kb-merge is passed
+    # `--item "$ITEM_ID"` so prMerged lands on the validated ticket, NOT on
+    # whatever ticket id the PR head BRANCH name happens to carry.
+    MERGE_OUT=$(_kbpm_helpers_run kb-merge "$PR_NUM" --item "$ITEM_ID")
     MERGE_RCPAIR=$(cat "$KBPM_RCFILE" 2>/dev/null)
     MERGE_SOURCE_RC="${MERGE_RCPAIR%% *}"
     MERGE_CMD_RC="${MERGE_RCPAIR##* }"
