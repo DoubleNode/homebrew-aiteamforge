@@ -4892,11 +4892,12 @@ kb-merge() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --item)
-                [[ -n "${2-}" ]] || { echo "Error: kb-merge --item requires an ID" >&2; return 1; }
+                # A flag-shaped value (`--item --squash`) is a missing ID, not an ID.
+                [[ -n "${2-}" && "${2}" != -* ]] || { echo "Error: kb-merge --item requires an ID" >&2; return 1; }
                 item="$2"; shift 2 ;;
             --item=*)
                 item="${1#--item=}"
-                [[ -n "$item" ]] || { echo "Error: kb-merge --item requires an ID" >&2; return 1; }
+                [[ -n "$item" && "$item" != -* ]] || { echo "Error: kb-merge --item requires an ID" >&2; return 1; }
                 shift ;;
             *)
                 _npos=$((_npos + 1))
@@ -4906,6 +4907,8 @@ kb-merge() {
     done
     [[ -z "$pr" ]] && { echo "Usage: kb-merge <PR#> [--squash|--merge|--rebase] [--item <ID>]" >&2; return 1; }
     [[ -n "$strategy" ]] || strategy="--squash"
+    # Board ids are upper-case; a lowercase --item would pass the mismatch compare yet miss the board.
+    [[ -n "$item" ]] && item=$(printf '%s' "$item" | tr '[:lower:]' '[:upper:]')
 
     # Capture combined output so we can pattern-match on the worktree-lock error.
     local out squash_body="" merged=1
