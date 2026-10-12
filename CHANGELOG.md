@@ -7,7 +7,7 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
-- **XACA-1502** (Added): `share/scripts/power-guard/install-power-guard.sh` install and status print an advisory `ups-sleep:` check. When a UPS is attached (`pmset -g ps`) and the `UPS Power` profile in `pmset -g custom` has `sleep` != 0, it warns with the fix `sudo pmset -u sleep 0 womp 1`; otherwise OK / not applicable / could not determine. Read-only; exit codes unchanged. Mirror-only, byte-identical to the dev-team canonical file.
+- **XACA-1502** (Added): `share/scripts/power-guard/install-power-guard.sh` install and status print an advisory `ups-sleep:` check. When a UPS is attached (`pmset -g ps`) and the `UPS Power` profile in `pmset -g custom` has `sleep` != 0, it warns with the fix `sudo pmset -u sleep 0 womp 1`; otherwise OK / not applicable / could not determine. Unrecognised `pmset -g ps` output reports could not determine, never not applicable. Read-only; exit codes unchanged. Mirror-only, byte-identical to the dev-team canonical file.
 
 ## [0.21.2] - 2026-10-12
 

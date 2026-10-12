@@ -288,7 +288,7 @@ _pg_pmset_capture() {
 # one outcome. Detect and advise only: never changes a power setting. Always returns 0.
 # Anything it cannot verify is "could not determine", never an OK.
 ups_sleep_check() {
-  local rc=0 line="" in_ups=0 saw_ups=0 has_ups=0 sleep_v="" womp_v="" k="" v="" rest=""
+  local rc=0 line="" in_ups=0 saw_ups=0 has_ups=0 has_anchor=0 sleep_v="" womp_v="" k="" v="" rest=""
 
   _pg_pmset_capture -g ps || rc=$?
   case "$rc" in
@@ -297,9 +297,15 @@ ups_sleep_check() {
     2) info "ups-sleep: could not determine UPS sleep setting (pmset -g ps timed out)"; return 0 ;;
     *) info "ups-sleep: could not determine UPS sleep setting (pmset -g ps failed)"; return 0 ;;
   esac
-  # A UPS is a power-source device line (" -Name (id=..)") that is not the internal battery.
+  # A UPS is a power-source device line (" -Name (id=..)") that is not the internal battery,
+  # or either of pmset's UPS-only lines (drawing from 'UPS Power', a "UPS settings:" block).
+  # "Not applicable" is an all-clear, so it needs the "Now drawing from" anchor line: output
+  # in a format we don't recognise is "could not determine", never "no UPS".
   while IFS= read -r line; do
     case "$line" in
+      "Now drawing from 'UPS Power'"*) has_ups=1; has_anchor=1 ;;
+      "Now drawing from "*) has_anchor=1 ;;
+      "UPS settings:"*) has_ups=1 ;;
       " -InternalBattery"*) ;;
       " -"*) has_ups=1 ;;
     esac
@@ -307,7 +313,11 @@ ups_sleep_check() {
 $PG_PMSET_OUT
 EOF
   if [ "$has_ups" = 0 ]; then
-    info "ups-sleep: not applicable (no UPS attached)"
+    if [ "$has_anchor" = 0 ]; then
+      info "ups-sleep: could not determine UPS sleep setting (unrecognised pmset -g ps output)"
+    else
+      info "ups-sleep: not applicable (no UPS attached)"
+    fi
     return 0
   fi
 
