@@ -26,11 +26,14 @@ from typing import List, Optional, Tuple
 __all__ = ["md_to_storage", "leading_h1_text"]
 
 # A comment match may NEVER contain "-->" (XACA-1509-014): the tempered body
-# stops at the first terminator, so text after it can never be swallowed.
+# stops at the first terminator, so text after it can never be swallowed. It
+# also stops at the next "<!--": an unclosed opener then scans only to the next
+# opener, so a long line of them is linear, not quadratic (XACA-1509 round 2).
+# The same "never cross your own opener" rule bounds the emphasis/image scans.
 # Block form: the comment (possibly multi-line) owns its whole line(s).
-_COMMENT_RE = re.compile(r"^[ \t]*<!--(?:(?!-->).)*-->[ \t]*$", re.DOTALL | re.MULTILINE)
+_COMMENT_RE = re.compile(r"^[ \t]*<!--(?:(?!-->|<!--).)*-->[ \t]*$", re.DOTALL | re.MULTILINE)
 # Inline form (XACA-1509-011): single line, surrounding text is kept.
-_INLINE_COMMENT_RE = re.compile(r"<!--(?:(?!-->).)*-->")
+_INLINE_COMMENT_RE = re.compile(r"<!--(?:(?!-->|<!--).)*-->")
 # Anything that is not a legal XML 1.0 Char (this also drops lone surrogates,
 # U+FFFE and U+FFFF). Tab/LF/CR survive; CR is normalised before this runs.
 _CTRL_RE = re.compile("[^\x09\x0a\x0d\x20-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]")
@@ -45,15 +48,15 @@ _NUM_ITEM_RE = re.compile(r"^\s*\d+[.)]\s+(.*)$", re.DOTALL)
 _BUL_ITEM_RE = re.compile(r"^\s*[-*+]\s+(.*)$", re.DOTALL)
 
 _CODE_RE = re.compile(r"(?<!`)(`{1,3})(?!`)(.+?)(?<!`)\1(?!`)")  # bounded run: no backtracking blow-up on long ``` lines
-_IMG_RE = re.compile(r"!\[([^\]]*)\]\(\s*([^()\s]+)\s*\)")
+_IMG_RE = re.compile(r"!\[([^\[\]]*)\]\(\s*([^()\s]+)\s*\)")
 _LINK_RE = re.compile(
     r"\[((?:[^\[\]\\]|\\.)*)\]\(\s*"
     r"([^()\s]+(?:\([^()\s]*\)[^()\s]*)*)(?:\s+\"[^\"]*\")?\s*\)"
 )
 _URL_RE = re.compile(r"https?://[^\s<>\"'`\x00]+")
-_BOLD_RE = re.compile(r"\*\*(?=\S)(.+?)(?<=\S)\*\*|(?<!\w)__(?=\S)(.+?)(?<=\S)__(?!\w)")
+_BOLD_RE = re.compile(r"\*\*(?=\S)((?:(?!\*\*).)+?)(?<=\S)\*\*|(?<!\w)__(?=\S)((?:(?!__).)+?)(?<=\S)__(?!\w)")
 _ITAL_RE = re.compile(
-    r"(?<![\w*])\*(?=[^\s*])(.+?)(?<=[^\s*])\*(?![\w*])|(?<!\w)_(?=[^\s_])(.+?)(?<=[^\s_])_(?!\w)"
+    r"(?<![\w*])\*(?=[^\s*])((?:[^*]|\*\*)+?)(?<=[^\s*])\*(?![\w*])|(?<!\w)_(?=[^\s_])((?:[^_]|__)+?)(?<=[^\s_])_(?!\w)"
 )
 _EMPH_RE = re.compile(_BOLD_RE.pattern + "|" + _ITAL_RE.pattern)
 _PH_RE = re.compile("\x00(\\d+)\x00")
