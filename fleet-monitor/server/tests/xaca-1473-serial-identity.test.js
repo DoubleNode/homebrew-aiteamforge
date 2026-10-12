@@ -483,3 +483,257 @@ describe('adversarial identity & migration (XACA-1473-005)', () => {
         for (const v of reg.derive(machines).accessories) assert.equal(v.state, 'unknown');
     });
 });
+
+// ---------------------------------------------------------------------------
+// XACA-1473-014: same-model UPS hardware swap keeps the accessory (and its pinned id)
+// XACA-1473-015: serial-less report after a rename -- accepted limit, pinned
+// ---------------------------------------------------------------------------
+describe('hardware swap (XACA-1473-014) & rename limit (XACA-1473-015)', () => {
+    const MID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    const MID_B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+    const NAME = 'CP1500PFCLCDa';
+    const W = acc.SWAP_STALE_MS;
+    const P = (ups, source) => ({ source: source || 'ac', ups: Object.assign({ name: NAME, id: 53280768, percent: 100, charging: false, minutes_remaining: 52, present: true }, ups || {}) });
+    const onDisk = (f) => JSON.parse(fs.readFileSync(f, 'utf8')).accessories;
+    // Same re-implementation of the d40debc3 (pre-1473) cleanRecord id gate as the rollback test above.
+    const oldServerKeeps = (id, r) => acc.ACCESSORY_ID_RE.test(id) && r !== null && typeof r === 'object'
+        && r.type === 'ups'
+        && typeof r.dataLinkMachineId === 'string' && !!r.dataLinkMachineId && r.dataLinkMachineId.length <= 128
+        && typeof r.upsId === 'string' && !!r.upsId
+        && typeof r.name === 'string' && !!r.name && r.name.length <= 64
+        && acc.accessoryId(r.dataLinkMachineId, r.name) === id;
+
+    let tmp, file, t, logs;
+    const clock = () => new Date(t);
+    const mk = () => acc.createRegistry({ file, now: clock, log: (m) => logs.push(m) });
+    beforeEach(() => {
+        tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'xaca-1473-014-'));
+        file = path.join(tmp, 'data', 'accessories.json');
+        t = Date.parse('2026-10-12T00:00:00.000Z');
+        logs = [];
+    });
+    afterEach(() => { fs.rmSync(tmp, { recursive: true, force: true }); });
+
+    test('W is the server offline threshold (server.js OFFLINE_THRESHOLD_MS), not a new number', () => {
+        const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+        const m = src.match(/const OFFLINE_THRESHOLD_MS = (\d+) \* 1000;/);
+        assert.ok(m, 'OFFLINE_THRESHOLD_MS declaration not found in server.js');
+        assert.equal(W, Number(m[1]) * 1000);
+        assert.equal(W, 180000);
+    });
+
+    test('swap after silence >= W: same id (acc_ name id), nickname, attachments, history kept; replaced serial recorded; persists + reloads; old server still loads it', () => {
+        const reg = mk();
+        const id = reg.upsertFromReport(MID, P({ serial: 'SERIALA1' }));
+        assert.equal(id, acc.accessoryId(MID, NAME));
+        reg.setNickname(id, 'Rack UPS');
+        reg.attach(id, MID_B);
+        reg.derive(new Map([[MID, { machine_id: MID, status: 'online', system: { power: P({ serial: 'SERIALA1' }) } }]]));
+        const before = reg.get(id);
+
+        t += W; // old unit silent for exactly W
+        const swapAt = new Date(t).toISOString();
+        assert.equal(reg.upsertFromReport(MID, P({ serial: 'SERIALB2', id: 777 }, 'ups')), id);
+        assert.equal(reg.size(), 1);
+        const r = reg.get(id);
+        assert.equal(r.serial, 'SERIALB2');
+        assert.equal(r.upsId, '777');
+        assert.equal(r.nickname, 'Rack UPS');
+        assert.deepEqual(r.attachedMachineIds, [MID, MID_B]);
+        assert.deepEqual(r.history, before.history);
+        assert.equal(r.createdAt, before.createdAt);
+        assert.deepEqual(r.replacedSerials, [{ serial: 'SERIALA1', until: swapAt }]);
+        assert.ok(logs.some((l) => /SERIALA1 replaced by SERIALB2/.test(l)), logs.join('\n'));
+
+        // Flushed immediately; reload keeps everything and keeps matching B on the same id.
+        const disk = onDisk(file);
+        assert.deepEqual(Object.keys(disk), [id]);
+        assert.deepEqual(disk[id].replacedSerials, [{ serial: 'SERIALA1', until: swapAt }]);
+        assert.equal(oldServerKeeps(id, disk[id]), true); // rollback-safe: name id survives a pre-1473 server
+        const reg2 = mk();
+        assert.deepEqual(reg2.load(), { loaded: 1, skipped: 0, status: 'ok' });
+        assert.equal(reg2.get(id).serial, 'SERIALB2');
+        assert.deepEqual(reg2.get(id).replacedSerials, [{ serial: 'SERIALA1', until: swapAt }]);
+        assert.equal(reg2.upsertFromReport(MID, P({ serial: 'SERIALB2' })), id);
+
+        // Power-guard contract: the pinned id now carries the NEW unit's state.
+        const machines = new Map([[MID, { machine_id: MID, status: 'online', system: { power: P({ serial: 'SERIALB2' }, 'ups') } }],
+            [MID_B, { machine_id: MID_B, status: 'online', system: {} }]]);
+        const out = reg2.derive(machines);
+        assert.equal(out.accessories[0].id, id);
+        assert.equal(out.accessories[0].state, 'on_battery');
+        assert.equal(out.machines.get(MID_B).power_state, 'on_battery');
+    });
+
+    test('swap at W-1ms does NOT adopt: the old unit is still live, a second accessory is minted on the serial id', () => {
+        const reg = mk();
+        const id = reg.upsertFromReport(MID, P({ serial: 'SERIALA1' }));
+        t += W - 1;
+        const b = reg.upsertFromReport(MID, P({ serial: 'SERIALB2' }));
+        assert.equal(b, acc.accessoryIdForSerial(MID, 'SERIALB2'));
+        assert.equal(reg.size(), 2);
+        assert.equal(reg.get(id).serial, 'SERIALA1');
+        assert.equal(has(reg.get(id), 'replacedSerials'), false);
+        assert.equal(has(reg.get(b), 'replacedSerials'), false);
+    });
+
+    test('genuine two-UPS host (serials alternating every reporter cycle, < W apart) keeps two accessories, never swaps', () => {
+        const reg = mk();
+        const a = reg.upsertFromReport(MID, P({ serial: 'SERIALA1' }));
+        let b = null;
+        for (let i = 0; i < 20; i++) {
+            t += 60 * 1000;
+            const s = i % 3 === 0 ? 'SERIALA1' : 'SERIALB2'; // irregular order, one UPS per cycle
+            const got = reg.upsertFromReport(MID, P({ serial: s }));
+            if (s === 'SERIALB2') { b = b || got; assert.equal(got, b); } else assert.equal(got, a);
+        }
+        assert.equal(b, acc.accessoryIdForSerial(MID, 'SERIALB2'));
+        assert.equal(reg.size(), 2);
+        assert.equal(reg.get(a).serial, 'SERIALA1');
+        assert.equal(reg.get(b).serial, 'SERIALB2');
+        assert.equal(has(reg.get(a), 'replacedSerials'), false);
+        assert.ok(!logs.some((l) => /replaced by/.test(l)), logs.join('\n'));
+    });
+
+    test('old unit A returning after a swap while B is still live: two units really are connected -> A is a NEW accessory (serial id)', () => {
+        const reg = mk();
+        const id = reg.upsertFromReport(MID, P({ serial: 'SERIALA1' }));
+        t += W;
+        assert.equal(reg.upsertFromReport(MID, P({ serial: 'SERIALB2' })), id); // swap A -> B
+        t += 60 * 1000;
+        const a2 = reg.upsertFromReport(MID, P({ serial: 'SERIALA1' }));
+        assert.equal(a2, acc.accessoryIdForSerial(MID, 'SERIALA1'));
+        assert.equal(reg.get(id).serial, 'SERIALB2');
+        assert.equal(reg.size(), 2);
+    });
+
+    test('swap back: B silent >= W then A returns -> same id takes A again; trail is [B] (A no longer listed as replaced)', () => {
+        const reg = mk();
+        const id = reg.upsertFromReport(MID, P({ serial: 'SERIALA1' }));
+        t += W;
+        reg.upsertFromReport(MID, P({ serial: 'SERIALB2' }));
+        t += W;
+        const backAt = new Date(t).toISOString();
+        assert.equal(reg.upsertFromReport(MID, P({ serial: 'SERIALA1' })), id);
+        assert.equal(reg.size(), 1);
+        assert.equal(reg.get(id).serial, 'SERIALA1');
+        assert.deepEqual(reg.get(id).replacedSerials, [{ serial: 'SERIALB2', until: backAt }]);
+    });
+
+    test('replacedSerials is bounded to MAX_REPLACED_SERIALS, newest first', () => {
+        const reg = mk();
+        const id = reg.upsertFromReport(MID, P({ serial: 'S0' }));
+        for (let i = 1; i <= acc.MAX_REPLACED_SERIALS + 3; i++) {
+            t += W;
+            assert.equal(reg.upsertFromReport(MID, P({ serial: `S${i}` })), id);
+        }
+        const trail = reg.get(id).replacedSerials;
+        assert.equal(trail.length, acc.MAX_REPLACED_SERIALS);
+        assert.equal(trail[0].serial, `S${acc.MAX_REPLACED_SERIALS + 2}`);
+    });
+
+    test('derive() applies the same swap rule as the upsert: stale record + new serial drives that record; at W-1ms it does not', () => {
+        for (const [gap, expectSame] of [[W, true], [W - 1, false]]) {
+            const reg = acc.createRegistry({ file: path.join(tmp, `d-${gap}.json`), now: clock });
+            const start = t;
+            const id = reg.upsertFromReport(MID, P({ serial: 'SERIALA1' }));
+            t = start + gap;
+            // Host's latest report (not yet upserted) carries the new unit, on battery.
+            const machines = new Map([[MID, { machine_id: MID, status: 'online', system: { power: P({ serial: 'SERIALB2' }, 'ups') } }]]);
+            const v = reg.derive(machines).accessories.find((x) => x.id === id);
+            assert.equal(v.state, expectSame ? 'on_battery' : 'unknown', `gap=${gap}`);
+            assert.equal(reg.upsertFromReport(MID, P({ serial: 'SERIALB2' }, 'ups')) === id, expectSame, `gap=${gap}`);
+            t = start;
+        }
+    });
+
+    test('limit (pinned): only the machine+name record is swap-adopted -- when the serial-id unit was the last one read, a new serial is minted, not adopted', () => {
+        const reg = mk();
+        const a = reg.upsertFromReport(MID, P({ serial: 'SERIALA1' }));
+        t += 60 * 1000;
+        const b = reg.upsertFromReport(MID, P({ serial: 'SERIALB2' })); // serial id, read last
+        t += W;
+        const d = reg.upsertFromReport(MID, P({ serial: 'SERIALD4' }));
+        assert.equal(d, acc.accessoryIdForSerial(MID, 'SERIALD4'));
+        assert.equal(reg.get(a).serial, 'SERIALA1');
+        assert.equal(reg.get(b).serial, 'SERIALB2');
+        assert.equal(reg.size(), 3);
+    });
+
+    test('both same-name units silent >= W: the machine+name record, if it was the last read, is swap-adopted; an exact tie adopts nothing', () => {
+        const reg = mk();
+        const a = reg.upsertFromReport(MID, P({ serial: 'SERIALA1' }));
+        t += 1;
+        const b = reg.upsertFromReport(MID, P({ serial: 'SERIALB2' }));
+        t += 60 * 1000;
+        reg.upsertFromReport(MID, P({ serial: 'SERIALA1' })); // A read last
+        t += W;
+        assert.equal(reg.upsertFromReport(MID, P({ serial: 'SERIALD4' })), a);
+        assert.equal(reg.get(b).serial, 'SERIALB2');
+
+        // Tie: both last observed at the same instant -> cannot tell which unit left.
+        const reg2 = acc.createRegistry({ file: path.join(tmp, 'tie.json'), now: clock });
+        const a2 = reg2.upsertFromReport(MID, P({ serial: 'SERIALA1' }));
+        reg2.upsertFromReport(MID, P({ serial: 'SERIALB2' })); // same t: minted on serial id
+        t += W;
+        const d2 = reg2.upsertFromReport(MID, P({ serial: 'SERIALD4' }));
+        assert.equal(d2, acc.accessoryIdForSerial(MID, 'SERIALD4'));
+        assert.equal(reg2.get(a2).serial, 'SERIALA1');
+    });
+
+    test('a pre-existing serial-id record for B wins over the swap (stored-serial match, step 1)', () => {
+        const reg = mk();
+        const a = reg.upsertFromReport(MID, P({ serial: 'SERIALA1' }));
+        const b = reg.upsertFromReport(MID, P({ serial: 'SERIALB2' })); // live sibling -> serial id
+        t += 10 * W;
+        assert.equal(reg.upsertFromReport(MID, P({ serial: 'SERIALB2' })), b);
+        assert.equal(reg.get(a).serial, 'SERIALA1');
+        assert.equal(has(reg.get(a), 'replacedSerials'), false);
+    });
+
+    test('swap is scoped to the data-link machine and to the name (a different model is a new accessory, as before)', () => {
+        const reg = mk();
+        const a = reg.upsertFromReport(MID, P({ serial: 'SERIALA1' }));
+        t += W;
+        const other = reg.upsertFromReport(MID_B, P({ serial: 'SERIALB2' }));
+        assert.equal(other, acc.accessoryId(MID_B, NAME));
+        const model = reg.upsertFromReport(MID, P({ serial: 'SERIALC3', name: 'BR1500MS2' }));
+        assert.equal(model, acc.accessoryId(MID, 'BR1500MS2'));
+        assert.equal(reg.get(a).serial, 'SERIALA1');
+        assert.equal(reg.size(), 3);
+    });
+
+    test('load: malformed replacedSerials is dropped, never fatal (non-array, bad entries filtered, empty -> no key)', () => {
+        const id = acc.accessoryId(MID, NAME);
+        const id2 = acc.accessoryId(MID_B, NAME);
+        const rec = (mid, replacedSerials) => ({ type: 'ups', name: NAME, dataLinkMachineId: mid, upsId: '1', attachedMachineIds: [mid], serial: 'SERIALB2', replacedSerials });
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, JSON.stringify({ schemaVersion: 1, accessories: {
+            [id]: rec(MID, [{ serial: 'SERIALA1', until: '2026-10-12T00:00:00.000Z', extra: 'x' }, { serial: 'bad serial!', until: 'x' }, { serial: 'OK1' }, 'nope', null, { serial: 'OK2', until: 5 }]),
+            [id2]: rec(MID_B, 'not-an-array'),
+        } }));
+        const reg = mk();
+        assert.deepEqual(reg.load(), { loaded: 2, skipped: 0, status: 'ok' });
+        assert.deepEqual(reg.get(id).replacedSerials, [{ serial: 'SERIALA1', until: '2026-10-12T00:00:00.000Z' }]);
+        assert.equal(has(reg.get(id2), 'replacedSerials'), false);
+        assert.equal(reg.get(id2).serial, 'SERIALB2');
+        // An all-invalid array also yields no key.
+        assert.equal(has(acc.cleanRecord(id, rec(MID, [{ serial: '' }])), 'replacedSerials'), false);
+    });
+
+    test('XACA-1473-015 accepted limit: serialed UPS renamed N->N2, then a SERIAL-LESS N2 report mints a separate N2 name-id accessory', () => {
+        // The name is the only match key a serial-less report has, and a serialed record's name is
+        // frozen (its id hashes it). Pre-1473 a rename re-keyed too, so this is not a regression.
+        const reg = mk();
+        const x = reg.upsertFromReport(MID, P({ serial: 'SERIALA1' }));
+        assert.equal(reg.upsertFromReport(MID, P({ serial: 'SERIALA1', name: 'Renamed UPS' })), x); // serial still matches
+        assert.equal(reg.get(x).name, NAME);
+        const dup = reg.upsertFromReport(MID, P({ name: 'Renamed UPS' }));
+        assert.equal(dup, acc.accessoryId(MID, 'Renamed UPS'));
+        assert.notEqual(dup, x);
+        assert.equal(reg.size(), 2);
+        assert.equal(has(reg.get(dup), 'serial'), false);
+        // Once the serial is readable again it is matched by serial to x, not to the duplicate.
+        assert.equal(reg.upsertFromReport(MID, P({ serial: 'SERIALA1', name: 'Renamed UPS' })), x);
+    });
+});

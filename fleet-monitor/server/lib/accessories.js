@@ -50,6 +50,24 @@ const MAX_ATTACHED = 64;
 const MAX_HISTORY = 50;          // state-transition entries kept per accessory
 const NICKNAME_MAX = 64;
 const NAME_MAX = 64;            // == server.js POWER_UPS_NAME_MAX; longer names are refused, never truncated
+const MAX_REPLACED_SERIALS = 5; // XACA-1473-014: replaced-serial audit trail kept per accessory
+
+/**
+ * XACA-1473-014: hardware-swap staleness window W. MUST equal server.js
+ * OFFLINE_THRESHOLD_MS (pinned by a test that reads server.js), i.e. the existing point at
+ * which the server already gives up on a host and derives its accessories `unknown`.
+ *
+ * Why this value: the reporter sends AT MOST ONE UPS per machine per cycle (the first one
+ * pmset lists), every 60 s by default. On a genuine two-UPS host the sibling serial was
+ * therefore read at most one interval before a "new" serial shows up, so anything older
+ * than W (= 3 intervals, tolerating 2 missed heartbeats) is not a concurrently connected
+ * UPS. A real swap (unplug USB + mains, re-cable the loads, plug the new unit in) takes the
+ * old unit off the data link for longer than that in practice. Lower would misread a
+ * two-UPS host with a late heartbeat as a swap; higher would miss quick swaps and strand
+ * the pinned id as `unknown` (the XACA-1473-014 defect). A reporter configured with an
+ * interval > W/2 already flaps warning/offline on this server and is out of contract.
+ */
+const SWAP_STALE_MS = 180 * 1000;
 
 const ACCESSORY_ID_RE = /^acc_[0-9a-f]{16}$/;
 // XACA-1473: optional hardware serial. MUST equal server.js POWER_UPS_SERIAL_RE (the
@@ -175,6 +193,17 @@ function cleanRecord(id, r) {
         updatedAt: typeof r.updatedAt === 'string' ? r.updatedAt : null,
     };
     if (serial !== null) out.serial = serial; // absent -> no key (never null), like the wire
+    // XACA-1473-014: optional audit trail of serials this accessory replaced on a hardware
+    // swap. Informational only (never a match key, never part of the id). Malformed entries
+    // or a non-array are DROPPED, never fatal; empty -> no key.
+    if (Array.isArray(r.replacedSerials)) {
+        const replaced = r.replacedSerials
+            .filter((e) => isPlainObject(e) && typeof e.serial === 'string' && SERIAL_RE.test(e.serial)
+                && typeof e.until === 'string' && e.until.length > 0 && e.until.length <= 64)
+            .slice(0, MAX_REPLACED_SERIALS)
+            .map((e) => ({ serial: e.serial, until: e.until }));
+        if (replaced.length) out.replacedSerials = replaced;
+    }
     return out;
 }
 
@@ -322,8 +351,9 @@ function createRegistry(opts) {
             // even when the report carries a serial, so a pre-1473 server (which only
             // accepts id == accessoryId(machine, name)) still loads the record on rollback
             // and merely drops its serial. Only when that name id is already TAKEN -- by a
-            // same-name record holding a DIFFERENT serial, i.e. a genuine second same-model
-            // UPS -- is a serial-derived id minted. That record is unavoidably not
+            // same-name record holding a DIFFERENT serial that is still live, i.e. a genuine
+            // second same-model UPS (a silent one is a swap: resolve step 3) -- is a
+            // serial-derived id minted. That record is unavoidably not
             // representable on an old server (which would merge the two UPSes anyway); an
             // old server skips it as malformed on load. Accepted and left as is.
             const nameId = accessoryId(machineId, u.name);
@@ -349,6 +379,21 @@ function createRegistry(opts) {
             // nickname, attachments, state and history are untouched (power-guard pins ids).
             rec.serial = serial;
             if (rec.upsId !== upsId) rec.upsId = upsId;
+            flushNow = true;
+        } else if (m.swap) {
+            // XACA-1473-014: hardware swap (see resolve). The machine+name record takes the
+            // NEW serial IN PLACE: id (pinned by power-guard), nickname, attachments, state and
+            // history all carry over, exactly as a pre-1473 same-model swap did. The old
+            // serial is kept as a bounded audit trail; a serial that is current again (swap
+            // back) is removed from it.
+            const oldSerial = rec.serial;
+            const prev = Array.isArray(rec.replacedSerials) ? rec.replacedSerials : [];
+            rec.replacedSerials = [{ serial: oldSerial, until: observedAt }]
+                .concat(prev.filter((e) => e.serial !== oldSerial && e.serial !== serial))
+                .slice(0, MAX_REPLACED_SERIALS);
+            rec.serial = serial;
+            rec.upsId = upsId;
+            log(`accessories: ${rec.id} on ${machineId}: UPS serial ${oldSerial} replaced by ${serial} (hardware swap; old unit unseen >= ${SWAP_STALE_MS / 1000}s); id, nickname and attachments kept`);
             flushNow = true;
         } else if (rec.upsId !== upsId) {
             // Same UPS (same machine + name), new pmset HID id after a reconnect: update in
@@ -381,10 +426,24 @@ function createRegistry(opts) {
      *   2. else the record on this machine with that name and NO serial yet -> adopt
      *      (at most one can exist: serial-less records all carry the deterministic
      *      machine+name id);
-     *   3. else none -> caller creates a new accessory: on the machine+name id if that id
-     *      is free (rollback-safe), else on a serial-derived id. So once X adopted
-     *      serial A, a same-name report with serial B creates a second accessory (serial
-     *      id, since X holds the name id) and never steals X.
+     *   3. else HARDWARE SWAP (XACA-1473-014): every same-name record on this machine now
+     *      holds a different serial. If NONE of them was observed within SWAP_STALE_MS
+     *      (the old unit has gone silent: a swap, not a concurrently connected second
+     *      UPS -- the reporter reads one UPS per cycle, so a live sibling is always fresh),
+     *      and the most recently observed of them (strictly, no tie) is the machine+name
+     *      record, that record takes the new serial IN PLACE (swap:true). Same id, so
+     *      power-guard policies keep matching across a same-model replacement, as they did
+     *      before XACA-1473. The old unit returning later is just another serial under this
+     *      same rule: a swap back if the current one is silent >= W, else a new accessory.
+     *      Limits (accepted): only the machine+name record is ever swap-adopted -- a
+     *      serial-derived id hashes its first serial, so it cannot follow a swap and stays
+     *      `unknown`; and a genuine two-UPS host whose second unit was never reported,
+     *      seen after an outage >= W, is indistinguishable from a swap.
+     *   4. else none -> caller creates a new accessory: on the machine+name id if that id
+     *      is free (rollback-safe), else on a serial-derived id. So once X adopted serial
+     *      A, a same-name report with serial B while X is still live (observed < W ago)
+     *      creates a second accessory (serial id, since X holds the name id) and never
+     *      steals X.
      * Without a serial (old reporter, or the serial was unreadable this cycle):
      *   name fallback over ALL records on this machine with that name, serial-bearing
      *   included. Exactly one -> that record (its stored serial is kept: a missing
@@ -393,24 +452,56 @@ function createRegistry(opts) {
      *   AMBIGUOUS: the report cannot say which UPS it is, so nothing is updated or
      *   created (creating would duplicate one of them).
      *
-     * Returns { rec|null, adopt:bool, ambiguous:string|null }.
+     * `now` is read through nowFn, so upsertFromReport and derive() apply the identical
+     * rule (including the swap window) at the time they run.
+     *
+     * Returns { rec|null, adopt:bool, swap:bool, ambiguous:string|null }.
      */
     function resolve(machineId, name, serial) {
+        const NONE = { rec: null, adopt: false, swap: false, ambiguous: null };
         const mine = [];
         for (const r of records.values()) if (r.dataLinkMachineId === machineId) mine.push(r);
         if (serial !== null) {
             const bySerial = mine.find((r) => r.serial === serial);
-            if (bySerial) return { rec: bySerial, adopt: false, ambiguous: null };
+            if (bySerial) return { rec: bySerial, adopt: false, swap: false, ambiguous: null };
             const unclaimed = mine.find((r) => r.serial === undefined && r.name === name);
-            if (unclaimed) return { rec: unclaimed, adopt: true, ambiguous: null };
-            return { rec: null, adopt: false, ambiguous: null };
+            if (unclaimed) return { rec: unclaimed, adopt: true, swap: false, ambiguous: null };
+            const swapped = swapCandidate(mine, machineId, name);
+            if (swapped) return { rec: swapped, adopt: false, swap: true, ambiguous: null };
+            return NONE;
         }
+        // XACA-1473-015 (accepted limit, pinned by test): with no serial the NAME is the only
+        // key a report has. A serialed record renamed N->N2 keeps its frozen name N (its id
+        // hashes N), so a later SERIAL-LESS N2 report cannot be tied to it and mints the N2
+        // machine+name accessory. Not a regression: before XACA-1473 a rename always re-keyed.
         const byName = mine.filter((r) => r.name === name);
-        if (byName.length === 1) return { rec: byName[0], adopt: false, ambiguous: null };
+        if (byName.length === 1) return { rec: byName[0], adopt: false, swap: false, ambiguous: null };
         if (byName.length > 1) {
-            return { rec: null, adopt: false, ambiguous: `serial-less report for "${name}" matches ${byName.length} accessories (${byName.map((r) => r.id).join(', ')})` };
+            return { rec: null, adopt: false, swap: false, ambiguous: `serial-less report for "${name}" matches ${byName.length} accessories (${byName.map((r) => r.id).join(', ')})` };
         }
-        return { rec: null, adopt: false, ambiguous: null };
+        return NONE;
+    }
+
+    /** ms epoch a record's UPS was last observed; -Infinity when never/unparseable (=> stale). */
+    function lastObservedMs(r) {
+        const t = r.lastReading && typeof r.lastReading.observedAt === 'string' ? Date.parse(r.lastReading.observedAt) : NaN;
+        return Number.isFinite(t) ? t : -Infinity;
+    }
+
+    /**
+     * XACA-1473-014, step 3 of resolve(). Called only when the serial matched nothing and
+     * no serial-less same-name record exists, so every same-name record here holds a
+     * DIFFERENT serial. Returns the machine+name record to swap-adopt, or null.
+     */
+    function swapCandidate(mine, machineId, name) {
+        const sameName = mine.filter((r) => r.name === name && typeof r.serial === 'string');
+        if (!sameName.length) return null;
+        const now = nowFn().getTime();
+        if (sameName.some((r) => now - lastObservedMs(r) < SWAP_STALE_MS)) return null; // live sibling
+        const byRecency = sameName.slice().sort((a, b) => lastObservedMs(b) - lastObservedMs(a));
+        const last = byRecency[0];
+        if (byRecency.length > 1 && lastObservedMs(byRecency[1]) === lastObservedMs(last)) return null; // cannot tell which unit left
+        return last.id === accessoryId(machineId, name) ? last : null;
     }
 
     // ------------------------------------------------- 003 attachment
@@ -500,7 +591,8 @@ function createRegistry(opts) {
         const serial = typeof u.serial === 'string' && SERIAL_RE.test(u.serial) ? u.serial : null;
         if (typeof u.name !== 'string') return 'unknown';
         const m = resolve(rec.dataLinkMachineId, u.name, serial);
-        // (An adopt-pending match -- serialed report, serial-less record -- returns this rec too.)
+        // (An adopt-pending match -- serialed report, serial-less record -- or a swap-pending
+        // one (XACA-1473-014, stale record, new serial) returns this rec too.)
         if (m.rec !== rec) return 'unknown';
         if (power.source === 'ups') return 'on_battery';
         if (power.source === 'ac') return 'ac';
@@ -652,6 +744,8 @@ module.exports = {
     MAX_ACCESSORIES,
     MAX_ATTACHED,
     MAX_HISTORY,
+    MAX_REPLACED_SERIALS,
+    SWAP_STALE_MS,
     NICKNAME_MAX,
     ACCESSORY_ID_RE,
     SERIAL_RE,

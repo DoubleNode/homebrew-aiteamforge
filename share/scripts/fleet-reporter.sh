@@ -1796,71 +1796,149 @@ _system_volatile_get() {
 # statement (not inside $( )) and read it back with _system_power_get.
 _SYSTEM_POWER_JSON=""
 
-# XACA-1473-002: UPS hardware serial (optional enrichment, never required).
+# XACA-1473-002 / -013: UPS hardware serial (optional enrichment, never required).
 #
-# ONE `ioreg -r -c IOHIDDevice -l` call per cycle, only when pmset already
-# found a UPS. Bounded exactly like the pmset call below: 3s ceiling, SIGKILL,
-# no `wait` on a hung child, so a wedged ioreg can never stall the reporter.
+# Called only when pmset already built a ups object, with the RAW id of the UPS
+# line that parser selected (the `id=` value) and the number of non-internal
+# device lines `pmset -g ps` printed. The serial must be CORRELATED to that
+# line: on a 2-UPS host, pairing "the first pmset UPS" with "the first ioreg
+# UPS" attaches readings to whichever serial enumerates first, and an
+# enumeration-order flip (reboot/replug) silently swaps them (XACA-1473-013).
 #
-# PARSER TRAP: the dump also carries other HID devices (a Magic Trackpad's
-# serial appears on a dozen lines), so the FIRST SerialNumber in the output is
-# the WRONG one. The awk scopes to the top-level device block ("+-o" at column
-# 0) whose "PrimaryUsagePage" = 132 (USB HID Power Device page) and reads the
-# SerialNumber inside that block only. If several blocks are 132, only the
-# FIRST is a candidate (the same first-device rule XACA-1391-011 pinned for
-# pmset): if it has no SerialNumber, a later 132 block never stands in.
+# 1. PRIMARY: ONE `pmset -g ps -xml` call (undocumented flag; exit 0 and
+#    instant on M1Mini/M3Pro, measured 2026-10-12). It prints a plist dict per
+#    power source whose "Power Source ID" equals the `id=` value of the text
+#    output and whose "Accessory Identifier" is the hardware serial (the same
+#    value as the ioreg SerialNumber). The awk selects the record whose
+#    "Power Source ID" == the selected id AND whose "Type" == "UPS", so the
+#    pairing is by id, not by order. Parsed defensively: records are dicts at
+#    plist depth 1, whether the output is one plist, several concatenated
+#    plist documents, or an <array> of dicts (multi-UPS shape is UNKNOWN, no
+#    hardware to capture it). Nested dicts (laptop BatteryPacks) are skipped.
+#    Two matching records = ambiguous = no serial. When this path yields a
+#    valid serial, ioreg is never called.
+# 2. FALLBACK: ONE `ioreg -r -c IOHIDDevice -l` call, used ONLY when the xml
+#    path yielded no correlated serial AND pmset listed exactly ONE
+#    non-internal device AND ioreg has exactly ONE top-level device block with
+#    "PrimaryUsagePage" = 132 (USB HID Power Device page). One UPS on both
+#    sides is unambiguous; two or more 132 blocks = no serial (the server then
+#    falls back to machine+name). PARSER TRAP: the dump carries other HID
+#    devices (a Magic Trackpad's serial appears on a dozen lines), so the
+#    awk scopes to top-level "+-o" blocks (column 0) and reads the first
+#    SerialNumber inside the 132 block only.
+#
+# Both calls are bounded by _system_bounded_run (3s ceiling, SIGKILL, no
+# `wait` on a hung child), so a wedged pmset/ioreg can never stall the
+# reporter. Worst case per cycle: pmset text + xml + ioreg = ~9s.
 #
 # Validation: ^[A-Za-z0-9._-]{1,64}$ -- the server sanitizer (XACA-1473-003)
 # MUST use exactly this rule. Anything else (empty, too long, spaces, quotes,
-# control chars) is dropped: the serial is OMITTED, never "", null, or a
-# placeholder. Sets the module-level _SYSTEM_UPS_SERIAL (empty = absent); call
-# it as a plain statement, not inside $( ). Always returns 0.
+# XML entities, control chars) is dropped: the serial is OMITTED, never "",
+# null, or a placeholder. Sets the module-level _SYSTEM_UPS_SERIAL (empty =
+# absent); call it as a plain statement, not inside $( ). Always returns 0.
 _SYSTEM_UPS_SERIAL=""
 
-_system_collect_ups_serial() {
-    _SYSTEM_UPS_SERIAL=""
-    command -v ioreg >/dev/null 2>&1 || return 0
-
-    local us_tmp="" us_pid="" us_i=0 us_rc=0 us_val=""
-    us_tmp="$(mktemp "${TMPDIR:-/tmp}/fleet-upsser.XXXXXX" 2>/dev/null)" || return 0
-    ioreg -r -c IOHIDDevice -l >"$us_tmp" 2>/dev/null &
-    us_pid=$!
-    while kill -0 "$us_pid" 2>/dev/null; do
-        if [ "$us_i" -ge 30 ]; then
+# _system_bounded_run <outfile> <cmd> [args...]: run cmd with stdout to
+# outfile under a 3s ceiling (30 x 0.1s). Returns 0 only if cmd finished in
+# time AND exited 0. A hung child is SIGKILLed and disowned, never waited on.
+_system_bounded_run() {
+    local br_out="$1" br_pid="" br_i=0 br_rc=0
+    shift
+    "$@" >"$br_out" 2>/dev/null &
+    br_pid=$!
+    while kill -0 "$br_pid" 2>/dev/null; do
+        if [ "$br_i" -ge 30 ]; then
             # SIGKILL + disown, no `wait` (see _system_collect_power).
-            disown "$us_pid" 2>/dev/null || true
-            kill -9 "$us_pid" 2>/dev/null || true
-            rm "$us_tmp" 2>/dev/null || true
-            return 0
+            disown "$br_pid" 2>/dev/null || true
+            kill -9 "$br_pid" 2>/dev/null || true
+            return 1
         fi
         sleep 0.1
-        us_i=$((us_i + 1))
+        br_i=$((br_i + 1))
     done
-    wait "$us_pid" 2>/dev/null || us_rc=$?
-    if [ "$us_rc" -ne 0 ]; then
+    wait "$br_pid" 2>/dev/null || br_rc=$?
+    [ "$br_rc" -eq 0 ]
+}
+
+# _system_ups_serial_valid <value>: 0 iff value matches ^[A-Za-z0-9._-]{1,64}$
+_system_ups_serial_valid() {
+    case "${1:-}" in
+        ''|*[!A-Za-z0-9._-]*) return 1 ;;
+    esac
+    [ "${#1}" -le 64 ]
+}
+
+# _system_collect_ups_serial <pmset-id> <pmset-device-line-count>
+_system_collect_ups_serial() {
+    _SYSTEM_UPS_SERIAL=""
+    local us_id="${1:-}" us_devs="${2:-0}" us_tmp="" us_val=""
+    [ -n "$us_id" ] || return 0
+
+    # --- 1. pmset -g ps -xml, correlated by Power Source ID ---------------
+    if command -v pmset >/dev/null 2>&1; then
+        us_tmp="$(mktemp "${TMPDIR:-/tmp}/fleet-upsxml.XXXXXX" 2>/dev/null)" || return 0
+        if _system_bounded_run "$us_tmp" pmset -g ps -xml; then
+            us_val="$(awk -v want="$us_id" '
+                function inner(s) {
+                    sub(/^[ \t]*<[A-Za-z]+>/, "", s)
+                    sub(/<\/[A-Za-z]+>[ \t]*$/, "", s)
+                    return s
+                }
+                /<dict>/ {
+                    depth++
+                    if (depth == 1) { psid = ""; typ = ""; acc = ""; nid = 0; ntyp = 0; nacc = 0 }
+                    key = ""; next
+                }
+                /<\/dict>/ {
+                    if (depth == 1 && nid == 1 && ntyp == 1 && psid == want && typ == "UPS") {
+                        hits++; hitacc = (nacc == 1) ? acc : ""
+                    }
+                    if (depth > 0) depth--
+                    key = ""; next
+                }
+                depth != 1 { key = ""; next }
+                /^[ \t]*<key>[^<]*<\/key>[ \t]*$/ { key = inner($0); next }
+                /^[ \t]*<(string|integer)>[^<]*<\/(string|integer)>[ \t]*$/ {
+                    if (key == "Power Source ID") { psid = inner($0); nid++ }
+                    else if (key == "Type") { typ = inner($0); ntyp++ }
+                    else if (key == "Accessory Identifier") { acc = inner($0); nacc++ }
+                    key = ""; next
+                }
+                { key = "" }
+                END { if (hits == 1 && hitacc != "") print hitacc }
+            ' "$us_tmp" 2>/dev/null || true)"
+        fi
         rm "$us_tmp" 2>/dev/null || true
-        return 0
+        if _system_ups_serial_valid "$us_val"; then
+            _SYSTEM_UPS_SERIAL="$us_val"
+            return 0
+        fi
+        us_val=""
     fi
-    us_val="$(awk '
-        function emit() { if (in132) { print ser; found = 1; exit } }
-        /^\+-o / { emit(); in132 = 0; ser = ""; got = 0; next }
-        /"PrimaryUsagePage" = 132[ \t]*$/ { in132 = 1; next }
-        /^[ |]*"SerialNumber" = "/ {
-            if (!got) {
-                v = $0
-                sub(/^[ |]*"SerialNumber" = "/, "", v)
-                sub(/"[ \t]*$/, "", v)
-                ser = v; got = 1
+
+    # --- 2. ioreg fallback: single-UPS hosts only -------------------------
+    [ "$us_devs" = "1" ] || return 0
+    command -v ioreg >/dev/null 2>&1 || return 0
+    us_tmp="$(mktemp "${TMPDIR:-/tmp}/fleet-upsser.XXXXXX" 2>/dev/null)" || return 0
+    if _system_bounded_run "$us_tmp" ioreg -r -c IOHIDDevice -l; then
+        us_val="$(awk '
+            function close_blk() { if (in132) { n132++; if (got) ser132 = ser } }
+            /^\+-o / { close_blk(); in132 = 0; ser = ""; got = 0; next }
+            /"PrimaryUsagePage" = 132[ \t]*$/ { in132 = 1; next }
+            /^[ |]*"SerialNumber" = "/ {
+                if (!got) {
+                    v = $0
+                    sub(/^[ |]*"SerialNumber" = "/, "", v)
+                    sub(/"[ \t]*$/, "", v)
+                    ser = v; got = 1
+                }
             }
-        }
-        END { if (!found) emit() }
-    ' "$us_tmp" 2>/dev/null || true)"
+            END { close_blk(); if (n132 == 1) print ser132 }
+        ' "$us_tmp" 2>/dev/null || true)"
+    fi
     rm "$us_tmp" 2>/dev/null || true
 
-    case "$us_val" in
-        ''|*[!A-Za-z0-9._-]*) return 0 ;;
-    esac
-    [ "${#us_val}" -le 64 ] || return 0
+    _system_ups_serial_valid "$us_val" || return 0
     _SYSTEM_UPS_SERIAL="$us_val"
     return 0
 }
@@ -1896,6 +1974,7 @@ _system_collect_power() {
     [ -n "$pw_out" ] || return 0
 
     local pw_source="" pw_ups="null" pw_line="" pw_tok="" pw_dev_seen=false
+    local pw_raw_id="" pw_dev_count=0
     while IFS= read -r pw_line; do
         case "$pw_line" in
             "Now drawing from '"*)
@@ -1913,10 +1992,13 @@ _system_collect_power() {
                 # The FIRST non-internal device line is the only UPS candidate
                 # (XACA-1391-011): if it is malformed, ups stays null -- a later
                 # line may be a different device, so it never stands in for it.
-                [ "$pw_dev_seen" = false ] || continue
                 case "$pw_line" in
                     " -InternalBattery"*) continue ;;   # laptop battery is not a UPS
                 esac
+                # Every non-internal device line is counted (XACA-1473-013: the
+                # ioreg serial fallback is only safe on a single-device host).
+                pw_dev_count=$((pw_dev_count + 1))
+                [ "$pw_dev_seen" = false ] || continue
                 pw_dev_seen=true
                 local pw_name="" pw_id="" pw_rest="" pw_pct="" pw_state="" pw_seg=""
                 local pw_charging=false pw_mins="null" pw_present="" pw_ok=true
@@ -1978,6 +2060,8 @@ _system_collect_power() {
                                 ;;
                         esac
                     done
+                    # Raw id, unquoted, for the XACA-1473-013 serial correlation.
+                    pw_raw_id="$pw_id"
                     # id: bare integer stays a JSON number, anything else a string.
                     # A leading zero (0123) is not a valid JSON number, and more
                     # than 15 digits loses precision in a JS Number -- both go
@@ -1994,11 +2078,12 @@ _system_collect_power() {
 $pw_out
 _SYSTEM_POWER_EOF
 
-    # XACA-1473-002: enrich a found UPS with its hardware serial. Only when a
-    # ups object was actually built; the key is absent unless a valid serial
-    # was read (never "" / null).
+    # XACA-1473-002/-013: enrich a found UPS with its hardware serial,
+    # correlated to the selected line's id. Only when a ups object was
+    # actually built; the key is absent unless a valid serial was read
+    # (never "" / null).
     if [ "$pw_ups" != "null" ]; then
-        _system_collect_ups_serial
+        _system_collect_ups_serial "$pw_raw_id" "$pw_dev_count"
         if [ -n "$_SYSTEM_UPS_SERIAL" ]; then
             pw_ups="${pw_ups%\}},\"serial\":\"${_SYSTEM_UPS_SERIAL}\"}"
         fi
