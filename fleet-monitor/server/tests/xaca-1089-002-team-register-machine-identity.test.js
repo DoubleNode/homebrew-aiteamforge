@@ -47,7 +47,7 @@ process.env.FLEET_VAULT_FILE = TEST_VAULT_FILE;
 
 const { test, before, after, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
-const request = require('supertest');
+const request = require('./helpers/loopback-request');
 const { createApp } = require('./helpers/app-factory.js');
 const vaultStore = require('../lib/vault-store');
 

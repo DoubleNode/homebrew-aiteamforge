@@ -23,7 +23,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { test, after } = require('node:test');
 const assert = require('node:assert/strict');
-const request = require('supertest');
+const request = require('./helpers/loopback-request');
 const express = require('express');
 
 const FLEET = 'xaca1441-leak-fleet-token-aaaaaaaa';

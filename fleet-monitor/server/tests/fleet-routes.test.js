@@ -14,7 +14,7 @@
  */
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
-const request = require('supertest');
+const request = require('./helpers/loopback-request');
 const { createApp } = require('./helpers/app-factory.js');
 
 // Shared test machine GUID (must be 36 chars)

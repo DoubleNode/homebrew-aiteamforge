@@ -175,7 +175,7 @@ describe('UI', () => {
 // Server (subitem 004): ci-runners-routes.js validates, drops-not-rejects, serves.
 // ===========================================================================
 const os = require('node:os');
-const request = require('supertest');
+const request = require('./helpers/loopback-request');
 const express = require('express');
 
 describe('Server', () => {

@@ -17,7 +17,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const request = require('supertest');
+const request = require('./helpers/loopback-request');
 const express = require('express');
 
 const acc = require('../lib/accessories');

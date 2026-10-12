@@ -59,7 +59,7 @@ delete process.env.FLEET_ADMIN_TOKEN;
 
 const { test, before, after, beforeEach } = require('node:test');
 const assert   = require('node:assert/strict');
-const request  = require('supertest');
+const request  = require('./helpers/loopback-request');
 const express  = require('express');
 
 // Vault dependencies (resolve their file paths from the env vars set above).

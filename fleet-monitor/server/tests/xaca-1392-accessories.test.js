@@ -289,7 +289,7 @@ describe('002 auto-discovery', () => {
 // 003 -- attachment API
 // ===========================================================================
 describe('003 attachment API', () => {
-    const request = require('supertest');
+    const request = require('./helpers/loopback-request');
     const express = require('express');
     const { registerAccessoriesRoutes } = require('../lib/accessories-routes');
     const FLEET = 'test-fleet-token-not-a-real-secret';

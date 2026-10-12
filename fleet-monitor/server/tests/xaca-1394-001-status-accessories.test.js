@@ -21,7 +21,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const express = require('express');
-const request = require('supertest');
+const request = require('./helpers/loopback-request');
 
 const acc = require('../lib/accessories');
 const SERVER_JS = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');

@@ -32,7 +32,7 @@
  */
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const request = require('supertest');
+const request = require('./helpers/loopback-request');
 const { createApp } = require('./helpers/app-factory.js');
 
 const TEST_MACHINE_GUID = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';

@@ -18,7 +18,7 @@ const os = require('os');
 const path = require('path');
 const { test, describe, after } = require('node:test');
 const assert = require('node:assert/strict');
-const request = require('supertest');
+const request = require('./helpers/loopback-request');
 const express = require('express');
 
 const { createGithubClient } = require('../lib/ci-dispatch-github');
@@ -111,9 +111,17 @@ describe('XACA-1465-012 ?refresh=1', () => {
     test('a concurrent pair of refreshes performs ONE read', async () => {
         const h = build();
         const release = h.hold();
+        // Release the held read only once BOTH requests have entered refreshNow() (XACA-1065-020). A fixed 60 ms
+        // sleep raced request arrival under load and flaked ~2-4%; this waits on the event itself.
+        let entered = 0; let bothIn;
+        const both = new Promise((r) => { bothIn = r; });
+        const refreshNow = h.reader.refreshNow.bind(h.reader);
+        h.reader.refreshNow = (...args) => { const p = refreshNow(...args); if (++entered === 2) bothIn(); return p; };
         const a = GET(h.app, '?refresh=1').then((r) => r);
         const b = GET(h.app, '?refresh=1').then((r) => r);
-        await new Promise((x) => setTimeout(x, 60));
+        let t;
+        await Promise.race([both, new Promise((_, rej) => { t = setTimeout(() => rej(new Error(`only ${entered} of 2 refreshes reached refreshNow()`)), 5000); })])
+            .finally(() => clearTimeout(t));
         release();
         const [ra, rb] = await Promise.all([a, b]);
         assert.equal(h.varCalls.length, 3, 'one read of 3 switches, not 6');

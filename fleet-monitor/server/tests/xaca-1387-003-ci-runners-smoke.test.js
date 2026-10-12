@@ -12,7 +12,7 @@ const os = require('os');
 const path = require('path');
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const request = require('supertest');
+const request = require('./helpers/loopback-request');
 const express = require('express');
 
 delete process.env.FLEET_AUTH_TOKEN;

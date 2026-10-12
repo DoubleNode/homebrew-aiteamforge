@@ -20,7 +20,7 @@ const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const express = require('express');
-const request = require('supertest');
+const request = require('./helpers/loopback-request');
 
 const ADMIN = 'admin-' + crypto.randomBytes(8).toString('hex');
 const SENTINEL = 'SENTINEL-s3cret-' + crypto.randomBytes(6).toString('hex');

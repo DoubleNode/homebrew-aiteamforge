@@ -50,7 +50,7 @@ process.env.FLEET_ENGINES_FILE = TEST_ENGINES_FILE;
 
 const { test, before, after } = require('node:test');
 const assert  = require('node:assert/strict');
-const request = require('supertest');
+const request = require('./helpers/loopback-request');
 const express = require('express');
 
 const vaultStore   = require('../lib/vault-store');

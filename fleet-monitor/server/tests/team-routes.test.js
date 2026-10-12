@@ -13,7 +13,7 @@
  */
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const request = require('supertest');
+const request = require('./helpers/loopback-request');
 const { createApp } = require('./helpers/app-factory.js');
 
 // Minimal valid team registration payload

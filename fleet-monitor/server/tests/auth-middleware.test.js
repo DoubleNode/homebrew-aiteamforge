@@ -33,7 +33,7 @@
 
 const { test, describe, beforeEach, afterEach } = require('node:test');
 const assert  = require('node:assert/strict');
-const request = require('supertest');
+const request = require('./helpers/loopback-request');
 const express = require('express');
 
 const authMiddleware = require('../lib/auth-middleware');

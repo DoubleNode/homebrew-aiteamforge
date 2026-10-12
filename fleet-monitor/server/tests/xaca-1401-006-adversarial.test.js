@@ -255,19 +255,37 @@ describe('2. abort / timeout', () => {
     });
 
     test('REGRESSION email: abort really closes the in-flight SMTP socket (real nodemailer, loopback only)', async () => {
-        let serverClosedAt = 0;
-        const srv = net.createServer((s) => { s.on('close', () => { serverClosedAt = Date.now(); }); s.on('error', () => {}); });
+        // Event-driven (XACA-1065-003): no fixed wall-clock budgets. Abort only once the server has actually
+        // accepted the client socket; then wait (generous ceiling, resolves the instant it closes) for the
+        // server side to see that socket close. Under CPU starvation the old 100 ms / 300 ms budgets flaked.
+        // The ceiling IS the promptness bound: this server never sends a greeting, so if abort stopped destroying
+        // the socket nothing would close it until the provider's GREETING_TIMEOUT_MS (10 s, lib/notify-providers/
+        // email.js). 5 s leaves 2x margin each way. Keep CEILING_MS well under that timeout or the test goes vacuous.
+        const CEILING_MS = 5000;
+        const within = (p, what) => {
+            let t;
+            const ceiling = new Promise((_, rej) => { t = setTimeout(() => rej(new Error(what)), CEILING_MS); });
+            return Promise.race([p, ceiling]).finally(() => clearTimeout(t));
+        };
+        let onConnection; let onClose;
+        const connected = new Promise((r) => { onConnection = r; });
+        const closed = new Promise((r) => { onClose = r; });
+        const srv = net.createServer((s) => {
+            onConnection();
+            s.on('close', () => onClose());
+            s.on('error', () => {});
+        });
         await new Promise((r) => srv.listen(0, '127.0.0.1', r));
         try {
             const p = createEmailProvider();
             const ac = new AbortController();
-            const t0 = Date.now();
-            setTimeout(() => ac.abort(), 100);
-            await assert.rejects(() => p.send({ id: 'c', params: { host: '127.0.0.1', port: srv.address().port, from: 'a@b.co', to: 'c@d.co', secure: 'starttls' }, secrets: {} },
-                { title: 't', body: 'b', severity: 'info' }, { signal: ac.signal }), /aborted/);
-            await sleep(300);
-            assert.ok(serverClosedAt > 0, 'server never saw the client socket close');
-            assert.ok(serverClosedAt - t0 < 1000, 'socket closed promptly after abort');
+            const sent = p.send({ id: 'c', params: { host: '127.0.0.1', port: srv.address().port, from: 'a@b.co', to: 'c@d.co', secure: 'starttls' }, secrets: {} },
+                { title: 't', body: 'b', severity: 'info' }, { signal: ac.signal });
+            const rejected = assert.rejects(() => sent, /aborted/);
+            await within(connected, 'server never saw the client connect');
+            ac.abort();
+            await rejected;
+            await within(closed, 'server never saw the client socket close within CEILING_MS of abort');
         } finally { srv.close(); }
     });
 });

@@ -23,7 +23,7 @@ const os = require('os');
 const path = require('path');
 const { test, describe, before, after } = require('node:test');
 const assert = require('node:assert/strict');
-const request = require('supertest');
+const request = require('./helpers/loopback-request');
 const express = require('express');
 
 const TOKEN = 'xaca1387-fake-fleet-token-0001';

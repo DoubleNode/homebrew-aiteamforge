@@ -22,7 +22,7 @@ const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const express = require('express');
-const request = require('supertest');
+const request = require('./helpers/loopback-request');
 
 const FLEET = 'fleet-' + crypto.randomBytes(8).toString('hex');
 const ADMIN = 'admin-' + crypto.randomBytes(8).toString('hex'); // XACA-1488: a SEPARATE admin tier is required for the notify team routes

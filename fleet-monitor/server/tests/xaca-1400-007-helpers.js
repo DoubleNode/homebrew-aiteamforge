@@ -22,7 +22,7 @@ const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const express = require('express');
-const request = require('supertest');
+const request = require('./helpers/loopback-request');
 
 const rand = (n = 8) => crypto.randomBytes(n).toString('hex');
 const ADMIN = 'admin-' + rand();

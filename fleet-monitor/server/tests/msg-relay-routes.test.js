@@ -38,7 +38,7 @@ process.env.FLEET_MSG_FILE = TEST_MSG_FILE;
 
 const { test, before, after, beforeEach } = require('node:test');
 const assert  = require('node:assert/strict');
-const request = require('supertest');
+const request = require('./helpers/loopback-request');
 const express = require('express');
 
 const { ensureReady, generateKeypair, seal, sealOpen } = require('../lib/vault-crypto');

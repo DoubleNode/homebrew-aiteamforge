@@ -32,7 +32,7 @@ delete process.env.FLEET_AUTH_TOKEN;
 
 const { test, beforeEach, after } = require('node:test');
 const assert  = require('node:assert/strict');
-const request = require('supertest');
+const request = require('./helpers/loopback-request');
 const express = require('express');
 
 const { registerTokenReportsRoutes, isoWeekOf, lastCompletedWeek } = require('../lib/token-reports-routes');

@@ -51,7 +51,7 @@
  */
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const request = require('supertest');
+const request = require('./helpers/loopback-request');
 const { createApp, helpers } = require('./helpers/app-factory.js');
 
 const fleetFixture = require('./fixtures/xaca-1002-live-fleet.json');
