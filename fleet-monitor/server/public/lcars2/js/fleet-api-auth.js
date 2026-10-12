@@ -17,8 +17,14 @@
  *   apiFetch(url, init) is a drop-in for fetch(). For a SAME-ORIGIN request:
  *     - sends `credentials: 'same-origin'` so the HttpOnly session cookie
  *       rides along;
- *     - adds `X-Fleet-CSRF: 1` on POST/PUT/PATCH/DELETE (CSRF layer 2 —
- *       the server refuses the cookie without it);
+ *     - adds `X-Fleet-CSRF: 1` on EVERY method, GET/HEAD included (XACA-1508).
+ *       Mutating calls need it as CSRF layer 2 (the server refuses the
+ *       cookie without it). Safe methods need it because browsers omit
+ *       Origin on same-origin GET, so the server's safe-method path cannot
+ *       tell a real page from a bare cookie replay and keys on this header
+ *       instead. Without it admin-tier GETs (e.g. Notifications) never get
+ *       authorized by the session cookie and the screen stays LOCKED. It is
+ *       only ever added on the same-origin path (see apiFetch);
  *     - on a 401 from a mutating call, opens the unlock dialog ONCE, and if
  *       the operator unlocks, retries the request ONCE. A second 401 is
  *       returned to the caller as-is (no loop). Cancelling returns the
@@ -99,20 +105,20 @@
                 }
             }
             opts.credentials = 'same-origin';
-            if (MUTATING[methodOf(init)]) {
-                if (typeof Headers !== 'undefined') {
-                    var h = new Headers(opts.headers || {});
-                    h.set(CSRF_HEADER, '1');
-                    opts.headers = h;
-                } else {
-                    var merged = {};
-                    var existing = opts.headers || {};
-                    for (var name in existing) {
-                        if (Object.prototype.hasOwnProperty.call(existing, name)) merged[name] = existing[name];
-                    }
-                    merged[CSRF_HEADER] = '1';
-                    opts.headers = merged;
+            // XACA-1508: every method, not just MUTATING. withAuthOptions is only
+            // reached for same-origin URLs (apiFetch gates on isSameOrigin).
+            if (typeof Headers !== 'undefined') {
+                var h = new Headers(opts.headers || {});
+                h.set(CSRF_HEADER, '1');
+                opts.headers = h;
+            } else {
+                var merged = {};
+                var existing = opts.headers || {};
+                for (var name in existing) {
+                    if (Object.prototype.hasOwnProperty.call(existing, name)) merged[name] = existing[name];
                 }
+                merged[CSRF_HEADER] = '1';
+                opts.headers = merged;
             }
             return opts;
         }

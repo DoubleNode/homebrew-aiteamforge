@@ -202,11 +202,42 @@ describe('apiFetch — request shaping', () => {
         });
     }
 
-    test('GET gets no CSRF header', async () => {
+    test('same-origin GET gets X-Fleet-CSRF: 1 (XACA-1508)', async () => {
         const env = makeEnv();
         env.respond(200);
         await env.client.apiFetch('/api/engines');
+        assert.equal(headerOf(env.calls[0].init, 'X-Fleet-CSRF'), '1');
+        assert.equal(env.calls[0].init.credentials, 'same-origin');
+    });
+
+    test('GET with existing headers keeps them and adds the CSRF header (XACA-1508)', async () => {
+        const env = makeEnv();
+        env.respond(200);
+        await env.client.apiFetch('/api/engines', { headers: { Accept: 'application/json' } });
+        assert.equal(headerOf(env.calls[0].init, 'X-Fleet-CSRF'), '1');
+        assert.equal(headerOf(env.calls[0].init, 'Accept'), 'application/json');
+    });
+
+    test('HEAD gets X-Fleet-CSRF: 1 (XACA-1508)', async () => {
+        const env = makeEnv();
+        env.respond(200);
+        await env.client.apiFetch('/api/engines', { method: 'HEAD' });
+        assert.equal(headerOf(env.calls[0].init, 'X-Fleet-CSRF'), '1');
+    });
+
+    test('GET to a cross-origin absolute URL gets NO CSRF header (XACA-1508)', async () => {
+        const env = makeEnv();
+        env.respond(200);
+        await env.client.apiFetch('https://elsewhere.example/api/engines');
         assert.equal(headerOf(env.calls[0].init, 'X-Fleet-CSRF'), undefined);
+    });
+
+    test('a same-origin GET 401 does not open the unlock dialog (retry stays mutating-only)', async () => {
+        const env = makeEnv();
+        env.respond(401);
+        const r = await env.client.apiFetch('/api/engines');
+        assert.equal(r.status, 401);
+        assert.equal(env.calls.length, 1);
     });
 
     test('the caller\'s init object is not mutated', async () => {

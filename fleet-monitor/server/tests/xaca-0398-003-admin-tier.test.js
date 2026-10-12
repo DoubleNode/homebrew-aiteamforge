@@ -200,10 +200,11 @@ describe('admin-session: cookie serialization (CSRF layer 1 is SameSite=Strict)'
 
 describe('admin-session: request-side CSRF rules, each on its own', () => {
     const base = { 'x-fleet-csrf': '1', origin: ORIGIN, host: HOST, 'sec-fetch-site': 'same-origin' };
-    const req = (overrides) => {
+    // Mutating by default (XACA-1508): the strict rules below are the POST rules.
+    const req = (overrides, method = 'POST') => {
         const headers = { ...base, ...overrides };
         for (const k of Object.keys(headers)) if (headers[k] === undefined) delete headers[k];
-        return { headers };
+        return method === null ? { headers } : { method, headers };
     };
 
     test('baseline passes', () => assert.equal(adminSession.passesCsrfChecks(req({})), true));
@@ -223,6 +224,47 @@ describe('admin-session: request-side CSRF rules, each on its own', () => {
     test('layer 4: Sec-Fetch-Site cross-site', () => assert.equal(adminSession.passesCsrfChecks(req({ 'sec-fetch-site': 'cross-site' })), false));
     test('layer 4: Sec-Fetch-Site same-site (sibling subdomain)', () => assert.equal(adminSession.passesCsrfChecks(req({ 'sec-fetch-site': 'same-site' })), false));
     test('layer 4: Sec-Fetch-Site none', () => assert.equal(adminSession.passesCsrfChecks(req({ 'sec-fetch-site': 'none' })), false));
+
+    // XACA-1508: safe methods (GET/HEAD) make Origin optional — browsers omit
+    // it on a same-origin GET — but the header stays mandatory and a PRESENT
+    // Origin / Sec-Fetch-Site must still pass. Mutating/missing methods are strict.
+    const bare = { origin: undefined, 'sec-fetch-site': undefined };
+    for (const m of ['GET', 'HEAD', 'get']) {
+        test(`${m}: header, no Origin, no Sec-Fetch-Site -> passes`, () =>
+            assert.equal(adminSession.passesCsrfChecks(req(bare, m)), true));
+        test(`${m}: header, no Origin, Sec-Fetch-Site same-origin -> passes`, () =>
+            assert.equal(adminSession.passesCsrfChecks(req({ origin: undefined }, m)), true));
+        test(`${m}: matching Origin still passes`, () =>
+            assert.equal(adminSession.passesCsrfChecks(req({}, m)), true));
+        test(`${m}: missing X-Fleet-CSRF -> fails`, () =>
+            assert.equal(adminSession.passesCsrfChecks(req({ ...bare, 'x-fleet-csrf': undefined }, m)), false));
+        test(`${m}: X-Fleet-CSRF other than 1 -> fails`, () =>
+            assert.equal(adminSession.passesCsrfChecks(req({ ...bare, 'x-fleet-csrf': 'yes' }, m)), false));
+        test(`${m}: cross-site Origin present -> fails`, () =>
+            assert.equal(adminSession.passesCsrfChecks(req({ origin: 'https://evil.example', 'sec-fetch-site': undefined }, m)), false));
+        test(`${m}: Origin "null" present -> fails`, () =>
+            assert.equal(adminSession.passesCsrfChecks(req({ origin: 'null', 'sec-fetch-site': undefined }, m)), false));
+        test(`${m}: empty-string Origin is present, not absent -> fails`, () =>
+            assert.equal(adminSession.passesCsrfChecks(req({ origin: '', 'sec-fetch-site': undefined }, m)), false));
+        test(`${m}: Origin differing only by port -> fails`, () =>
+            assert.equal(adminSession.passesCsrfChecks(req({ origin: `${ORIGIN}:8443` }, m)), false));
+        test(`${m}: non-http Origin scheme -> fails`, () =>
+            assert.equal(adminSession.passesCsrfChecks(req({ origin: `ftp://${HOST}` }, m)), false));
+        test(`${m}: Sec-Fetch-Site cross-site -> fails`, () =>
+            assert.equal(adminSession.passesCsrfChecks(req({ origin: undefined, 'sec-fetch-site': 'cross-site' }, m)), false));
+        test(`${m}: Sec-Fetch-Site same-site -> fails`, () =>
+            assert.equal(adminSession.passesCsrfChecks(req({ origin: undefined, 'sec-fetch-site': 'same-site' }, m)), false));
+    }
+    for (const m of ['POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'BREW', '']) {
+        test(`${m || '(empty)'}: missing Origin -> fails (strict path)`, () =>
+            assert.equal(adminSession.passesCsrfChecks(req(bare, m)), false));
+    }
+    test('missing req.method -> strict path: missing Origin fails', () =>
+        assert.equal(adminSession.passesCsrfChecks(req(bare, null)), false));
+    test('missing req.method -> strict path: full headers still pass', () =>
+        assert.equal(adminSession.passesCsrfChecks(req({}, null)), true));
+    test('non-string req.method -> strict path', () =>
+        assert.equal(adminSession.passesCsrfChecks({ method: ['GET'], headers: { 'x-fleet-csrf': '1', host: HOST } }), false));
 });
 
 // ===========================================================================

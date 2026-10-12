@@ -333,8 +333,10 @@ function isAuthorized(req) {
  *   1. A valid-shape header credential. If one is presented, the decision is
  *      made on it alone — a wrong header 401s even alongside a good cookie.
  *   2. Otherwise the __Host-fleet_admin session cookie, accepted only when
- *      every request-side CSRF rule holds (X-Fleet-CSRF: 1, Origin host ==
- *      Host exactly, Sec-Fetch-Site same-origin when present). A CSRF
+ *      every request-side CSRF rule holds (X-Fleet-CSRF: 1 on every
+ *      method; Origin host == Host exactly - REQUIRED on unsafe methods,
+ *      optional-but-exact-if-present on GET/HEAD per XACA-1508;
+ *      Sec-Fetch-Site same-origin when present). A CSRF
  *      failure is "no credential presented", i.e. the byte-identical 401.
  */
 function isAdminAuthorized(req) {

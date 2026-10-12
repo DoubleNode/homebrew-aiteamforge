@@ -176,6 +176,8 @@ function serializeClearCookie() {
 // ---------------------------------------------------------------------------
 // CSRF rules (contract §3.6). Rule 1 (SameSite=Strict) is an issuance
 // attribute — see serializeSessionCookie(). Rules 2-4 are request checks.
+// Rule 3 (Origin) is method-aware since XACA-1508: required on unsafe methods,
+// optional-but-exact-if-present on GET/HEAD. See passesCsrfChecks().
 // Each is exported on its own so the tests can prove each one rejects alone.
 // ---------------------------------------------------------------------------
 
@@ -215,9 +217,54 @@ function secFetchSiteOk(req) {
     return String(v).trim().toLowerCase() === 'same-origin';
 }
 
-/** All request-side CSRF rules. */
+/**
+ * Rule 3 relaxed for SAFE methods only (XACA-1508): an ABSENT Origin passes,
+ * but a PRESENT one must satisfy originMatchesHost() exactly — so "null", a
+ * port mismatch, a foreign host, a path, or a non-http(s) scheme still fail.
+ * "Absent" means undefined/null only; an empty-string Origin is present and
+ * fails. originMatchesHost() itself is deliberately NOT weakened.
+ */
+function originAbsentOrMatchesHost(req) {
+    const origin = getHeader(req, 'origin');
+    if (origin === undefined || origin === null) return true;
+    return originMatchesHost(req);
+}
+
+// Only GET and HEAD are treated as safe. OPTIONS is not: preflights are
+// answered by the cors() middleware before any route, and treating it as
+// safe here would buy nothing but a wider surface. Anything else — including
+// an unknown, non-string, or MISSING method — takes the strict path.
+const SAFE_METHODS = new Set(['GET', 'HEAD']);
+
+function isSafeMethod(req) {
+    return typeof req.method === 'string' && SAFE_METHODS.has(req.method.toUpperCase());
+}
+
+/**
+ * All request-side CSRF rules, method-aware (XACA-1508).
+ *
+ * Mutating methods (and any unknown/missing method — fail closed): header +
+ * Origin present and == Host + Sec-Fetch-Site same-origin when present.
+ * Unchanged from contract §3.6.
+ *
+ * Safe methods (GET, HEAD): header REQUIRED; Origin and Sec-Fetch-Site are
+ * OPTIONAL but, when present, must pass the same rules. Why Origin cannot
+ * be required here: browsers do not send Origin on a same-origin GET, so
+ * requiring it meant an admin session cookie could never authorize an
+ * admin-tier GET (the Notifications screen stayed LOCKED forever). Why this
+ * is still safe: X-Fleet-CSRF is a non-safelisted header, so a cross-origin
+ * page that tries to attach it triggers a CORS preflight, which the server
+ * does not grant (server.js pins cors() allowedHeaders to Content-Type, so
+ * X-Fleet-CSRF is refused even for an allow-listed origin) — the request is never sent with the cookie. A plain
+ * cross-site navigation/<img>/<form> GET cannot add the header at all, so it
+ * fails rule 2. And the Same-Origin Policy stops a cross-site page reading
+ * any GET response regardless. Safe methods carry no side effects, so the
+ * Origin check bought confidentiality the preflight already provides.
+ */
 function passesCsrfChecks(req) {
-    return hasCsrfHeader(req) && originMatchesHost(req) && secFetchSiteOk(req);
+    if (!hasCsrfHeader(req) || !secFetchSiteOk(req)) return false;
+    if (isSafeMethod(req)) return originAbsentOrMatchesHost(req);
+    return originMatchesHost(req);
 }
 
 module.exports = {
@@ -232,6 +279,7 @@ module.exports = {
     serializeClearCookie,
     hasCsrfHeader,
     originMatchesHost,
+    originAbsentOrMatchesHost,
     secFetchSiteOk,
     passesCsrfChecks,
 };
