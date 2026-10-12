@@ -4675,12 +4675,17 @@ kb-ci-priority() {
 #   * Verifies with gh that the PR is really MERGED; never records an open/closed PR.
 #   * ITEM-ID empty -> resolved from the PR head branch name, else the PR title; unresolvable ->
 #     warn + skip (rc 2), never guess. A subitem id (XACA-1347-005) maps to its parent item.
+#   * ITEM-ID given (kb-merge --item / kb-backlog pr-merged, XACA-1503) -> recorded ON THAT ITEM. If the id derived from
+#     the head branch (else the title) differs, warn on stderr naming both and still record on the
+#     explicit item. A failure to derive the id never blocks recording.
 #   * Idempotent: same PR + repo already recorded = no-op (rc 0). A DIFFERENT PR on the same item
 #     OVERWRITES (latest merge wins; an item spans several PRs, the gate only tests truthiness).
 # rc: 0 recorded/already recorded, 1 gh/board/usage failure, 2 item unresolvable, 3 PR not merged.
 _kb_pr_merged_record() {
     local item="${1-}" pr="${2-}"
     [[ "$pr" =~ ^[0-9]+$ ]] || { echo "Error: PR number required (got '$pr')" >&2; return 1; }
+    # XACA-1503-003: a missing gh is its own error, not "could not read PR".
+    command -v gh >/dev/null 2>&1 || { echo "Error: 'gh' not found on PATH - cannot read PR #$pr" >&2; return 1; }
     _kb_ensure_jq || return 1
 
     local info="" _try _st _oid
@@ -4722,6 +4727,26 @@ _kb_pr_merged_record() {
             echo "Warning: no ticket id in PR #$pr head branch '$head' or title; prMerged not recorded" >&2
             return 2
         fi
+    else
+        # XACA-1503-002: explicit item wins; warn when the branch/title names a different ticket.
+        # Best-effort only - a derive failure (empty head/title, grep miss) just skips the warning.
+        local _src _derived="" _from=""
+        for _src in "$head" "$title"; do
+            _derived=$(printf '%s' "$_src" | grep -oiE '[A-Z]{3,5}-[0-9]{3,5}' | head -1 | tr '[:lower:]' '[:upper:]') || _derived=""
+            if [[ -n "$_derived" ]]; then
+                [[ "$_src" == "$head" ]] && _from="head branch '$head'" || _from="title '$title'"
+                break
+            fi
+        done
+        if [[ -n "$_derived" ]]; then
+            local _a _b="$_derived"
+            _a=$(printf '%s' "$item" | tr '[:lower:]' '[:upper:]')
+            _kb_is_subitem_id "$_a" 2>/dev/null && _a="${_a%-*}"
+            _kb_is_subitem_id "$_b" 2>/dev/null && _b="${_b%-*}"
+            if [[ "$_a" != "$_b" ]]; then
+                echo "⚠️  prMerged: PR #$pr $_from names $_derived but the explicit item is $item - recording on $item" >&2
+            fi
+        fi
     fi
     # Subitem id (XACA-1347-005) -> parent item: prMerged lives on the top-level item.
     _kb_is_subitem_id "$item" 2>/dev/null && item="${item%-*}"
@@ -4758,11 +4783,11 @@ _kb_pr_merged_record() {
 # Fail-soft wrapper for kb-merge: the merge already happened, so a recording failure only warns
 # (naming the retry command) and NEVER changes kb-merge's exit status. Always returns 0.
 _kb_merge_record_safe() {
-    local pr="${1-}" rc=0
-    _kb_pr_merged_record "" "$pr" || rc=$?
+    local pr="${1-}" item="${2-}" rc=0
+    _kb_pr_merged_record "$item" "$pr" || rc=$?
     if [[ "$rc" -ne 0 ]]; then
         echo "⚠️  kb-merge: PR #$pr merged, but item.prMerged was NOT recorded (rc=$rc) - the DEV->QA gate needs it." >&2
-        echo "    Retry: kb-backlog pr-merged <ITEM-ID> $pr" >&2
+        echo "    Retry: kb-backlog pr-merged ${item:-<ITEM-ID>} $pr" >&2
     fi
     return 0
 }
@@ -4855,15 +4880,32 @@ sys.stdout.write((summary + "\n\n" if summary else "") + "\n".join(lines) + "\n"
 # that specific failure mode, falls back to remote-branch cleanup via direct push,
 # and returns success.
 #
-# Usage: kb-merge <PR#> [--squash|--merge|--rebase]  (defaults to --squash)
+# Usage: kb-merge <PR#> [--squash|--merge|--rebase] [--item <ID>]  (strategy defaults to --squash)
+#   --item <ID> / --item=<ID> (any position, XACA-1503): record prMerged on <ID> instead of the
+#   ID derived from the PR head branch/title (which is wrong when branch and title disagree).
 #
 # Exit:
 #   0 — PR merged (and branch cleanup completed or was already done)
 #   1 — merge failed for any other reason (gh's stderr is preserved)
 kb-merge() {
-    local pr="${1-}"
-    [[ -z "$pr" ]] && { echo "Usage: kb-merge <PR#> [--squash|--merge|--rebase]" >&2; return 1; }
-    local strategy="${2:---squash}"
+    local pr="" strategy="" item="" _npos=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --item)
+                [[ -n "${2-}" ]] || { echo "Error: kb-merge --item requires an ID" >&2; return 1; }
+                item="$2"; shift 2 ;;
+            --item=*)
+                item="${1#--item=}"
+                [[ -n "$item" ]] || { echo "Error: kb-merge --item requires an ID" >&2; return 1; }
+                shift ;;
+            *)
+                _npos=$((_npos + 1))
+                if [[ "$_npos" -eq 1 ]]; then pr="$1"; elif [[ "$_npos" -eq 2 ]]; then strategy="$1"; fi
+                shift ;;
+        esac
+    done
+    [[ -z "$pr" ]] && { echo "Usage: kb-merge <PR#> [--squash|--merge|--rebase] [--item <ID>]" >&2; return 1; }
+    [[ -n "$strategy" ]] || strategy="--squash"
 
     # Capture combined output so we can pattern-match on the worktree-lock error.
     local out squash_body="" merged=1
@@ -4879,7 +4921,7 @@ kb-merge() {
     fi
     if [[ "$merged" -eq 0 ]]; then
         echo "$out"
-        _kb_merge_record_safe "$pr"
+        _kb_merge_record_safe "$pr" "$item"
         return 0
     fi
 
@@ -4895,18 +4937,18 @@ kb-merge() {
         if [[ -n "$branch" && -n "$remote" ]]; then
             if git push "$remote" --delete "$branch" 2>&1; then
                 echo "✓ kb-merge: PR #$pr merged via API; remote branch '$branch' deleted manually (worktree-lock fallback)."
-                _kb_merge_record_safe "$pr"
+                _kb_merge_record_safe "$pr" "$item"
                 return 0
             else
                 echo "⚠️  kb-merge: PR #$pr merged via API but remote branch '$branch' delete failed." >&2
                 echo "    Run manually: git push $remote --delete $branch" >&2
-                _kb_merge_record_safe "$pr"
+                _kb_merge_record_safe "$pr" "$item"
                 return 0  # the merge itself succeeded
             fi
         fi
         echo "⚠️  kb-merge: PR #$pr merged via API but could not auto-detect branch/remote for cleanup." >&2
         echo "$out" >&2
-        _kb_merge_record_safe "$pr"
+        _kb_merge_record_safe "$pr" "$item"
         return 0
     fi
 
