@@ -4744,7 +4744,9 @@ _kb_pr_merged_record() {
             _kb_is_subitem_id "$_a" 2>/dev/null && _a="${_a%-*}"
             _kb_is_subitem_id "$_b" 2>/dev/null && _b="${_b%-*}"
             if [[ "$_a" != "$_b" ]]; then
-                echo "⚠️  prMerged: PR #$pr $_from names $_derived but the explicit item is $item - recording on $item" >&2
+                # Name where it is RECORDED: a subitem id records on its parent (XACA-1503-015).
+                local _on="$_a"; [[ "$_a" != "$(printf '%s' "$item" | tr '[:lower:]' '[:upper:]')" ]] && _on="parent $_a"
+                echo "⚠️  prMerged: PR #$pr $_from names $_derived but the explicit item is $item - recording on $_on" >&2
             fi
         fi
     fi
@@ -4883,6 +4885,8 @@ sys.stdout.write((summary + "\n\n" if summary else "") + "\n".join(lines) + "\n"
 # Usage: kb-merge <PR#> [--squash|--merge|--rebase] [--item <ID>]  (strategy defaults to --squash)
 #   --item <ID> / --item=<ID> (any position, XACA-1503): record prMerged on <ID> instead of the
 #   ID derived from the PR head branch/title (which is wrong when branch and title disagree).
+#   <ID> (or its parent, for a subitem) must be on the team board BEFORE the merge: if it is
+#   not, or the board cannot be read, kb-merge refuses (rc 1) and merges nothing.
 #
 # Exit:
 #   0 — PR merged (and branch cleanup completed or was already done)
@@ -4909,6 +4913,21 @@ kb-merge() {
     [[ -n "$strategy" ]] || strategy="--squash"
     # Board ids are upper-case; a lowercase --item would pass the mismatch compare yet miss the board.
     [[ -n "$item" ]] && item=$(printf '%s' "$item" | tr '[:lower:]' '[:upper:]')
+    # --item must exist BEFORE merging (XACA-1503-016): a typo would otherwise merge the PR and
+    # then fail to record. Fail-closed - an unreadable board refuses too; merge nothing.
+    if [[ -n "$item" ]]; then
+        local _ctx _team _bf _idx _top="$item"
+        _kb_is_subitem_id "$_top" 2>/dev/null && _top="${_top%-*}"
+        _ctx=$(_kb_detect_context 2>/dev/null) || { echo "Error: kb-merge --item $item: cannot detect kanban team context - PR #$pr NOT merged" >&2; return 1; }
+        _team="${_ctx%%:*}"
+        _bf=$(_kb_get_board_file "$_team") && [[ -f "$_bf" ]] \
+            || { echo "Error: kb-merge --item $item: no kanban board for team '$_team' - PR #$pr NOT merged" >&2; return 1; }
+        _idx=$(_kb_find_by_id "$_bf" "$_top")
+        if [[ -z "$_idx" || "$_idx" == "-1" ]]; then
+            echo "Error: kb-merge --item $item: $_top is not on the $_team board - PR #$pr NOT merged" >&2
+            return 1
+        fi
+    fi
 
     # Capture combined output so we can pattern-match on the worktree-lock error.
     local out squash_body="" merged=1
