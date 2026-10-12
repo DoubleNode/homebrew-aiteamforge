@@ -7,6 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [0.21.2] - 2026-10-12
+
 - **XACA-1506** (Changed, re-mirror): `fleet-monitor/server/` re-mirrored with XACA-1065's merged test-flake fix, which landed on dev-team (b9b30641, 903d70ff) without a tap sync and left `develop` red on `sync-tap-drift`. 52 files drifted and 4 are new: supertest listeners pinned to 127.0.0.1, the new `tests/helpers/loopback-request.js` helper, `tests/xaca-1065-loopback-request.test.js` and `tests/xaca-1065-loopback-guard.test.js`, and `scripts/flake-ab.sh`. Mirror-only, byte-identical to the dev-team canonical files.
 - **XACA-1503** (Fixed): `share/templates/kanban/kanban-helpers.template.sh`: `kb-merge` accepts `--item <ID>` (any position; positional PR + strategy unchanged) and records `prMerged` on that item instead of the ticket id derived from the PR head branch/title, warning on stderr when they disagree; `kb-pr-monitor` passes it. A missing `gh` now reports `'gh' not found on PATH` instead of "could not read PR". PR #1144 gate round 1: a flag-shaped `--item` value (`--item --squash`) is rejected as a missing ID before any merge, and a lowercase `--item` is upper-cased so it is actually recorded. Gate round 2: `--item` must be on the team board BEFORE the merge (an unknown id or unreadable board refuses, rc 1, nothing merged), and the mismatch warning names the parent when the item is a subitem. Gate round 3: `share/scripts/kb-pr-monitor` re-mirrored, so the shipped monitor actually passes `--item "$ITEM_ID"` to `kb-merge` (without it, consumers got the new flag but kept the branch-credit bug).
 - **XACA-1496** (Changed, re-mirror): mirror the XACA-1465 CI/CD fallback-switch pills, REFRESH pill + `?refresh=1` route, pill CSS, admin-tier route count (38→40), and register the 9 already-mirrored xaca-1465 tests in `fleet-monitor/server` `scripts.test`. Completes the catch-up begun in XACA-0967 (c8039698), which skipped these 5 files as tap-ahead.
@@ -7980,7 +7982,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.1...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.2...HEAD
+[0.21.2]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.1...v0.21.2
 [0.21.1]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.0...v0.21.1
 [0.21.0]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.33...v0.21.0
 [0.20.33]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.32...v0.20.33
