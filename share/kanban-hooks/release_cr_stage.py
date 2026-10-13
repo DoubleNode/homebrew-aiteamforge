@@ -390,6 +390,7 @@ class CrStage:
             resolve = _rpr.resolve_profile
         self._resolve = resolve
         self.cr_id: Optional[str] = None
+        self._plan_waived = False  # XACA-1510-016: set by _facts when an approved legacy plan is published verbatim
         self._gamma_held: List[Dict[str, Any]] = []
         self._profiles: Dict[str, Dict[str, Any]] = {}
 
@@ -447,10 +448,17 @@ class CrStage:
         except ValueError as exc:  # FactSetError / ExcludedScopeError
             raise CrStageError("cannot assemble the CR facts: %s" % exc, RC_REFUSED)
         if render_plan:
-            if self._plan_grandfathered(cr):
-                self._passthrough_plan(facts)   # approved draft: publish the stored plan verbatim
-            else:
+            self._plan_waived = False
+            try:
                 self._apply_implementation_plan(facts, relr, cr)
+            except CrStageError as exc:
+                # XACA-1510-015/016: grandfather only what the rule would otherwise REFUSE. A valid stored plan has
+                # already been normalized above, exactly as when it was approved; only an approved plan that does
+                # not parse (pre-rule prose) falls back to verbatim, with section-steps waived.
+                if exc.rc != RC_DRAFT_INVALID or not self._plan_grandfathered(cr):
+                    raise
+                self._plan_waived = True
+                self._legacy_plan_verbatim(facts, relr)
         else:
             self._passthrough_plan(facts)
         return facts
@@ -468,6 +476,15 @@ class CrStage:
         dc = cr.get("draftContent")
         plan = dc.get("implementationPlan") if isinstance(dc, dict) else None
         return isinstance(plan, str) and bool(plan.strip())
+
+    def _legacy_plan_verbatim(self, facts: Dict[str, Any], rel: Dict[str, Any]) -> None:
+        """An approved plan that is not an ordered list stays as approved. Only line endings are normalized (CRLF -> LF) and newlines are collapsed to ``<br>``
+        when the slot sits in a pipe-table row, so the row cannot split (the text itself is not altered)."""
+        content = facts["content"]
+        plan = content["implementationPlan"].replace("\r\n", "\n").replace("\r", "\n")   # no stray CRs either way
+        if self._plan_in_table_row(self._profile("cr")["template"]):
+            plan = "<br>".join(part.strip() for part in re.split(r"\r\n|\r|\n", plan) if part.strip())
+        content["implementationPlan"] = plan
 
     def _passthrough_plan(self, facts: Dict[str, Any]) -> None:
         """No render, no validation. A plan the draft never stored reads as '' so a whole-template render
@@ -812,7 +829,7 @@ class CrStage:
         content = self._content(cr, self._profile("cr")["template"])
         board, rel, cr = self._load()
         facts = self._facts(board, rel, cr, content=content, render_plan=True)
-        body, title = self._render_validate("cr", facts, strict=False, grandfathered=self._plan_grandfathered(cr))
+        body, title = self._render_validate("cr", facts, strict=False, grandfathered=self._plan_waived)
         out_dir = Path(self.kdir) / "release-drafts"
         out_dir.mkdir(parents=True, exist_ok=True)
         path = out_dir / ("%s.md" % cr["id"])
@@ -936,7 +953,7 @@ class CrStage:
             url_tl = get_wiki_handle(rel, "testing-log")["url"]
             content = self._content(cr, self._profile("cr")["template"])
             facts = self._facts(board, rel, cr, content=content, testing_url=url_tl, render_plan=True)
-            body, title = self._render_validate("cr", facts, strict=True, grandfathered=self._plan_grandfathered(cr))
+            body, title = self._render_validate("cr", facts, strict=True, grandfathered=self._plan_waived)
             handle = self._publish_page("cr", cr["id"], title, body, None)
             set_wiki_handle(self.board_file, "crs", cr["id"], "cr", handle, links={"crRequestPage": handle["url"]})
             note.append("cr page %s (v%d)" % (handle["url"], handle["version"]))
