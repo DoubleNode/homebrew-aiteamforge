@@ -336,17 +336,22 @@ def _strip_block_comments(lines: List[str]) -> List[str]:
     i, n, no_close = 0, len(lines), False
     tbl = held = False  # inside a pipe table / a comment-owned blank is owed
 
-    def add(x: str) -> None:
+    def add(x: str, nxt: Optional[str] = None) -> None:
         nonlocal tbl, held
         row = x.lstrip().startswith("|")
-        if held and not row:
-            out.append("")  # the comment really did separate blocks
+        # The comment really did separate blocks: a non-row follows, or the row
+        # is the header of a NEW table (row + separator), which develop rendered
+        # as a second table (XACA-1523 gate round 2).
+        if held and (not row or (nxt is not None and _is_table_start([x, nxt], 0))):
+            out.append("")
             tbl = False
         held = False
-        if not row:
-            tbl = False
-        elif not tbl and out and out[-1].lstrip().startswith("|"):
-            tbl = _is_table_start([out[-1], x], 0)
+        # Same table notion as the renderer: a header row + separator (with or
+        # without a leading "|") opens it, every following "|" line continues it.
+        if tbl:
+            tbl = row
+        else:
+            tbl = bool(out) and _is_table_start([out[-1], x], 0)
         out.append(x)
 
     while i < n:
@@ -363,7 +368,7 @@ def _strip_block_comments(lines: List[str]) -> List[str]:
             continue
         c = ln.find("<!--")
         if c < 0 or no_close or ln[:c].strip(" \t"):
-            add(ln)
+            add(ln, lines[i + 1] if i + 1 < n else None)
             i += 1
             continue
         j, e = i, ln.find("-->", c + 4)
@@ -372,7 +377,7 @@ def _strip_block_comments(lines: List[str]) -> List[str]:
             e = lines[j].find("-->")
         if e < 0:
             no_close = True
-            add(ln)
+            add(ln, lines[i + 1] if i + 1 < n else None)
             i += 1
             continue
         rest = lines[j][e + 3:]
