@@ -47,9 +47,12 @@ _BUL_ITEM_RE = re.compile(r"^\s*[-*+]\s+(.*)$", re.DOTALL)
 
 _CODE_RE = re.compile(r"(?<!`)(`{1,3})(?!`)(.+?)(?<!`)\1(?!`)")  # bounded run: no backtracking blow-up on long ``` lines
 _IMG_RE = re.compile(r"!\[([^\[\]]*)\]\(\s*([^()\s]+)\s*\)")
-_LINK_RE = re.compile(
-    r"\[((?:[^\[\]\\]|\\.)*)\]\(\s*"
-    r"([^()\s]+(?:\([^()\s]*\)[^()\s]*)*)(?:\s+\"[^\"]*\")?\s*\)"
+# Links are scanned by _sub_links (label, then tail) rather than by one regex:
+# as a single pattern the label body re-scanned to end-of-line from every
+# unclosed "[" preceded by escaped brackets -> quadratic (XACA-1523-001).
+_LINK_LABEL_RE = re.compile(r"\[((?:[^\[\]\\]|\\.)*)")
+_LINK_TAIL_RE = re.compile(
+    r"\]\(\s*([^()\s]+(?:\([^()\s]*\)[^()\s]*)*)(?:\s+\"[^\"]*\")?\s*\)"
 )
 _URL_RE = re.compile(r"https?://[^\s<>\"'`\x00]+")
 _BOLD_RE = re.compile(r"\*\*(?=\S)((?:(?!\*\*).)+?)(?<=\S)\*\*|(?<!\w)__(?=\S)((?:(?!__).)+?)(?<=\S)__(?!\w)")
@@ -60,6 +63,30 @@ _EMPH_RE = re.compile(_BOLD_RE.pattern + "|" + _ITAL_RE.pattern)
 _PH_RE = re.compile("\x00(\\d+)\x00")
 _SAFE_SCHEME_RE = re.compile(r"^(?:https?|mailto):", re.IGNORECASE)
 _ANY_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+
+
+def _sub_links(s: str, repl) -> str:
+    """Replace every `[label](url)` with repl(label, url), in linear time.
+    The label body is deterministic (it ends at the first unescaped bracket), so
+    when a label fails to close into a link, every later "[" inside that body
+    (necessarily an escaped one) would end at the same place and fail the same
+    way: resume at the body's end instead of re-scanning it (XACA-1523-001)."""
+    out: List[str] = []
+    last = i = 0
+    while True:
+        m = _LINK_LABEL_RE.search(s, i)
+        if not m:
+            break
+        e = m.end()
+        t = _LINK_TAIL_RE.match(s, e)
+        if t:
+            out.append(s[last:m.start()])
+            out.append(repl(m.group(1), t.group(1)))
+            last = i = t.end()
+        else:
+            i = e + 1 if s.startswith("]", e) else e
+    out.append(s[last:])
+    return "".join(out)
 
 
 def _esc(s: str) -> str:
@@ -166,10 +193,10 @@ def _inline(text: str, autolink: bool = True,
         out = _image_xml(alt, _plain(m.group(2), store))
         return park(out) if out is not None else park(_esc(alt), alt)
 
-    def link(m):
-        label = _inline(m.group(1).replace("\\[", "[").replace("\\]", "]"),
+    def link(raw_label, raw_url):
+        label = _inline(raw_label.replace("\\[", "[").replace("\\]", "]"),
                         autolink=False, store=store)
-        url = _plain(m.group(2), store)
+        url = _plain(raw_url, store)
         if not _safe_target(url):
             return park(label)
         return park('<a href="%s">%s</a>' % (_esc(url), label))
@@ -193,7 +220,7 @@ def _inline(text: str, autolink: bool = True,
     if stripped != s:
         s = stripped.strip()
     s = _IMG_RE.sub(img, s)
-    s = _LINK_RE.sub(link, s)
+    s = _sub_links(s, link)
     s = _BR_RE.sub(lambda m: park("<br />", " "), s)
     if autolink:  # never nest an <a> inside a link label
         s = _URL_RE.sub(url, s)
@@ -307,10 +334,25 @@ def _strip_block_comments(lines: List[str]) -> List[str]:
     Comments that open mid-line are left for the inline pass."""
     out: List[str] = []
     i, n, no_close = 0, len(lines), False
+    tbl = held = False  # inside a pipe table / a comment-owned blank is owed
+
+    def add(x: str) -> None:
+        nonlocal tbl, held
+        row = x.lstrip().startswith("|")
+        if held and not row:
+            out.append("")  # the comment really did separate blocks
+            tbl = False
+        held = False
+        if not row:
+            tbl = False
+        elif not tbl and out and out[-1].lstrip().startswith("|"):
+            tbl = _is_table_start([out[-1], x], 0)
+        out.append(x)
+
     while i < n:
         ln = lines[i]
         if _FENCE_RE.match(ln):
-            out.append(ln)
+            add(ln)
             i += 1
             while i < n and not _FENCE_CLOSE_RE.match(lines[i]):
                 out.append(lines[i])
@@ -321,7 +363,7 @@ def _strip_block_comments(lines: List[str]) -> List[str]:
             continue
         c = ln.find("<!--")
         if c < 0 or no_close or ln[:c].strip(" \t"):
-            out.append(ln)
+            add(ln)
             i += 1
             continue
         j, e = i, ln.find("-->", c + 4)
@@ -330,7 +372,7 @@ def _strip_block_comments(lines: List[str]) -> List[str]:
             e = lines[j].find("-->")
         if e < 0:
             no_close = True
-            out.append(ln)
+            add(ln)
             i += 1
             continue
         rest = lines[j][e + 3:]
@@ -338,9 +380,14 @@ def _strip_block_comments(lines: List[str]) -> List[str]:
             lines[j] = rest  # re-scan the remainder: it may open another comment
             i = j
         else:
-            out.append("")
+            if tbl:
+                held = True  # a comment-only line inside a table is dropped; the
+                # table goes on if a row follows (XACA-1523-002)
+            else:
+                add("")
             i = j + 1
     return out
+
 
 def leading_h1_text(text: str) -> Optional[str]:
     """Text of the first non-blank line if it is a single-`#` heading (exactly
