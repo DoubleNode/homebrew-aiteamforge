@@ -1361,19 +1361,21 @@ _kb_release_close_out_post() {
 }
 
 _kb_release_close_out_init() {
-    local release_id="${1-}" cr="false" targets="" payload
+    local release_id="${1-}" cr="false" targets="" payload mode=""
     shift 2>/dev/null || shift $#
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --cr-team) cr="true" ;;
             --targets) targets="${2-}"; shift ;;
+            --mode) mode="${2-}"; shift ;;
             *) echo "Error: unknown option '$1'" >&2; return 1 ;;
         esac
         shift
     done
     # XACA-1446 round 1: the actor travels on every close-out write; with GAMMA off the server refuses a non-lead
-    payload=$(jq -nc --argjson cr "$cr" --arg t "$targets" --arg a "$(_kb_release_default_actor)" \
-        '{op:"init", actor:$a, crTeam:$cr, targets:($t | split(",") | map(select(length>0)))}') || return 1
+    # XACA-1521-019: --mode pins the branch mode the close-out started under (omitted = legacy shape, no pin)
+    payload=$(jq -nc --argjson cr "$cr" --arg t "$targets" --arg a "$(_kb_release_default_actor)" --arg m "$mode" \
+        '{op:"init", actor:$a, crTeam:$cr, targets:($t | split(",") | map(select(length>0)))} + (if $m == "" then {} else {mode:$m} end)') || return 1
     _kb_release_close_out_post "$release_id" "$payload"
 }
 
@@ -1450,6 +1452,20 @@ _kb_release_close_out_release_json() {
 # integration; mergeProduction: merge it into production when production != integration, else done;
 # mergeIntegration / mergeOtherReleases: done (no-op); deleteBranch: done-as-skipped -- integration is never deleted.
 #
+# CLIENT-MERGE MODE (releaseConfig.branches.mode = "client-merge", XACA-1521): the repo belongs to a CLIENT who merges
+# <releasePrefix><ver> into integration themselves (one combined PR). The branch CUT is identical to release mode; the
+# close-out never writes to the client repo. tag / mergeProduction / mergeOtherReleases / deleteBranch are recorded
+# done-as-skipped (no tag, no production push, no forward-merges, no branch delete). mergeIntegration is a READ-ONLY
+# VERIFICATION (_kb_co_verify_client_merged): stageSha[S] must be an ancestor of the remote integration tip (merge commit /
+# fast-forward), else a MERGED PR <branch> -> integration must have headRefOid == stageSha[S] (squash merge; via `gh`).
+# BRANCH-TIP RULE: while <branch> exists on the remote its tip MUST equal stageSha[S] (commits pushed after gating =
+# fail closed, re-gate). If the client auto-deleted it after merging, ancestry proves nothing about what was merged, so
+# only the merged-PR headRefOid == stageSha[S] evidence is accepted. Otherwise (incl. gh missing / unauthenticated /
+# erroring) the step FAILS CLOSED and the release stays at S; a re-run after the client merges resumes here.
+# A type:hotfix release is REFUSED in this mode, at the CUT (release_branches.py) and again at close-out before any step
+# (either would write to the client repo). The close-out record PINS the mode it started under (closeOut.mode, stamped at
+# init); resuming under a different board mode is refused before any step (absent pin = legacy record, no check).
+#
 # deleteBranch HARD GUARD (_kb_co_delete_guard, independent of mode): never the integration or production
 # branch, never a name outside the allowed prefixes (_kb_co_delete_prefixes: releasePrefix + hotfix/, XACA-1353-005), and only when the remote tip is already contained in production AND integration.
 #
@@ -1463,6 +1479,83 @@ _kb_co_fail() {
     echo "Error: close-out step '$step' failed for $rel: $msg" >&2
     _kb_release_close_out_set "$rel" "$step" failed "$msg" >/dev/null 2>&1 \
         || echo "Warning: could not record '$step' as failed on the release record" >&2
+    return 1
+}
+
+# XACA-1521-018: <remote url> -> "owner/repo" for `gh --repo`. Prints it and returns 0, or prints nothing and returns 1 (callers
+# MUST fail closed). Handles scp-like (git@host:o/r.git, alias:o/r.git), ssh:// and https:// (with user:token@, a port, a
+# trailing slash, a .git suffix) and plain local paths (last two components; the test fixtures use bare repos).
+_kb_co_gh_slug() {
+    local u="${1-}" rest path owner repo
+    while [[ "$u" == */ ]]; do u="${u%/}"; done
+    u="${u%.git}"
+    [[ -n "$u" ]] || return 1
+    if [[ "$u" == *"://"* ]]; then
+        rest="${u#*://}"
+        [[ "$rest" == */* ]] || return 1
+        path="${rest#*/}"
+    elif [[ "$u" == /* || "$u" == ./* || "$u" == ../* || "$u" != *:* ]]; then
+        path="$u"
+    else
+        path="${u#*:}"
+    fi
+    [[ "$path" == */* ]] || return 1
+    repo="${path##*/}"; rest="${path%/*}"; owner="${rest##*/}"
+    [[ "$owner" =~ ^[A-Za-z0-9._-]+$ && "$repo" =~ ^[A-Za-z0-9._-]+$ ]] || return 1
+    printf '%s/%s\n' "$owner" "$repo"
+}
+
+# XACA-1521 client-merge: verify (READ-ONLY, never pushes) that the bound build <sha> was merged into integration <integ>
+# by the client. rc 0 verified | 1 not merged / cannot tell (reason in $_KB_CO_ERR). Fails closed on everything unclear.
+#   1. ancestry: <sha> is an ancestor of origin/<integ> in the scratch clone (merge commit / fast-forward)
+#   2. squash merge: a MERGED PR <branch> -> <integ> whose headRefOid == <sha> (gh; owner/repo from the clone's origin URL)
+# A merged PR for an OLDER head does not count: the build that passed the gates must be the build the client merged.
+_kb_co_verify_client_merged() {
+    local work="${1-}" branch="${2-}" integ="${3-}" sha="${4-}" itip url slug out grc n merged
+    local btip="" present=no why
+    _KB_CO_ERR=""
+    itip=$(_kb_co_git -C "$work" rev-parse --verify "refs/remotes/origin/${integ}^{commit}" 2>/dev/null) \
+        || { _KB_CO_ERR="integration branch '$integ' not found on the remote"; return 1; }
+    # branch-tip rule: a present release branch must still be the gated build
+    if btip=$(_kb_co_git -C "$work" rev-parse --verify "refs/remotes/origin/${branch}^{commit}" 2>/dev/null); then
+        present=yes
+        if [[ "$btip" != "$sha" ]]; then
+            _KB_CO_ERR="release branch ${branch} tip ${btip:0:12} != stageSha ${sha:0:12}: commits were pushed after gating; re-gate the release"; return 1
+        fi
+        if _kb_co_git -C "$work" merge-base --is-ancestor "$sha" "$itip" 2>/dev/null; then
+            echo "  mergeIntegration: ${sha:0:12} is an ancestor of ${integ} (${itip:0:12}); client merge verified"
+            return 0
+        fi
+    else
+        echo "  mergeIntegration: ${branch} is gone from the remote (deleted by the client); ancestry cannot prove what was merged, requiring merged-PR evidence"
+    fi
+    why="${sha:0:12} is not an ancestor of ${integ} (${itip:0:12})"
+    [[ "$present" == "yes" ]] || why="${branch} is gone from the remote so ancestry cannot be used"
+    url=$(_kb_co_git -C "$work" remote get-url origin 2>/dev/null)
+    slug=$(_kb_co_gh_slug "$url")
+    if [[ -z "$slug" ]]; then
+        _KB_CO_ERR="client has not merged ${branch} into ${integ} yet: ${why} and the repository slug could not be derived for the merged-PR check"; return 1
+    fi
+    if ! command -v gh >/dev/null 2>&1; then
+        _KB_CO_ERR="client has not merged ${branch} into ${integ} yet: ${why} and the merged-PR (squash) check is unavailable (gh not installed); failing closed"; return 1
+    fi
+    out=$(GH_PROMPT_DISABLED=1 gh pr list --repo "$slug" --state merged --head "$branch" --base "$integ" --limit 100 --json headRefOid,number </dev/null 2>/dev/null)
+    grc=$?
+    if [[ $grc -ne 0 ]]; then
+        _KB_CO_ERR="client has not merged ${branch} into ${integ} yet: ${why} and the merged-PR (squash) check failed (gh exited ${grc}: unauthenticated or unreachable); failing closed"; return 1
+    fi
+    n=$(printf '%s' "$out" | jq -er --arg s "$sha" 'if type == "array" then [.[] | select(.headRefOid == $s)] | length else error("not an array") end' 2>/dev/null) \
+        || { _KB_CO_ERR="client has not merged ${branch} into ${integ} yet: the merged-PR (squash) check returned an unreadable answer; failing closed"; return 1; }
+    if [[ "$n" =~ ^[0-9]+$ && "$n" -gt 0 ]]; then
+        echo "  mergeIntegration: merged PR ${branch} -> ${integ} has head ${sha:0:12} (squash merge); client merge verified"
+        return 0
+    fi
+    merged=$(printf '%s' "$out" | jq -r '[.[] | "#\(.number) \(.headRefOid[0:12])"] | join(", ")' 2>/dev/null)
+    if [[ -n "$merged" ]]; then
+        _KB_CO_ERR="client merged ${branch} into ${integ} at a DIFFERENT build: merged PR(s) ${merged} != stageSha ${sha:0:12} (the build that passed the gates); not verified"
+    else
+        _KB_CO_ERR="client has not merged ${branch} into ${integ} yet: ${why} and no merged PR ${branch} -> ${integ} was found"
+    fi
     return 1
 }
 
@@ -1822,7 +1915,7 @@ _kb_release_close_out_lead_ok() {
 
 _kb_release_close_out_run() {
     local board_file="${1-}" release_id="${2-}" work="${3-}" dry_run="${4-}" repo="${5-}"
-    local rj rtype pfx branch bsha bstage bind version mode prod integ tag_name rel_tip first cr targets step ex_tip tgt st archived msg has_rec confirm=""
+    local cfg_mode rec_mode rj rtype pfx branch bsha bstage bind version mode prod integ tag_name rel_tip first cr targets step ex_tip tgt st archived msg has_rec confirm=""
     rj=$(_kb_release_close_out_release_json "$board_file" "$release_id") || return 1
     [[ -n "$rj" ]] || { echo "Error: release '$release_id' not found in $board_file" >&2; return 1; }
     branch=$(printf '%s' "$rj" | jq -er '.branch | strings | select(length > 0)') \
@@ -1861,7 +1954,14 @@ _kb_release_close_out_run() {
     fi
     [[ "$dry_run" != "1" && "$_KB_CO_CONFIRM" == "PROD" ]] && confirm=yes   # PROD is the deploy-confirm stage (no GAMMA)
     mode=$(_kb_get_release_branch_role "$board_file" mode) || { echo "Error: cannot read release branch config" >&2; return 1; }
-    [[ "$mode" == "release" || "$mode" == "trunk" ]] || { echo "Error: unknown release branch mode '$mode'" >&2; return 1; }
+    [[ "$mode" == "release" || "$mode" == "trunk" || "$mode" == "client-merge" ]] || { echo "Error: unknown release branch mode '$mode'" >&2; return 1; }
+    cfg_mode="$mode"
+    # XACA-1521-019: a started record pins the mode it started under; resuming under another mode would change what is
+    # pushed to the repo. An absent pin (legacy record) = no check. Refused before any step or write.
+    rec_mode=$(printf '%s' "$rj" | jq -r '.closeOut.mode // empty' 2>/dev/null)
+    if [[ -n "$rec_mode" && "$rec_mode" != "$cfg_mode" ]]; then
+        echo "Error: close-out for $release_id started under mode $rec_mode; board is now mode $cfg_mode; refusing to resume (would change what is pushed to the repo)" >&2; return 1
+    fi
     prod=$(_kb_get_release_branch_role "$board_file" production) || return 1
     integ=$(_kb_get_release_branch_role "$board_file" integration) || return 1
     # XACA-1353-005: a type:hotfix release has its OWN hotfix/<ver> branch in EVERY mode (even trunk), so it always
@@ -1869,6 +1969,9 @@ _kb_release_close_out_run() {
     # type is a normal release; an unknown type fails closed (same set the cut enforces).
     rtype=$(printf '%s' "$rj" | jq -er '.type // "feature" | select(IN("feature","bugfix","hotfix","maintenance"))') \
         || { echo "Error: release $release_id has an unknown type; refusing to close out" >&2; return 1; }
+    if [[ "$rtype" == "hotfix" && "$mode" == "client-merge" ]]; then
+        echo "Error: client-merge mode: hotfix close-out is not supported (the engine never writes to the client repo); tag and merge the hotfix in the client repo by hand, then record the release as shipped manually" >&2; return 1
+    fi
     if [[ "$rtype" == "hotfix" ]]; then
         mode=release
         [[ "$branch" == hotfix/?* ]] \
@@ -1895,16 +1998,16 @@ print(r.release_version(json.load(sys.stdin)))' "$(dirname "$(_kb_release_branch
         # Propagation targets are the other open releases/* ONLY (spec 4.2 "keeping releases current", 13.5 step 6).
         # Never another hotfix/*: it is cut from production and must not absorb unreleased integration work.
         pfx=$(_kb_get_release_branch_role "$board_file" releasePrefix) || { echo "Error: cannot read releasePrefix" >&2; return 1; }
-        [[ "$mode" == "trunk" ]] || targets=$(_kb_jq_read "$board_file" '[.releases[]? | select(.id != $id and ((.branch|type) == "string") and (.branch|startswith($p))
+        [[ "$mode" == "trunk" || "$mode" == "client-merge" ]] || targets=$(_kb_jq_read "$board_file" '[.releases[]? | select(.id != $id and ((.branch|type) == "string") and (.branch|startswith($p))
             and ((.stage // "") != "PROD") and ((.status // "") | IN("completed","cancelled","closed") | not)) | .branch] | unique | join(",")' -r \
             --arg id "$release_id" --arg p "$pfx") || { echo "Error: cannot enumerate other open releases" >&2; return 1; }
         if [[ "$dry_run" == "1" ]]; then
             echo "[dry-run] would init close-out (crTeam=$cr targets=${targets:-none})"
         else
             if [[ "$cr" == "true" ]]; then
-                _kb_release_close_out_init "$release_id" --cr-team --targets "$targets" || return 1
+                _kb_release_close_out_init "$release_id" --cr-team --targets "$targets" --mode "$cfg_mode" || return 1
             else
-                _kb_release_close_out_init "$release_id" --targets "$targets" || return 1
+                _kb_release_close_out_init "$release_id" --targets "$targets" --mode "$cfg_mode" || return 1
             fi
             rj=$(_kb_release_close_out_release_json "$board_file" "$release_id") || return 1
             printf '%s' "$rj" | jq -e '.closeOut | type == "object"' >/dev/null 2>&1 \
@@ -1920,6 +2023,15 @@ print(r.release_version(json.load(sys.stdin)))' "$(dirname "$(_kb_release_branch
 
     if [[ "$dry_run" == "1" ]]; then
         ex_tip=$(_kb_co_git -C "$repo" ls-remote -- "$(_kb_co_git -C "$repo" remote | head -1)" "refs/heads/${branch}" | awk '{print $1}')
+        if [[ "$mode" == "client-merge" ]]; then
+            if [[ -z "$ex_tip" ]]; then
+                echo "[dry-run] NOTE: ${branch} is not on the remote; only merged-PR evidence (head == stageSha.${bstage} ${bsha:0:12}) will count"
+            elif [[ "$ex_tip" != "$bsha" ]]; then
+                echo "[dry-run] WARNING: ${branch} tip '${ex_tip:0:12}' != stageSha.${bstage} ${bsha:0:12}; the mergeIntegration verification would refuse (commits pushed after gating)"
+            fi
+            echo "[dry-run] would: skip tag/mergeProduction/mergeOtherReleases/deleteBranch (client-merge); verify stageSha.${bstage} ${bsha:0:12} is merged into ${integ} by the client (ancestry, else a merged PR with that head)"
+            return 0
+        fi
         if [[ "$mode" != "trunk" ]]; then
             [[ "$ex_tip" == "$bsha" ]] || echo "[dry-run] WARNING: ${branch} tip '${ex_tip:-absent}' != stageSha.${bstage} ${bsha:0:12}; the tag step would refuse"
         fi
@@ -1931,6 +2043,16 @@ print(r.release_version(json.load(sys.stdin)))' "$(dirname "$(_kb_release_branch
         st=$(printf '%s' "$rj" | _kb_release_close_out_step_status - "$step")
         [[ "$st" == "n/a" ]] && continue          # crClose exists only for CR teams
         if [[ "$st" == "done" ]]; then echo "  $step: already done"; continue; fi
+        # XACA-1521 client-merge: four steps are no-ops recorded done-as-skipped (nothing is tagged, pushed, forward-merged or deleted)
+        if [[ "$mode" == "client-merge" ]]; then
+            case "$step" in
+            tag|mergeProduction|mergeOtherReleases|deleteBranch)
+                echo "  $step: skipped; client-merge mode: the client owns the repository (no tag, no push, no delete) (done)"
+                _kb_release_close_out_set "$release_id" "$step" done \
+                    || { echo "Error: '$step' skipped but could not be recorded; re-run to resume (idempotent)" >&2; return 1; }
+                continue ;;
+            esac
+        fi
         # XACA-1446 round 2 (-019): re-ask right before each irreversible step (a lead list changed mid-run is caught)
         case "$step" in
         tag|mergeProduction|mergeIntegration|mergeOtherReleases|deleteBranch)
@@ -1979,6 +2101,8 @@ print(r.release_version(json.load(sys.stdin)))' "$(dirname "$(_kb_release_branch
         mergeIntegration)
             if [[ "$mode" == "trunk" ]]; then
                 echo "  mergeIntegration: trunk mode; the release branch IS $integ (no-op, done)"
+            elif [[ "$mode" == "client-merge" ]]; then
+                _kb_co_verify_client_merged "$work" "$branch" "$integ" "$bsha" || { _kb_co_fail "$release_id" "$step" "$_KB_CO_ERR"; return 1; }
             else
                 _kb_co_merge_into "$work" "$integ" "$bsha" "$branch" || { _kb_co_fail "$release_id" "$step" "$_KB_CO_ERR"; return 1; }
             fi
