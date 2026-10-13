@@ -447,10 +447,27 @@ class CrStage:
         except ValueError as exc:  # FactSetError / ExcludedScopeError
             raise CrStageError("cannot assemble the CR facts: %s" % exc, RC_REFUSED)
         if render_plan:
-            self._apply_implementation_plan(facts, relr, cr)
+            if self._plan_grandfathered(cr):
+                self._passthrough_plan(facts)   # approved draft: publish the stored plan verbatim
+            else:
+                self._apply_implementation_plan(facts, relr, cr)
         else:
             self._passthrough_plan(facts)
         return facts
+
+    @staticmethod
+    def _plan_grandfathered(cr: Optional[Dict[str, Any]]) -> bool:
+        """XACA-1510-015: the ordered-steps rule is a DRAFTING rule. Once the lead has approved the draft
+        (``timestamps.cr_draft_approved_at``, the record ``kb-cr approve-draft`` writes and the same signal the
+        approval step and ``_content`` key on) the stored plan is what was approved: accepted as is, never
+        re-validated or re-rendered, so an approved pre-rule CR cannot deadlock at publish."""
+        if not isinstance(cr, dict):
+            return False
+        if not ((cr.get("timestamps") or {}).get("cr_draft_approved_at")):
+            return False
+        dc = cr.get("draftContent")
+        plan = dc.get("implementationPlan") if isinstance(dc, dict) else None
+        return isinstance(plan, str) and bool(plan.strip())
 
     def _passthrough_plan(self, facts: Dict[str, Any]) -> None:
         """No render, no validation. A plan the draft never stored reads as '' so a whole-template render
@@ -474,7 +491,9 @@ class CrStage:
                     val = val.get(part) if isinstance(val, dict) else None
                 if isinstance(val, bool) or not isinstance(val, (str, int, float)) or not str(val).strip():
                     raise CrStageError("Implementation Plan: deployment step %d needs the fact {{%s}} but it is missing "
-                                       "or empty for this release" % (n, path), RC_DRAFT_INVALID)
+                                       "or empty for this release. To recover: record that fact on the release (e.g. its platform) "
+                                       "and re-run the draft, or supply a numbered implementationPlan in --content-file"
+                                       % (n, path), RC_DRAFT_INVALID)
                 return str(val).strip()
             line = _STEP_SLOT.sub(fill, text)
             if "{{" in line or "}}" in line:
@@ -515,7 +534,10 @@ class CrStage:
             err = rpv.check_ordered_steps(text, mn)
         if err:
             raise CrStageError("Implementation Plan: must be the ordered production deployment steps, "
-                               "numbered 1. 2. 3. ... (at least %d): %s" % (mn, err), RC_DRAFT_INVALID)
+                               "numbered 1. 2. 3. ... (at least %d): %s. To recover: re-run the draft with --content-file whose "
+                               "implementationPlan is a numbered list (or omit implementationPlan so the profile's "
+                               "deploymentSteps are used). A draft the lead has already approved keeps its stored plan "
+                               "as approved and is not re-checked" % (mn, err), RC_DRAFT_INVALID)
         # Joiner follows the RESOLVED TEMPLATE: a pipe-table row cannot hold a newline (it would split the row),
         # so a plan living in a table cell is <br>-joined (md_to_storage turns that into <td><ol>); else newline.
         joiner = "<br>" if self._plan_in_table_row(res["template"]) else "\n"
@@ -762,7 +784,8 @@ class CrStage:
                                RC_DRAFT_INVALID)
         return dict(stored)
 
-    def _render_validate(self, kind: str, facts: Dict[str, Any], *, strict: bool, title_hint: str = ""):
+    def _render_validate(self, kind: str, facts: Dict[str, Any], *, strict: bool, title_hint: str = "",
+                         grandfathered: bool = False):
         import release_profile_validate as rpv  # noqa: PLC0415
         res = self._profile(kind)
         try:
@@ -771,6 +794,8 @@ class CrStage:
             raise CrStageError("the %s template did not render: %s" % (kind, exc), RC_DRAFT_INVALID)
         title = _first_heading(body) or title_hint
         violations = rpv.validate_draft(body, title, res["profile"], facts=facts)
+        if grandfathered:  # XACA-1510-015: the approved stored plan is accepted as approved
+            violations = [v for v in violations if v.rule != "section-steps"]
         if not strict:  # the Testing Log is not published yet: only its own link may be missing
             violations = [v for v in violations
                           if not (v.rule in _TESTING_LINK_RULES and "testingLog" in v.detail)]
@@ -787,7 +812,7 @@ class CrStage:
         content = self._content(cr, self._profile("cr")["template"])
         board, rel, cr = self._load()
         facts = self._facts(board, rel, cr, content=content, render_plan=True)
-        body, title = self._render_validate("cr", facts, strict=False)
+        body, title = self._render_validate("cr", facts, strict=False, grandfathered=self._plan_grandfathered(cr))
         out_dir = Path(self.kdir) / "release-drafts"
         out_dir.mkdir(parents=True, exist_ok=True)
         path = out_dir / ("%s.md" % cr["id"])
@@ -911,7 +936,7 @@ class CrStage:
             url_tl = get_wiki_handle(rel, "testing-log")["url"]
             content = self._content(cr, self._profile("cr")["template"])
             facts = self._facts(board, rel, cr, content=content, testing_url=url_tl, render_plan=True)
-            body, title = self._render_validate("cr", facts, strict=True)
+            body, title = self._render_validate("cr", facts, strict=True, grandfathered=self._plan_grandfathered(cr))
             handle = self._publish_page("cr", cr["id"], title, body, None)
             set_wiki_handle(self.board_file, "crs", cr["id"], "cr", handle, links={"crRequestPage": handle["url"]})
             note.append("cr page %s (v%d)" % (handle["url"], handle["version"]))
