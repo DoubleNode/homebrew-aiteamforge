@@ -305,8 +305,33 @@ def _starts_block(lines: List[str], i: int) -> bool:
 def _prep(text: str) -> List[str]:
     text = (text or "").lstrip("\ufeff")  # a leading BOM would hide the first heading
     text = _CTRL_RE.sub("", text.replace("\r\n", "\n").replace("\r", "\n"))
-    text = _strip_comments(text, whole_line=True)  # block-level HTML comments (template notes)
-    return text.expandtabs(4).split("\n")
+    return _strip_block_comments_outside_fences(text.split("\n")).expandtabs(4).split("\n")
+
+
+def _strip_block_comments_outside_fences(lines: List[str]) -> str:
+    """Block-level HTML comments (template notes) are dropped, but never inside
+    a fenced code block, whose content is literal (XACA-1509-021). Fences are
+    found exactly as _block finds them; an unclosed fence runs to the end."""
+    out, seg, i, n = [], [], 0, len(lines)
+    while i < n:
+        if _FENCE_RE.match(lines[i]):
+            if seg:
+                out.append(_strip_comments("\n".join(seg), whole_line=True))
+            seg, fence = [], [lines[i]]
+            i += 1
+            while i < n and not re.match(r"^\s*```\s*$", lines[i]):
+                fence.append(lines[i])
+                i += 1
+            if i < n:
+                fence.append(lines[i])
+                i += 1
+            out.append("\n".join(fence))
+            continue
+        seg.append(lines[i])
+        i += 1
+    if seg:
+        out.append(_strip_comments("\n".join(seg), whole_line=True))
+    return "\n".join(out)
 
 
 def leading_h1_text(text: str) -> Optional[str]:
