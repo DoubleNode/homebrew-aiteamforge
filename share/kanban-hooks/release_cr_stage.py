@@ -427,7 +427,10 @@ class CrStage:
 
     # -- facts ------------------------------------------------------------------------------------
     def _facts(self, board, rel, cr, *, content=None, testing_url: Optional[str] = None,
-               expected_at: Optional[str] = None) -> Dict[str, Any]:
+               expected_at: Optional[str] = None, render_plan: bool = False) -> Dict[str, Any]:
+        """``render_plan`` (XACA-1510-013): True ONLY where the CR body is produced and validated (the draft step and
+        the pre-publish page render). Every other step passes the stored plan through untouched, so a plan stored
+        before this rule existed can never fail notify / testing-log / cr."""
         activity = self.tools.activity(self.board_file, cr["id"]) if cr else None
         pname = self._wiki_platform_name()
         crr = rcf.cr_record_for_facts(cr, release=rel, activity=activity) if cr else None
@@ -443,8 +446,18 @@ class CrStage:
                 facts = rcf.build_cr_fact_set(relr, crr, **kw)
         except ValueError as exc:  # FactSetError / ExcludedScopeError
             raise CrStageError("cannot assemble the CR facts: %s" % exc, RC_REFUSED)
-        self._apply_implementation_plan(facts, relr, cr)
+        if render_plan:
+            self._apply_implementation_plan(facts, relr, cr)
+        else:
+            self._passthrough_plan(facts)
         return facts
+
+    def _passthrough_plan(self, facts: Dict[str, Any]) -> None:
+        """No render, no validation. A plan the draft never stored reads as '' so a whole-template render
+        (the title helper) cannot trip on an absent slot."""
+        content = facts.get("content")
+        if isinstance(content, dict) and "implementationPlan" not in content:
+            content["implementationPlan"] = ""
 
     # -- implementation plan (XACA-1510) ------------------------------------------------------------
     def _render_deployment_steps(self, steps: Any, facts: Dict[str, Any]) -> str:
@@ -773,7 +786,7 @@ class CrStage:
             return "skipped", "CR already published"
         content = self._content(cr, self._profile("cr")["template"])
         board, rel, cr = self._load()
-        facts = self._facts(board, rel, cr, content=content)
+        facts = self._facts(board, rel, cr, content=content, render_plan=True)
         body, title = self._render_validate("cr", facts, strict=False)
         out_dir = Path(self.kdir) / "release-drafts"
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -897,7 +910,7 @@ class CrStage:
         if handle is None:
             url_tl = get_wiki_handle(rel, "testing-log")["url"]
             content = self._content(cr, self._profile("cr")["template"])
-            facts = self._facts(board, rel, cr, content=content, testing_url=url_tl)
+            facts = self._facts(board, rel, cr, content=content, testing_url=url_tl, render_plan=True)
             body, title = self._render_validate("cr", facts, strict=True)
             handle = self._publish_page("cr", cr["id"], title, body, None)
             set_wiki_handle(self.board_file, "crs", cr["id"], "cr", handle, links={"crRequestPage": handle["url"]})

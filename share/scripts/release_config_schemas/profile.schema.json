@@ -128,12 +128,12 @@
       "type": "array",
       "minItems": 2,
       "items": { "type": "string", "minLength": 1 },
-      "description": "XACA-1510: the PROD deployment procedure for the CR Implementation Plan: an ordered list of step strings with {{fact}} slots filled from the CR fact set (an unfilled slot fails loudly). The engine numbers the steps. Top-level (not inside requiredSections) because lists merge by REPLACEMENT across profile tiers: a team's own deploymentSteps replaces the default's, and a team that replaces requiredSections still inherits this key."
+      "description": "XACA-1510: the PROD deployment procedure for the CR Implementation Plan: an ordered list of step strings with {{fact}} slots filled from the CR fact set (an unfilled slot fails loudly). The engine numbers the steps. Top-level (not inside requiredSections) because lists merge by REPLACEMENT across profile tiers: a team's own deploymentSteps replaces the default's, and a team that replaces requiredSections still inherits this key. Template note: where the plan sits under its own heading it is read up to the next heading, so that section must contain ONLY the numbered steps (no trailing paragraph or code fence); end the template with it or follow it with a heading. In a pipe-table row the engine joins steps with <br>."
     },
     "implementationPlanMinSteps": {
       "type": "integer",
       "minimum": 2,
-      "description": "XACA-1510: minimum ordered steps the CR Implementation Plan must hold. Top-level so it survives a team replacing requiredSections; the validator never accepts less than 2."
+      "description": "XACA-1510: minimum ordered steps the CR Implementation Plan must hold. Top-level so it survives a team replacing requiredSections; the validator never accepts less than 2. The Implementation Plan section is read up to the next heading and must contain only the numbered steps."
     },
     "titlePattern": { "type": "string" },
     "titleWordCount": { "type": "string" },

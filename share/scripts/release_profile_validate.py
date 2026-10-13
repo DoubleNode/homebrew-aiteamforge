@@ -718,8 +718,11 @@ def _check_plan_steps(lines: List[str], profile: dict) -> List[Violation]:
         text, first = "\n".join([rest] + lines[i + 1:end]), i + 1
     err = check_ordered_steps(text, mn)
     if err:
+        hint = "" if kind == "table" else (
+            " (this section is read up to the next heading, so it must contain only the numbered steps; "
+            "end the template with it or follow it with a heading)")
         return [Violation("section-steps", "%s section 'implementationPlan' must be an ordered, numbered list of "
-                                           "the production deployment steps: %s" % (label, err), first)]
+                                           "the production deployment steps: %s%s" % (label, err, hint), first)]
     return []
 
 
