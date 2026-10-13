@@ -18117,7 +18117,9 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     doc['aliases'] = copy.deepcopy(existing['aliases'])
                 try:
                     errors = list(validate(doc)) or list(semantic(doc, _notify_kanban_dir(team)))
-                except ImportError:  # XACA-1504: jsonschema imports lazily now; missing at CALL time
+                except ImportError as ie:  # XACA-1504: jsonschema imports lazily now; missing at CALL time
+                    if getattr(ie, 'name', None) != 'jsonschema':
+                        raise  # XACA-1504-015: unrelated ImportError -> outer handler (500 internal), not "unavailable"
                     print("[LCARS] notify-config: validator unavailable (jsonschema)")
                     raise _NotifyApiError('validator-unavailable') from None
                 if errors:

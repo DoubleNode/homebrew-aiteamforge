@@ -276,7 +276,9 @@ def _full_validate(config, quiet=False):
                 return False
             try:
                 errors = mod.validate_wiki_config(config)
-            except ImportError:  # XACA-1504: SchemaValidatorUnavailable (jsonschema imports lazily now)
+            except ImportError as exc:  # XACA-1504: SchemaValidatorUnavailable (jsonschema imports lazily now)
+                if getattr(exc, "name", None) != "jsonschema":
+                    raise  # XACA-1504-015: an unrelated import failure is NOT "jsonschema missing"
                 if not quiet:
                     _err("schema validator unavailable (jsonschema missing); "
                          "checking only the fields kb-wiki uses")
@@ -741,11 +743,14 @@ def _profile_checks(rw, team, doc, kanban_dir, out):
         return
     try:
         res = resolver.resolve_profile(team, doc, kanban_dir=kanban_dir)
-    except ImportError:  # XACA-1504: SchemaValidatorUnavailable (jsonschema imports lazily now)
-        out.append(rw.Check("title-pattern", rw.WARN, NEEDS_JSONSCHEMA, doc))
-        out.append(rw.Check("profile-chain", rw.WARN, NEEDS_JSONSCHEMA, doc))
-        return
-    except Exception as exc:  # ProfileResolutionError / ReleaseConfigValidationError / OSError
+    except Exception as exc:  # ProfileResolutionError / ReleaseConfigValidationError / OSError / ImportError
+        if isinstance(exc, ImportError) and getattr(exc, "name", None) == "jsonschema":
+            # XACA-1504: SchemaValidatorUnavailable (jsonschema imports lazily now).
+            # XACA-1504-015: only a jsonschema ImportError is "not installed"; any
+            # other ImportError falls through to the genuine-failure report below.
+            out.append(rw.Check("title-pattern", rw.WARN, NEEDS_JSONSCHEMA, doc))
+            out.append(rw.Check("profile-chain", rw.WARN, NEEDS_JSONSCHEMA, doc))
+            return
         msg = f"profile resolution failed ({type(exc).__name__}): {rw._one_line(exc)}"
         out.append(rw.Check("title-pattern", rw.FAIL, msg, doc))
         out.append(rw.Check("profile-chain", rw.FAIL, msg, doc))

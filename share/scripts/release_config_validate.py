@@ -341,7 +341,11 @@ def notify_v2_semantic_errors(config: dict, kanban_dir) -> list[str]:
 # ---------------------------------------------------------------------------
 
 def _is_int(v: Any) -> bool:
-    return isinstance(v, int) and not isinstance(v, bool)
+    """jsonschema (Draft 2020-12) "integer" semantics: an integer-valued float
+    (300.0) IS an integer, a bool is NOT (XACA-1504-014)."""
+    if isinstance(v, bool):
+        return False
+    return isinstance(v, int) or (isinstance(v, float) and v.is_integer())
 
 
 def _degraded_alias_errors(aliases: Any, alias_map_schema: dict, min_entries: int) -> list[str]:
