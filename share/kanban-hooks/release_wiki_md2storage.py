@@ -25,15 +25,12 @@ from typing import List, Optional, Tuple
 
 __all__ = ["md_to_storage", "leading_h1_text"]
 
-# A comment match may NEVER contain "-->" (XACA-1509-014): the tempered body
-# stops at the first terminator, so text after it can never be swallowed. It
-# also stops at the next "<!--": an unclosed opener then scans only to the next
-# opener, so a long line of them is linear, not quadratic (XACA-1509 round 2).
-# The same "never cross your own opener" rule bounds the emphasis/image scans.
-# Block form: the comment (possibly multi-line) owns its whole line(s).
-_COMMENT_RE = re.compile(r"^[ \t]*<!--(?:(?!-->|<!--).)*-->[ \t]*$", re.DOTALL | re.MULTILINE)
-# Inline form (XACA-1509-011): single line, surrounding text is kept.
-_INLINE_COMMENT_RE = re.compile(r"<!--(?:(?!-->|<!--).)*-->")
+# HTML comments are stripped by _strip_comments (a str.find scan, not a regex):
+# a comment ends at the FIRST "-->" after its "<!--" exactly as in HTML, so text
+# after it is never swallowed (XACA-1509-014) and a nested "<!--" stays inside
+# the comment (XACA-1509-020). Linear time: once no "-->" follows an opener, no
+# later opener can close either, so the scan stops (XACA-1509 round 2).
+# The "never cross your own opener" rule bounds the emphasis/image scans.
 # Anything that is not a legal XML 1.0 Char (this also drops lone surrogates,
 # U+FFFE and U+FFFF). Tab/LF/CR survive; CR is normalised before this runs.
 _CTRL_RE = re.compile("[^\x09\x0a\x0d\x20-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]")
@@ -116,6 +113,39 @@ def _plain(s: str, store: List[Tuple[str, str]]) -> str:
     return _PH_RE.sub(sub, s)
 
 
+def _strip_comments(text: str, whole_line: bool) -> str:
+    """Remove HTML comments. whole_line=True drops only comments that own their
+    whole line(s) (block-level template notes; the newline is kept); others are
+    left for the inline pass, which removes them and keeps surrounding text."""
+    out, pos = [], 0
+    while True:
+        i = text.find("<!--", pos)
+        if i < 0:
+            break
+        j = text.find("-->", i + 4)
+        if j < 0:
+            break  # unclosed: leave it visible (never drop text)
+        end = j + 3
+        if not whole_line:
+            out.append(text[pos:i])
+            pos = end
+            continue
+        k = text.rfind("\n", pos, i)
+        ls = k + 1 if k >= 0 else pos
+        at_line_start = k >= 0 or pos == 0 or text[pos - 1] == "\n"
+        if at_line_start and not text[ls:i].strip(" \t"):
+            le = text.find("\n", end)
+            le = len(text) if le < 0 else le
+            if not text[end:le].strip(" \t"):
+                out.append(text[pos:ls])
+                pos = le
+                continue
+        out.append(text[pos:end])
+        pos = end
+    out.append(text[pos:])
+    return "".join(out)
+
+
 def _emph(s: str) -> str:
     """Bold/italic in ONE left-to-right pass. re.sub matches never overlap and
     each match's inner text is rendered recursively, so the emitted tags are
@@ -175,7 +205,7 @@ def _inline(text: str, autolink: bool = True,
         return park('<a href="%s">%s</a>' % (_esc(raw), _esc(raw))) + tail
 
     s = _CODE_RE.sub(code, text)
-    stripped = _INLINE_COMMENT_RE.sub("", s)  # code spans are parked: they keep "<!--"
+    stripped = _strip_comments(s, whole_line=False)  # code spans are parked: they keep "<!--"
     if stripped != s:
         s = stripped.strip()
     s = _IMG_RE.sub(img, s)
@@ -275,7 +305,7 @@ def _starts_block(lines: List[str], i: int) -> bool:
 def _prep(text: str) -> List[str]:
     text = (text or "").lstrip("\ufeff")  # a leading BOM would hide the first heading
     text = _CTRL_RE.sub("", text.replace("\r\n", "\n").replace("\r", "\n"))
-    text = _COMMENT_RE.sub("", text)  # block-level HTML comments (template notes)
+    text = _strip_comments(text, whole_line=True)  # block-level HTML comments (template notes)
     return text.expandtabs(4).split("\n")
 
 
