@@ -23,6 +23,13 @@ Shape (fixed order = spec 13.4: tag -> mergeProduction -> mergeIntegration -> me
       }
     }
 
+Client-merge mode (XACA-1521, releaseConfig.branches.mode "client-merge"): the record shape and step names are
+UNCHANGED; this module is mode-agnostic. The close-out driver records tag, mergeProduction, mergeOtherReleases and
+deleteBranch as `done` (skipped: the client owns production and the branch), and mergeIntegration is `done` only after
+verifying the stageSha[S] build reached the remote integration branch: stageSha[S] is an ancestor of (or equal to)
+the integration tip, else a MERGED GitHub PR head=<release branch> base=<integration> whose head SHA == stageSha[S].
+Anything unverifiable fails closed (step stays pending/failed). Ordering and stickiness rules below still apply.
+
 Contract (enforced here, not by callers):
   * A step may only be set to `done` or `failed` when EVERY earlier applicable step is `done`
     (so first_incomplete() is always the one runnable step, and resume never skips ahead).

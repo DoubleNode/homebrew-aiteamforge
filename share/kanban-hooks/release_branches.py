@@ -5,6 +5,10 @@ Config lives at board `releaseConfig.branches` (every field optional):
     {"integration": "develop", "production": "master", "releasePrefix": "releases/", "mode": "release"}
 mode "release" (default): PLANNED->DEV pushes `<releasePrefix><version>` from the integration tip.
 mode "trunk" (XACA-1352-015): the release branch IS the integration branch; nothing is cut.
+mode "client-merge" (XACA-1521): the CUT is identical to "release" (`<releasePrefix><version>` from the integration
+tip) and every is-trunk check stays False, so gating is release-mode exact equality. Only the PROD close-out differs:
+the client (not us) merges the release branch into production, so tag/mergeProduction/mergeOtherReleases/deleteBranch
+are recorded done-as-skipped and mergeIntegration verifies the client's merge (see release_closeout.py).
 HOTFIX (XACA-1353-005, spec 4.2 "Hotfix" / 13.5): a release record with type "hotfix" cuts `hotfix/<ver>` from the
 PRODUCTION tip instead, in EVERY mode (see cut_release_branch). Same cut code, different (source, prefix).
 
@@ -27,7 +31,7 @@ import sys
 from pathlib import Path
 
 DEFAULTS = {"integration": "develop", "production": "master", "releasePrefix": "releases/", "mode": "release"}
-MODES = ("release", "trunk")
+MODES = ("release", "trunk", "client-merge")
 # Release record `type` (kb-release create validates the same four; the server stores it verbatim, so THIS is the
 # fail-closed point for the cut: a typo'd type must not silently cut releases/<ver> from integration).
 RELEASE_TYPES = ("feature", "bugfix", "hotfix", "maintenance")

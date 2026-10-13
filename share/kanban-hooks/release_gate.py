@@ -40,6 +40,9 @@ whose data is absent is UNMET ("cannot verify"), never assumed satisfied.
   `dev_sha_reachable: True|False|None` (stageSha.DEV is an ancestor of / equal to the remote tip; None = could not
   verify). Absent / any other branch_mode = exact equality (release mode, hotfix: unchanged). Under trunk mode,
   None or an absent key fails closed. The CR head check is unchanged (CR teams are release-mode).
+  Client-merge mode (XACA-1521): releaseConfig.branches.mode "client-merge" is gated EXACTLY like release mode
+  (exact-equality head checks; the server never sets branch_mode "trunk" for it). Its close-out record has the same
+  shape and STEPS, so closeout_gap() / the PROD entry check apply unchanged; only how the steps are performed differs.
 """
 from datetime import datetime, timezone
 
