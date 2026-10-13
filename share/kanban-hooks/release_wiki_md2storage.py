@@ -35,6 +35,7 @@ __all__ = ["md_to_storage", "leading_h1_text"]
 # U+FFFE and U+FFFF). Tab/LF/CR survive; CR is normalised before this runs.
 _CTRL_RE = re.compile("[^\x09\x0a\x0d\x20-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]")
 _FENCE_RE = re.compile(r"^\s*```\s*([\w+#.-]*)\s*$")
+_FENCE_CLOSE_RE = re.compile(r"^\s*```\s*$")
 _HEADING_RE = re.compile(r"^\s{0,3}(#{1,6})\s+(.*?)(?:\s+#+)?\s*$")
 _HR_RE = re.compile(r"^\s{0,3}(?:-{3,}|\*{3,}|_{3,})\s*$")
 _LIST_RE = re.compile(r"^(\s*)([-*+]|\d+[.)])\s+(.*)$")
@@ -113,10 +114,9 @@ def _plain(s: str, store: List[Tuple[str, str]]) -> str:
     return _PH_RE.sub(sub, s)
 
 
-def _strip_comments(text: str, whole_line: bool) -> str:
-    """Remove HTML comments. whole_line=True drops only comments that own their
-    whole line(s) (block-level template notes; the newline is kept); others are
-    left for the inline pass, which removes them and keeps surrounding text."""
+def _strip_comments(text: str) -> str:
+    """Remove inline HTML comments, keeping the surrounding text. A comment ends
+    at the FIRST "-->"; an unclosed one is left visible (never drop text)."""
     out, pos = [], 0
     while True:
         i = text.find("<!--", pos)
@@ -124,27 +124,11 @@ def _strip_comments(text: str, whole_line: bool) -> str:
             break
         j = text.find("-->", i + 4)
         if j < 0:
-            break  # unclosed: leave it visible (never drop text)
-        end = j + 3
-        if not whole_line:
-            out.append(text[pos:i])
-            pos = end
-            continue
-        k = text.rfind("\n", pos, i)
-        ls = k + 1 if k >= 0 else pos
-        at_line_start = k >= 0 or pos == 0 or text[pos - 1] == "\n"
-        if at_line_start and not text[ls:i].strip(" \t"):
-            le = text.find("\n", end)
-            le = len(text) if le < 0 else le
-            if not text[end:le].strip(" \t"):
-                out.append(text[pos:ls])
-                pos = le
-                continue
-        out.append(text[pos:end])
-        pos = end
+            break  # and no later opener can close either: linear
+        out.append(text[pos:i])
+        pos = j + 3
     out.append(text[pos:])
     return "".join(out)
-
 
 def _emph(s: str) -> str:
     """Bold/italic in ONE left-to-right pass. re.sub matches never overlap and
@@ -205,7 +189,7 @@ def _inline(text: str, autolink: bool = True,
         return park('<a href="%s">%s</a>' % (_esc(raw), _esc(raw))) + tail
 
     s = _CODE_RE.sub(code, text)
-    stripped = _strip_comments(s, whole_line=False)  # code spans are parked: they keep "<!--"
+    stripped = _strip_comments(s)  # code spans are parked: they keep "<!--"
     if stripped != s:
         s = stripped.strip()
     s = _IMG_RE.sub(img, s)
@@ -305,34 +289,58 @@ def _starts_block(lines: List[str], i: int) -> bool:
 def _prep(text: str) -> List[str]:
     text = (text or "").lstrip("\ufeff")  # a leading BOM would hide the first heading
     text = _CTRL_RE.sub("", text.replace("\r\n", "\n").replace("\r", "\n"))
-    return _strip_block_comments_outside_fences(text.split("\n")).expandtabs(4).split("\n")
+    return [ln.expandtabs(4) for ln in _strip_block_comments(text.split("\n"))]
 
 
-def _strip_block_comments_outside_fences(lines: List[str]) -> str:
-    """Block-level HTML comments (template notes) are dropped, but never inside
-    a fenced code block, whose content is literal (XACA-1509-021). Fences are
-    found exactly as _block finds them; an unclosed fence runs to the end."""
-    out, seg, i, n = [], [], 0, len(lines)
+def _strip_block_comments(lines: List[str]) -> List[str]:
+    """Drop block-level HTML comments (template notes) in ONE left-to-right scan
+    that tracks comments and fences together, so whichever opens first wins, as
+    in CommonMark (XACA-1509-021/-022/-023):
+      * a fence that opens first is literal to its closing fence (or EOF), so a
+        "<!--" inside it is kept;
+      * a "<!--" that opens a line (only blanks before it) hides everything up to
+        its FIRST "-->", fence lines included. Text after the "-->" stays on that
+        line (never swallowed, XACA-1509-014); a comment owning whole lines
+        leaves one blank line;
+      * an unclosed comment stays visible and later fences still render. Once a
+        "-->" search fails none can succeed later, so the scan stays linear.
+    Comments that open mid-line are left for the inline pass."""
+    out: List[str] = []
+    i, n, no_close = 0, len(lines), False
     while i < n:
-        if _FENCE_RE.match(lines[i]):
-            if seg:
-                out.append(_strip_comments("\n".join(seg), whole_line=True))
-            seg, fence = [], [lines[i]]
+        ln = lines[i]
+        if _FENCE_RE.match(ln):
+            out.append(ln)
             i += 1
-            while i < n and not re.match(r"^\s*```\s*$", lines[i]):
-                fence.append(lines[i])
+            while i < n and not _FENCE_CLOSE_RE.match(lines[i]):
+                out.append(lines[i])
                 i += 1
             if i < n:
-                fence.append(lines[i])
+                out.append(lines[i])
                 i += 1
-            out.append("\n".join(fence))
             continue
-        seg.append(lines[i])
-        i += 1
-    if seg:
-        out.append(_strip_comments("\n".join(seg), whole_line=True))
-    return "\n".join(out)
-
+        c = ln.find("<!--")
+        if c < 0 or no_close or ln[:c].strip(" \t"):
+            out.append(ln)
+            i += 1
+            continue
+        j, e = i, ln.find("-->", c + 4)
+        while e < 0 and j + 1 < n:
+            j += 1
+            e = lines[j].find("-->")
+        if e < 0:
+            no_close = True
+            out.append(ln)
+            i += 1
+            continue
+        rest = lines[j][e + 3:]
+        if rest.strip(" \t"):
+            lines[j] = rest  # re-scan the remainder: it may open another comment
+            i = j
+        else:
+            out.append("")
+            i = j + 1
+    return out
 
 def leading_h1_text(text: str) -> Optional[str]:
     """Text of the first non-blank line if it is a single-`#` heading (exactly
@@ -411,7 +419,7 @@ def _block(lines: List[str], i: int, out: List[str], kv_two_column: bool) -> int
     if m:
         lang, body = m.group(1), []
         i += 1
-        while i < n and not re.match(r"^\s*```\s*$", lines[i]):
+        while i < n and not _FENCE_CLOSE_RE.match(lines[i]):
             body.append(lines[i])
             i += 1
         i += 1  # closing fence (or EOF)
