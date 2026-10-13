@@ -102,10 +102,31 @@ function createNotifyDispatcher(opts = {}) {
         ? opts.sendTimeoutMs : DEFAULT_SEND_TIMEOUT_MS;
 
     async function dispatch(notice) {
-        const { team, type, title, body, ref } = notice;
-
-        const rec = store.getTeamRoutes(team);
+        const rec = store.getTeamRoutes(notice.team);
         if (!rec) throw new NotifyDispatchError('no routes pushed for team', 'not_found', 404);
+        return run(notice, rec);
+    }
+
+    /**
+     * XACA-1407: dispatch a notice Fleet Monitor originated itself, through the FLEET-level route
+     * set (owned by no team). Receipts carry team 'fleet'. Unlike dispatch(), "no fleet routes set"
+     * is a normal state, not an error: it returns the same unrouted envelope as a route miss.
+     */
+    async function dispatchFleet(notice) {
+        const n = { ...notice, team: 'fleet' };
+        const rec = typeof store.resolveFleetRoutes === 'function' ? store.resolveFleetRoutes() : null;
+        if (!rec) {
+            return {
+                ok: false, routed: false, reason: 'no-route', team: 'fleet', type: n.type,
+                severity: isValidSeverity(n.severity) ? n.severity : 'info',
+                delivered: 0, failed: 0, suppressed: 0, receipts: [], warnings: [],
+            };
+        }
+        return run(n, rec);
+    }
+
+    async function run(notice, rec) {
+        const { team, type, title, body, ref } = notice;
         const { config, catalog } = rec;
         if (!isPlainObject(catalog) || !Object.prototype.hasOwnProperty.call(catalog, type)) {
             throw new NotifyDispatchError('unknown notice type', 'invalid', 400);
@@ -199,7 +220,7 @@ function createNotifyDispatcher(opts = {}) {
         return make(id, fields);
     }
 
-    return { dispatch };
+    return { dispatch, dispatchFleet };
 }
 
 module.exports = { createNotifyDispatcher, NotifyDispatchError, resolveSeverity, SEVERITIES, DEFAULT_SEND_TIMEOUT_MS, withTimeout };

@@ -44,6 +44,9 @@ const { registerCiRunnersRoutes } = require('./lib/ci-runners-routes');
 // XACA-1441-007: Fleet CI Pool dispatcher (dormant unless FLEET_CI_DISPATCHER=1 + GitHub App secrets).
 const { wireCiPool } = require('./lib/ci-dispatcher');
 const { wireNotifyHub } = require('./lib/notify-routes');
+// XACA-1407: fleet-originated notices (machine offline/recovered, accessory on-battery/restored).
+const { emitFleetNotice } = require('./lib/fleet-notices');
+const { createMachineNoticeTracker, createAccessoryNoticeTracker } = require('./lib/fleet-notice-sources');
 // XACA-1392: accessory registry (UPS auto-discovery, attachment, derived power state).
 const { createRegistry: createAccessoryRegistry } = require('./lib/accessories');
 const { registerAccessoriesRoutes } = require('./lib/accessories-routes');
@@ -76,6 +79,12 @@ const { registerAuthRoutes } = require('./lib/auth-routes');
 const PORT = process.env.PORT || 3000;
 const OFFLINE_THRESHOLD_MS = 180 * 1000; // 180 seconds (3 minutes) - allows for 2 missed heartbeats
 const WARNING_THRESHOLD_MS = 120 * 1000; // 120 seconds (2 minutes) - early warning before offline
+
+// XACA-1407: transition detectors feeding emitFleetNotice(). Pure state machines (lib/fleet-notice-sources.js);
+// the first observation of a machine is a baseline, so machines already stale at boot emit nothing.
+// Offline notices are flap-damped (default 5 min window); see that file's header for the rules.
+const machineNotices = createMachineNoticeTracker({ emit: emitFleetNotice, offlineThresholdMs: OFFLINE_THRESHOLD_MS });
+const accessoryNotices = createAccessoryNoticeTracker({ emit: emitFleetNotice });
 const DATA_FILE = path.join(__dirname, 'data', 'machines.json');
 const TEAMS_FILE = path.join(__dirname, 'data', 'registered-teams.json');
 const BOARDS_FILE = path.join(__dirname, 'data', 'pushed-boards.json');
@@ -1026,6 +1035,13 @@ function updateMachineStatuses() {
                 `Status changed from ${previousStatus} to ${data.status} (no heartbeat for ${downtimeStr})`
             );
         }
+
+        // XACA-1407: observed on EVERY tick (not only on change); the tracker owns transition
+        // detection, baselining and flap damping, and never throws.
+        machineNotices.observe(hostname, data.status, {
+            label: data.nickname || data.hostname || hostname,
+            lastSeen: data.last_seen
+        });
     }
 }
 
@@ -1044,6 +1060,7 @@ function cleanupLegacyMachines() {
     }
     for (const key of toRemove) {
         machines.delete(key);
+        machineNotices.forget(key);
         console.log(`✓ Removed legacy machine entry: ${key}`);
     }
     if (toRemove.length > 0) {
@@ -1442,6 +1459,9 @@ function parseFleetData() {
 function deriveAccessoryStateOrThrow() {
     return accessoryRegistry.derive(machines, {
         onTransition(rec, from, to) {
+            // XACA-1407: on_battery -> accessory-on-battery; on_battery -> ac -> accessory-restored.
+            // 'unknown' (stale/no reading) never notifies; see lib/fleet-notice-sources.js.
+            accessoryNotices.transition(rec, from, to);
             const label = rec.nickname || rec.name;
             const msg = `${label}: ${from} → ${to}`;
             const host = machines.get(rec.dataLinkMachineId);
@@ -2025,6 +2045,10 @@ app.post('/api/status', requireApiKey, (req, res) => {
             // collected (e.g. `versions.aiteamforge`) is OMITTED, not null.
             system: normalizeSystemBlock(system)
         });
+
+        // XACA-1407: a heartbeat flips the machine straight to online WITHOUT passing through
+        // updateMachineStatuses(), so the offline -> online edge (machine-recovered) is observed here.
+        machineNotices.observe(machineKey, 'online', { label: existingNickname || machine.hostname, lastSeen: now });
 
         // XACA-1392-002: UPS auto-discovery. Uses the SANITIZED power block that was just
         // stored (never the raw body). Absent power / ups:null is a no-op inside

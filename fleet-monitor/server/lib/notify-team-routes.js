@@ -285,7 +285,39 @@ function validateTeamPush(body, canonical) {
     return { ok: true, config, catalog: merged };
 }
 
+/**
+ * XACA-1407: validate a FLEET-level route set { routes: { type: [connectionId...] } }.
+ * Reuses the per-type structural limits of the team v2 schema; semantics differ in one way:
+ * connection ids must exist in the store (`connectionExists(id)`), since a fleet route has no
+ * team config that could be pushed before its connections. Messages name ids/paths only.
+ * Returns {ok:true, routes} or {ok:false, errors:[...]}.
+ */
+function validateFleetRoutes(body, canonical, connectionExists) {
+    if (!isObj(body)) return { ok: false, errors: ['body must be an object {routes}'] };
+    if (Object.keys(body).some((k) => k !== 'routes')) return { ok: false, errors: ['body: unexpected field(s)'] };
+    const routes = body.routes;
+    if (!isObj(routes)) return { ok: false, errors: ['routes: must be an object'] };
+    const errs = [];
+    const entries = Object.entries(routes);
+    if (entries.length > MAX_ROUTE_TYPES) return { ok: false, errors: [`routes: at most ${MAX_ROUTE_TYPES} notice types`] };
+    const known = new Set((canonical.types || []).map((t) => t.id));
+    for (const [tid, conns] of entries) {
+        const w = `routes['${safeId(tid)}']`;
+        if (!ID_RE.test(tid)) { errs.push('routes: notice type id malformed'); continue; }
+        if (!known.has(tid)) errs.push(`routes: unknown notice type '${tid}'`);
+        if (!Array.isArray(conns)) { errs.push(`${w}: must be a list of connection ids`); continue; }
+        if (conns.length > MAX_CONNECTIONS_PER_TYPE) errs.push(`${w}: at most ${MAX_CONNECTIONS_PER_TYPE} connections`);
+        if (new Set(conns).size !== conns.length) errs.push(`${w}: connection ids must be unique`);
+        for (const c of conns) {
+            if (typeof c !== 'string' || !ID_RE.test(c)) { errs.push(`${w}: connection id malformed`); break; }
+            if (!connectionExists(c)) errs.push(`${w}: unknown connection '${c}'`);
+        }
+    }
+    return errs.length ? { ok: false, errors: errs } : { ok: true, routes: JSON.parse(JSON.stringify(routes)) };
+}
+
 module.exports = {
+    validateFleetRoutes,
     SEVERITIES, TEAM_RE, ID_RE, MAX_ROUTE_TYPES, MAX_CATALOG_TYPES, MAX_ALIASES,
     validateCatalog, validateTeamOverride, mergeCatalog, loadCanonicalCatalog, defaultCatalogFile,
     validateV2Structure, validateV2Semantics, validateTeamPush, validZone,

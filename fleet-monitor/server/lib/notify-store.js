@@ -155,7 +155,7 @@ function createNotifyStore(opts) {
     const key = parsed.key || null;
     const disabledReason = key ? null : parsed.reason;
 
-    let state = { version: SCHEMA_VERSION, connections: {}, routes: {}, teamKeys: {} };
+    let state = { version: SCHEMA_VERSION, connections: {}, routes: {}, teamKeys: {}, fleetRoutes: null };
     // Recovery trace (D3/D4): ids and a basename only, never contents.
     let movedAside = null;
     let quarantined = [];
@@ -188,6 +188,7 @@ function createNotifyStore(opts) {
             connections: good,
             routes: isPlainObject(j.routes) ? j.routes : {},
             teamKeys: loadTeamKeys(j.teamKeys),
+            fleetRoutes: loadFleetRoutes(j.fleetRoutes),
         };
         if (bad.length === 0) return;
         quarantined = bad;
@@ -210,6 +211,18 @@ function createNotifyStore(opts) {
             }
         }
         return out;
+    }
+    /**
+     * XACA-1407: the FLEET-level route set (owned by no team). A pre-1407 file has none -> null.
+     * A malformed entry is dropped (fail closed: no route = log only), never trusted.
+     */
+    function loadFleetRoutes(raw) {
+        if (!isPlainObject(raw) || !isPlainObject(raw.routes)) return null;
+        const routes = {};
+        for (const [t, conns] of Object.entries(raw.routes)) {
+            if (ID_RE.test(t) && Array.isArray(conns) && conns.every((c) => typeof c === 'string' && ID_RE.test(c))) routes[t] = conns;
+        }
+        return { routes, updatedAt: typeof raw.updatedAt === 'string' ? raw.updatedAt : null };
     }
     function moveAside() {
         const aside = `${file}.corrupt-${clock().getTime()}`;
@@ -437,6 +450,46 @@ function createNotifyStore(opts) {
         getTeamRoutes(team) {
             const r = isPlainObject(state.routes) && has(state.routes, team) ? state.routes[team] : null;
             return r ? clone(r) : null;
+        },
+        /**
+         * XACA-1407: replace the FLEET-level route set (notice type -> connection ids) used for
+         * notices Fleet Monitor originates itself (machine-offline, accessory-on-battery, ...).
+         * input = { routes: { <noticeType>: [<connectionId>...] } }. Every type must exist in the
+         * canonical catalog and every connection id must exist in this store NOW. A whole-set
+         * replace, like a team push. Throws NotifyValidationError (400) / NotifyStoreDisabledError (503).
+         * A connection deleted later leaves a dangling id; the dispatcher records 'unknown
+         * connection' receipts for it (same behaviour as team routes).
+         */
+        setFleetRoutes(input) {
+            requireEnabled();
+            const canonical = canonicalCatalog();
+            const res = teamRoutes.validateFleetRoutes(input, canonical, (id) => has(state.connections, id));
+            if (!res.ok) throw new NotifyValidationError(res.errors.join('; ').slice(0, 1000));
+            return mutate((draft) => {
+                draft.fleetRoutes = { routes: res.routes, updatedAt: clock().toISOString() };
+                return clone(draft.fleetRoutes);
+            });
+        },
+        /** Stored { routes, updatedAt } or null when no fleet routes were ever set. */
+        getFleetRoutes() {
+            return isPlainObject(state.fleetRoutes) ? clone(state.fleetRoutes) : null;
+        },
+        /**
+         * The fleet route set in the shape the dispatcher consumes ({config, catalog, updatedAt}),
+         * catalog = the canonical catalog merged with no team layer. Null when no routes were set.
+         * Fleet notices honour no quiet hours / severity overrides (none are stored at fleet level).
+         */
+        resolveFleetRoutes() {
+            if (!isPlainObject(state.fleetRoutes)) return null;
+            return {
+                config: { $schema: 'release-notify/v2', version: 2, routes: clone(state.fleetRoutes.routes) },
+                catalog: teamRoutes.mergeCatalog(canonicalCatalog(), null),
+                updatedAt: state.fleetRoutes.updatedAt,
+            };
+        },
+        /** Notice-type ids the bundled catalog knows (a fleet notice of any other type is unroutable). */
+        catalogTypeIds() {
+            return canonicalCatalog().types.map((t) => t.id);
         },
         /**
          * XACA-1488: mint a per-team notify key (`fnt_`). Returns the plaintext ONCE; only its

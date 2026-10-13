@@ -350,6 +350,21 @@ function registerNotifyRoutes(app, { store, registry, isRegisteredTeam, dispatch
         } catch (e) { return sendError(res, e); }
     }));
 
+    // ----- fleet-level routes (XACA-1407-001): the route set for notices Fleet Monitor originates
+    // itself (machine-offline/recovered, accessory-on-battery/restored). Owned by no team, so BOTH
+    // verbs are ADMIN tier (a team key must never read or rewrite fleet routing). PUT replaces the
+    // whole set: body {routes: {<type>: [<connectionId>...]}}. GET answers 200 with an empty set
+    // (updatedAt null) when nothing was ever set, because "no fleet routes" is a normal state.
+    app.get('/api/notify/fleet-routes', requireAdminKey, guard((req, res) => {
+        const rec = store.getFleetRoutes();
+        res.json({ routes: rec ? rec.routes : {}, updatedAt: rec ? rec.updatedAt : null, noticeTypes: store.catalogTypeIds() });
+    }));
+
+    app.put('/api/notify/fleet-routes', requireAdminKey, guard((req, res) => {
+        const rec = store.setFleetRoutes(req.body);
+        res.json({ routes: rec.routes, updatedAt: rec.updatedAt });
+    }));
+
     app.get('/api/notify/receipts', requireAdminKey, (req, res) => {
         const { team } = req.query;
         if (team !== undefined && (typeof team !== 'string' || !TEAM_RE.test(team))) {
@@ -403,7 +418,11 @@ function wireNotifyHub(app, opts) {
     const registry = defaultRegistry({ imessageQueue });
     const store = createNotifyStore(Object.assign({}, o.storeOpts, { registry }));
     registerImessageRelayRoutes(app, { queue: imessageQueue });
-    registerNotifyRoutes(app, { store, registry, receipts, isRegisteredTeam: o.isRegisteredTeam });
+    // ONE dispatcher shared by the HTTP routes and by fleet-originated notices (XACA-1407), so
+    // dedupe and rate-limit state is common to both entry points.
+    const dispatcher = o.dispatcher || createNotifyDispatcher({ store, registry, receipts });
+    registerNotifyRoutes(app, { store, registry, receipts, dispatcher, isRegisteredTeam: o.isRegisteredTeam });
+    require('./fleet-notices').configure({ dispatcher, store, receipts, logger });
     // Lease/TTL expiry is also swept lazily on every queue call; this timer makes a failed
     // delivery receipt appear even when no relay is polling. unref'd: never holds the process open.
     const sweepMs = Number.isFinite(o.imessageSweepMs) && o.imessageSweepMs > 0 ? o.imessageSweepMs : 15000;
