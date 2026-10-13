@@ -240,6 +240,12 @@ def cut_release_branch(release, board, repo_root, *, dry_run=False, run=subproce
     remote = _remote(git)
     hotfix = rtype == "hotfix"
     if hotfix:
+        if cfg["mode"] == "client-merge":
+            # XACA-1521-020: the engine never writes to a client-owned repo except the create-only cut of the
+            # RELEASE branch; a hotfix branch is cut from production, which the client owns. Refuse, push nothing.
+            raise RuntimeError("client-merge mode: hotfix release cut is not supported (the engine never writes to the "
+                               "client repo); create the hotfix branch in the client repo by hand, or switch the board "
+                               "to mode release")
         if cfg["mode"] == "trunk" and cfg["production"] == cfg["integration"]:
             raise RuntimeError("hotfix release in trunk mode: production and integration are both %r, so a hotfix "
                                "branch cannot be isolated from unreleased trunk work; refusing to cut"

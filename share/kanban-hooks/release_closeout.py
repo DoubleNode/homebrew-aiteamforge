@@ -97,16 +97,22 @@ def applicable_steps(close_out):
     return [s for s in STEPS if s in steps]
 
 
+_MODE_RE = re.compile(r"^[a-z][a-z-]{0,31}$")
+
+
 def _valid_sha(v):
     """`v` as a lower-case SHA string when valid, else None."""
     return v.lower() if isinstance(v, str) and _SHA_RE.match(v.lower()) else None
 
 
-def init_close_out(cr_team=False, targets=None, now=None, stage=None, sha=None, gamma_sha=None):
+def init_close_out(cr_team=False, targets=None, now=None, stage=None, sha=None, gamma_sha=None, mode=None):
     """Fresh record, every step pending. `targets` = the other open release branches at the time
     close-out starts (one sub-entry each, all pending). `stage`/`sha` = the bound stage S and stageSha[S]
     the record belongs to; `gamma_sha` is the deprecated spelling of stage="GAMMA", sha=gamma_sha.
-    Writes only `stage` and `sha` (never the legacy `gammaSha`)."""
+    Writes only `stage` and `sha` (never the legacy `gammaSha`). `mode` (XACA-1521-019) pins the board's
+    releaseConfig.branches.mode the close-out STARTED under; an absent `mode` (legacy record) means "no check"."""
+    if mode is not None and not (isinstance(mode, str) and _MODE_RE.match(mode)):
+        raise CloseOutError("'mode' must be a branch-mode name such as release|trunk|client-merge")
     if gamma_sha is not None:
         if stage not in (None, "GAMMA") or (sha is not None and sha != gamma_sha):
             raise CloseOutError("gamma_sha conflicts with stage/sha")
@@ -127,6 +133,8 @@ def init_close_out(cr_team=False, targets=None, now=None, stage=None, sha=None, 
     if stage is not None:
         rec["stage"] = stage
         rec["sha"] = _valid_sha(sha)
+    if mode is not None:
+        rec["mode"] = mode
     return rec
 
 
@@ -315,7 +323,7 @@ def set_target(close_out, target, status, now=None):
 
 def apply_op(release, op, now=None, stage=None, sha=None):
     """The server's single entry point. `op` is the POST body:
-         {"op": "init", "crTeam": bool, "targets": [..]}      (idempotent: refused if a record exists)
+         {"op": "init", "crTeam": bool, "targets": [..], "mode": str?}   (XACA-1521-019: pins the branch mode; idempotent: refused if a record exists)
        `stage` is the bound stage S the SERVER resolved (release_gate.closeout_stage); init binds to it and to
        stageSha[S] read from the board here. Both come from keyword arguments, never from the body (a client
        `stage`/`sha`/`gammaSha` in the body is ignored). `sha`, when given, must equal stageSha[S].
@@ -339,7 +347,7 @@ def apply_op(release, op, now=None, stage=None, sha=None):
             raise CloseOutError("close-out cannot start: the release has no valid stageSha.%s to bind it to" % stage)
         if sha is not None and _valid_sha(sha) != bsha:
             raise CloseOutError("close-out cannot start: stageSha.%s is not the expected build" % stage)
-        release["closeOut"] = init_close_out(cr, tg, now, stage=stage, sha=bsha)
+        release["closeOut"] = init_close_out(cr, tg, now, stage=stage, sha=bsha, mode=op.get("mode"))
         return release["closeOut"]
     co = release.get("closeOut")
     if kind in ("set", "target") and not isinstance(co, dict):
@@ -373,6 +381,7 @@ def main(argv=None):
     p.add_argument("--gamma-sha", default=None)   # deprecated alias for --stage GAMMA --sha
     p.add_argument("--stage", default=None)
     p.add_argument("--sha", default=None)
+    p.add_argument("--mode", default=None)
     p = sub.add_parser("archived-for-sha")
     p.add_argument("--release", required=True)
     p.add_argument("--sha", required=True)
@@ -385,7 +394,7 @@ def main(argv=None):
     try:
         if a.cmd == "init":
             tg = [t for t in a.targets.split(",") if t.strip()]
-            print(json.dumps(init_close_out(a.cr_team, tg, stage=a.stage, sha=a.sha, gamma_sha=a.gamma_sha)))
+            print(json.dumps(init_close_out(a.cr_team, tg, stage=a.stage, sha=a.sha, gamma_sha=a.gamma_sha, mode=a.mode)))
             return 0
         rel = _load_release(a.release)
         if a.cmd == "archived-for-sha":
