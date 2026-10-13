@@ -62,7 +62,9 @@ describe('transitions', () => {
         tr.observe('m1', 'online', info);
         tr.observe('m1', 'offline', info);
         clock.t += 17 * MIN;
-        assert.equal(tr.observe('m1', 'online', info), 'recovered');
+        // downtime is measured from the machine's last heartbeat (the 'offline' observation above was 17 min ago;
+        // use the matching lastSeen) -- see xaca-1407-012 for the table-driven coverage
+        assert.equal(tr.observe('m1', 'online', { label: 'm4mini', lastSeen: new Date(clock.t - 17 * MIN).toISOString() }), 'recovered');
         for (let i = 0; i < 5; i++) { clock.t += 30000; tr.observe('m1', 'online', info); }
         assert.equal(sent.length, 2);
         assert.equal(sent[1].type, 'machine-recovered');

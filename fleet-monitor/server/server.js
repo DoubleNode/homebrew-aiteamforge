@@ -2050,7 +2050,12 @@ app.post('/api/status', requireApiKey, (req, res) => {
 
         // XACA-1407: a heartbeat flips the machine straight to online WITHOUT passing through
         // updateMachineStatuses(), so the offline -> online edge (machine-recovered) is observed here.
-        machineNotices.observe(machineKey, 'online', { label: existingNickname || machine.hostname, lastSeen: now });
+        // lastSeen is the machine's PREVIOUS last_seen (existingMachine is the pre-update record;
+        // `now` above is this heartbeat's own timestamp), so machine-recovered reports the real downtime.
+        machineNotices.observe(machineKey, 'online', {
+            label: existingNickname || machine.hostname,
+            lastSeen: existingMachine ? existingMachine.last_seen : undefined
+        });
 
         // XACA-1392-002: UPS auto-discovery. Uses the SANITIZED power block that was just
         // stored (never the raw body). Absent power / ups:null is a no-op inside

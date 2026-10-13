@@ -142,7 +142,7 @@ function createMachineNoticeTracker(o = {}) {
     /**
      * @param {string} id          stable machine key
      * @param {string} status      'online' | 'warning' | 'offline' (anything else is ignored)
-     * @param {{label?:string,lastSeen?:string}} [info]
+     * @param {{label?:string,lastSeen?:string}} [info]  lastSeen = the machine's last heartbeat BEFORE this observation (ISO string)
      * @returns {string|null} what happened: baseline | offline | suppressed-offline | escalated-offline | recovered | recovered-quiet | null
      */
     function observe(id, status, info = {}) {
@@ -176,7 +176,12 @@ function createMachineNoticeTracker(o = {}) {
         }
         if (!e.up && up) {
             const wasAnnounced = e.announced;
-            const downFor = e.downSince === null ? 0 : t - e.downSince;
+            // Downtime = now - the machine's last heartbeat BEFORE this one (info.lastSeen). The tracker's
+            // own downSince is only when FM noticed (boot baseline, stall hold, escalation), so it is a
+            // FALLBACK for a missing, unparseable or future lastSeen (XACA-1407-012).
+            const seenMs = typeof info.lastSeen === 'string' ? Date.parse(info.lastSeen) : NaN;
+            const downFor = Number.isFinite(seenMs) && seenMs <= t ? t - seenMs
+                : (e.downSince === null ? 0 : t - e.downSince);
             e.up = true;
             e.announced = false;
             e.held = false;

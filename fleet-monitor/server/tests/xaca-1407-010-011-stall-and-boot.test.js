@@ -129,10 +129,15 @@ describe('011: boot observation', () => {
     });
 
     test('boot sweep baselines a stale machine OFFLINE, so its first heartbeat produces machine-recovered', () => {
-        const { clock, sent, sweep } = setup();
+        const { tr, clock, sent, sweep } = setup();
         sweep({ a: 'offline', b: 'online' });            // boot sweep over machines loaded from disk
         assert.deepEqual(sent, [], 'boot sweep emits nothing');
-        assert.equal(clock.t > 0, true);
+        // XACA-1407-013: assert the baselined STATUS itself. A machine baselined offline must have its
+        // recovery announced; one baselined online would swallow it.
+        clock.t += 5 * SEC;
+        assert.equal(tr.observe('a', 'online', { label: 'a' }), 'recovered', 'a was baselined OFFLINE');
+        assert.equal(tr.observe('b', 'offline', { label: 'b' }), 'offline', 'b was baselined ONLINE');
+        assert.deepEqual(types(sent), ['machine-recovered:a', 'machine-offline:b']);
     });
 
     test('boot sweep + heartbeat: recovered is sent; WITHOUT the boot sweep the heartbeat is swallowed (the 011 gap)', () => {
