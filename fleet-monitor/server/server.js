@@ -991,6 +991,8 @@ function logActivity(type, hostname, ip, sessionCount, extra = '') {
  * Also tracks offline status in uptime_history for sparkline
  */
 function updateMachineStatuses() {
+    // XACA-1407-010: lets the notice tracker see a Fleet Monitor stall (host sleep / blocked loop).
+    machineNotices.beginSweep();
     const now = Date.now();
     const nowISO = new Date().toISOString();
 
@@ -4253,6 +4255,12 @@ if (String(process.env.FLEET_REQUIRE_AUTH || '') === '1' && _authPosture.identic
 // ============================================================================
 // START SERVER
 // ============================================================================
+
+// XACA-1407-011: observe machine statuses ONCE at boot, after machines are loaded from disk and
+// before app.listen() so no heartbeat can be processed first. Stale machines are baselined offline
+// (announced, no notice), so a heartbeat in the first 30 s then yields machine-recovered instead of
+// being baselined online. The first sweep has no previous sweep, so it is never counted as a stall.
+updateMachineStatuses();
 
 app.listen(PORT, () => {
     ciPool.start(); // no-op (logs why) unless FLEET_CI_DISPATCHER=1 and App credentials are set

@@ -35,6 +35,19 @@
  *     (reported on a later observation, i.e. the next tick). The window slides: each recovery
  *     restarts it, so a machine that keeps bouncing yields one pair, then silence until it has
  *     been stable for the window. The hub's own dedupe (type+ref) is a second, independent layer.
+ *   - FM-STALL GUARD (XACA-1407-010): if Fleet Monitor's own host sleeps or its event loop stalls,
+ *     the next status sweep sees EVERY machine's last_seen as stale and would flip them all to
+ *     offline at once, then a recovered wave when their heartbeats resume. The caller calls
+ *     beginSweep() at the top of each status sweep; when the gap since the previous sweep exceeds
+ *     stallThresholdMs (default 90 s = 3 x the 30 s tick; sweeps also run from request handlers so
+ *     the gap can only be shorter than the tick, never longer, unless the process really stalled),
+ *     the tracker logs ONE line and opens a grace period of stallGraceMs (default = the offline
+ *     threshold, 180 s, i.e. long enough for every healthy reporter to heartbeat again). Edges INTO
+ *     offline during the grace are held, not announced. Once the grace has elapsed, a machine that
+ *     is STILL offline gets exactly one machine-offline (a genuine outage is delayed, never lost);
+ *     a machine that heartbeats first recovers quietly (its offline was never announced, so no
+ *     recovered either). Machines already announced offline before the stall are unaffected.
+ *     The FIRST sweep after boot has no previous sweep and is never a stall (XACA-1407-011).
  *
  * ACCESSORY TRACKER (accessory-on-battery / accessory-restored)
  *   Fed registry transitions (from, to) per accessory.
@@ -49,6 +62,8 @@
  */
 
 const FLAP_WINDOW_MS = 5 * 60 * 1000;
+const STALL_THRESHOLD_MS = 90 * 1000;      // 3 x the 30 s status tick
+const DEFAULT_STALL_GRACE_MS = 180 * 1000; // = server.js OFFLINE_THRESHOLD_MS
 
 function safeEmit(emit, logger, notice) {
     try {
@@ -79,7 +94,9 @@ function humanDuration(ms) {
  * @param {Function} o.emit                    (notice) => any
  * @param {Function} [o.now]                   () => epoch ms
  * @param {number}   [o.flapWindowMs]
- * @param {number}   [o.offlineThresholdMs]    only used for the notice text
+ * @param {number}   [o.offlineThresholdMs]    notice text; also the default stall grace
+ * @param {number}   [o.stallThresholdMs]      sweep gap that counts as an FM stall (default 90 s)
+ * @param {number}   [o.stallGraceMs]          hold period after a stall (default offlineThresholdMs, else 180 s)
  * @param {object}   [o.logger]                {warn?, log?}
  */
 function createMachineNoticeTracker(o = {}) {
@@ -88,6 +105,27 @@ function createMachineNoticeTracker(o = {}) {
     const flapMs = Number.isFinite(o.flapWindowMs) && o.flapWindowMs >= 0 ? o.flapWindowMs : FLAP_WINDOW_MS;
     const logger = o.logger || console;
     const entries = new Map();
+    const stallMs = Number.isFinite(o.stallThresholdMs) && o.stallThresholdMs > 0 ? o.stallThresholdMs : STALL_THRESHOLD_MS;
+    const graceMs = Number.isFinite(o.stallGraceMs) && o.stallGraceMs >= 0 ? o.stallGraceMs
+        : (Number.isFinite(o.offlineThresholdMs) && o.offlineThresholdMs > 0 ? o.offlineThresholdMs : DEFAULT_STALL_GRACE_MS);
+    let lastSweepAt = null;  // null until the first sweep (boot): never a stall
+    let holdUntil = 0;       // edges into offline before this instant are held (stall grace)
+
+    /**
+     * Call once at the top of every status sweep (before observe()). Returns true when this
+     * sweep follows an FM stall. Never throws.
+     */
+    function beginSweep() {
+        const t = now();
+        const gap = lastSweepAt === null ? 0 : t - lastSweepAt;
+        lastSweepAt = t;
+        if (gap > stallMs) {
+            holdUntil = t + graceMs;
+            try { (logger.warn || logger.log || console.warn).call(logger, `[FLEET-NOTICE] status sweep gap ${Math.round(gap / 1000)}s > ${Math.round(stallMs / 1000)}s: Fleet Monitor stalled; offline notices held ${Math.round(graceMs / 1000)}s`); } catch (_) { /* never throw */ }
+            return true;
+        }
+        return false;
+    }
 
     function offlineNotice(id, info) {
         const label = clean(info.label || id, 100);
@@ -114,12 +152,19 @@ function createMachineNoticeTracker(o = {}) {
         const up = status !== 'offline';
         const e = entries.get(id);
         if (!e) {
-            entries.set(id, { up, announced: !up, lastRecoveredAt: null, downSince: up ? null : t });
+            entries.set(id, { up, announced: !up, lastRecoveredAt: null, downSince: up ? null : t, held: false });
             return 'baseline';
         }
         if (e.up && !up) {
             e.up = false;
             e.downSince = t;
+            if (t < holdUntil) {
+                // Fleet Monitor itself stalled: this "offline" may be FM's own absence. Hold it.
+                e.announced = false;
+                e.held = true;
+                return 'held-offline';
+            }
+            e.held = false;
             if (e.lastRecoveredAt !== null && t - e.lastRecoveredAt < flapMs) {
                 e.announced = false;
                 return 'suppressed-offline';
@@ -134,6 +179,7 @@ function createMachineNoticeTracker(o = {}) {
             const downFor = e.downSince === null ? 0 : t - e.downSince;
             e.up = true;
             e.announced = false;
+            e.held = false;
             e.downSince = null;
             e.lastRecoveredAt = t;
             if (!wasAnnounced) return 'recovered-quiet';
@@ -146,6 +192,14 @@ function createMachineNoticeTracker(o = {}) {
             });
             return 'recovered';
         }
+        if (!e.up && !e.announced && e.held) {
+            // Compare against the LIVE hold, so a second stall during the grace re-opens it.
+            if (t < holdUntil) return null;
+            e.announced = true;
+            e.held = false;
+            safeEmit(o.emit, logger, offlineNotice(id, info));
+            return 'escalated-offline';
+        }
         if (!e.up && !e.announced && e.downSince !== null && t - e.downSince >= flapMs) {
             e.announced = true;
             const n = offlineNotice(id, info);
@@ -155,7 +209,7 @@ function createMachineNoticeTracker(o = {}) {
         return null;
     }
 
-    return { observe, forget: (id) => entries.delete(id), _size: () => entries.size, flapWindowMs: flapMs };
+    return { observe, beginSweep, forget: (id) => entries.delete(id), _size: () => entries.size, flapWindowMs: flapMs };
 }
 
 /**
@@ -207,4 +261,4 @@ function createAccessoryNoticeTracker(o = {}) {
     return { transition, _announced: () => new Set(announced) };
 }
 
-module.exports = { createMachineNoticeTracker, createAccessoryNoticeTracker, FLAP_WINDOW_MS, humanDuration };
+module.exports = { createMachineNoticeTracker, createAccessoryNoticeTracker, FLAP_WINDOW_MS, STALL_THRESHOLD_MS, humanDuration };
