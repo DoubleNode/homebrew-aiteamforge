@@ -40,8 +40,11 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from jsonschema import Draft202012Validator
-from jsonschema.exceptions import ValidationError
+# NOTE (XACA-1504): jsonschema is deliberately NOT imported at module top. It is
+# not a dependency of the shipped formula, and a top-level import made the
+# whole module (including the stdlib-only resolve_secret_ref) unimportable on a
+# stock /usr/bin/python3. It is imported lazily by _validate_against_schema();
+# when it is missing, that raises SchemaValidatorUnavailable -- never "no errors".
 
 # ---------------------------------------------------------------------------
 # secretRef grammar (XACA-1342-001, DECIDED 2026-09-25)
@@ -102,6 +105,17 @@ class ReleaseConfigValidationError(Exception):
         super().__init__("\n".join(self.errors))
 
 
+class SchemaValidatorUnavailable(ImportError):
+    """
+    jsonschema cannot be imported, so schema validation cannot run (XACA-1504).
+    Fail-closed contract: validate_*_config() RAISES this rather than returning
+    [] (which callers read as "valid"). It subclasses ImportError, with
+    name="jsonschema", so older `except ImportError` handlers around the
+    validate calls keep working. Callers that can degrade (kb-notify send)
+    catch it and fall back to validate_notify_config_degraded().
+    """
+
+
 class SecretResolutionError(Exception):
     """
     Raised by resolve_secret_ref() when a secretRef cannot be resolved to a
@@ -116,10 +130,24 @@ class SecretResolutionError(Exception):
 # ---------------------------------------------------------------------------
 
 @lru_cache(maxsize=None)
+def _read_schema_file(filename: str) -> dict:
+    """Stdlib-only schema read (no jsonschema): usable for key-name redaction
+    and by the degraded validator when jsonschema is absent (XACA-1504)."""
+    with open(_SCHEMAS_DIR / filename, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+@lru_cache(maxsize=None)
 def _load_schema(filename: str) -> dict:
-    path = _SCHEMAS_DIR / filename
-    with open(path, "r", encoding="utf-8") as f:
-        schema = json.load(f)
+    schema = _read_schema_file(filename)
+    try:
+        from jsonschema import Draft202012Validator  # noqa: PLC0415 - lazy, XACA-1504
+    except ImportError:
+        raise SchemaValidatorUnavailable(
+            "jsonschema is not installed; schema validation unavailable "
+            "(install jsonschema or use a python that has it)",
+            name="jsonschema",
+        ) from None
     Draft202012Validator.check_schema(schema)
     return schema
 
@@ -167,7 +195,7 @@ def _render_key(key: str) -> str:
         known: set = set()
         for name in ("notify.schema.json", "notify-v2.schema.json",
                      "wiki.schema.json", "profile.schema.json"):
-            _declared_property_names(_load_schema(name), known)
+            _declared_property_names(_read_schema_file(name), known)
         _KNOWN_KEYS = known
     if key in _KNOWN_KEYS or _ALIAS_NAME_RE.search(key):
         return key
@@ -188,7 +216,7 @@ def _path_touches_secret_field(path: list) -> bool:
     return any(isinstance(seg, str) and seg in _SECRET_SENSITIVE_FIELD_NAMES for seg in path)
 
 
-def _describe_error(e: ValidationError) -> str:
+def _describe_error(e: Any) -> str:  # e: jsonschema.exceptions.ValidationError
     """
     Build a redaction-safe description of a single jsonschema ValidationError:
     field path + reason, NEVER the instance value. Requirement: any error on
@@ -234,6 +262,14 @@ def _describe_error(e: ValidationError) -> str:
 
 
 def _validate_against_schema(instance: Any, schema: dict) -> list[str]:
+    try:
+        from jsonschema import Draft202012Validator  # noqa: PLC0415 - lazy, XACA-1504
+    except ImportError:
+        raise SchemaValidatorUnavailable(
+            "jsonschema is not installed; schema validation unavailable "
+            "(install jsonschema or use a python that has it)",
+            name="jsonschema",
+        ) from None
     validator = Draft202012Validator(schema)
     errors = sorted(
         validator.iter_errors(instance),
@@ -286,6 +322,164 @@ def notify_v2_semantic_errors(config: dict, kanban_dir) -> list[str]:
     except rr.NoticeRoutingError as exc:
         return [str(exc)]
     return rr.validate_v2_semantics(config, catalog)
+
+
+# ---------------------------------------------------------------------------
+# Degraded (stdlib-only) notify validation -- XACA-1504
+#
+# Used by kb-notify when jsonschema is not importable (stock /usr/bin/python3
+# on a consumer Mac). FAIL-CLOSED: every check here either mirrors the schema
+# or is stricter; anything it cannot positively verify is an error. It is NOT a
+# general JSON Schema engine -- it checks exactly the notify.json shapes, and
+# reads every pattern / enum / bound from the schema FILES (no copied regexes,
+# so it cannot drift). The hub re-validates full structure on its side.
+#
+# secretRef: resolve_secret_ref() already rejects anything outside
+# vault:<a>/<b> | env:RELEASE_* (SECRET_REF_RE.match), but only at resolve
+# time. A literal destination must be rejected when the config is LOADED, so
+# the schema's secretRef pattern is enforced here as well.
+# ---------------------------------------------------------------------------
+
+def _is_int(v: Any) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
+def _degraded_alias_errors(aliases: Any, alias_map_schema: dict, min_entries: int) -> list[str]:
+    errs: list[str] = []
+    if not isinstance(aliases, dict):
+        return ["$.aliases: wrong type (expected object)"]
+    if len(aliases) < min_entries:
+        errs.append("$.aliases: requires at least one entry")
+    name_re = re.compile(alias_map_schema["propertyNames"]["pattern"])
+    entry = alias_map_schema["additionalProperties"]
+    props = entry["properties"]
+    ref_re = re.compile(props["target"]["properties"]["secretRef"]["pattern"])
+    for key, val in aliases.items():
+        base = ["aliases", key]
+        label = _format_path(base)
+        if not isinstance(key, str) or not name_re.search(key):
+            errs.append(f"{label}: alias name does not match the required pattern")
+        if not isinstance(val, dict):
+            errs.append(f"{label}: wrong type (expected object)")
+            continue
+        if set(val) - set(props):
+            errs.append(f"{label}: unexpected additional field(s) not permitted")
+        for req in entry["required"]:
+            if req not in val:
+                errs.append(f"{label}: '{req}' is a required property")
+        if "provider" in val and val["provider"] not in props["provider"]["enum"]:
+            errs.append(f"{_format_path(base + ['provider'])}: value is not one of the allowed options")
+        if "shape" in val and val["shape"] not in props["shape"]["enum"]:
+            errs.append(f"{_format_path(base + ['shape'])}: value is not one of the allowed options")
+        if "target" in val:
+            tgt = val["target"]
+            tpath = _format_path(base + ["target"])
+            if (not isinstance(tgt, dict) or set(tgt) != {"secretRef"}
+                    or not isinstance(tgt["secretRef"], str)
+                    or not ref_re.search(tgt["secretRef"])):
+                errs.append(f"{tpath}: literal value not permitted")  # never echo the value
+    return errs
+
+
+def _degraded_v2_errors(config: dict) -> list[str]:
+    schema = _read_schema_file("notify-v2.schema.json")
+    props = schema["properties"]
+    errs: list[str] = []
+    for req in schema["required"]:
+        if req not in config:
+            errs.append(f"$: '{req}' is a required property")
+    if set(config) - set(props):
+        errs.append("$: unexpected additional field(s) not permitted")
+    if "version" in config and not (_is_int(config["version"]) and config["version"] == props["version"]["const"]):
+        errs.append("$.version: value is not one of the allowed options")
+    id_re = re.compile(props["routes"]["propertyNames"]["pattern"])
+    rsch = props["routes"]["additionalProperties"]
+    item_re = re.compile(rsch["items"]["pattern"])
+    routes = config.get("routes")
+    if "routes" in config:
+        if not isinstance(routes, dict):
+            errs.append("$.routes: wrong type (expected object)")
+        else:
+            for tid, conns in routes.items():
+                path = _format_path(["routes", tid])
+                if not isinstance(tid, str) or not id_re.search(tid):
+                    errs.append(f"{path}: notice type id does not match the required pattern")
+                if not isinstance(conns, list):
+                    errs.append(f"{path}: wrong type (expected array)")
+                    continue
+                if len(conns) > rsch["maxItems"]:
+                    errs.append(f"{path}: too many items (max {rsch['maxItems']})")
+                if not all(isinstance(c, str) and item_re.search(c) for c in conns):
+                    errs.append(f"{path}: connection id does not match the required pattern")
+                elif len(set(conns)) != len(conns):
+                    errs.append(f"{path}: items must be unique")
+    if "severityOverrides" in config:
+        so = config["severityOverrides"]
+        sev = props["severityOverrides"]["additionalProperties"]["enum"]
+        if not isinstance(so, dict):
+            errs.append("$.severityOverrides: wrong type (expected object)")
+        else:
+            for tid, v in so.items():
+                path = _format_path(["severityOverrides", tid])
+                if not isinstance(tid, str) or not id_re.search(tid):
+                    errs.append(f"{path}: notice type id does not match the required pattern")
+                if v not in sev:
+                    errs.append(f"{path}: value is not one of the allowed options")
+    if "quietHours" in config:
+        qh, qs = config["quietHours"], props["quietHours"]
+        if not isinstance(qh, dict):
+            errs.append("$.quietHours: wrong type (expected object)")
+        else:
+            if set(qh) - set(qs["properties"]):
+                errs.append("$.quietHours: unexpected additional field(s) not permitted")
+            for req in qs["required"]:
+                if req not in qh:
+                    errs.append(f"$.quietHours: '{req}' is a required property")
+            for fld, fs in qs["properties"].items():
+                if fld in qh and not (isinstance(qh[fld], str) and re.search(fs["pattern"], qh[fld])
+                                      and len(qh[fld]) <= fs.get("maxLength", 1 << 30)):
+                    errs.append(f"$.quietHours.{fld}: value does not match the required pattern")
+    if "dedupeWindow" in config:
+        w, ds = config["dedupeWindow"], props["dedupeWindow"]
+        if not _is_int(w):
+            errs.append("$.dedupeWindow: wrong type (expected integer)")
+        elif not ds["minimum"] <= w <= ds["maximum"]:
+            errs.append("$.dedupeWindow: value is out of range")
+    if "aliases" in config:
+        errs.extend(_degraded_alias_errors(config["aliases"], props["aliases"], 0))
+    return errs
+
+
+def _degraded_v1_errors(config: dict) -> list[str]:
+    schema = _read_schema_file("notify.schema.json")
+    props = schema["properties"]
+    errs: list[str] = []
+    for req in schema["required"]:
+        if req not in config:
+            errs.append(f"$: '{req}' is a required property")
+    if set(config) - set(props):
+        errs.append("$: unexpected additional field(s) not permitted")
+    if config.get("$schema") != props["$schema"]["const"]:
+        errs.append("$.$schema: value is not one of the allowed options")
+    if "aliases" in config:
+        errs.extend(_degraded_alias_errors(
+            config["aliases"], props["aliases"], props["aliases"].get("minProperties", 0)))
+    return errs
+
+
+def validate_notify_config_degraded(config: Any, kanban_dir) -> list[str]:
+    """Stdlib-only, fail-closed stand-in for validate_notify_config() +
+    notify_v2_semantic_errors() when jsonschema is unavailable (XACA-1504).
+    Returns redaction-safe error strings; [] only when every check passed.
+    Dispatches on "$schema" exactly like validate_notify_config()."""
+    if not isinstance(config, dict):
+        return ["$: wrong type (expected object)"]
+    if config.get("$schema") == "release-notify/v2":
+        errors = _degraded_v2_errors(config)
+        # Semantic cross-checks (unknown notice types, quietHours) only run on a
+        # structurally sound config -- same ordering as the CLI and routes push.
+        return errors or notify_v2_semantic_errors(config, kanban_dir)
+    return _degraded_v1_errors(config)
 
 
 def validate_wiki_config(config: dict) -> list[str]:
@@ -849,7 +1043,13 @@ def _run(argv: list[str]) -> int:
             had_failure = True
             continue
 
-        errors = validate_fn(config)
+        try:
+            errors = validate_fn(config)
+        except SchemaValidatorUnavailable as exc:
+            # XACA-1504: never report "valid" when the validator could not run.
+            print(f"{label}: cannot validate: {exc}", file=sys.stderr)
+            had_failure = True
+            continue
         if not errors and validate_fn is validate_notify_config:
             # XACA-1399: v2 route ids must exist in the team's merged catalog
             errors = notify_v2_semantic_errors(config, config_dir.parent)

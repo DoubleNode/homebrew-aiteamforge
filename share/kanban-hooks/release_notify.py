@@ -232,6 +232,18 @@ def _load_script_module(name: str):
     raise NotifyConfigError("%s.py not found next to this module" % name)
 
 
+_DEGRADED_NOTICE_PRINTED = False
+
+
+def _note_degraded_validation() -> None:
+    """One stderr notice per process when schema validation degrades (XACA-1504)."""
+    global _DEGRADED_NOTICE_PRINTED
+    if not _DEGRADED_NOTICE_PRINTED:
+        _DEGRADED_NOTICE_PRINTED = True
+        print("kb-notify: jsonschema unavailable; full schema validation skipped "
+              "(structural + routing checks only; the hub re-validates)", file=sys.stderr)
+
+
 # ---------------------------------------------------------------- engine
 
 
@@ -292,8 +304,22 @@ class NotifyEngine:
             raise NotifyConfigError("notify.json unreadable (%s)" % type(exc).__name__) from None
         validate = self._validate_config
         if validate is None:
-            validate = _load_script_module("release_config_validate").validate_notify_config
-        errors = validate(config)
+            rcv = _load_script_module("release_config_validate")
+            try:
+                errors = rcv.validate_notify_config(config)
+            except getattr(rcv, "SchemaValidatorUnavailable", ()):
+                # XACA-1504: stock python (no jsonschema). Fail-CLOSED stdlib path;
+                # see release_config_validate.validate_notify_config_degraded().
+                _note_degraded_validation()
+                try:
+                    errors = rcv.validate_notify_config_degraded(config, self.kanban_dir())
+                except NotifyConfigError:
+                    raise
+                except Exception as dexc:  # noqa: BLE001 - never fail open
+                    raise NotifyConfigError(
+                        "notify.json could not be validated (%s)" % type(dexc).__name__) from None
+        else:
+            errors = validate(config)
         if errors:  # the validator's messages are redaction-safe by contract
             raise NotifyConfigError("notify.json invalid: " + "; ".join(errors))
         return config

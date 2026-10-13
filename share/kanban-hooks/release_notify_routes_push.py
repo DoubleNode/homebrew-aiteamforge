@@ -188,11 +188,16 @@ class RoutesPusher:
             raise RoutesPushError("notify.json invalid: " + "; ".join(errs)[:300])
         # Full schema validation when jsonschema is available; the hub re-validates structure anyway.
         try:
-            validate = _load_validator_module().validate_notify_config
-        except Exception:  # noqa: BLE001 - e.g. jsonschema missing on system python
-            validate = None
+            vmod = _load_validator_module()
+            validate = vmod.validate_notify_config
+            unavailable = getattr(vmod, "SchemaValidatorUnavailable", ImportError)
+        except Exception:  # noqa: BLE001 - validator module absent/unloadable
+            validate, unavailable = None, ImportError
         if validate is not None:
-            errors = validate(config)
+            try:
+                errors = validate(config)
+            except unavailable:  # XACA-1504: jsonschema missing on system python; the hub re-validates
+                errors = []
             if errors:
                 raise RoutesPushError("notify.json invalid: " + "; ".join(errors)[:300])
         payload: Dict[str, Any] = {"config": config}
