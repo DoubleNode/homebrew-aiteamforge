@@ -216,6 +216,9 @@ from urllib.parse import parse_qs, unquote, urlsplit
 __all__ = [
     "validate_draft",
     "assert_draft_valid",
+    "parse_ordered_steps",
+    "check_ordered_steps",
+    "MIN_ORDERED_STEPS",
     "Violation",
     "DraftValidationError",
     "MAX_BODY_CHARS",
@@ -227,6 +230,7 @@ __all__ = [
     "CHILD_STARTUP_GRACE_SECONDS",
 ]
 
+MIN_ORDERED_STEPS = 2
 MAX_BODY_CHARS = 200_000
 MAX_TITLE_CHARS = 1_000
 MAX_PATTERN_CHARS = 2_000
@@ -660,6 +664,89 @@ def _check_sections(body: str, lines: List[str], profile: dict) -> List[Violatio
 
 
 _RX_PREFIX = re.compile(r"^(?:regex|re):", re.I)
+
+# XACA-1510-003: ordered-steps check. A section whose ``format`` starts ``steps:`` must hold a numbered
+# procedure (the CR Implementation Plan = the ordered PROD deployment steps WE run). Steps are separated by
+# a newline or by ``<br>`` (a markdown table cell is one physical line). Fail-closed: any non-blank piece
+# that is not "<n>. text" / "<n>) text", numbered 1..N in order, fails; so does fewer than the minimum.
+_STEP_SPLIT = re.compile(r"\s*<br\s*/?>\s*|\r\n|\r|\n", re.I)
+_STEP_ITEM = re.compile(r"^\s*(\d{1,3})[.)]\s+(\S.*?)\s*$")
+
+
+def _check_plan_steps(lines: List[str], profile: dict) -> List[Violation]:
+    """XACA-1510-003: a ``cr`` document's Implementation Plan must hold >= ``implementationPlanMinSteps``
+    (never below 2) ordered steps. Keyed on the TOP-LEVEL profile ``kind`` and independent of
+    ``requiredSections``: lists merge by replacement across tiers, so a team that carries its own
+    requiredSections would otherwise silently escape the rule. The section is found by the entry whose id is
+    ``implementationPlan`` (the team's label wins) else the default label. Fail-closed: malformed config or an
+    unparseable body violate; an absent section is left to `required-section-missing`."""
+    if profile.get("kind") != "cr":
+        return []
+    ds = profile.get("deploymentSteps")
+    has_entry = any(isinstance(x, dict) and x.get("id") == "implementationPlan"
+                    for x in (profile.get("requiredSections") or []) if isinstance(profile.get("requiredSections"), list))
+    if ds is None and "implementationPlanMinSteps" not in profile and not has_entry:
+        return []   # a sparse cr profile that says nothing about the plan (the default tier always does)
+    if ds is not None and not (isinstance(ds, list) and len(ds) >= 2 and all(isinstance(t, str) and t.strip() for t in ds)):
+        return [Violation("profile-malformed", "deploymentSteps must be a list of >= 2 non-empty step strings")]
+    mn = profile.get("implementationPlanMinSteps", MIN_ORDERED_STEPS)
+    if isinstance(mn, bool) or not isinstance(mn, int):
+        return [Violation("profile-malformed", "implementationPlanMinSteps must be an integer")]
+    mn = max(mn, MIN_ORDERED_STEPS)
+    label = "Implementation Plan:"
+    for item in profile.get("requiredSections") or []:
+        if isinstance(item, dict) and item.get("id") == "implementationPlan" and isinstance(item.get("label"), str) \
+                and item["label"].strip():
+            label = item["label"]
+    sec = _Section({"id": "implementationPlan", "label": label, "required": True}, label)
+    fenced = _fence_mask(lines)
+    loc = _locate(sec, lines, fenced)
+    if loc is None:
+        return []   # no plan section in this document: a required one is already `required-section-missing`
+    i, kind, level, rest = loc
+    if kind == "table":
+        text, first = rest, i + 1
+    else:
+        end = len(lines)
+        for j in range(i + 1, len(lines)):
+            if fenced[j]:
+                continue
+            hm = _HEADING.match(lines[j])
+            if (kind == "heading" and hm and len(hm.group(1)) <= level) or (kind != "heading" and (hm or _BOLD_LINE.match(lines[j]))):
+                end = j
+                break
+        text, first = "\n".join([rest] + lines[i + 1:end]), i + 1
+    err = check_ordered_steps(text, mn)
+    if err:
+        return [Violation("section-steps", "%s section 'implementationPlan' must be an ordered, numbered list of "
+                                           "the production deployment steps: %s" % (label, err), first)]
+    return []
+
+
+def parse_ordered_steps(text: Any) -> Tuple[List[str], Optional[str]]:
+    """-> (steps, error). ``error`` is None only when ``text`` is a clean 1..N numbered list."""
+    if not isinstance(text, str):
+        return [], "is not text"
+    pieces = [p for p in _STEP_SPLIT.split(text) if p.strip()]
+    steps: List[str] = []
+    for n, piece in enumerate(pieces, 1):
+        m = _STEP_ITEM.match(piece)
+        if not m:
+            return steps, "line %d (%s) is not a numbered step like '%d. <action>'" % (n, _clip(piece.strip(), 40), n)
+        if int(m.group(1)) != n:
+            return steps, "step numbering must run 1, 2, 3, ... in order (found %s where %d was expected)" % (m.group(1), n)
+        steps.append(m.group(2))
+    return steps, None
+
+
+def check_ordered_steps(text: Any, minimum: int = MIN_ORDERED_STEPS) -> Optional[str]:
+    """None when ``text`` has >= ``minimum`` ordered numbered steps, else a human message (fail-closed)."""
+    steps, err = parse_ordered_steps(text)
+    if err:
+        return err
+    if len(steps) < minimum:
+        return "has %d numbered step(s); needs at least %d" % (len(steps), minimum)
+    return None
 
 
 def _check_section_rules(sec: _Section, text: str, first_line: int) -> List[Any]:
@@ -1677,6 +1764,7 @@ def validate_draft(rendered_body: str, title: str, profile: dict, *,
     lines = body.split("\n")
     starts = _line_starts(body)
     out.extend(_check_sections(body, lines, profile))
+    out.extend(_check_plan_steps(lines, profile))
     out.extend(_check_banned(body, starts, profile))
     out.extend(_check_links(body, lines, starts, profile, facts))
     return _sort_banned(_resolve_jobs(out))

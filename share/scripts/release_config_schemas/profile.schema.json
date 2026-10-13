@@ -124,6 +124,17 @@
         }
       ]
     },
+    "deploymentSteps": {
+      "type": "array",
+      "minItems": 2,
+      "items": { "type": "string", "minLength": 1 },
+      "description": "XACA-1510: the PROD deployment procedure for the CR Implementation Plan: an ordered list of step strings with {{fact}} slots filled from the CR fact set (an unfilled slot fails loudly). The engine numbers the steps. Top-level (not inside requiredSections) because lists merge by REPLACEMENT across profile tiers: a team's own deploymentSteps replaces the default's, and a team that replaces requiredSections still inherits this key."
+    },
+    "implementationPlanMinSteps": {
+      "type": "integer",
+      "minimum": 2,
+      "description": "XACA-1510: minimum ordered steps the CR Implementation Plan must hold. Top-level so it survives a team replacing requiredSections; the validator never accepts less than 2."
+    },
     "titlePattern": { "type": "string" },
     "titleWordCount": { "type": "string" },
     "titleSourceRule": { "type": "string" },

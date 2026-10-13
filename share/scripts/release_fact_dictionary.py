@@ -200,8 +200,8 @@ CONTENT_SLOTS: Dict[str, str] = {
     "content.reasonForChangeShort": "Short variant of the reason field.",
     "content.testingNarrative": "Plain-language summary of testing.",
     "content.testingNarrativeFirebase": "Testing summary variant for Firebase deploys (seed-observed).",
-    "content.implementationPlan": "Implementation plan field.",
-    "content.implementationPlanShort": "Short variant of the implementation plan.",
+    "content.implementationPlan": "Implementation Plan field: the PROD deployment procedure, i.e. the ordered steps we execute to release the change (not what guests will see). Engine-rendered from the profile `deploymentSteps`; a team override must be a numbered list of >= 2 steps.",
+    "content.implementationPlanShort": "Short variant of the PROD deployment procedure: the ordered steps we execute to release the change.",
     "content.rollbackPlanText": "Rollback plan field.",
     "content.behindScenesLine": "Optional behind-the-scenes line (seed-observed); Academy default uses `release.foldedItemCount` instead.",
 }

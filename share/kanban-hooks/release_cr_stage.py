@@ -101,6 +101,9 @@ REUSABLE_STATES = ("cr-drafted", "cr-published", "cr-submitted", "cr-approved", 
 _AT_LEAST_PUBLISHED = ("cr-published", "cr-submitted", "cr-approved", "deployed-prod", "cr-completed", "cr-closed")
 _AT_LEAST_SUBMITTED = ("cr-submitted", "cr-approved", "deployed-prod", "cr-completed", "cr-closed")
 NOTICE_ALIAS, NOTICE_TEMPLATE = "cr-approver", "cr-submitted"
+_LEAD_NUM = re.compile(r"^\d+[.)]\s+")  # XACA-1510: a step already written "1. Build" must not render "1. 1. Build"
+_PLAN_REF = re.compile(r"\{\{\s*content\.implementationPlan\??\s*\}\}")
+_STEP_SLOT = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_.]*)\s*\}\}")  # XACA-1510: {{fact.path}} in deploymentSteps
 _CONTENT_REF = re.compile(r"\{\{\s*content\.([A-Za-z0-9_]+)(\??)\s*\}\}")
 _CREATED_RE = re.compile(r"Created CR \[([^\]]+)\]")
 _TESTING_LINK_RULES = ("link-required-unresolved", "link-required-missing")
@@ -435,10 +438,79 @@ class CrStage:
                   excluded_from_scope=(self._profile("cr")["profile"].get("excludedFromScope")))
         try:
             if testing_url:
-                return rcf.rebuild_after_testing_log_publish(relr, crr, testing_url, **kw)
-            return rcf.build_cr_fact_set(relr, crr, **kw)
+                facts = rcf.rebuild_after_testing_log_publish(relr, crr, testing_url, **kw)
+            else:
+                facts = rcf.build_cr_fact_set(relr, crr, **kw)
         except ValueError as exc:  # FactSetError / ExcludedScopeError
             raise CrStageError("cannot assemble the CR facts: %s" % exc, RC_REFUSED)
+        self._apply_implementation_plan(facts, relr, cr)
+        return facts
+
+    # -- implementation plan (XACA-1510) ------------------------------------------------------------
+    def _render_deployment_steps(self, steps: Any, facts: Dict[str, Any]) -> str:
+        """The resolved profile's ordered ``deploymentSteps`` with every ``{{fact}}`` slot filled. A slot that
+        is missing or empty fails loudly; a literal ``{{...}}`` is never rendered."""
+        if not isinstance(steps, list) or not steps or any(not isinstance(t, str) or not t.strip() for t in steps):
+            raise CrStageError("the cr profile's deploymentSteps must be a list of non-empty step strings", RC_DRAFT_INVALID)
+        out: List[str] = []
+        for n, text in enumerate(steps, 1):
+            def fill(m, n=n):
+                path = m.group(1)
+                val: Any = facts
+                for part in path.split("."):
+                    val = val.get(part) if isinstance(val, dict) else None
+                if isinstance(val, bool) or not isinstance(val, (str, int, float)) or not str(val).strip():
+                    raise CrStageError("Implementation Plan: deployment step %d needs the fact {{%s}} but it is missing "
+                                       "or empty for this release" % (n, path), RC_DRAFT_INVALID)
+                return str(val).strip()
+            line = _STEP_SLOT.sub(fill, text)
+            if "{{" in line or "}}" in line:
+                raise CrStageError("Implementation Plan: deployment step %d has an unsupported template tag: %r"
+                                   % (n, text), RC_DRAFT_INVALID)
+            out.append("%d. %s" % (n, _LEAD_NUM.sub("", line.strip())))
+        return "\n".join(out)
+
+    def _apply_implementation_plan(self, facts: Dict[str, Any], rel: Dict[str, Any], cr: Optional[Dict[str, Any]]) -> None:
+        """Set ``facts.content.implementationPlan`` to the ordered PROD deployment procedure.
+
+        Source: a supplied (team override) value if there is one, else the resolved profile's
+        ``deploymentSteps`` (a team's list replaces the default's; per-platform procedures live in team profiles). Either way the result must pass the ordered-steps
+        validator (>= 2 numbered steps, fail-closed). Steps are newline-joined markdown, so the default template
+        puts them in their own ``## Implementation Plan:`` section (raw ``<br>`` in a draft would leave the
+        validator's relaxed scan path, and a table cell cannot hold a list)."""
+        res = self._profile("cr")
+        if "implementationPlan" not in self._required_slots(res["template"]):
+            return
+        content = facts.get("content")
+        if content is None:
+            content = facts["content"] = {}
+        if not isinstance(content, dict):
+            raise CrStageError("the draft content must be an object", RC_USAGE)
+        given = content.get("implementationPlan")
+        spec = res["profile"].get("deploymentSteps")
+        if isinstance(given, str) and given.strip():
+            text = given
+        elif spec is not None:
+            text = self._render_deployment_steps(spec, facts)
+        else:
+            return  # no override and no profile steps: _content() already refused a blank slot
+        import release_profile_validate as rpv  # noqa: PLC0415
+        mn = res["profile"].get("implementationPlanMinSteps", rpv.MIN_ORDERED_STEPS)
+        mn = max(mn, rpv.MIN_ORDERED_STEPS) if isinstance(mn, int) and not isinstance(mn, bool) else rpv.MIN_ORDERED_STEPS
+        steps, err = rpv.parse_ordered_steps(text)
+        if err is None:
+            err = rpv.check_ordered_steps(text, mn)
+        if err:
+            raise CrStageError("Implementation Plan: must be the ordered production deployment steps, "
+                               "numbered 1. 2. 3. ... (at least %d): %s" % (mn, err), RC_DRAFT_INVALID)
+        # Joiner follows the RESOLVED TEMPLATE: a pipe-table row cannot hold a newline (it would split the row),
+        # so a plan living in a table cell is <br>-joined (md_to_storage turns that into <td><ol>); else newline.
+        joiner = "<br>" if self._plan_in_table_row(res["template"]) else "\n"
+        content["implementationPlan"] = joiner.join("%d. %s" % (i, t) for i, t in enumerate(steps, 1))
+
+    @staticmethod
+    def _plan_in_table_row(template: str) -> bool:
+        return any(_PLAN_REF.search(ln) and ln.lstrip().startswith("|") for ln in template.splitlines())
 
     # -- run --------------------------------------------------------------------------------------
     def run(self) -> Dict[str, Any]:
@@ -667,7 +739,10 @@ class CrStage:
                 update_records(self.board_file, [("crs", cr["id"], lambda r, g=dict(given): r.__setitem__("draftContent", g))])
             stored = given
         slots = self._required_slots(template)
-        blank = [s for s in slots if not str((stored or {}).get(s, "")).strip()]
+        # XACA-1510: the engine renders the Implementation Plan from the profile's deploymentSteps, so the
+        # drafter need not (and normally does not) supply it; a supplied value is an override, validated later.
+        auto = {"implementationPlan"} if self._profile("cr")["profile"].get("deploymentSteps") else set()
+        blank = [s for s in slots if s not in auto and not str((stored or {}).get(s, "")).strip()]
         if stored is None or blank:
             raise CrStageError("the CR draft has no content for: %s. Supply them with --content-file <json> "
                                "(an object keyed by slot name: %s)" % (", ".join(blank or slots), ", ".join(slots)),
