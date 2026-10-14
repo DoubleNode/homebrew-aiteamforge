@@ -114,7 +114,8 @@ Each run logs one or more lines tagged `[kb-knowledge-sync]`, greppable as
 If the only files in the way are generated `INDEX.md` files under `agents/`,
 `teams/` or `subjects/`, the daemon resolves the collision itself. It copies
 your versions to `knowledge-sync-index-backups/<UTC>.XXXXXX/<path>` next to the
-daemon's state file (override with `KB_KNOWLEDGE_SYNC_INDEX_BACKUP_DIR`),
+daemon's state file (override with `KB_KNOWLEDGE_SYNC_INDEX_BACKUP_DIR`; backups
+older than `KB_KNOWLEDGE_SYNC_INDEX_BACKUP_KEEP_DAYS`, default 30, are pruned),
 restores them, pulls the new knowledge, and regenerates the indexes (helper
 path override: `KB_KNOWLEDGE_SYNC_HELPERS`). It logs `converged-ff-index-regen`.
 Your INDEX may become modified again afterwards when it references an entry

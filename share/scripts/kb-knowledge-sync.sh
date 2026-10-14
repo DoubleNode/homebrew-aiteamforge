@@ -1995,7 +1995,7 @@ _ffc_classify() {
         [[ "$p" =~ $AC_INDEX_RE ]] || return 0
         # Cross-check: git's named path must really be in the incoming change
         # and really be dirty here, so a parsing miss cannot misclassify.
-        printf '%s\n' "$incoming" | grep -qxF -- "$p" || return 0
+        grep -qxF -- "$p" <<< "$incoming" || return 0
         [ -n "$(git -C "$REPO_DIR" status --porcelain -- "$p" 2>/dev/null)" ] || return 0
     done <<< "$paths"
 
@@ -2041,6 +2041,29 @@ _ffc_reindex_dir() {
         _FFC_SKIP_REASON="kb-knowledge-reindex failed for ${dir}"
         return 1
     fi
+    return 0
+}
+
+# _ffc_prune_backups <base> — XACA-1530-017. Each self-heal mints a timestamped
+# backup dir, and a held stub re-arms the heal by design, so without a bound
+# they accumulate forever. Removes only dirs with _ffc_selfheal's own name
+# shape (<YYYYMMDDTHHMMSSZ>.<suffix>, directly under <base>), only once older
+# than KB_KNOWLEDGE_SYNC_INDEX_BACKUP_KEEP_DAYS (default 30), and never the
+# backup this tick just wrote. Best-effort: a failure is logged, never fatal.
+_ffc_prune_backups() {
+    local base="$1" days="${KB_KNOWLEDGE_SYNC_INDEX_BACKUP_KEEP_DAYS:-30}" d pruned=0
+    case "$days" in ''|*[!0-9]*) days=30 ;; esac
+    [ -d "$base" ] || return 0
+    while IFS= read -r d; do
+        [ -n "$d" ] || continue
+        [ "$d" = "$_FFC_BACKUP_DIR" ] && continue
+        if rm -rf -- "$d" 2>/dev/null; then
+            pruned=$((pruned + 1))
+        else
+            log "index-regen-prune-failed: could not remove old backup ${d}"
+        fi
+    done <<< "$(find "$base" -mindepth 1 -maxdepth 1 -type d -name '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z.*' -mtime +"$days" 2>/dev/null)"
+    [ "$pruned" -eq 0 ] || log "index-regen-pruned: removed ${pruned} self-heal backup dir(s) older than ${days} day(s) from ${base}"
     return 0
 }
 
@@ -2112,6 +2135,7 @@ _ffc_selfheal() {
         fi
     done <<< "$_FFC_PATHS"
     log "converged-ff-index-regen: ${REPO_DIR} advanced ${_pre_behind} commit(s) via fast-forward after ${n} generated INDEX.md restored and regenerated (reindex skipped=${skipped}), backup at ${_FFC_BACKUP_DIR}"
+    _ffc_prune_backups "$base"
     return 0
 }
 
