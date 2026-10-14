@@ -1838,7 +1838,6 @@ body.kiosk-active .kiosk-fab {
         width: auto;
         min-width: 0;
         padding: 4px 8px 3px;
-        font-size: 0.55rem;
         letter-spacing: 0;
         overflow: hidden;
         text-overflow: ellipsis;
@@ -1846,6 +1845,19 @@ body.kiosk-active .kiosk-fab {
     }
     .lcars-data-bar .mode-bar-separator {
         display: none;
+    }
+}
+
+/* Middle tier (601-953px, UX advisory fold-in). The compact block above sets NO
+   font-size, so tablets keep the pills' normal 12px text; only phones shrink it.
+   Measured with every clock digit 0-9 and ADMIN shown, 12px text fits from 601px:
+   REFRESH 55.7px, nothing clipped, no cluster overflow. (An earlier cut shrank
+   everything to 0.55rem = 8.8px from 953px down, which hurt readability on iPad
+   portrait.) */
+@media (max-width: 600px) {
+    .lcars-data-bar .legend-pill,
+    .lcars-data-bar .utc-pill {
+        font-size: 0.55rem;
     }
 }
 
