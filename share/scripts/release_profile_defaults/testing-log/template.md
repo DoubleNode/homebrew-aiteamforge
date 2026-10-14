@@ -24,10 +24,14 @@
 
 | # | Timestamp (CT) | Type | Env | Test | Result | Run by | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-{{#each stage.tests}}
+{{#each stage.testsCurrent}}
 | {{this.n}} | {{this.timestampCT}} | {{this.type}} | {{this.env}} | {{this.test}} | {{this.result}} | {{this.runBy}} | {{this.notesWithShaAndSuperseded}} |
 {{/each}}
 
+{{#if stage.omittedCount}}
+*Not listed above ({{stage.omittedCount}}): {{stage.childCount}} child cases, {{stage.supersededCount}} superseded runs, {{stage.otherShaCount}} runs on earlier builds. The full record is on the board.*
+
+{{/if}}
 **Stage totals:** {{stage.totals.automated}} automated, {{stage.totals.manual}} manual: {{stage.totals.pass}} pass / {{stage.totals.fail}} fail / {{stage.totals.waived}} waived.
 
 ## Waivers

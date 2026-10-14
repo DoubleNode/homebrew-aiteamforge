@@ -164,6 +164,23 @@ CANONICAL_FACTS: Dict[str, Dict[str, Any]] = {
     "stage.tests": {"type": "array of test rows",
                     "source": "release record `tests` filtered to `stage.name`, in append order, superseded rows kept",
                     "example": "[{\"n\": 1, \"result\": \"PASS\", ...}]", "kinds": ["testing-log"]},
+    "stage.testsCurrent": {"type": "array of test rows",
+                           "source": "the `stage.tests` rows worth rendering: top-level (no `parent`), not superseded, "
+                                     "recorded at `stageSha[<stage>]`; `n` is the row's number in `stage.tests`. "
+                                     "If the stage has no recorded stageSha, every top-level non-superseded row",
+                           "example": "[{\"n\": 4, \"result\": \"PASS\", ...}]", "kinds": ["testing-log"]},
+    "stage.childCount": {"type": "integer",
+                         "source": "stage records omitted from `stage.testsCurrent` because they have a `parent` (jsonl child cases); counted first",
+                         "example": "6400", "kinds": ["testing-log"]},
+    "stage.supersededCount": {"type": "integer",
+                              "source": "top-level stage records omitted because they are superseded (any SHA); counted after children",
+                              "example": "5", "kinds": ["testing-log"]},
+    "stage.otherShaCount": {"type": "integer",
+                            "source": "top-level, non-superseded stage records omitted because they ran on a SHA other than `stageSha[<stage>]`; 0 when no stageSha",
+                            "example": "12", "kinds": ["testing-log"]},
+    "stage.omittedCount": {"type": "integer",
+                           "source": "`stage.childCount` + `stage.supersededCount` + `stage.otherShaCount` (each omitted record counted once)",
+                           "example": "6417", "kinds": ["testing-log"]},
     "stage.totals.automated": {"type": "integer", "source": "count of current (not superseded) Automated tests in the stage",
                                "example": "12", "kinds": ["testing-log"]},
     "stage.totals.manual": {"type": "integer", "source": "count of current Manual tests in the stage",
@@ -223,6 +240,8 @@ ROW_SHAPES: Dict[str, List[str]] = {
     "cr.stateHistory": ["state", "verb", "actor", "timestampCT", "note"],
     "stage.tests": ["n", "timestampCT", "type", "env", "test", "result", "runBy", "notes",
                     "notesWithShaAndSuperseded"],
+    "stage.testsCurrent": ["n", "timestampCT", "type", "env", "test", "result", "runBy", "notes",
+                           "notesWithShaAndSuperseded"],
     "tests.byStage": ["stage", "automated", "manual", "pass", "fail", "waived"],
     "tests.failuresAndReruns": ["failedRow", "supersededByRow", "stage", "notes"],
     "waivers": ["by", "reason", "ts", "tests"],
@@ -533,6 +552,10 @@ def build_stage_facts(release_record: Dict[str, Any], stage_name: str, *, tz: st
     recs = [t for t in _tests(release_record) if t.get("stage") == stage_name]
     row_of = {t.get("id"): i + 1 for i, t in enumerate(recs)}
     waived = _waived_ids(release_record)
+    # XACA-1511: rows worth rendering by default; stage.tests stays the full record.
+    # lower(): the record endpoint compares SHAs case-insensitively, so an upper-case hex record is current
+    cur_sha = str(_obj(release_record.get("stageSha"), "release.stageSha").get(stage_name) or "").lower()
+    cur_rows, omitted = [], {"child": 0, "superseded": 0, "otherSha": 0}
     rows, totals = [], {"automated": 0, "manual": 0, "pass": 0, "fail": 0, "waived": 0}
     for i, t in enumerate(recs, start=1):
         sup = t.get("supersededBy")
@@ -540,12 +563,21 @@ def build_stage_facts(release_record: Dict[str, Any], stage_name: str, *, tz: st
         extra = "sha %s" % str(t.get("sha", ""))[:7] if t.get("sha") else ""
         if sup:
             extra = (extra + "; " if extra else "") + "superseded by row %s" % row_of.get(sup, sup)
-        rows.append({
+        row = {
             "n": i, "timestampCT": _fmt_ts(t.get("ts"), tz), "type": t.get("type", ""),
             "env": t.get("env", ""), "test": t.get("test", ""), "result": t.get("result", ""),
             "runBy": t.get("runBy", ""), "notes": note,
             "notesWithShaAndSuperseded": (note + (" (" + extra + ")" if extra else "")).strip(),
-        })
+        }
+        rows.append(row)
+        if t.get("parent"):  # precedence child > superseded > other SHA: each omitted record counts once
+            omitted["child"] += 1
+        elif sup:
+            omitted["superseded"] += 1
+        elif cur_sha and str(t.get("sha") or "").lower() != cur_sha:
+            omitted["otherSha"] += 1
+        else:
+            cur_rows.append(row)
         if sup:
             continue  # superseded rows are shown but never counted
         totals["automated" if t.get("type") == "Automated" else "manual"] += 1
@@ -555,7 +587,9 @@ def build_stage_facts(release_record: Dict[str, Any], stage_name: str, *, tz: st
             totals["waived"] += 1
         else:
             totals["fail"] += 1
-    return {"name": stage_name, "tests": rows, "totals": totals}
+    return {"name": stage_name, "tests": rows, "totals": totals, "testsCurrent": cur_rows,
+            "childCount": omitted["child"], "supersededCount": omitted["superseded"],
+            "otherShaCount": omitted["otherSha"], "omittedCount": sum(omitted.values())}
 
 
 def _by_stage(release: Dict[str, Any], tz: str) -> List[Dict[str, Any]]:
