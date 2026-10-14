@@ -166,8 +166,8 @@ CANONICAL_FACTS: Dict[str, Dict[str, Any]] = {
                     "example": "[{\"n\": 1, \"result\": \"PASS\", ...}]", "kinds": ["testing-log"]},
     "stage.testsCurrent": {"type": "array of test rows",
                            "source": "the `stage.tests` rows worth rendering: top-level (no `parent`), not superseded, "
-                                     "recorded at `stageSha[<stage>]`; `n` is the row's number in `stage.tests`. "
-                                     "If the stage has no recorded stageSha, every top-level non-superseded row",
+                                     "recorded at the graded SHA (`stageSha[<stage>]`, else `stages[<stage>].sha`, case-insensitive); "
+                                     "`n` is the row's number in `stage.tests`. If neither is recorded, every top-level non-superseded row",
                            "example": "[{\"n\": 4, \"result\": \"PASS\", ...}]", "kinds": ["testing-log"]},
     "stage.childCount": {"type": "integer",
                          "source": "stage records omitted from `stage.testsCurrent` because they have a `parent` (jsonl child cases); counted first",
@@ -176,7 +176,7 @@ CANONICAL_FACTS: Dict[str, Dict[str, Any]] = {
                               "source": "top-level stage records omitted because they are superseded (any SHA); counted after children",
                               "example": "5", "kinds": ["testing-log"]},
     "stage.otherShaCount": {"type": "integer",
-                            "source": "top-level, non-superseded stage records omitted because they ran on a SHA other than `stageSha[<stage>]`; 0 when no stageSha",
+                            "source": "top-level, non-superseded stage records omitted because they ran on a SHA other than the graded SHA; 0 when none is recorded",
                             "example": "12", "kinds": ["testing-log"]},
     "stage.omittedCount": {"type": "integer",
                            "source": "`stage.childCount` + `stage.supersededCount` + `stage.otherShaCount` (each omitted record counted once)",
@@ -554,7 +554,10 @@ def build_stage_facts(release_record: Dict[str, Any], stage_name: str, *, tz: st
     waived = _waived_ids(release_record)
     # XACA-1511: rows worth rendering by default; stage.tests stays the full record.
     # lower(): the record endpoint compares SHAs case-insensitively, so an upper-case hex record is current
-    cur_sha = str(_obj(release_record.get("stageSha"), "release.stageSha").get(stage_name) or "").lower()
+    # Same SHA the gate grades (release_gate.graded_sha): stageSha[<stage>], else stages[<stage>].sha.
+    stage_rec = (release_record.get("stages") or {}).get(stage_name) if isinstance(release_record.get("stages"), dict) else None
+    cur_sha = str(_obj(release_record.get("stageSha"), "release.stageSha").get(stage_name)
+                  or (stage_rec.get("sha") if isinstance(stage_rec, dict) else "") or "").lower()
     cur_rows, omitted = [], {"child": 0, "superseded": 0, "otherSha": 0}
     rows, totals = [], {"automated": 0, "manual": 0, "pass": 0, "fail": 0, "waived": 0}
     for i, t in enumerate(recs, start=1):
