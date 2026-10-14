@@ -93,7 +93,11 @@
 # -> release branch) MUST be true merges (`--merge-method merge`), or the later
 # release -> integration PR re-conflicts. An unknown or missing value is a usage
 # error (rc 2), validated at parse time. The chosen strategy is reported as
-# `merge_method=<method>` in the GATES_PASSED detail.
+# `merge_method=<method>` in the GATES_PASSED detail. When the flag is LEFT AT
+# ITS DEFAULT and the PR head is protected (or its protection cannot be told),
+# the monitor REFUSES to squash: BLOCKED (rc 22) before kb-merge runs, naming the
+# fix (`--merge-method merge`, or an explicit `--merge-method squash` to squash
+# anyway). Passing the flag with any value skips that check entirely.
 #
 # BASE GATE (XACA-1483): every poll, right after the head SHA is read and
 # BEFORE any review/CI/mergeability/staleness gate, the PR's baseRefName must
@@ -169,6 +173,7 @@ MAX_HOURS=48
 ONCE="false"
 DO_MERGE="true"
 MERGE_METHOD="squash"
+MERGE_METHOD_EXPLICIT="false"
 
 # XACA-1276-021: the default below used to be the single literal
 # $HOME/dev-team/kanban-helpers.sh — always the MAIN repo's checkout,
@@ -644,8 +649,8 @@ while [ $# -gt 0 ]; do
         --poll-seconds=*) POLL_SECONDS="${1#*=}"; shift ;;
         --max-hours)      _need_val "$1" $#; MAX_HOURS="$2"; shift 2 ;;
         --max-hours=*)    MAX_HOURS="${1#*=}"; shift ;;
-        --merge-method)   _need_val "$1" $#; MERGE_METHOD="$2"; shift 2 ;;
-        --merge-method=*) MERGE_METHOD="${1#*=}"; shift ;;
+        --merge-method)   _need_val "$1" $#; MERGE_METHOD="$2"; MERGE_METHOD_EXPLICIT="true"; shift 2 ;;
+        --merge-method=*) MERGE_METHOD="${1#*=}"; MERGE_METHOD_EXPLICIT="true"; shift ;;
         --once)           ONCE="true"; shift ;;
         --no-merge)       DO_MERGE="false"; shift ;;
         -h|--help)        usage
@@ -2326,6 +2331,27 @@ PR_FILTER_EOF
     # The merge is credited to --item (XACA-1503): kb-merge is passed
     # `--item "$ITEM_ID"` so prMerged lands on the validated ticket, NOT on
     # whatever ticket id the PR head BRANCH name happens to carry.
+    # Default-squash guard (XACA-1525-013): a sync PR squashed by forgetting the
+    # flag silently drops merge ancestry (freelance #1289). Only when the method
+    # was NOT given explicitly; fail closed on every doubt (no head, classifier
+    # rc 0 or 2, helpers unsourceable / function missing).
+    if [ "$MERGE_METHOD_EXPLICIT" != "true" ] && [ "$MERGE_METHOD" = "squash" ]; then
+        _remedy="re-run with --merge-method merge (a sync PR must be a true merge), or pass --merge-method squash explicitly to squash anyway"
+        PR_HEAD_REF=$(gh pr view "$PR_NUM" --repo "$REPO" --json headRefName --jq '.headRefName' 2>/dev/null)
+        if [ -z "$PR_HEAD_REF" ]; then
+            verdict BLOCKED "cannot read PR #$PR_NUM head branch to check whether it is protected, so the default squash is refused; $_remedy"
+        fi
+        PROT_OUT=$(_kbpm_helpers_run _kb_branch_protected "$PR_HEAD_REF")
+        PROT_RCPAIR=$(cat "$KBPM_RCFILE" 2>/dev/null)
+        PROT_SOURCE_RC="${PROT_RCPAIR%% *}"
+        PROT_CMD_RC="${PROT_RCPAIR##* }"
+        case "$PROT_SOURCE_RC" in ''|*[!0-9]*) PROT_SOURCE_RC=127 ;; esac
+        case "$PROT_CMD_RC" in ''|*[!0-9]*) PROT_CMD_RC=127 ;; esac
+        PROT_REASON=$(printf '%s\n' "$PROT_OUT" | head -1 | tr '\n\r' '  ')
+        if ! { [ "$PROT_SOURCE_RC" -eq 0 ] && [ "$PROT_CMD_RC" -eq 1 ]; }; then
+            verdict BLOCKED "default squash refused: head branch '$PR_HEAD_REF' is protected or its protection is unknown (source rc=$PROT_SOURCE_RC, classifier rc=$PROT_CMD_RC: $PROT_REASON); $_remedy"
+        fi
+    fi
     MERGE_OUT=$(_kbpm_helpers_run kb-merge "$PR_NUM" "--$MERGE_METHOD" --item "$ITEM_ID")
     MERGE_RCPAIR=$(cat "$KBPM_RCFILE" 2>/dev/null)
     MERGE_SOURCE_RC="${MERGE_RCPAIR%% *}"
