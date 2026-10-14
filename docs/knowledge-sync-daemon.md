@@ -90,7 +90,10 @@ Each run logs one or more lines tagged `[kb-knowledge-sync]`, greppable as
 |---|---|
 | `converged-ff` | You had uncommitted changes, and the daemon still pulled in new fleet knowledge cleanly — your own changes are untouched. |
 | `fetch-only-dirty` | You had uncommitted changes; there was nothing new to pull in anyway. |
-| `blocked-ff-conflict` | You had uncommitted changes that collide with something new coming in. Nothing was touched — see "Troubleshooting" below. |
+| `converged-ff-index-regen` | Your locally regenerated `INDEX.md` files collided with new fleet knowledge; the daemon backed them up, restored them, pulled the new content and regenerated the indexes. Nothing needs doing. See "Generated INDEX.md self-heal" below. |
+| `index-regen-reindex-skipped` | Same as above, but the index regeneration could not run this tick. You still received the new knowledge; your backup is kept. |
+| `index-regen-retry-failed` / `index-regen-aborted` | The self-heal could not complete, so nothing was changed and the tick is reported as `blocked-ff-conflict`. |
+| `blocked-ff-conflict` | You had uncommitted changes (other than generated `INDEX.md` files) that collide with something new coming in. Nothing was touched — see "Troubleshooting" below. |
 | `blocked-ff-diverged` | You have local commits (not the daemon's own auto-commits) **and** uncommitted changes, and upstream has moved — the daemon can't reconcile this automatically. See "Troubleshooting" below. |
 | `rebased-advanced` | Clean tree — pulled in new fleet knowledge. |
 | `already-current` | Clean tree — already up to date, nothing to do. |
@@ -106,9 +109,22 @@ Each run logs one or more lines tagged `[kb-knowledge-sync]`, greppable as
 > and has not yet received the current release — check for a pending
 > `brew upgrade aiteamforge`.
 
+## Generated INDEX.md self-heal
+
+If the only files in the way are generated `INDEX.md` files under `agents/`,
+`teams/` or `subjects/`, the daemon resolves the collision itself. It copies
+your versions to `knowledge-sync-index-backups/<UTC>.XXXXXX/<path>` next to the
+daemon's state file (override with `KB_KNOWLEDGE_SYNC_INDEX_BACKUP_DIR`),
+restores them, pulls the new knowledge, and regenerates the indexes (helper
+path override: `KB_KNOWLEDGE_SYNC_HELPERS`). It logs `converged-ff-index-regen`.
+Your INDEX may become modified again afterwards when it references an entry
+you have not committed yet; that is expected, and the next collision heals the
+same way. Any other kind of collision is left alone, as described below.
+
 ## Troubleshooting
 
-**Log shows `blocked-ff-conflict`:** you have an uncommitted change that
+**Log shows `blocked-ff-conflict`:** you have an uncommitted change (other than
+a generated `INDEX.md`, which the daemon handles itself) that
 collides with new fleet knowledge (either you both touched the same file,
 or you have an untracked file that a new upstream entry also wants to add
 at that path). Nothing was changed — your content is intact and HEAD is

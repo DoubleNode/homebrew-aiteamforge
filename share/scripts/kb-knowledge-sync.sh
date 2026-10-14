@@ -442,7 +442,7 @@ _outbound_threshold() {
 # Called ONCE per tick (XACA-1291 §5.1). The inbound half is unchanged from
 # XACA-1266: it takes the phase token that determines convergence
 # (fetch-failed / blocked-ff-conflict / blocked-ff-diverged /
-# rebase-conflict-aborted / converged-ff / fetch-only-dirty /
+# rebase-conflict-aborted / converged-ff / converged-ff-index-regen (XACA-1530) / fetch-only-dirty /
 # rebased-advanced / already-current / synced — see design doc §3.5 for the
 # full token vocabulary). Reads the PREVIOUS counters from $STATE_FILE (if
 # present/readable), advances them per the tables below, writes the new
@@ -452,7 +452,7 @@ _outbound_threshold() {
 #
 #   Inbound increment on: fetch-failed, blocked-ff-conflict, blocked-ff-diverged,
 #                 rebase-conflict-aborted   (design §5's fail-direction table)
-#   Inbound reset to 0 on: converged-ff, rebased-advanced, already-current,
+#   Inbound reset to 0 on: converged-ff, converged-ff-index-regen, rebased-advanced, already-current,
 #                  fetch-only-dirty, synced   (design §4.2)
 #   Inbound threshold 6, escalated to 2 for blocked-ff-diverged.
 #
@@ -492,7 +492,7 @@ _update_notify_state() {
                 prev_first="$(_now_iso)"
             fi
             ;;
-        converged-ff|rebased-advanced|already-current|fetch-only-dirty|synced)
+        converged-ff|converged-ff-index-regen|rebased-advanced|already-current|fetch-only-dirty|synced)
             new_counter=0
             prev_first=""
             ;;
@@ -1917,6 +1917,204 @@ if [ -n "$_dirty" ] && _ac_enabled; then
     fi
 fi
 
+# ── XACA-1530: dirty-tree ff collision on GENERATED INDEX.md files ───────────
+#
+# THE BUG. A reindex on another machine commits a regenerated INDEX.md. This
+# machine's own regenerated (or auto-commit-held) INDEX.md is uncommitted, so
+# `git merge --ff-only` refuses (exit 1) -> blocked-ff-conflict -> exit 0.
+# Outbound auto-commit only runs at 0 behind, so the machine could neither
+# send nor receive, forever (measured on M4Mini: every collision was a
+# generated */INDEX.md).
+#
+# THE FIX, in two parts:
+#   _ffc_classify  decides whether the collision is "index-only" (every
+#                  colliding path is an allowlisted generated INDEX.md) or
+#                  "mixed" (anything else, or any doubt). FAIL CLOSED: mixed
+#                  means today's behaviour, byte-for-byte.
+#   _ffc_selfheal  for index-only: back up each colliding INDEX.md OUTSIDE the
+#                  repo, restore it to HEAD (or move it aside if untracked),
+#                  retry the ff, then best-effort reindex the affected dirs
+#                  from disk. A generated INDEX is derived data; the entries
+#                  are the truth. If anything goes wrong the tree is put back
+#                  exactly as found and the caller falls through to the
+#                  existing blocked-ff-conflict path.
+#
+# RE-ARMING (XACA-1530-005, by design). _ac_index_rule may HOLD a dirty
+# INDEX.md whose rows reference an uncommitted entry (e.g. a never-filled stub
+# agents/phlox/k001). After this self-heal reindexes, the stub's row comes
+# back (the reindex reads the DISK, which still has the stub), the INDEX is
+# dirty again and is held again. That is acceptable: the next collision just
+# self-heals again (the operation is idempotent), and the stub's row is never
+# permanently lost - the reindex re-derives it from disk, and if the reindex
+# was skipped the pre-heal INDEX is still in the backup dir. Entries
+# themselves are never touched here.
+
+_FFC_CLASS="mixed"
+_FFC_PATHS=""
+_FFC_BACKUP_DIR=""
+_FFC_SKIP_REASON=""
+
+# Reads git's merge refusal on stdin; prints the colliding paths, one per line.
+# Handles both formats: "Your local changes to the following files would be
+# overwritten by merge:" and "The following untracked working tree files would
+# be overwritten by merge:" - in each the paths are whitespace-indented.
+_ffc_parse_colliding_paths() {
+    awk '
+        /would be overwritten by merge:[ \t]*$/ { grab = 1; next }
+        grab && /^[ \t]+[^ \t]/ { sub(/^[ \t]+/, ""); print; next }
+        { grab = 0 }
+    '
+}
+
+# Sets _FFC_CLASS ("index-only" | "mixed") and _FFC_PATHS from $MERGE_OUTPUT.
+# Always returns 0; read _FFC_CLASS.
+_ffc_classify() {
+    local paths incoming p line
+    _FFC_CLASS="mixed"
+    _FFC_PATHS=""
+
+    # Any error/fatal line that is not a would-be-overwritten refusal means
+    # git refused for a reason we did not model -> mixed.
+    while IFS= read -r line; do
+        case "$line" in
+            error:*|fatal:*)
+                case "$line" in
+                    *"would be overwritten by merge"*) ;;
+                    *) return 0 ;;
+                esac ;;
+        esac
+    done <<< "$MERGE_OUTPUT"
+
+    paths="$(printf '%s\n' "$MERGE_OUTPUT" | _ffc_parse_colliding_paths)"
+    [ -n "$paths" ] || return 0
+    incoming="$(git -C "$REPO_DIR" diff --name-only HEAD '@{u}' 2>/dev/null)" || return 0
+    [ -n "$incoming" ] || return 0
+
+    while IFS= read -r p; do
+        [ -n "$p" ] || continue
+        [[ "$p" =~ $AC_INDEX_RE ]] || return 0
+        # Cross-check: git's named path must really be in the incoming change
+        # and really be dirty here, so a parsing miss cannot misclassify.
+        printf '%s\n' "$incoming" | grep -qxF -- "$p" || return 0
+        [ -n "$(git -C "$REPO_DIR" status --porcelain -- "$p" 2>/dev/null)" ] || return 0
+    done <<< "$paths"
+
+    _FFC_PATHS="$paths"
+    _FFC_CLASS="index-only"
+    return 0
+}
+
+# Puts every backed-up file back where it was found. Best effort.
+_ffc_restore_all() {
+    local p
+    while IFS= read -r p; do
+        [ -n "$p" ] || continue
+        [ -f "${_FFC_BACKUP_DIR}/${p}" ] || continue
+        mkdir -p "$(dirname "${REPO_DIR}/${p}")" 2>/dev/null || true
+        cp -p "${_FFC_BACKUP_DIR}/${p}" "${REPO_DIR}/${p}" 2>/dev/null || \
+            log "index-regen-restore-failed: could not put ${p} back from ${_FFC_BACKUP_DIR} - copy it by hand"
+    done <<< "$_FFC_PATHS"
+}
+
+# Best-effort reindex of one dir via the zsh helpers, in a subprocess. Returns
+# non-zero (and sets _FFC_SKIP_REASON) when it could not run.
+_ffc_reindex_dir() {
+    local dir="$1" helpers self_dir
+    self_dir="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"
+    # Dev layout: <repo>/scripts/kb-knowledge-sync.sh -> <repo>/kanban-helpers.sh
+    # Tap layout: $AITEAMFORGE_DIR/scripts/kb-knowledge-sync.sh
+    #             -> $AITEAMFORGE_DIR/kanban-helpers.sh (install-kanban.sh).
+    # Both are "../kanban-helpers.sh" relative to this script. An explicit
+    # KB_KNOWLEDGE_SYNC_HELPERS always wins and never falls back.
+    helpers="${KB_KNOWLEDGE_SYNC_HELPERS:-${self_dir}/../kanban-helpers.sh}"
+    if [ ! -r "$helpers" ]; then
+        _FFC_SKIP_REASON="helpers not readable at ${helpers}"
+        return 1
+    fi
+    if ! command -v zsh >/dev/null 2>&1; then
+        _FFC_SKIP_REASON="zsh not found"
+        return 1
+    fi
+    # KB_KNOWLEDGE_GLOBAL_ROOT pins the reindex to the repo under sync, so a
+    # fixture repo can never be confused with the real ~/knowledge.
+    if ! KB_KNOWLEDGE_GLOBAL_ROOT="$REPO_DIR" zsh -c 'source "$1" >/dev/null 2>&1; kb-knowledge-reindex --dir "$2"' _ "$helpers" "$dir" >/dev/null 2>&1; then
+        _FFC_SKIP_REASON="kb-knowledge-reindex failed for ${dir}"
+        return 1
+    fi
+    return 0
+}
+
+# Returns 0 if the tree converged (HEAD fast-forwarded), 1 if not (tree left
+# exactly as found; caller runs the existing blocked-ff-conflict path).
+_ffc_selfheal() {
+    local base p n=0 retry_out d skipped=0
+    base="${KB_KNOWLEDGE_SYNC_INDEX_BACKUP_DIR:-$(dirname "$STATE_FILE")/knowledge-sync-index-backups}"
+    mkdir -p "$base" 2>/dev/null || { log "index-regen-aborted: cannot create backup dir ${base}"; return 1; }
+    _FFC_BACKUP_DIR="$(mktemp -d "${base}/$(date -u +'%Y%m%dT%H%M%SZ').XXXXXX" 2>/dev/null)" || _FFC_BACKUP_DIR=""
+    [ -n "$_FFC_BACKUP_DIR" ] || { log "index-regen-aborted: cannot create backup dir under ${base}"; return 1; }
+
+    # 1. Back up everything BEFORE touching anything; any failure aborts clean.
+    while IFS= read -r p; do
+        [ -n "$p" ] || continue
+        if [ ! -f "${REPO_DIR}/${p}" ] \
+           || ! mkdir -p "$(dirname "${_FFC_BACKUP_DIR}/${p}")" \
+           || ! cp -p "${REPO_DIR}/${p}" "${_FFC_BACKUP_DIR}/${p}"; then
+            log "index-regen-aborted: could not back up ${p} - nothing was modified"
+            return 1
+        fi
+        # A STAGED change would be lost by a restore-to-HEAD; refuse instead.
+        if git -C "$REPO_DIR" ls-files --error-unmatch -- "$p" >/dev/null 2>&1 \
+           && ! git -C "$REPO_DIR" diff --cached --quiet -- "$p" 2>/dev/null; then
+            log "index-regen-aborted: ${p} has staged changes - nothing was modified"
+            return 1
+        fi
+        n=$((n + 1))
+    done <<< "$_FFC_PATHS"
+
+    # 2. Restore: tracked -> HEAD content; untracked -> moved aside (backed up).
+    while IFS= read -r p; do
+        [ -n "$p" ] || continue
+        if git -C "$REPO_DIR" ls-files --error-unmatch -- "$p" >/dev/null 2>&1; then
+            if ! git -C "$REPO_DIR" checkout HEAD -- "$p" >/dev/null 2>&1; then
+                _ffc_restore_all
+                log "index-regen-aborted: could not restore ${p} to HEAD - tree put back as found"
+                return 1
+            fi
+        else
+            if ! unlink "${REPO_DIR}/${p}" 2>/dev/null; then
+                _ffc_restore_all
+                log "index-regen-aborted: could not move ${p} aside - tree put back as found"
+                return 1
+            fi
+        fi
+    done <<< "$_FFC_PATHS"
+
+    # 3. Retry the fast-forward.
+    retry_out="$(git -C "$REPO_DIR" merge --ff-only '@{u}' 2>&1)"
+    if [ $? -ne 0 ]; then
+        _ffc_restore_all
+        log "index-regen-retry-failed: fast-forward still refused after restoring ${n} generated INDEX.md - files put back as found, backup kept at ${_FFC_BACKUP_DIR}"
+        log_block "retry git merge --ff-only output" "$retry_out"
+        return 1
+    fi
+
+    # 4. Converged. Same dup-slot gate as converged-ff, then best-effort reindex.
+    log_block "git merge --ff-only output" "$retry_out"
+    _check_dup_slots
+    _handle_dup_slots_fatal  # exits 65 and does not return if a collision is found
+    while IFS= read -r p; do
+        [ -n "$p" ] || continue
+        d="$(dirname "$p")"
+        [ -d "${REPO_DIR}/${d}" ] || continue
+        if ! _ffc_reindex_dir "${REPO_DIR}/${d}"; then
+            skipped=1
+            log "index-regen-reindex-skipped: ${_FFC_SKIP_REASON} - the tick still converged; INDEX.md for ${d} stays as upstream committed it (the next reindex regenerates it); pre-heal copy kept at ${_FFC_BACKUP_DIR}"
+        fi
+    done <<< "$_FFC_PATHS"
+    log "converged-ff-index-regen: ${REPO_DIR} advanced ${_pre_behind} commit(s) via fast-forward after ${n} generated INDEX.md restored and regenerated (reindex skipped=${skipped}), backup at ${_FFC_BACKUP_DIR}"
+    return 0
+}
+
 INBOUND_TOKEN=""
 
 if [ -n "$_dirty" ]; then
@@ -1940,6 +2138,8 @@ if [ -n "$_dirty" ]; then
             _check_dup_slots
             _handle_dup_slots_fatal  # exits 65 and does not return if a collision is found
             INBOUND_TOKEN="converged-ff"
+        elif [ "$MERGE_EXIT" -eq 1 ] && _ffc_classify && [ "$_FFC_CLASS" = "index-only" ] && _ffc_selfheal; then
+            INBOUND_TOKEN="converged-ff-index-regen"
         elif [ "$MERGE_EXIT" -eq 1 ]; then
             log "blocked-ff-conflict: fast-forward refused in ${REPO_DIR} — incoming change(s) collide with the dirty tree (colliding path(s) named below by git itself). HEAD and local content are unchanged; git refused rather than clobbered. This machine CANNOT RECEIVE this content until the colliding local path is committed or removed by a human; it will keep retrying every tick."
             log_block "git merge --ff-only output" "$MERGE_OUTPUT"
