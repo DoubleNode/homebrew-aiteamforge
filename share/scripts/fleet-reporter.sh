@@ -2609,11 +2609,14 @@ _msg_has_vault_key() {
         _kc_list=$(security list-keychains 2>/dev/null) || _kc_rc=$?
         MSG_VAULT_KEY_SEARCH_LIST=$(printf '%s' "$_kc_list" | tr -d '"' | sed 's/^[[:space:]]*//' | tr '\n' ',' | sed 's/,$//')
         if { [ -f "$_kc_login" ] || [ -f "${_kc_login%-db}" ]; } && [ "$_kc_rc" -eq 0 ] && [ -n "$_kc_list" ]; then
-            if printf '%s' "$_kc_list" | grep -q 'login\.keychain'; then
-                MSG_VAULT_KEY_STORE_STATE="reachable"
-            else
-                MSG_VAULT_KEY_STORE_STATE="unreachable"
-            fi
+            # `case`, not `printf | grep -q`: under pipefail an early-exiting
+            # grep can SIGPIPE printf and flip a reachable store to
+            # "unreachable" — the confident false claim this probe must never
+            # make (XACA-1404 class; PR #1159 tester round 1).
+            case "$_kc_list" in
+                *login.keychain*) MSG_VAULT_KEY_STORE_STATE="reachable" ;;
+                *)                MSG_VAULT_KEY_STORE_STATE="unreachable" ;;
+            esac
         fi
     fi
     if [ -n "$MSG_VAULT_KEY_LOOKED_IN" ]; then
