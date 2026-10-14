@@ -2316,9 +2316,13 @@ _kb_reset_worktree() {
     # <remote>/<base>) is clean and remote-reachable, so it passes without a prompt.
     local dirty_files unpushed_commits
     dirty_files=$(git status --porcelain 2>/dev/null)
+    # "Exists nowhere else" = reachable from no remote ref AND no OTHER local branch: a fresh
+    # worktree cut from a local base that is ahead of its remote must not be refused.
+    local cur_branch
+    cur_branch=$(git branch --show-current 2>/dev/null)
     unpushed_commits=""
-    if [[ -n "$(git rev-list HEAD --not --remotes 2>/dev/null | head -1)" ]]; then
-        unpushed_commits=$(git log --oneline HEAD --not --remotes 2>/dev/null)
+    if [[ -n "$(git rev-list HEAD --not --exclude="$cur_branch" --branches --remotes 2>/dev/null | head -1)" ]]; then
+        unpushed_commits=$(git log --oneline HEAD --not --exclude="$cur_branch" --branches --remotes 2>/dev/null)
     fi
     if [[ -n "$dirty_files" ]] || [[ -n "$unpushed_commits" ]]; then
         echo "" >&2
