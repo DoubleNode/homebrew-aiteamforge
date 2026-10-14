@@ -2246,6 +2246,8 @@ _kb_get_main_branch() {
 # FRESHLY CREATED worktree. It refuses (rc 2, no reset) when the tree is dirty or HEAD has
 # commits on no remote ref; on a TTY the user may confirm the discard (default No), without
 # a TTY it never proceeds. Existing worktrees must use _kb_sync_worktree_to_branch instead.
+# Callers on the fresh path go through _kb_prepare_fresh_worktree (attach-existing => sync). The unpushed
+# probe is fail-closed: a failing `git rev-list` refuses (rc 2) rather than reading as "nothing unpushed".
 _kb_reset_worktree() {
     local branch_override="${1-}"
     # Auto-detect remote name (first remote listed)
@@ -2315,13 +2317,24 @@ _kb_reset_worktree() {
     # TTY = explicit confirmation, default No. A freshly created worktree (cut from
     # <remote>/<base>) is clean and remote-reachable, so it passes without a prompt.
     local dirty_files unpushed_commits
-    dirty_files=$(git status --porcelain 2>/dev/null)
+    dirty_files=$(git status --porcelain --untracked-files=all 2>/dev/null)
     # "Exists nowhere else" = reachable from no remote ref AND no OTHER local branch: a fresh
     # worktree cut from a local base that is ahead of its remote must not be refused.
     local cur_branch
     cur_branch=$(git branch --show-current 2>/dev/null)
     unpushed_commits=""
-    if [[ -n "$(git rev-list HEAD --not --exclude="$cur_branch" --branches --remotes 2>/dev/null | head -1)" ]]; then
+    # XACA-1372 r1: capture-first, NO pipe. `rev-list | head -1` reported rev-list's ERROR as
+    # "nothing unpushed" (fail-open); an unprobeable history must refuse, never reset.
+    local revlist_out revlist_rc=0
+    revlist_out=$(git rev-list HEAD --not --exclude="$cur_branch" --branches --remotes 2>/dev/null) || revlist_rc=$?
+    if (( revlist_rc != 0 )); then
+        echo "" >&2
+        echo "⛔ Refusing to reset: could not determine whether this worktree has unpushed commits (git rev-list failed, rc=${revlist_rc})." >&2
+        echo "   Nothing was reset. Check the repository state (git fsck), then retry." >&2
+        echo "─────────────────────────────────────"
+        return 2
+    fi
+    if [[ -n "$revlist_out" ]]; then
         unpushed_commits=$(git log --oneline HEAD --not --exclude="$cur_branch" --branches --remotes 2>/dev/null)
     fi
     if [[ -n "$dirty_files" ]] || [[ -n "$unpushed_commits" ]]; then
@@ -2465,6 +2478,35 @@ _kb_umbrella_sub_repos() {
 }
 
 # Sync an EXISTING worktree to its OWN remote branch, fast-forward only (XACA-1372)
+# Usage: _kb_prepare_fresh_worktree [release_branch]
+# XACA-1372 r1: the FRESH-worktree entry point (kb-run / _kb_switch_to_item_worktree after
+# _kb_create_item_worktree). _kb_create_item_worktree can ATTACH an already-existing local branch
+# ("Branch exists, attaching worktree"); hard-resetting that to base would diverge a pushed branch
+# from its remote. So: current branch exists on the remote -> treat as EXISTING (fast-forward
+# sync, never a reset); absent on the remote (ls-remote rc 2) -> a genuinely new branch, reset
+# to base as before; ANY other ls-remote rc (network/auth) -> the NON-destructive sync path
+# (which itself returns 1 soft if its fetch fails). Detached HEAD / no remote -> reset path
+# (which refuses on unpushed work or soft-fails).
+# Returns the rc of whichever helper ran: 0 ok, 1 soft, 2 refused.
+_kb_prepare_fresh_worktree() {
+    local release_branch="${1-}"
+    local cur remote ls_rc=0
+    cur=$(git branch --show-current 2>/dev/null)
+    remote=$(git remote 2>/dev/null | head -1)
+    if [[ -z "$cur" ]] || [[ -z "$remote" ]]; then
+        _kb_reset_worktree "$release_branch"
+        return $?
+    fi
+    git ls-remote --exit-code --heads "$remote" "refs/heads/${cur}" >/dev/null 2>&1 || ls_rc=$?
+    if (( ls_rc == 2 )); then
+        _kb_reset_worktree "$release_branch"
+        return $?
+    fi
+    # rc 0 = branch exists remotely; any other rc = unknown -> fail toward non-destructive.
+    _kb_sync_worktree_to_branch "$cur"
+    return $?
+}
+
 # Usage: _kb_sync_worktree_to_branch [branch]   (default: current branch)
 # Never resets and never discards: local-ahead and unpushed work is left untouched, a clean
 # behind-worktree is fast-forwarded, a dirty or diverged one is refused. Remote = first remote
@@ -13957,9 +13999,10 @@ kb-run() {
             kb_wt_session_created=1
             kb_wt_session_path="$new_worktree"
 
-            # Reset worktree to remote main branch (or the release branch) for clean starting state
+            # Reset a NEW branch to remote main (or the release branch) for a clean starting state;
+            # an attached already-pushed branch is synced instead (XACA-1372 r1).
             local reset_rc=0
-            _kb_reset_worktree "$release_branch" || reset_rc=$?
+            _kb_prepare_fresh_worktree "$release_branch" || reset_rc=$?
             if [[ $reset_rc -eq 2 ]]; then
                 echo "⛔ Worktree operation aborted by user." >&2
                 return 1
@@ -14749,7 +14792,8 @@ _kb_resolve_run_team() {
 # XACA-1372 contract: an EXISTING worktree (linked fast path or discovered) is only ever
 # fast-forwarded to its OWN remote branch via _kb_sync_worktree_to_branch (local-ahead work is
 # left untouched; dirty/diverged = rc 2). Only a worktree freshly CREATED here is hard-reset to
-# the base via _kb_reset_worktree, which itself refuses on a dirty tree or unpushed commits.
+# the base via _kb_prepare_fresh_worktree -> _kb_reset_worktree (which itself refuses on a dirty
+# tree or unpushed commits); a fresh worktree that merely ATTACHED a pushed branch is synced.
 # Usage: _kb_switch_to_item_worktree <board_file> <index> <item_id> [cmd_name]
 # Expects caller-scope variables from _kb_display_item_box: item_worktree, item_worktree_branch, title
 # Returns (XACA-1151-068 contract -- every caller MUST honour it):
@@ -14903,7 +14947,7 @@ _kb_switch_to_item_worktree() {
             kb_wt_session_path="$new_worktree"
 
             local reset_rc=0
-            _kb_reset_worktree "$release_branch" || reset_rc=$?
+            _kb_prepare_fresh_worktree "$release_branch" || reset_rc=$?
             if [[ $reset_rc -eq 2 ]]; then
                 echo "⛔ Worktree operation aborted by user." >&2
                 return 2
@@ -15280,6 +15324,24 @@ _kb_require_pr_head() {
     fi
     local_head=$(git rev-parse HEAD 2>/dev/null)
     if [[ "$local_head" == "$pr_head" ]]; then
+        # XACA-1372 r1: HEAD == PR head is necessary, not sufficient. Staged/unstaged/untracked
+        # changes or a submodule checked out away from its recorded gitlink mean the gate would
+        # judge code the PR does not contain. No path is excluded: kb-sync-personas adds
+        # `.claude/agents/` to the repo's info/exclude, so deployed persona files are ignored,
+        # not untracked. Capture-first (no pipe) and fail closed if the probe itself errors.
+        local dirty_out="" dirty_rc=0
+        dirty_out=$(git status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null) || dirty_rc=$?
+        if (( dirty_rc != 0 )); then
+            echo "⛔ Cannot determine whether this worktree is clean (git status failed, rc=${dirty_rc}); refusing to launch the gate." >&2
+            return 2
+        fi
+        if [[ -n "$dirty_out" ]]; then
+            echo "⛔ This worktree is at PR #${pr}'s head but is NOT clean; a gate run here would judge code the PR lacks." >&2
+            echo "   Offending entries (git status --porcelain):" >&2
+            printf '%s\n' "$dirty_out" | sed 's/^/     /' >&2
+            echo "   Fix: commit or discard them (git submodule update for a drifted submodule), then re-launch." >&2
+            return 2
+        fi
         return 0
     fi
     echo "⛔ This worktree is not at PR #${pr}'s head; a gate run here would judge the wrong code." >&2
