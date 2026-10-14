@@ -96,7 +96,7 @@
     <link href="https://fonts.googleapis.com/css2?family=Antonio:wght@400;500;600;700&display=swap" rel="stylesheet">
 
     <!-- LCARS Fleet Core Framework -->
-    <link rel="stylesheet" href="css/lcars-fleet.css?v=20261011b">
+    <link rel="stylesheet" href="css/lcars-fleet.css?v=20261013a">
     <!-- LCARS Kiosk Mode Styles (shared) -->
     <link rel="stylesheet" href="../shared/css/lcars-kiosk.css?v=20260825e">
     <!-- LCARS Fleet Theme (Red/Blue Color Scheme) -->
@@ -149,7 +149,6 @@
             <div class="top-sidebar">
                 <div class="top-sidebar-content">
                     <span class="stardate" id="stardate">2026.006</span>
-                    <time class="utc-clock" id="utc-clock" datetime=""><span class="visually-hidden">UTC time: </span><span id="utc-clock-value">--:--:-- UTC</span></time>
                     <span class="top-divider"></span>
                     <span class="lcars-version">LCARS 02-048</span>
                     <span class="top-divider"></span>
@@ -206,6 +205,13 @@
                          onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();LCARSSound.toggleMute()}">
                         <span id="sound-status">SOUND</span>
                     </div>
+                    <!-- UTC clock (XACA-1495, moved here by XACA-1526). A READOUT, not a control: no role,
+                         tabindex, data-section or handlers, and deliberately NOT .legend-pill, because
+                         js/lcars-sound.js clicks for any .legend-pill and that engine must stay
+                         byte-identical with its lcars-ui twin. Keep id="utc-clock" + "utc-clock-value":
+                         updateUtcClock() in js/lcars-dashboard-app.js binds by id. No aria-live (a per-second
+                         announcement would be unusable). Must stay the cluster's LAST child (seam rules). -->
+                    <time class="utc-pill" id="utc-clock" datetime=""><span class="visually-hidden">UTC time: </span><span id="utc-clock-value">--:--:-- UTC</span></time>
                 </div>
             </div>
 

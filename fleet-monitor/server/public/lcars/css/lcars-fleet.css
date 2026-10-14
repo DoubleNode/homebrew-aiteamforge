@@ -238,24 +238,6 @@ body {
     z-index: 25;
 }
 
-/* UTC clock (XACA-1495) - same row as stardate, to its right. The sibling
-   .top-divider spans are display:none, so the separator is a left border.
-   Fixed offset clears the widest stardate (e.g. 43000.0) at 12px. */
-.top-sidebar-content .utc-clock {
-    position: fixed;
-    top: 28px;
-    left: calc(var(--sidebar-width) + 20px + 64px);
-    padding-left: 8px;
-    border-left: 2px solid var(--lcars-blue);
-    font-size: 12px;
-    font-weight: 600;
-    line-height: 1.1;
-    color: var(--lcars-blue);
-    white-space: nowrap;
-    font-variant-numeric: tabular-nums;
-    z-index: 25;
-}
-
 /* Generic visually-hidden utility (XACA-1495-010): readable by screen readers,
    zero layout footprint, never display:none. */
 .visually-hidden {
@@ -1140,13 +1122,6 @@ body.kiosk-active .kiosk-fab {
         left: calc(var(--sidebar-width) + 18px);
     }
 
-    .top-sidebar-content .utc-clock {
-        top: 25px;
-        left: calc(var(--sidebar-width) + 18px + 54px);
-        padding-left: 6px;
-        font-size: 10px;
-    }
-
     .top-sidebar-content::after {
         top: 55px;
         height: 1px;
@@ -1781,6 +1756,51 @@ body.kiosk-active .kiosk-fab {
     outline-color: var(--lcars-cyan);
 }
 
+/* UTC clock readout (XACA-1495, relocated from the header by XACA-1526).
+   A READOUT, not a control, so it is deliberately NOT a .legend-pill: that class
+   carries cursor:pointer, hover/active filters and a focus ring, and
+   js/lcars-sound.js plays a click for any .legend-pill. Geometry, seating, borders
+   and type mirror the base .legend-pill rule above so it reads as the same family.
+   No :hover / :active / :focus-visible rules on purpose.
+
+   Width: 120px, the one departure from the uniform 100px. The 100px pill leaves a
+   72px content box; "00:00:00 UTC" measures 68.1px in Antonio but ~88px in the
+   Arial/Helvetica fallback, which would ellipsise the seconds. 120px leaves 92px.
+   tabular-nums is a no-op in Antonio (no tnum feature) and only helps fallback
+   fonts; the fixed width is what absorbs the ~5px digit-to-digit variation.
+
+   Colour: --lcars-blue, the header clock's own colour, so the clock reads as
+   "moved" rather than "replaced". No neighbour uses it (OFFLINE green/red,
+   SETTINGS tan, ADMIN orange, SOUND rose). Black on it measures ~9:1. */
+.lcars-data-bar .utc-pill {
+    flex: 0 0 120px;
+    width: 120px;
+    min-width: 120px;
+    display: flex;
+    align-items: flex-end;
+    justify-content: flex-end;
+    padding: 6px 12px;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    font-variant-numeric: tabular-nums;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--lcars-black);
+    background: var(--lcars-blue);
+    cursor: default;
+    user-select: none;
+    -webkit-user-select: none;
+    border-left: 2px solid var(--lcars-black);
+    border-right: 2px solid var(--lcars-black);
+    /* Seam: the clock is the cluster's LAST child, so no negative margin (the
+       .legend-pill:last-child rule no longer reaches it, and SOUND keeps the
+       -2px seam against this pill's left border). */
+    margin-right: 0;
+    border-radius: 0;
+}
+
 /* XACA-1465-013: REFRESH pill sits alone at the LEFT of the bar, before the spacer. */
 .lcars-data-bar .legend-pill.refresh-pill {
     margin-right: 0;
@@ -1793,16 +1813,25 @@ body.kiosk-active .kiosk-fab {
     filter: none;
 }
 
-@media (max-width: 600px) {
-    /* Allow the pills to SHRINK at narrow widths. With `flex: 0 0 auto` and a
-       fixed min-width they cannot compress, and .lcars-main/body both set
-       `overflow: hidden` — so on a ~375px viewport the three-pill (ADMIN-visible)
-       cluster needs about 212px against roughly 209px available and the overflow
-       is silently CLIPPED rather than scrolled. The candy-pill layout this
-       replaced used `flex: 1; min-width: 0` and could never overflow; allowing
-       shrink here keeps that guarantee while still preferring the legible size. */
-    .lcars-data-bar .legend-pill {
-        /* Narrow widths drop the uniform 100px and allow shrink, so the cluster
+/* Compact pills. Breakpoint was 600px (XACA-0963); XACA-1526 raised it to 953px.
+   The 120px clock pushes the full-size cluster (OFFLINE, SETTINGS, ADMIN, SOUND
+   + clock = 510px) past the bar's column on tablets: rendered with the breakpoint
+   lowered, the ADMIN-shown cluster overflows the visible bar by 23.4px at 930px,
+   13.4px at 940px, 2.4px at 951px and 1.4px at 952px, and first fits at 953px
+   (0.4px sub-pixel) / 954px (flush). So 953px is the smallest value at which the
+   full-size cluster, ADMIN included, does not overflow just above it (full size
+   from 954px). Bar column = viewport - 220px above ~850px. Tablets therefore get
+   the compact pills too, which also cures the 7px ADMIN overflow that already
+   existed at 768px.
+
+   Allow the pills to SHRINK. With `flex: 0 0 auto` and a fixed min-width they
+   cannot compress, and .lcars-main/body both set `overflow: hidden`, so an
+   over-wide cluster is silently CLIPPED rather than scrolled. The candy-pill
+   layout this replaced used `flex: 1; min-width: 0` and could never overflow. */
+@media (max-width: 953px) {
+    .lcars-data-bar .legend-pill,
+    .lcars-data-bar .utc-pill {
+        /* Narrow widths drop the uniform width and allow shrink, so the cluster
            can never be clipped by the overflow:hidden parent. Legibility of a
            uniform grid matters less than not losing a pill entirely. */
         flex: 0 1 auto;
@@ -1817,5 +1846,43 @@ body.kiosk-active .kiosk-fab {
     }
     .lcars-data-bar .mode-bar-separator {
         display: none;
+    }
+}
+
+/* The compact cluster needs (measured, 0.55rem pills, " UTC" kept): about 191px
+   without ADMIN, 230px with ADMIN. Room for it is viewport - 154.17px (40+40px
+   bar caps + the 54.17px REFRESH pill). Below that the flex layout does not clip
+   the cluster, it CRUSHES REFRESH (rendered at 360px + ADMIN before this rule:
+   label reads "ESH"). The readout is the expendable pill, so it yields and nothing
+   else is lost.
+   Thresholds are set by the WIDEST clock text, not a typical one: Antonio's "0"
+   is its widest digit, so "00:00:00 UTC" is the worst case. Rendered with every
+   digit 0-9, REFRESH holds its 46.2px from 348px (no ADMIN) and 387px (ADMIN) and
+   is crushed by 1-2.7px at 345-347px / 384-386px, so the clock hides up to
+   347px / 386px (the first-pass estimate of 345 / 384 was 3px optimistic).
+   (The old XACA-0963 note put the three-pill cluster at "~212 vs ~209"; measured,
+   it is 173.0px needed vs 220.8px available at 375px with ADMIN shown. Without
+   the clock, 320px + ADMIN already overruns by 7px; that is pre-existing and not
+   this ticket's.)
+   SOUND is the visually-last pill once the clock is hidden, so it takes the
+   last-child margin the clock normally owns. */
+@media (max-width: 347px) {
+    .lcars-data-bar .utc-pill {
+        display: none;
+    }
+    .lcars-data-bar .legend-pill.sound-pill {
+        margin-right: 0;
+    }
+}
+
+/* ADMIN needs 38.6px more: hide up to 386px, but only while ADMIN is actually
+   shown. Its visibility is toggled by an inline style (display:none vs ''), set
+   by js/lcars-dashboard-app.js (ALL FLEET only), so key on the visible state. */
+@media (max-width: 386px) {
+    .lcars-data-bar .utility-cluster:has(.admin-pill:not([style*="display: none"])) .utc-pill {
+        display: none;
+    }
+    .lcars-data-bar .utility-cluster:has(.admin-pill:not([style*="display: none"])) .legend-pill.sound-pill {
+        margin-right: 0;
     }
 }
