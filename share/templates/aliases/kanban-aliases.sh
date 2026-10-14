@@ -4197,11 +4197,16 @@ _kb_knowledge_strip_id_prefix() {
 }
 _kb_knowledge_doubled_id() {
     setopt LOCAL_OPTIONS EXTENDED_GLOB
-    [[ "${1-}" == [a-zA-Z][0-9](#c3,)-[a-zA-Z][0-9](#c3,)-* ]]
+    # Same tier letter on both halves (k120-k120-, p072-p071-): a kept
+    # cross-letter title such as "P100 GPU" slugs to k001-p100-gpu and is not
+    # a doubled id (PR #1163 review).
+    [[ "${1-}" == (#b)([a-zA-Z])[0-9](#c3,)-([a-zA-Z])[0-9](#c3,)-* ]] &&
+        [[ "${(L)match[1]}" == "${(L)match[2]}" ]]
 }
 _kb_knowledge_doubled_h1() {
     setopt LOCAL_OPTIONS EXTENDED_GLOB
-    [[ "${1-}" == [a-zA-Z][0-9](#c3,):[[:space:]]#[a-zA-Z][0-9](#c3,):* ]]
+    [[ "${1-}" == (#b)([a-zA-Z])[0-9](#c3,):[[:space:]]#([a-zA-Z])[0-9](#c3,):* ]] &&
+        [[ "${(L)match[1]}" == "${(L)match[2]}" ]]
 }
 
 # Internal: slugify a string → lowercase, hyphen-separated, no non-alnum chars
