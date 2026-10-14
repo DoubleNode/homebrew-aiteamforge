@@ -67,7 +67,7 @@ def _slots(scheduled, tests, sha, t0, now):
 
 
 def resume_plan(release, *, flow_config, cr_support_enabled, items=None, other_releases=None, manual_tests=(),
-                scheduled=(), cr=None, branch_head=None, now=None):
+                scheduled=(), cr=None, branch_head=None, now=None, board=None):
     """-> plan dict {release, stage, stageSha, branch, row, action, headline, lines[], offer, run{}}.
 
     row = the spec 5.2 table row (planned | dev-items-open | dev-deploy-pending | tests-running | tests-failed |
@@ -75,7 +75,8 @@ def resume_plan(release, *, flow_config, cr_support_enabled, items=None, other_r
     (stage-passed, gamma-ready, gamma-passed, closeout-ready, cr-stage-incomplete, cr-held, gamma-failed, stage-sha-missing, terminal).
     action = what the session does next. `items` [{id,title,status,prMerged}], `scheduled` [{provider, schedule[],
     tests[]}], `cr` {id, crState, draftApproved, feed} (feed = approval_providers.release_cr_feed) are pre-resolved by
-    the loader; None means "could not read" and fails closed."""
+    the loader; None means "could not read" and fails closed. `board` (optional) only feeds the
+    PLANNED hint's branch name (XACA-1524); None = default releaseConfig."""
     now = now or datetime.now(timezone.utc)
     cur, rid = G.current_stage(release), release.get("id")
     sha = G.graded_sha(release, cur)
@@ -100,7 +101,8 @@ def resume_plan(release, *, flow_config, cr_support_enabled, items=None, other_r
                        context={"items": items, "other_releases": other_releases})
         if v["allowed"]:
             return done("planned", "offer-dev-promote", "PLANNED: assignment and version checks pass.",
-                        "Offer the DEV promote; it cuts releases/<ver> and records branch/branchBaseSha.",
+                        "Offer the DEV promote; it %s and records branch/branchBaseSha."
+                        % release_branches.planned_branch_label(release, board),
                         offer=promote_offer("DEV"))
         return done("planned", "fix-planning", "PLANNED: the DEV promote would be refused.",
                     *["unmet: " + r for r in v["reasons"]])
@@ -295,18 +297,20 @@ def load_plan(kanban_dir, release_id, repo_dir=None, now=None):
                   "feed": ap.release_cr_feed(board, rel, now.isoformat())}
     plan = resume_plan(rel, flow_config=rc.get("flowConfig") or {}, cr_support_enabled=cr_on, items=items,
                        other_releases=board.get("releases") or [], manual_tests=manual, scheduled=sched, cr=cr,
-                       branch_head=head, now=now)
+                       branch_head=head, now=now, board=board)
     plan["name"] = rel.get("name")
     return plan
 
 
-def ensure_worktree(release, repo_dir, worktree_dir, *, run=subprocess.run):
+def ensure_worktree(release, repo_dir, worktree_dir, *, run=subprocess.run, board=None):
     """Attach to the worktree already on release.branch, else create one at worktree_dir from that branch (local, or the
     remote-tracking ref). -> (path, "attached"|"created"). Never defaults to develop and never switches branches."""
     branch = release.get("branch")
     if not isinstance(branch, str) or not branch.strip() or branch.startswith("-"):
-        raise RunnerError("release %s has no branch recorded: a PLANNED release has none (the DEV promote cuts "
-                          "releases/<ver>). Refusing to fall back to develop; promote to DEV first." % release.get("id"))
+        raise RunnerError("release %s has no branch recorded: a PLANNED release has none (the DEV promote %s). "
+                          "Refusing to fall back to %s; promote to DEV first."
+                          % (release.get("id"), release_branches.planned_branch_label(release, board),
+                             release_branches.integration_branch_name(board)))
     path = None
     for ln in _git(run, repo_dir, "worktree", "list", "--porcelain").splitlines():
         if ln.startswith("worktree "):
@@ -358,7 +362,7 @@ def main(argv=None):
             print(json.dumps(plan) if a.json else format_plan(plan))
         else:
             _p, _b, rel = find_release(a.kanban_dir, a.release)
-            path, how = ensure_worktree(rel, a.repo_dir, a.worktree_dir)
+            path, how = ensure_worktree(rel, a.repo_dir, a.worktree_dir, board=_b)
             print("%s\t%s" % (how, path))
     except RunnerError as e:
         print("release_resume: %s" % (e,), file=sys.stderr)

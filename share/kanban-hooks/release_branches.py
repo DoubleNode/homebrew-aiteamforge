@@ -21,6 +21,7 @@ CLI (wrapped by kanban-helpers.sh):
     branches    --board B
     item-branch --board B --item ID
     cut         --board B --release-id REL [--repo DIR] [--dry-run]
+    planned-branch --board B --release-id REL   (what the PLANNED->DEV promote WOULD produce; pure, no git)
 """
 import argparse
 import json
@@ -224,6 +225,64 @@ def sha_reachable_from_tip(repo_root, branch, sha, *, run=subprocess.run):
         return None
 
 
+def _branch_spec(cfg, rtype):
+    """(source branch, prefix) the promote uses for `rtype` under `cfg`; prefix None = trunk mode, nothing is cut
+    (the release branch IS `source`). RuntimeError for the refused hotfix combination. Shared by cut_release_branch
+    and planned_branch_label so the cut and the message about it cannot drift (XACA-1524)."""
+    if rtype == "hotfix":
+        if cfg["mode"] == "client-merge":
+            # XACA-1521-020: the engine never writes to a client-owned repo except the create-only cut of the
+            # RELEASE branch; a hotfix branch is cut from production, which the client owns. Refuse, push nothing.
+            raise RuntimeError("client-merge mode: hotfix release cut is not supported (the engine never writes to the "
+                               "client repo); create the hotfix branch in the client repo by hand, or switch the board "
+                               "to mode release")
+        if cfg["mode"] == "trunk" and cfg["production"] == cfg["integration"]:
+            raise RuntimeError("hotfix release in trunk mode: production and integration are both %r, so a hotfix "
+                               "branch cannot be isolated from unreleased trunk work; refusing to cut"
+                               % cfg["production"])
+        return cfg["production"], HOTFIX_PREFIX
+    if cfg["mode"] == "trunk":
+        return cfg["integration"], None
+    return cfg["integration"], cfg["releasePrefix"]
+
+
+def planned_branch_label(release, board):
+    """Pure (no git) verb phrase for what the PLANNED->DEV promote does to the release branch, for messages that read
+    "...the DEV promote <label>" (XACA-1524). Never raises; never guesses a prefix it could not read:
+      "cuts dme-release/1.2.3"  ("<ver>" placeholder when the version is absent/inconsistent)
+      "cuts hotfix/1.2.3"       hotfix, every mode
+      "uses the integration branch develop (trunk mode, nothing is cut)"
+      "would be refused (...)"  trunk-mode hotfix with production == integration, or an unknown release type
+      "cuts the configured release branch"   releaseConfig.branches is malformed"""
+    try:
+        cfg = effective_branches((board or {}).get("releaseConfig") if isinstance(board, dict) else None)
+    except ValueError:
+        return "cuts the configured release branch"
+    try:
+        rtype = release_type(release)
+    except ValueError as e:
+        return "would be refused (%s)" % e
+    try:
+        src, prefix = _branch_spec(cfg, rtype)
+    except RuntimeError as e:
+        return "would be refused (%s)" % e
+    if prefix is None:
+        return "uses the integration branch %s (trunk mode, nothing is cut)" % src
+    try:
+        ver = release_version(release)
+    except ValueError:
+        ver = "<ver>"
+    return "cuts %s%s" % (prefix, ver)
+
+
+def integration_branch_name(board):
+    """The configured integration branch for messages, or a generic phrase when releaseConfig is malformed."""
+    try:
+        return effective_branches((board or {}).get("releaseConfig") if isinstance(board, dict) else None)["integration"]
+    except ValueError:
+        return "the integration branch"
+
+
 def cut_release_branch(release, board, repo_root, *, dry_run=False, run=subprocess.run):
     """Cut (or, in trunk mode, resolve) the release branch. Returns {"branch","branchBaseSha"}.
 
@@ -239,24 +298,11 @@ def cut_release_branch(release, board, repo_root, *, dry_run=False, run=subproce
     git = _Git(repo_root, run)
     remote = _remote(git)
     hotfix = rtype == "hotfix"
-    if hotfix:
-        if cfg["mode"] == "client-merge":
-            # XACA-1521-020: the engine never writes to a client-owned repo except the create-only cut of the
-            # RELEASE branch; a hotfix branch is cut from production, which the client owns. Refuse, push nothing.
-            raise RuntimeError("client-merge mode: hotfix release cut is not supported (the engine never writes to the "
-                               "client repo); create the hotfix branch in the client repo by hand, or switch the board "
-                               "to mode release")
-        if cfg["mode"] == "trunk" and cfg["production"] == cfg["integration"]:
-            raise RuntimeError("hotfix release in trunk mode: production and integration are both %r, so a hotfix "
-                               "branch cannot be isolated from unreleased trunk work; refusing to cut"
-                               % cfg["production"])
-        src, prefix = cfg["production"], HOTFIX_PREFIX
-    else:
-        src, prefix = cfg["integration"], cfg["releasePrefix"]
+    src, prefix = _branch_spec(cfg, rtype)
     src_sha = _remote_tip(git, remote, src)
     if not src_sha:
         raise RuntimeError("%s branch %r not found on remote %r" % ("production" if hotfix else "integration", src, remote))
-    if cfg["mode"] == "trunk" and not hotfix:
+    if prefix is None:   # trunk mode, non-hotfix: no cut
         return {"branch": src, "branchBaseSha": src_sha}
 
     branch = prefix + release_version(release)
@@ -400,6 +446,9 @@ def main(argv=None):
     p.add_argument("--release-id", required=True)
     p.add_argument("--repo")
     p.add_argument("--dry-run", action="store_true")
+    p = sub.add_parser("planned-branch")
+    p.add_argument("--board", required=True)
+    p.add_argument("--release-id", required=True)
     a = ap.parse_args(argv)
     try:
         if a.cmd == "item-branch":
@@ -411,6 +460,9 @@ def main(argv=None):
         rel = _find_release(board, a.release_id)
         if rel is None:
             raise ValueError("release %s not found" % a.release_id)
+        if a.cmd == "planned-branch":
+            print(planned_branch_label(rel, board))
+            return 0
         repo = a.repo or team_repo_root(board.get("team"), Path(a.board).resolve().parent)
         if not repo:
             raise RuntimeError("cannot resolve the team repo root; pass --repo")
