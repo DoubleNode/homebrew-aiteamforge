@@ -4999,6 +4999,58 @@ sys.stdout.write((summary + "\n\n" if summary else "") + "\n".join(lines) + "\n"
     printf '%s\n' "$body"
 }
 
+# _kb_branch_protected <branch>   (XACA-1525-003)
+# Is <branch> a long-lived branch that kb-merge must NEVER delete after merging a PR whose
+# HEAD it is (e.g. a develop -> releases/x.y sync PR merged with --merge)?
+#   rc 0  protected   - prints the reason on stdout
+#   rc 1  not protected (an ordinary short-lived topic branch)
+#   rc 2  cannot tell  - prints the reason; callers MUST treat this like rc 0 (fail closed)
+# Layers, first hit wins:
+#   1. master / main / develop, release/ releases/ prefixes, and a version-shaped hotfix/<ver>
+#      (release_branches.py HOTFIX_PREFIX; hotfix/<topic> stays deletable) - static floor, no board
+#   2. the team's configured integration / production / releasePrefix (release_branches.py via
+#      _kb_get_release_branches - the same source kb-pr-base uses; never re-parsed here), and any
+#      release on the board whose recorded .branch IS <branch> (hotfix/<ver> of any version shape).
+#      An unreadable config is NOT fatal: layers 1 and 3 still apply.
+#   3. GitHub branch protection (gh api .../branches/<b> .protected). Lookup error => rc 2.
+_kb_branch_protected() {
+    local branch="${1-}" ctx team="" bf="" json v cfg prefix="" gh_prot
+    [[ -n "$branch" ]] || { echo "empty branch name"; return 2; }
+    case "$branch" in
+        master|main|develop) echo "'$branch' is a protected trunk branch"; return 0 ;;
+        release/*|releases/*) echo "'$branch' is a release branch"; return 0 ;;
+        hotfix/[0-9]*|hotfix/v[0-9]*) echo "'$branch' is a hotfix release branch"; return 0 ;;
+    esac
+    if ctx=$(_kb_detect_context 2>/dev/null); then team="${ctx%%:*}"; fi
+    if [[ -n "$team" ]]; then
+        bf=$(_kb_get_board_file "$team" 2>/dev/null) || bf=""
+        if [[ -n "$bf" && -f "$bf" ]] && jq -e --arg b "$branch" \
+            'any((.releases // [])[]?; type == "object" and .branch == $b)' "$bf" >/dev/null 2>&1; then
+            echo "'$branch' is a release's recorded branch on the board"; return 0
+        fi
+        if [[ -n "$bf" && -f "$bf" ]] && json=$(_kb_get_release_branches "$bf" 2>/dev/null); then
+            for v in integration production; do
+                cfg=$(printf '%s\n' "$json" | jq -er --arg r "$v" '.[$r] // empty' 2>/dev/null) || cfg=""
+                if [[ -n "$cfg" && "$branch" == "$cfg" ]]; then
+                    echo "'$branch' is the team's configured $v branch"; return 0
+                fi
+            done
+            prefix=$(printf '%s\n' "$json" | jq -er '.releasePrefix // empty' 2>/dev/null) || prefix=""
+            if [[ -n "$prefix" && "$branch" == "$prefix"* ]]; then
+                echo "'$branch' matches the team's release prefix '$prefix'"; return 0
+            fi
+        fi
+    fi
+    command -v gh >/dev/null 2>&1 || { echo "gh not available to check branch protection for '$branch'"; return 2; }
+    gh_prot=$(gh api "repos/{owner}/{repo}/branches/$branch" --jq '.protected' 2>/dev/null) \
+        || { echo "could not query GitHub branch protection for '$branch'"; return 2; }
+    case "$gh_prot" in
+        true) echo "'$branch' has GitHub branch protection"; return 0 ;;
+        false) return 1 ;;
+        *) echo "unreadable GitHub branch protection answer for '$branch'"; return 2 ;;
+    esac
+}
+
 # kb-merge — wrap `gh pr merge` with worktree-lock fallback handling.
 # When the auto-merge loop runs from inside a worktree, `gh pr merge --delete-branch`
 # fails locally because the develop branch is checked out elsewhere. The API merge
@@ -5055,15 +5107,32 @@ kb-merge() {
 
     # Capture combined output so we can pattern-match on the worktree-lock error.
     local out squash_body="" merged=1
+    # XACA-1525-003: never delete a long-lived HEAD branch (a develop -> release sync PR merged
+    # with --merge would otherwise delete the branch it just merged FROM). Fail closed: an
+    # unreadable head or an undeterminable protection state also skips deletion (merge still runs).
+    local head_ref="" prot_why="" prot_rc=0 keep_branch=0
+    local -a del_flag
+    del_flag=(--delete-branch)
+    head_ref=$(gh pr view "$pr" --json headRefName --jq '.headRefName' 2>/dev/null) || head_ref=""
+    if [[ -z "$head_ref" ]]; then
+        keep_branch=1; prot_why="could not determine PR #$pr head branch"
+    else
+        prot_why=$(_kb_branch_protected "$head_ref"); prot_rc=$?
+        [[ "$prot_rc" -eq 1 ]] || keep_branch=1
+    fi
+    if [[ "$keep_branch" -eq 1 ]]; then
+        del_flag=()
+        echo "ℹ️  kb-merge: NOT deleting head branch of PR #$pr: $prot_why." >&2
+    fi
     # XACA-1468-002: a squash keeps the Kanban-* trailers as a real final paragraph.
     # No trailers / any failure -> squash_body stays empty and the call is exactly as before.
     if [[ "$strategy" == "--squash" ]]; then
         squash_body=$(_kb_squash_body "$pr" 2>/dev/null) || squash_body=""
     fi
     if [[ -n "$squash_body" ]]; then
-        out=$(gh pr merge "$pr" "$strategy" --delete-branch --admin --body "$squash_body" 2>&1) && merged=0
+        out=$(gh pr merge "$pr" "$strategy" ${del_flag[@]+"${del_flag[@]}"} --admin --body "$squash_body" 2>&1) && merged=0
     else
-        out=$(gh pr merge "$pr" "$strategy" --delete-branch --admin 2>&1) && merged=0
+        out=$(gh pr merge "$pr" "$strategy" ${del_flag[@]+"${del_flag[@]}"} --admin 2>&1) && merged=0
     fi
     if [[ "$merged" -eq 0 ]]; then
         echo "$out"
@@ -5077,7 +5146,12 @@ kb-merge() {
     if echo "$out" | grep -qE 'is already (used by|checked out)'; then
         # API merge already succeeded; we just need to delete the remote branch.
         local branch remote
-        branch=$(gh pr view "$pr" --json headRefName --jq '.headRefName' 2>/dev/null)
+        if [[ "$keep_branch" -eq 1 ]]; then
+            echo "✓ kb-merge: PR #$pr merged via API; head branch kept (not deleted)."
+            _kb_merge_record_safe "$pr" "$item"
+            return 0
+        fi
+        branch="$head_ref"
         # Prefer dev-team remote (this repo's convention), fall back to origin.
         remote=$(git remote 2>/dev/null | grep -E '^(dev-team|origin)$' | head -1)
         if [[ -n "$branch" && -n "$remote" ]]; then

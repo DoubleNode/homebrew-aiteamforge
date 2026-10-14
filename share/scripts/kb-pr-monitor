@@ -8,6 +8,7 @@
 #
 # Usage: scripts/kb-pr-monitor --pr <N> --item <ITEM-ID> [--repo <owner>/<repo>]
 #                              [--poll-seconds 60] [--max-hours 48]
+#                              [--merge-method squash|merge|rebase]
 #                              [--once] [--no-merge] [--help]
 #
 # Exit codes (the verdict contract):
@@ -84,8 +85,15 @@
 # 0/GATES_PASSED. For dry runs and tests.
 #
 # --item is also the merge's credit target (XACA-1503): kb-merge is invoked as
-# `kb-merge <PR> --item <ITEM-ID>`, so prMerged is recorded on --item rather
-# than on the ticket named in the PR head branch.
+# `kb-merge <PR> --<method> --item <ITEM-ID>`, so prMerged is recorded on --item
+# rather than on the ticket named in the PR head branch.
+#
+# --merge-method (XACA-1525) picks kb-merge's strategy: squash (default, the
+# behaviour before this flag existed), merge, or rebase. Sync PRs (integration
+# -> release branch) MUST be true merges (`--merge-method merge`), or the later
+# release -> integration PR re-conflicts. An unknown or missing value is a usage
+# error (rc 2), validated at parse time. The chosen strategy is reported as
+# `merge_method=<method>` in the GATES_PASSED detail.
 #
 # BASE GATE (XACA-1483): every poll, right after the head SHA is read and
 # BEFORE any review/CI/mergeability/staleness gate, the PR's baseRefName must
@@ -160,6 +168,7 @@ POLL_SECONDS=60
 MAX_HOURS=48
 ONCE="false"
 DO_MERGE="true"
+MERGE_METHOD="squash"
 
 # XACA-1276-021: the default below used to be the single literal
 # $HOME/dev-team/kanban-helpers.sh — always the MAIN repo's checkout,
@@ -635,6 +644,8 @@ while [ $# -gt 0 ]; do
         --poll-seconds=*) POLL_SECONDS="${1#*=}"; shift ;;
         --max-hours)      _need_val "$1" $#; MAX_HOURS="$2"; shift 2 ;;
         --max-hours=*)    MAX_HOURS="${1#*=}"; shift ;;
+        --merge-method)   _need_val "$1" $#; MERGE_METHOD="$2"; shift 2 ;;
+        --merge-method=*) MERGE_METHOD="${1#*=}"; shift ;;
         --once)           ONCE="true"; shift ;;
         --no-merge)       DO_MERGE="false"; shift ;;
         -h|--help)        usage
@@ -648,6 +659,14 @@ while [ $# -gt 0 ]; do
                           verdict USAGE_ERROR "unknown argument: $1" ;;
     esac
 done
+
+# Validated at parse time: the value becomes kb-merge's `--<method>` flag, so an
+# unknown one must die here (rc 2), not after every gate has passed.
+case "$MERGE_METHOD" in
+    squash|merge|rebase) ;;
+    *) printf 'kb-pr-monitor: --merge-method must be squash, merge or rebase (got: %s)\n' "$MERGE_METHOD" >&2
+       verdict USAGE_ERROR "--merge-method must be squash|merge|rebase (got: $MERGE_METHOD)" ;;
+esac
 
 [ -n "$PR_NUM" ]  || verdict USAGE_ERROR "--pr is required"
 [ -n "$ITEM_ID" ] || verdict USAGE_ERROR "--item is required"
@@ -2297,7 +2316,7 @@ PR_FILTER_EOF
 
     if [ "$DO_MERGE" != "true" ]; then
         printf '%s\n' "All gates passed + branch fresh (mergeable=$MERGEABLE, mergeStateStatus=$MERGE_STATE). --no-merge: stopping short of kb-merge."
-        verdict GATES_PASSED "--no-merge: all gates passed (mergeable=$MERGEABLE state=$MERGE_STATE); kb-merge NOT run"
+        verdict GATES_PASSED "--no-merge: all gates passed (mergeable=$MERGEABLE state=$MERGE_STATE); kb-merge NOT run merge_method=$MERGE_METHOD"
     fi
 
     printf '%s\n' "All gates passed + branch fresh (mergeable=$MERGEABLE, mergeStateStatus=$MERGE_STATE). Merging with --admin..."
@@ -2307,7 +2326,7 @@ PR_FILTER_EOF
     # The merge is credited to --item (XACA-1503): kb-merge is passed
     # `--item "$ITEM_ID"` so prMerged lands on the validated ticket, NOT on
     # whatever ticket id the PR head BRANCH name happens to carry.
-    MERGE_OUT=$(_kbpm_helpers_run kb-merge "$PR_NUM" --item "$ITEM_ID")
+    MERGE_OUT=$(_kbpm_helpers_run kb-merge "$PR_NUM" "--$MERGE_METHOD" --item "$ITEM_ID")
     MERGE_RCPAIR=$(cat "$KBPM_RCFILE" 2>/dev/null)
     MERGE_SOURCE_RC="${MERGE_RCPAIR%% *}"
     MERGE_CMD_RC="${MERGE_RCPAIR##* }"
@@ -2318,5 +2337,5 @@ PR_FILTER_EOF
         verdict BLOCKED "kb-merge did not succeed (source rc=$MERGE_SOURCE_RC, kb-merge rc=$MERGE_CMD_RC) — PR not merged"
     fi
     # kb-done is deliberately NOT run here; the caller owns closing the item.
-    verdict GATES_PASSED "merged PR #$PR_NUM via kb-merge; run kb-done yourself"
+    verdict GATES_PASSED "merged PR #$PR_NUM via kb-merge; merge_method=$MERGE_METHOD; run kb-done yourself"
 done
