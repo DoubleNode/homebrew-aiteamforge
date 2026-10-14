@@ -28232,7 +28232,7 @@ kb-release-cr-stage() {
                 echo "  --step S           run only through step S"
                 echo "  --status           show which steps are already done; change nothing"
                 echo "  --skip-notify R    lead override of the approver notice (needs --by <lead>)"
-                echo "  --repo-dir P       git repo holding releases/<ver> (default: current directory)"
+                echo "  --repo-dir P       git repo holding the release branch (default: current directory)"
                 echo ""
                 echo "Exit codes: 0 submitted, 1 tool failed (re-run resumes), 2 usage/config, 3 refused,"
                 echo "            5 waiting for the lead's draft approval, 6 draft failed validation"
@@ -28547,7 +28547,17 @@ _kb_release_run() {
         echo "✓ Release worktree ${wt_out%%$'\t'*}: ${wt_out#*$'\t'}  (branch $branch)"
         cd "${wt_out#*$'\t'}" || { echo "✗ kb-run: cannot cd into the release worktree" >&2; return 1; }
     else
-        echo "ℹ $release_id is $stage with no release branch yet: no worktree (the DEV promote cuts releases/<ver>)."
+        # XACA-1524: the label comes from the planned-branch CLI (same _branch_spec the cut uses), so a custom
+        # releasePrefix / hotfix / trunk mode is named correctly. Message path: any failure degrades to neutral text
+        # that guesses no prefix; it never aborts kb-run.
+        local _pb_bf _pb_cli _pb_label=""
+        _pb_bf=$(_kb_get_board_file "$team" 2>/dev/null) || _pb_bf=""
+        _pb_cli=$(_kb_release_branches_script 2>/dev/null) || _pb_cli=""
+        if [[ -n "$_pb_bf" && -n "$_pb_cli" && -f "$_pb_cli" ]]; then
+            _pb_label=$(python3 "$_pb_cli" planned-branch --board "$_pb_bf" --release-id "$release_id" 2>/dev/null) || _pb_label=""
+        fi
+        [[ -n "$_pb_label" ]] || _pb_label="cuts the release branch"
+        echo "ℹ $release_id is $stage with no release branch yet: no worktree (the DEV promote $_pb_label)."
     fi
     # the plan the session starts from; with a worktree it also reads branch HEAD + the soak providers
     local plan_text
