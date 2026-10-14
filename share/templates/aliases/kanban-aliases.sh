@@ -4151,6 +4151,59 @@ _kb_knowledge_destination_guard() {
     return 0
 }
 
+# XACA-0994: the three section placeholders kb-knowledge-add scaffolds into a
+# new entry. Shared by the reindex summary guard and kb-validate's retained-
+# placeholder WARN so the two can never disagree about what a "stub" is.
+typeset -ga _KB_KNOWLEDGE_STUB_PLACEHOLDERS=(
+    'Describe the symptom and root cause.'
+    'The fix, workaround, or correct approach.'
+    'What could go wrong next time if forgotten.'
+)
+
+# XACA-0994: _kb_knowledge_has_stub_text <text> — rc 0 when <text> contains any
+# scaffold placeholder string. Prints nothing. Pure zsh (no forks).
+_kb_knowledge_has_stub_text() {
+    local _t="${1-}" _p
+    [[ -n "$_t" ]] || return 1
+    for _p in "${_KB_KNOWLEDGE_STUB_PLACEHOLDERS[@]}"; do
+        [[ "$_t" == *"$_p"* ]] && return 0
+        # Tolerate the placeholder without its trailing period (a summary line
+        # may have been truncated or re-punctuated).
+        [[ "$_t" == *"${_p%.}"* ]] && return 0
+    done
+    return 1
+}
+
+# XACA-0994-012/013: shared id-prefix pattern knowledge.
+#   _kb_knowledge_strip_id_prefix <title> <tier-letter> -> prints <title>
+#     without a leading "K027:" style id prefix. Strips ONLY when the letter is
+#     the tier being added (k for agent, s subject, p project, t team) AND a ":"
+#     follows 3+ digits — the form the XBWA-0122 retro observed. Whitespace-only
+#     and cross-tier forms ("P100 GPU ...", "T800: notes", "S3000 router") are
+#     real title text and are kept; validate's doubled-id WARN still catches a
+#     genuine id that slips through. A dash separator after the colon
+#     ("K027: - foo") is dropped too, and an empty result keeps the original.
+#   _kb_knowledge_doubled_id <text> -> rc 0 when <text> starts with a doubled
+#     id ("k120-k120-..." slug/id form).
+#   _kb_knowledge_doubled_h1 <text> -> rc 0 for "K120: K120: ..." H1 text.
+_kb_knowledge_strip_id_prefix() {
+    setopt LOCAL_OPTIONS EXTENDED_GLOB
+    local _t="${1-}" _p="${2-}" _r
+    [[ "$_p" == [kspt] ]] || { print -r -- "$_t"; return 0; }
+    _r="${_t##(#i)${_p}[0-9](#c3,):[[:space:]]#}"
+    [[ "$_r" != "$_t" ]] && _r="${_r##(-|–|—)[[:space:]]##}"
+    [[ -n "$_r" ]] && _t="$_r"
+    print -r -- "$_t"
+}
+_kb_knowledge_doubled_id() {
+    setopt LOCAL_OPTIONS EXTENDED_GLOB
+    [[ "${1-}" == [a-zA-Z][0-9](#c3,)-[a-zA-Z][0-9](#c3,)-* ]]
+}
+_kb_knowledge_doubled_h1() {
+    setopt LOCAL_OPTIONS EXTENDED_GLOB
+    [[ "${1-}" == [a-zA-Z][0-9](#c3,):[[:space:]]#[a-zA-Z][0-9](#c3,):* ]]
+}
+
 # Internal: slugify a string → lowercase, hyphen-separated, no non-alnum chars
 _kb_knowledge_slugify() {
     local s="${1-}"
@@ -5635,9 +5688,13 @@ _kb_knowledge_reindex_one() {
                 lf_title=$(grep -m1 '^# ' "$lf_ef" 2>/dev/null | sed 's/^# //' | head -1)
                 [[ -z "$lf_title" ]] && lf_title="${lf_eid}"
                 lf_summary=$(_kb_knowledge_yaml_field "$lf_ef" "summary")
+                # XACA-0994-003: scaffold placeholder text in a frontmatter summary counts as absent.
+                _kb_knowledge_has_stub_text "$lf_summary" && lf_summary=""
                 if [[ -z "$lf_summary" ]]; then
-                    lf_summary=$(awk '/^---$/{count++; next} count>=2 && /^[^#[:space:]]/{print; exit}' "$lf_ef" 2>/dev/null | head -1)
+                    lf_summary=$(awk '/^---$/{count++; next} count>=2 { if (in_cmt) { if ($0 ~ /-->/) in_cmt=0; next } if ($0 ~ /^<!--/) { if ($0 !~ /-->/) in_cmt=1; next } if ($0 ~ /^[^#[:space:]]/) { print; exit } }' "$lf_ef" 2>/dev/null | head -1)
                 fi
+                # XACA-0994-003: body fallback may be unwrapped stub prose; never publish it.
+                _kb_knowledge_has_stub_text "$lf_summary" && lf_summary=""
                 [[ -z "$lf_summary" ]] && lf_summary="*(add one-sentence summary)*"
                 echo "- **${lf_display_eid}:** [${lf_title}](./${lf_eid}.md) — ${lf_summary}"
             done
@@ -5704,9 +5761,13 @@ _kb_knowledge_reindex_one() {
             estatus=$(_kb_knowledge_yaml_field "$ef" "status")
             # Pull summary from frontmatter, or fall back to first non-blank body line
             esummary=$(_kb_knowledge_yaml_field "$ef" "summary")
+            # XACA-0994-003: scaffold placeholder text in a frontmatter summary counts as absent.
+            _kb_knowledge_has_stub_text "$esummary" && esummary=""
             if [[ -z "$esummary" ]]; then
-                esummary=$(awk '/^---$/{count++; next} count>=2 && /^[^#[:space:]]/{print; exit}' "$ef" 2>/dev/null | head -1)
+                esummary=$(awk '/^---$/{count++; next} count>=2 { if (in_cmt) { if ($0 ~ /-->/) in_cmt=0; next } if ($0 ~ /^<!--/) { if ($0 !~ /-->/) in_cmt=1; next } if ($0 ~ /^[^#[:space:]]/) { print; exit } }' "$ef" 2>/dev/null | head -1)
             fi
+            # XACA-0994-003: body fallback may be unwrapped stub prose; never publish it.
+            _kb_knowledge_has_stub_text "$esummary" && esummary=""
             [[ -z "$esummary" ]] && esummary="*(add one-sentence summary)*"
 
             display_eid="${eid[1]:u}${eid:1}"
@@ -7128,6 +7189,18 @@ kb-knowledge-add() {
     if [[ ! -d "$target_dir" ]]; then
         echo "Creating directory: $target_dir"
         mkdir -p "$target_dir"
+    fi
+
+    # XACA-0994-012: a title that already starts with the entry id ("K027: foo")
+    # was slugified AND re-prefixed into the H1, yielding k027-k027-foo.md,
+    # `id: k027-k027-foo` and "# K027: K027: foo" (Bandwear XBWA-0122 retro).
+    # Strip the leading id from the raw title BEFORE the slug and the H1 are
+    # derived; the allocator mints the one real id.
+    local _kb_add_title_stripped
+    _kb_add_title_stripped=$(_kb_knowledge_strip_id_prefix "$title_raw" "$prefix")
+    if [[ "$_kb_add_title_stripped" != "$title_raw" ]]; then
+        echo "Note: dropped leading id prefix from title ('${title_raw}' -> '${_kb_add_title_stripped}'); the id is allocated automatically." >&2
+        title_raw="$_kb_add_title_stripped"
     fi
 
     # Compute the title slug up front — it is title-derived and independent of
@@ -8925,6 +8998,7 @@ kb-knowledge-validate() {
     # for a file that raised an error THIS iteration, instead of unconditionally
     # reporting every examined file as passed regardless of what it just failed.
     local file_had_error
+    local x_h1 x_p x_stub x_stale x_stale_n x_stale_first   # XACA-0994
     local -a entry_files index_ids
 
     # XACA-0991-003: --changed / --file scoping. _kb_val_scope_files is the set
@@ -9759,6 +9833,41 @@ kb-knowledge-validate() {
                 fi
             done
 
+            # XACA-0994-013: WARN-only hygiene checks (never FAIL — existing trees
+            # carry these today and validate's exit code must not flip).
+            # (a) doubled id prefix in the filename / id: / H1 — the signature of
+            #     the pre-XACA-0994-012 kb-knowledge-add title bug.
+            _kb_knowledge_doubled_id "$fname" && \
+                _kb_val_warn "Doubled id prefix in filename ${fname}.md (${ef}) — rename the file and fix id:/H1"
+            if [[ "$has_id" -gt 0 ]] && _kb_knowledge_doubled_id "$file_id"; then
+                _kb_val_warn "Doubled id prefix in id: field '${file_id}' (${ef})"
+            fi
+            if (( _kb_val_fast )); then
+                x_h1=$'\n'"$_kb_val_c"
+                if [[ $x_h1 == *$'\n'"# "* ]]; then
+                    x_h1=${x_h1#*$'\n'"# "}; x_h1=${x_h1%%$'\n'*}
+                else
+                    x_h1=""
+                fi
+            else
+                x_h1=$(grep -m1 '^# ' "$ef" 2>/dev/null); x_h1=${x_h1#\# }
+            fi
+            _kb_knowledge_doubled_h1 "$x_h1" && \
+                _kb_val_warn "Doubled id prefix in H1 '# ${x_h1}' (${ef})"
+            # (b) scaffold placeholder text still in the body: the section was
+            #     never written (or the HTML comment was left in place).
+            x_stub=""
+            for x_p in "${_KB_KNOWLEDGE_STUB_PLACEHOLDERS[@]}"; do
+                if (( _kb_val_fast )); then
+                    [[ "$_kb_val_c" == *"$x_p"* ]] && x_stub="$x_p"
+                else
+                    grep -qF -- "$x_p" "$ef" 2>/dev/null && x_stub="$x_p"
+                fi
+                [[ -n "$x_stub" ]] && break
+            done
+            [[ -n "$x_stub" ]] && \
+                _kb_val_warn "Stub placeholder still in ${ef}: '${x_stub}' — write the section (and drop the comment), or the INDEX summary stays a stub"
+
             # XACA-0991-004 (Defect A): a file that raised one or more errors
             # this iteration must NOT also be reported/counted as passing — the
             # prior unconditional call printed "[OK] <file>" directly beneath
@@ -9773,6 +9882,25 @@ kb-knowledge-validate() {
                 _kb_val_pass "${ef:t}"   # XACA-1191: was $(basename "$ef"); exact for any *.md path
             fi
         done
+
+        # XACA-0994-011: stale-INDEX WARN. The tag list and summary in INDEX.md
+        # are frozen at the last reindex, so an entry written/edited after it is
+        # missing from (or mis-described in) the INDEX and Tag Index rows until
+        # someone reindexes (Bandwear XBWA-0122: reed K028 absent from 3 rows).
+        # mtime compare via zsh -nt (no fork); strictly newer only, so a same-
+        # second write by reindex itself never self-flags. WARN only; no
+        # auto-reindex here by design.
+        if [[ -f "$index_file" ]]; then
+            x_stale_n=0 x_stale_first=""
+            for x_stale in "${entry_files[@]}"; do
+                if [[ "$x_stale" -nt "$index_file" ]]; then
+                    (( x_stale_n++ ))
+                    [[ -n "$x_stale_first" ]] || x_stale_first="${x_stale:t}"
+                fi
+            done
+            (( x_stale_n > 0 )) && \
+                _kb_val_warn "Stale INDEX.md in ${val_dir}: older than ${x_stale_n} entry file(s) (e.g. ${x_stale_first}) — run: kb-knowledge-reindex --dir ${val_dir}"
+        fi
 
         # Orphan check: files in INDEX but not on disk (D3: idx_id already contains .md suffix)
         for idx_id in "${index_ids[@]}"; do
