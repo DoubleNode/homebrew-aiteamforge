@@ -2242,6 +2242,10 @@ _kb_get_main_branch() {
 # or omitted = the pre-XACA-1352 behaviour, unchanged.
 # Returns: 0 = success, 1 = failed but user chose to continue, 2 = user aborted
 # On failure, prompts user for confirmation before continuing
+# XACA-1372 contract: this is a DESTRUCTIVE hard reset to <remote>/<base>, meant only for a
+# FRESHLY CREATED worktree. It refuses (rc 2, no reset) when the tree is dirty or HEAD has
+# commits on no remote ref; on a TTY the user may confirm the discard (default No), without
+# a TTY it never proceeds. Existing worktrees must use _kb_sync_worktree_to_branch instead.
 _kb_reset_worktree() {
     local branch_override="${1-}"
     # Auto-detect remote name (first remote listed)
@@ -2306,12 +2310,37 @@ _kb_reset_worktree() {
         fi
     fi
 
-    # Warn about uncommitted changes that will be lost
-    local dirty_files
+    # XACA-1372: refuse to destroy local work. A dirty tree, or commits reachable from no
+    # remote ref (unpushed), would be lost by the hard reset below. Non-TTY = refuse (rc 2);
+    # TTY = explicit confirmation, default No. A freshly created worktree (cut from
+    # <remote>/<base>) is clean and remote-reachable, so it passes without a prompt.
+    local dirty_files unpushed_commits
     dirty_files=$(git status --porcelain 2>/dev/null)
-    if [[ -n "$dirty_files" ]]; then
-        echo "⚠️  Warning: Uncommitted changes will be lost:" >&2
-        echo "$dirty_files" | sed 's/^/   /' >&2
+    unpushed_commits=""
+    if [[ -n "$(git rev-list HEAD --not --remotes 2>/dev/null | head -1)" ]]; then
+        unpushed_commits=$(git log --oneline HEAD --not --remotes 2>/dev/null)
+    fi
+    if [[ -n "$dirty_files" ]] || [[ -n "$unpushed_commits" ]]; then
+        echo "" >&2
+        echo "⛔ Refusing to reset: this worktree has work that exists nowhere else." >&2
+        if [[ -n "$dirty_files" ]]; then
+            echo "   Uncommitted changes:" >&2
+            echo "$dirty_files" | sed 's/^/     /' >&2
+        fi
+        if [[ -n "$unpushed_commits" ]]; then
+            echo "   Commits not on any remote ref:" >&2
+            echo "$unpushed_commits" | sed 's/^/     /' >&2
+        fi
+        local discard_confirm="n"
+        if (exec < /dev/tty) 2>/dev/null; then
+            echo -n "   Discard these and reset anyway? [y/N] " >&2
+            read -r discard_confirm < /dev/tty
+        fi
+        if [[ ! "$discard_confirm" =~ ^[Yy]$ ]]; then
+            echo "   Aborting; nothing was reset." >&2
+            echo "─────────────────────────────────────"
+            return 2
+        fi
     fi
 
     # Hard-reset current branch to remote main branch
@@ -2429,6 +2458,89 @@ _kb_umbrella_sub_repos() {
         local d_path="${d%/}"
         [[ -d "$d_path/.git" ]] && basename "$d_path"
     done
+}
+
+# Sync an EXISTING worktree to its OWN remote branch, fast-forward only (XACA-1372)
+# Usage: _kb_sync_worktree_to_branch [branch]   (default: current branch)
+# Never resets and never discards: local-ahead and unpushed work is left untouched, a clean
+# behind-worktree is fast-forwarded, a dirty or diverged one is refused. Remote = first remote
+# (same detection as _kb_reset_worktree).
+# Returns: 0 = in sync / left untouched / fast-forwarded, 1 = soft (fetch failed; state unknown),
+#          2 = refused (detached HEAD, dirty tree while behind, diverged, or ff failed)
+_kb_sync_worktree_to_branch() {
+    local b="${1-}"
+    [[ -z "$b" ]] && b=$(git branch --show-current 2>/dev/null)
+    if [[ -z "$b" ]]; then
+        echo "❌ Error: detached HEAD; cannot sync a worktree with no branch." >&2
+        return 2
+    fi
+
+    local remote
+    remote=$(git remote 2>/dev/null | head -1)
+    if [[ -z "$remote" ]]; then
+        echo "⚠️  Warning: No git remote found, skipping worktree sync" >&2
+        return 1
+    fi
+
+    echo "─────────────────────────────────────"
+    echo "🔄 Syncing worktree with ${remote}/${b} (fast-forward only)..."
+
+    local fetch_output fetch_exit
+    fetch_output=$(git fetch -- "$remote" "+refs/heads/${b}:refs/remotes/${remote}/${b}" 2>&1)
+    fetch_exit=$?
+    if [[ $fetch_exit -ne 0 ]]; then
+        local ls_rc=0
+        git ls-remote --exit-code --heads "$remote" "$b" >/dev/null 2>&1 || ls_rc=$?
+        if [[ $ls_rc -eq 2 ]]; then
+            echo "ℹ️  Branch '${b}' not on remote yet; leaving local branch untouched."
+            echo "─────────────────────────────────────"
+            return 0
+        fi
+        [[ -n "$fetch_output" ]] && echo "$fetch_output" | sed 's/^/   /' >&2
+        echo "⚠️  Warning: Could not fetch ${remote}/${b}; worktree state unverified." >&2
+        echo "─────────────────────────────────────"
+        return 1
+    fi
+
+    local head_sha remote_sha
+    head_sha=$(git rev-parse HEAD 2>/dev/null)
+    remote_sha=$(git rev-parse "refs/remotes/${remote}/${b}" 2>/dev/null)
+
+    if [[ "$head_sha" == "$remote_sha" ]]; then
+        echo "✓ Worktree up to date with ${remote}/${b}"
+        echo "─────────────────────────────────────"
+        return 0
+    fi
+
+    if git merge-base --is-ancestor "$remote_sha" "$head_sha" 2>/dev/null; then
+        echo "ℹ️  Local ${b} is ahead of ${remote}/${b} (unpushed work); leaving untouched."
+        echo "─────────────────────────────────────"
+        return 0
+    fi
+
+    if git merge-base --is-ancestor "$head_sha" "$remote_sha" 2>/dev/null; then
+        if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
+            echo "⛔ ${b} is behind ${remote}/${b} but the tree has uncommitted changes; refusing to fast-forward." >&2
+            git status --porcelain 2>/dev/null | sed 's/^/     /' >&2
+            echo "─────────────────────────────────────"
+            return 2
+        fi
+        local ff_output
+        if ff_output=$(git merge --ff-only "${remote}/${b}" 2>&1); then
+            echo "✓ Fast-forwarded ${b} to ${remote}/${b}"
+            echo "─────────────────────────────────────"
+            return 0
+        fi
+        echo "$ff_output" | sed 's/^/   /' >&2
+        echo "❌ Error: fast-forward of ${b} to ${remote}/${b} failed" >&2
+        echo "─────────────────────────────────────"
+        return 2
+    fi
+
+    echo "⛔ ${b} has diverged from ${remote}/${b}: local ${head_sha} vs remote ${remote_sha}." >&2
+    echo "   Refusing to sync; reconcile by hand (merge or rebase)." >&2
+    echo "─────────────────────────────────────"
+    return 2
 }
 
 # Resolve the project root directory for worktree placement given a git root path.
@@ -14630,6 +14742,10 @@ _kb_resolve_run_team() {
 # break the frictionless-switch ergonomics. Only kb-run's create path (silent-reuse +
 # destructive-recreate branches) is gated. See feedback_pre_work_overlap_check + k501
 # sibling-heuristic-drift — three siblings get the same treatment, on purpose.
+# XACA-1372 contract: an EXISTING worktree (linked fast path or discovered) is only ever
+# fast-forwarded to its OWN remote branch via _kb_sync_worktree_to_branch (local-ahead work is
+# left untouched; dirty/diverged = rc 2). Only a worktree freshly CREATED here is hard-reset to
+# the base via _kb_reset_worktree, which itself refuses on a dirty tree or unpushed commits.
 # Usage: _kb_switch_to_item_worktree <board_file> <index> <item_id> [cmd_name]
 # Expects caller-scope variables from _kb_display_item_box: item_worktree, item_worktree_branch, title
 # Returns (XACA-1151-068 contract -- every caller MUST honour it):
@@ -14638,7 +14754,7 @@ _kb_resolve_run_team() {
 #      directory" / "Worktree creation failed. Staying in current directory"); the
 #      caller MAY continue and launch in the current directory (kb-run parity)
 #   2  HARD refusal: invalid subRepo, no-git-context refused/aborted, cd into the
-#      worktree failed, or the user aborted the reset; the caller MUST NOT launch
+#      worktree failed, or the sync/reset was refused; the caller MUST NOT launch
 #      (return non-zero before cc). A blanket `|| return 1` is wrong: it would turn
 #      the two soft paths into refusals.
 _kb_switch_to_item_worktree() {
@@ -14672,13 +14788,14 @@ _kb_switch_to_item_worktree() {
                 echo "Error: Failed to cd into worktree: $item_worktree"
                 return 2
             }
-            local reset_rc=0
-            _kb_reset_worktree "$release_branch" || reset_rc=$?
-            if [[ $reset_rc -eq 2 ]]; then
-                echo "⛔ Worktree operation aborted by user." >&2
+            # XACA-1372: EXISTING worktree = fast-forward to its OWN remote branch, never a reset.
+            local sync_rc=0
+            _kb_sync_worktree_to_branch || sync_rc=$?
+            if [[ $sync_rc -eq 2 ]]; then
+                echo "⛔ Worktree sync aborted; the worktree was left as-is." >&2
                 return 2
-            elif [[ $reset_rc -eq 1 ]]; then
-                echo "⚠️  Worktree reset failed. Worktree may not be on latest code." >&2
+            elif [[ $sync_rc -eq 1 ]]; then
+                echo "⚠️  Worktree sync failed. Worktree may not be on latest code." >&2
             fi
             return 0
         fi
@@ -14717,13 +14834,14 @@ _kb_switch_to_item_worktree() {
         item_worktree="$discovered"
         item_worktree_branch="$wt_branch"
 
-        local reset_rc=0
-        _kb_reset_worktree "$release_branch" || reset_rc=$?
-        if [[ $reset_rc -eq 2 ]]; then
-            echo "⛔ Worktree operation aborted by user." >&2
+        # XACA-1372: discovered (EXISTING) worktree = fast-forward only, never a reset.
+        local sync_rc=0
+        _kb_sync_worktree_to_branch || sync_rc=$?
+        if [[ $sync_rc -eq 2 ]]; then
+            echo "⛔ Worktree sync aborted; the worktree was left as-is." >&2
             return 2
-        elif [[ $reset_rc -eq 1 ]]; then
-            echo "⚠️  Worktree reset failed. Worktree may not be on latest code." >&2
+        elif [[ $sync_rc -eq 1 ]]; then
+            echo "⚠️  Worktree sync failed. Worktree may not be on latest code." >&2
         fi
         return 0
     fi
@@ -15135,6 +15253,38 @@ _kb_gate_resolve_pr() {
     echo "$repo $pr"
 }
 
+# Usage: _kb_require_pr_head <pr_number> [owner/repo]
+# XACA-1372 gate-launch precondition: the session about to be launched must be looking at the
+# PR's CURRENT head. Compares `gh pr view --json headRefOid` with this directory's HEAD.
+# rc 0 = equal; rc 2 = mismatch OR the PR head could not be read (fail closed -- a gate run
+# against the wrong tree is a false verdict, so an unverifiable head refuses too).
+_kb_require_pr_head() {
+    local pr="${1-}" repo="${2-}"
+    local pr_head="" local_head="" gh_rc=0
+    if ! [[ "$pr" =~ ^[0-9]+$ ]]; then
+        echo "❌ _kb_require_pr_head: invalid PR number '${pr}'" >&2
+        return 2
+    fi
+    if [[ -n "$repo" ]]; then
+        pr_head=$(gh pr view "$pr" --repo "$repo" --json headRefOid --jq '.headRefOid' 2>/dev/null) || gh_rc=$?
+    else
+        pr_head=$(gh pr view "$pr" --json headRefOid --jq '.headRefOid' 2>/dev/null) || gh_rc=$?
+    fi
+    if (( gh_rc != 0 )) || [[ -z "$pr_head" ]]; then
+        echo "⛔ Cannot verify PR #${pr} head (gh failed or returned nothing); refusing to launch the gate." >&2
+        return 2
+    fi
+    local_head=$(git rev-parse HEAD 2>/dev/null)
+    if [[ "$local_head" == "$pr_head" ]]; then
+        return 0
+    fi
+    echo "⛔ This worktree is not at PR #${pr}'s head; a gate run here would judge the wrong code." >&2
+    echo "   worktree HEAD: ${local_head:-unknown}" >&2
+    echo "   PR #${pr} head: ${pr_head}" >&2
+    echo "   Fix: git fetch && git merge --ff-only <remote>/<pr-branch>   (or push your unpushed commits first)" >&2
+    return 2
+}
+
 # Usage: _kb_gate_postcondition <launcher> <gate> <item_id> <branch> <launch_epoch> <board_file> <index>
 # Called by each gate launcher AFTER cc returned 0. rc 0 = verdict landed; non-zero = it did
 # not (or could not be verified), with a loud actionable message. Always returns the verdict
@@ -15401,6 +15551,17 @@ kb-run-review() {
             return 1
         fi
     fi
+
+    # XACA-1372: gates judge a PR HEAD. Resolve this item's PR and refuse (rc 2) unless this
+    # worktree is AT that head. Runs after the worktree switch, before any session spawn;
+    # --yes only skips the confirmation prompt, never this check.
+    local _kb_prh_rp="" _kb_prh_rc=0
+    _kb_prh_rp=$(_kb_gate_resolve_pr "$item_id" "$item_worktree_branch") || _kb_prh_rc=$?
+    if (( _kb_prh_rc != 0 )) || [[ "$_kb_prh_rp" != */* ]]; then
+        echo "⛔ kb-run-review: no PR linked to $item_id; gates run against a PR head. Open the PR first (kb-pr)." >&2
+        return 2
+    fi
+    _kb_require_pr_head "${_kb_prh_rp##* }" "${_kb_prh_rp%% *}" || return 2
 
     # Build the review prompt using shared helper
     local prompt
@@ -15789,6 +15950,17 @@ kb-run-test() {
             return 1
         fi
     fi
+
+    # XACA-1372: gates judge a PR HEAD. Resolve this item's PR and refuse (rc 2) unless this
+    # worktree is AT that head. Runs after the worktree switch, before any session spawn;
+    # --yes only skips the confirmation prompt, never this check.
+    local _kb_prh_rp="" _kb_prh_rc=0
+    _kb_prh_rp=$(_kb_gate_resolve_pr "$item_id" "$item_worktree_branch") || _kb_prh_rc=$?
+    if (( _kb_prh_rc != 0 )) || [[ "$_kb_prh_rp" != */* ]]; then
+        echo "⛔ kb-run-test: no PR linked to $item_id; gates run against a PR head. Open the PR first (kb-pr)." >&2
+        return 2
+    fi
+    _kb_require_pr_head "${_kb_prh_rp##* }" "${_kb_prh_rp%% *}" || return 2
 
     # Build the test prompt using shared helper
     local prompt
