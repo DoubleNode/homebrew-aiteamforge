@@ -2726,8 +2726,25 @@ _kb_create_item_worktree() {
         start_ref="${start_remote}/${start_branch}"
         echo "  Base: ${start_ref} (release branch)" >&2
     fi
+    # XACA-1372 r2: branch absent locally but present on the remote -> create the worktree FROM the
+    # remote branch. Cutting a fresh branch from HEAD/start_ref would diverge from the pushed work and
+    # _kb_prepare_fresh_worktree would then (correctly) refuse. Any probe/fetch failure falls through
+    # to the pre-existing behaviour unchanged (the later sync handles it non-destructively).
+    local remote_ref=""
+    if ! git show-ref --verify --quiet "refs/heads/${branch_name}" 2>/dev/null; then
+        local rb_remote
+        rb_remote=$(git remote 2>/dev/null | head -1)
+        if [[ -n "$rb_remote" ]] \
+            && git ls-remote --exit-code --heads -- "$rb_remote" "refs/heads/${branch_name}" >/dev/null 2>&1 \
+            && git fetch -- "$rb_remote" "+refs/heads/${branch_name}:refs/remotes/${rb_remote}/${branch_name}" >/dev/null 2>&1; then
+            remote_ref="${rb_remote}/${branch_name}"
+            echo "  Branch exists on ${rb_remote}, creating worktree from it..." >&2
+        fi
+    fi
     # Try to create with new branch first
-    if [[ -n "$start_ref" ]]; then
+    if [[ -n "$remote_ref" ]]; then
+        git_error=$(git worktree add -b "$branch_name" "$worktree_dir" "$remote_ref" 2>&1)
+    elif [[ -n "$start_ref" ]]; then
         git_error=$(git worktree add --no-track -b "$branch_name" "$worktree_dir" "$start_ref" 2>&1)
     else
         git_error=$(git worktree add -b "$branch_name" "$worktree_dir" 2>&1)
@@ -14004,7 +14021,7 @@ kb-run() {
             local reset_rc=0
             _kb_prepare_fresh_worktree "$release_branch" || reset_rc=$?
             if [[ $reset_rc -eq 2 ]]; then
-                echo "⛔ Worktree operation aborted by user." >&2
+                echo "⛔ Worktree preparation refused (see above); nothing was launched." >&2
                 return 1
             elif [[ $reset_rc -eq 1 ]]; then
                 echo "⚠️  Worktree reset failed. Worktree may not be on latest code." >&2
@@ -14949,7 +14966,7 @@ _kb_switch_to_item_worktree() {
             local reset_rc=0
             _kb_prepare_fresh_worktree "$release_branch" || reset_rc=$?
             if [[ $reset_rc -eq 2 ]]; then
-                echo "⛔ Worktree operation aborted by user." >&2
+                echo "⛔ Worktree preparation refused (see above); nothing was launched." >&2
                 return 2
             elif [[ $reset_rc -eq 1 ]]; then
                 echo "⚠️  Worktree reset failed. Worktree may not be on latest code." >&2
