@@ -307,6 +307,11 @@ def ensure_worktree(release, repo_dir, worktree_dir, *, run=subprocess.run, boar
     remote-tracking ref). -> (path, "attached"|"created"). Never defaults to develop and never switches branches."""
     branch = release.get("branch")
     if not isinstance(branch, str) or not branch.strip() or branch.startswith("-"):
+        if release_branches.is_trunk_planned(release, board):   # XACA-1528: no "uses develop ... refusing develop"
+            raise RunnerError("release %s has no branch recorded: a PLANNED release has none. In trunk mode the DEV "
+                              "promote records the integration branch %s as the release branch (nothing is cut); "
+                              "this session will not attach to it before then. Promote to DEV first."
+                              % (release.get("id"), release_branches.integration_branch_name(board)))
         raise RunnerError("release %s has no branch recorded: a PLANNED release has none (the DEV promote %s). "
                           "Refusing to fall back to %s; promote to DEV first."
                           % (release.get("id"), release_branches.planned_branch_label(release, board),

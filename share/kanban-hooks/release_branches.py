@@ -275,6 +275,16 @@ def planned_branch_label(release, board):
     return "cuts %s%s" % (prefix, ver)
 
 
+def is_trunk_planned(release, board):
+    """True iff the PLANNED->DEV promote for `release` uses the integration branch as the release branch (trunk mode,
+    nothing cut). Structural (reads _branch_spec, not the label text); never raises -- any failure is False (XACA-1528)."""
+    try:
+        cfg = effective_branches((board or {}).get("releaseConfig") if isinstance(board, dict) else None)
+        return _branch_spec(cfg, release_type(release))[1] is None
+    except (ValueError, RuntimeError):
+        return False
+
+
 def integration_branch_name(board):
     """The configured integration branch for messages, or a generic phrase when releaseConfig is malformed."""
     try:

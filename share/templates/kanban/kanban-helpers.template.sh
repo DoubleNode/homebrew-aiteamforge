@@ -28631,7 +28631,8 @@ _kb_release_run() {
             _pb_label=$(python3 "$_pb_cli" planned-branch --board "$_pb_bf" --release-id "$release_id" 2>/dev/null) || _pb_label=""
         fi
         [[ -n "$_pb_label" ]] || _pb_label="cuts the release branch"
-        echo "ℹ $release_id is $stage with no release branch yet: no worktree (the DEV promote $_pb_label)."
+        # XACA-1528: no outer parens -- the label may itself carry parens (trunk mode / refused), which nested as "((...))".
+        echo "ℹ $release_id is $stage with no release branch yet: no worktree; the DEV promote $_pb_label."
     fi
     # the plan the session starts from; with a worktree it also reads branch HEAD + the soak providers
     local plan_text
