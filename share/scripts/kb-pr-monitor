@@ -2341,7 +2341,9 @@ PR_FILTER_EOF
         if [ -z "$PR_HEAD_REF" ]; then
             verdict BLOCKED "cannot read PR #$PR_NUM head branch to check whether it is protected, so the default squash is refused; $_remedy"
         fi
-        PROT_OUT=$(_kbpm_helpers_run _kb_branch_protected "$PR_HEAD_REF")
+        # GH_REPO pins the classifier's `gh api repos/{owner}/{repo}` lookup to the
+        # PR's repo (--repo), not whatever repo the shell's cwd happens to be.
+        PROT_OUT=$(export GH_REPO="$REPO"; _kbpm_helpers_run _kb_branch_protected "$PR_HEAD_REF")
         PROT_RCPAIR=$(cat "$KBPM_RCFILE" 2>/dev/null)
         PROT_SOURCE_RC="${PROT_RCPAIR%% *}"
         PROT_CMD_RC="${PROT_RCPAIR##* }"
