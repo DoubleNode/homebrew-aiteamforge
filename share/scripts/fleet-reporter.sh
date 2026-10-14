@@ -9,7 +9,14 @@
 
 # Fleet Status Reporter
 # Collects tmux session data and reports to central monitoring server
-# Run via cron every 60 seconds: * * * * * ~/dev-team/fleet-monitor/client/fleet-reporter.sh
+# Run every 60 seconds from a LaunchAgent (a login-session job).
+#   - tap consumers: com.aiteamforge.fleet-reporter (install-fleet-monitor.sh)
+#   - the M3Pro dev box: com.devteam.fleet-reporter (scripts/generate-launchagents.py)
+# Do NOT schedule it from cron on macOS (XACA-1098): cron has no user security
+# session, so the login Keychain is not in its search list and the cross-machine
+# kb-msg pull goes deaf (`security` exits 44 for an item that is present).
+# Linux hosts have no Keychain and may still use cron:
+#   * * * * * ~/dev-team/fleet-monitor/client/fleet-reporter.sh
 
 # Ensure PATH includes common locations (cron has minimal PATH)
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
@@ -2573,10 +2580,41 @@ _msg_default_machine_slug() {
 _msg_has_vault_key() {
     local slug="$1"
     MSG_VAULT_KEY_LOOKED_IN=""
+    MSG_VAULT_KEY_STORE_STATE="unknown"
+    MSG_VAULT_KEY_SEARCH_LIST=""
     [ -n "$slug" ] || return 1
     if [ "$(uname -s)" = "Darwin" ] && command -v security >/dev/null 2>&1; then
         MSG_VAULT_KEY_LOOKED_IN="macOS keychain service com.aiteamforge.vault, account '$slug'"
         security find-generic-password -s com.aiteamforge.vault -a "$slug" >/dev/null 2>&1 && return 0
+        # XACA-1098: the find failed. Ask a DIFFERENT question to learn whether
+        # the store was even reachable. Inline (not a helper) so the awk
+        # extraction in tests/bats/kb-msg-pull-status.bats keeps working.
+        #
+        # `security find-generic-password` exits 44 both for "no such item" and
+        # for "this process has no user security session, so the login keychain
+        # is not in its search list" (cron). The exit code cannot separate them.
+        # So: does the login keychain FILE exist, and does this process's
+        # EFFECTIVE search list (`security list-keychains`, no -d) contain it?
+        #   file exists + not in list -> "unreachable" (store is there, unseen)
+        #   file exists +     in list -> "reachable"   (the item really is absent)
+        #   no file / probe failed / empty list -> "unknown" (claim nothing more)
+        # MEASURED on M3Pro 2026-10-13 from a login-session shell: the effective
+        # list holds login.keychain-db while `-d dynamic` is empty, so only the
+        # effective list is used. The cron-side output was NOT measured by the
+        # author (a cron context cannot be built without editing the live
+        # crontab), so the list is recorded verbatim in the status file and the
+        # first cron tick after deploy evidences it. A wrong guess degrades to
+        # the old no-vault-key record, never to a confident false claim.
+        local _kc_list="" _kc_rc=0 _kc_login="$HOME/Library/Keychains/login.keychain-db"
+        _kc_list=$(security list-keychains 2>/dev/null) || _kc_rc=$?
+        MSG_VAULT_KEY_SEARCH_LIST=$(printf '%s' "$_kc_list" | tr -d '"' | sed 's/^[[:space:]]*//' | tr '\n' ',' | sed 's/,$//')
+        if { [ -f "$_kc_login" ] || [ -f "${_kc_login%-db}" ]; } && [ "$_kc_rc" -eq 0 ] && [ -n "$_kc_list" ]; then
+            if printf '%s' "$_kc_list" | grep -q 'login\.keychain'; then
+                MSG_VAULT_KEY_STORE_STATE="reachable"
+            else
+                MSG_VAULT_KEY_STORE_STATE="unreachable"
+            fi
+        fi
     fi
     if [ -n "$MSG_VAULT_KEY_LOOKED_IN" ]; then
         MSG_VAULT_KEY_LOOKED_IN="$MSG_VAULT_KEY_LOOKED_IN; and $HOME/.aiteamforge/vault/${slug}.key"
@@ -2771,7 +2809,18 @@ pull_messages() {
     local machine_slug
     machine_slug=$(_msg_default_machine_slug)
     _msg_has_vault_key "$machine_slug" || {
-        _msg_record_skip "no-vault-key: no vault private key for machine '$machine_slug' visible to this process (checked: ${MSG_VAULT_KEY_LOOKED_IN:-unknown locations})"
+        # XACA-1098: two prefixes, because two different facts.
+        # `no-keychain-session:` = the login keychain exists but is not in THIS
+        # process's search list, so the lookup could not have succeeded (fix:
+        # schedule from a LaunchAgent). `no-vault-key:` = the store was reachable
+        # (or reachability is unknown) and the item was not found. Both quote
+        # `machine '<slug>'` identically; kanban-helpers.sh's
+        # _kb_msg_recorded_slug depends on that.
+        if [ "${MSG_VAULT_KEY_STORE_STATE:-unknown}" = "unreachable" ]; then
+            _msg_record_skip "no-keychain-session: the login keychain exists but is not in this process's keychain search list (no user security session - cron-style scheduler), so the vault key for machine '$machine_slug' could not be looked up (effective search list: ${MSG_VAULT_KEY_SEARCH_LIST:-empty}; checked: ${MSG_VAULT_KEY_LOOKED_IN:-unknown locations})"
+        else
+            _msg_record_skip "no-vault-key: no vault private key for machine '$machine_slug' visible to this process (checked: ${MSG_VAULT_KEY_LOOKED_IN:-unknown locations}${MSG_VAULT_KEY_SEARCH_LIST:+; effective keychain search list: $MSG_VAULT_KEY_SEARCH_LIST; store reachability: ${MSG_VAULT_KEY_STORE_STATE:-unknown}})"
+        fi
         return 0
     }
 

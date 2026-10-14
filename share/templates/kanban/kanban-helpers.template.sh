@@ -30408,7 +30408,17 @@ print(len(d) if isinstance(d, dict) else "notdict")' "$map_path" 2>/dev/null)
             gaps=$((gaps + 1))
         elif [[ "$state" == ok:* ]]; then
             _kb_msg_row "[ok]" "receive path" "relay reached $(( age_s / 60 ))m ago"
-        elif [[ "$state" == no-vault-key:* ]]; then
+        elif [[ "$state" == no-vault-key:* || "$state" == no-keychain-session:* ]]; then
+            # ── XACA-1098: `no-keychain-session:` joins this branch ─────────
+            # The reporter now writes that prefix when its OWN probe found the
+            # login keychain present but absent from its keychain search list
+            # (a cron-style context with no user security session). It is the
+            # same condition this branch already diagnoses by re-running the
+            # predicate interactively, so it takes the SAME path and the same
+            # present/absent/stale/slug-mismatch handling. Classified [GAP]
+            # (operator-actionable: move the reporter to a LaunchAgent), never
+            # the generic "skipping: <state>" catch-all below, which would
+            # reprint the record with no remedy.
             # ── XACA-1090: diagnose, do not parrot ──────────────────────────
             #
             # The reporter can only record WHAT it failed to find. It structurally
@@ -30550,9 +30560,15 @@ print(len(d) if isinstance(d, dict) else "notdict")' "$map_path" 2>/dev/null)
                     _kb_msg_cont "record written $(_kb_msg_ago "$age_s"); the credential's creation time could not be"
                     _kb_msg_cont "read here, so a record that simply predates it is not ruled out"
                 fi
-                _kb_msg_cont "fix: run the reporter from your login session — the rest of the"
-                _kb_msg_cont "     fleet does, and reports ok — or use the file-backed fallback"
-                _kb_msg_cont "     under ~/.aiteamforge/vault/, readable from any context"
+                # XACA-1098: the file-backed fallback is no longer offered. It
+                # puts a private key on disk and was REJECTED as the remedy; the
+                # dev box now has a sanctioned LaunchAgent (com.devteam.*, NOT
+                # the prohibited com.aiteamforge.* namespace) for this.
+                _kb_msg_cont "fix: run the reporter from your login session (a LaunchAgent), not cron —"
+                _kb_msg_cont "     the rest of the fleet does, and reports ok. Dev box: from the main"
+                _kb_msg_cont "     repo run  python3 scripts/generate-launchagents.py --install  (adds"
+                _kb_msg_cont "     com.devteam.fleet-reporter), then delete the fleet-reporter line"
+                _kb_msg_cont "     from  crontab -e. Tap consumer: com.aiteamforge.fleet-reporter."
                 gaps=$((gaps + 1))
                 fi
             else
