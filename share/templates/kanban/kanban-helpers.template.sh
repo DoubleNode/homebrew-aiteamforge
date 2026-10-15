@@ -14799,6 +14799,25 @@ _kb_resolve_run_team() {
     return 1
 }
 
+# XACA-1372-022: the caller is ALREADY in the item's correct worktree (no switch ran), so nothing
+# synced it. After kb-pr-monitor's RESPAWN_BOTH (`gh pr update-branch`) the remote branch moved and
+# this tree is behind; _kb_require_pr_head would then refuse until someone ff-pulled by hand.
+# Same rc handling as the linked/discovered existing-worktree sites in _kb_switch_to_item_worktree:
+# fast-forward only (never a reset; local-ahead untouched), rc 2 = refused (dirty-behind/diverged/
+# detached) -> return 2 so the launcher does not launch; rc 1 = soft warning, continue (the PR-head
+# check still guards). Returns 0 or 2.
+_kb_sync_current_worktree() {
+    local sync_rc=0
+    _kb_sync_worktree_to_branch || sync_rc=$?
+    if [[ $sync_rc -eq 2 ]]; then
+        echo "⛔ Worktree sync aborted; the worktree was left as-is." >&2
+        return 2
+    elif [[ $sync_rc -eq 1 ]]; then
+        echo "⚠️  Worktree sync failed. Worktree may not be on latest code." >&2
+    fi
+    return 0
+}
+
 # Internal helper: Attempt to switch to an item's worktree with fallback discovery
 # If item_worktree is set and valid, uses it directly.
 # If not, runs _kb_discover_worktree and optionally backlinks to the kanban item.
@@ -14814,6 +14833,8 @@ _kb_resolve_run_team() {
 # left untouched; dirty/diverged = rc 2). Only a worktree freshly CREATED here is hard-reset to
 # the base via _kb_prepare_fresh_worktree -> _kb_reset_worktree (which itself refuses on a dirty
 # tree or unpushed commits); a fresh worktree that merely ATTACHED a pushed branch is synced.
+# XACA-1372-022: a launcher already IN the item's worktree never reaches this function; it calls
+# _kb_sync_current_worktree (same ff-only sync, same rc handling) instead, so a post-update-branch tree is current.
 # Usage: _kb_switch_to_item_worktree <board_file> <index> <item_id> [cmd_name]
 # Expects caller-scope variables from _kb_display_item_box: item_worktree, item_worktree_branch, title
 # Returns (XACA-1151-068 contract -- every caller MUST honour it):
@@ -15636,6 +15657,10 @@ kb-run-review() {
         if [[ $_kb_switch_rc -eq 2 ]]; then
             return 1
         fi
+    else
+        # XACA-1372-022: already in the item's worktree -- ff-sync it before the PR-head check
+        # (a RESPAWN_BOTH `gh pr update-branch` moves the remote branch under us). rc 2 = refuse.
+        _kb_sync_current_worktree || return 1
     fi
 
     # XACA-1372: gates judge a PR HEAD. Resolve this item's PR and refuse (rc 2) unless this
@@ -16035,6 +16060,10 @@ kb-run-test() {
         if [[ $_kb_switch_rc -eq 2 ]]; then
             return 1
         fi
+    else
+        # XACA-1372-022: already in the item's worktree -- ff-sync it before the PR-head check
+        # (a RESPAWN_BOTH `gh pr update-branch` moves the remote branch under us). rc 2 = refuse.
+        _kb_sync_current_worktree || return 1
     fi
 
     # XACA-1372: gates judge a PR HEAD. Resolve this item's PR and refuse (rc 2) unless this
@@ -16452,6 +16481,10 @@ kb-run-debug() {
         if [[ $_kb_switch_rc -eq 2 ]]; then
             return 1
         fi
+    else
+        # XACA-1372-022: already in the item's worktree -- ff-sync it before the PR-head check
+        # (a RESPAWN_BOTH `gh pr update-branch` moves the remote branch under us). rc 2 = refuse.
+        _kb_sync_current_worktree || return 1
     fi
 
     # Re-read subitem count/list AFTER the possible reopen above (XACA-0801): reopen only
