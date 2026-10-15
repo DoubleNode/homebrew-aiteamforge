@@ -5316,9 +5316,12 @@ kb-merge() {
     fi
 
     # Look for the worktree-lock signature. The gh CLI surfaces git's stderr here.
-    # Git emits variants: "is already used by worktree at PATH" (lock-file path)
-    # and "is already checked out at PATH" (branch-delete path on newer git).
-    if echo "$out" | grep -qE 'is already (used by|checked out)'; then
+    # Git emits variants: "is already used by worktree at PATH" (lock-file path),
+    # "is already checked out at PATH" (branch-delete path on newer git), and, on current
+    # git, the local branch-delete wording (XACA-1372-013, seen on PR #1002):
+    #   failed to delete local branch feature/x: cannot delete branch 'feature/x' used by worktree at '/tmp/wt'
+    # Only these lock wordings trigger the fallback; any other failure still surfaces below.
+    if echo "$out" | grep -qE "is already (used by|checked out)|used by worktree at"; then
         # API merge already succeeded; we just need to delete the remote branch.
         local branch remote
         if [[ "$keep_branch" -eq 1 ]]; then
