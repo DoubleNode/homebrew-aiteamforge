@@ -225,3 +225,15 @@ test('formatBackupDisplayName: client segment is dropped, 2-segment ids keep wor
     assert.equal(f('academy'), 'ACADEMY');
     assert.equal(f('legal-coparenting'), 'LEGAL-COPARENTING');
 });
+
+test('dashboard avatar division key drops the client segment like server.js resolveDivisionKey', { skip: FLEET_SKIP }, function () {
+    var src = fs.readFileSync(DASH_JS, 'utf8');
+    var block = slice(src, "if (session.division === 'freelance' && session.project) {", '} else if', 'divisionForAvatar');
+    assert.ok(!/session\.project\.replace\(/.test(block), 'divisionForAvatar must not strip one hardcoded client prefix');
+    var ctx = run('var out = (function (session) { var divisionForAvatar; ' + block + '} return divisionForAvatar; })(input);',
+        { input: { division: 'freelance', project: 'acme-starwords' } });
+    assert.equal(ctx.out, 'freelance-starwords');
+    ctx = run('var out = (function (session) { var divisionForAvatar; ' + block + '} return divisionForAvatar; })(input);',
+        { input: { division: 'freelance', project: 'starwords' } });
+    assert.equal(ctx.out, 'freelance-starwords');
+});

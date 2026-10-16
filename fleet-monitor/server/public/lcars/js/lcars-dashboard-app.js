@@ -1676,7 +1676,10 @@
         // Build division key that includes project for multi-project divisions
         var divisionForAvatar = session.division;
         if (session.division === 'freelance' && session.project) {
-            divisionForAvatar = 'freelance-' + session.project.replace('doublenode-', '');
+            // XACA-1337: drop the client segment of "<client>-<project>", matching
+            // server.js resolveDivisionKey (client-agnostic; no hardcoded client).
+            var fpDash = session.project.indexOf('-');
+            divisionForAvatar = 'freelance-' + (fpDash > 0 && fpDash < session.project.length - 1 ? session.project.slice(fpDash + 1) : session.project);
         } else if (session.project && (session.division === 'legal' || session.division === 'medical')) {
             divisionForAvatar = session.division + '-' + session.project;
         }
