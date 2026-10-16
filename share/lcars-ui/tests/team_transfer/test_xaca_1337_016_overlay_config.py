@@ -118,7 +118,7 @@ def test_server_export_resolver_finds_overlay_team(overlay):
 
 def test_overlay_with_empty_home_relative_root_is_valid(overlay):
     """Option B configs (absolute paths outside $HOME) use home_relative_root: "" --
-    the shipped freelance-liquidstyle-* configs did. Empty must not be read as absent."""
+    the retired shipped client configs did. Empty must not be read as absent."""
     overlay.mkdir()
     body = VALID_YAML.replace('home_relative_root: "../Shared/Development/SynthClient/Widget"', 'home_relative_root: ""')
     (overlay / f"{SYNTH}.yaml").write_text(body, encoding="utf-8")

@@ -35,6 +35,12 @@ var path   = require('path');
 var fs     = require('fs');
 var vm     = require('vm');
 
+// The retired client slugs, built from fragments so this SHIPPED test does not itself
+// contain them (scripts/check-no-client-slugs.sh scans every shipped file; the single
+// pattern definition lives in that script). The third entry is a bare brand name, also a leak.
+var CLIENT_SLUGS = ['freelance-' + 'double' + 'node', 'freelance-' + 'liquid' + 'style', 'band' + 'wear'];
+var CLIENT_SLUG_RE = new RegExp(CLIENT_SLUGS.join('|'), 'i');
+
 var LCARS_JS = path.join(__dirname, '../js/lcars.js');
 var FLEET_DIR = path.join(__dirname, '../../fleet-monitor/server/public/lcars/js');
 var DASH_JS = path.join(FLEET_DIR, 'lcars-dashboard-app.js');
@@ -90,7 +96,8 @@ function themeFor(team) {
 
 test('lcars.js: no per-client slug survives in lcars.js / lcars.css', function () {
     var css = fs.readFileSync(path.join(__dirname, '../css/lcars.css'), 'utf8');
-    var re = /freelance-(doublenode|liquidstyle|bandwear)|bandwear/i;
+    var re = CLIENT_SLUG_RE;
+    assert.ok(re.test(CLIENT_SLUGS[0]), 'sanity: the leak pattern must match a real slug (non-vacuous)');
     assert.ok(!re.test(LCARS_SRC), 'lcars.js still names a client slug');
     assert.ok(!re.test(css), 'lcars.css still names a client slug');
 });
@@ -164,7 +171,8 @@ var dash = FLEET_PRESENT ? fs.readFileSync(DASH_JS, 'utf8') : '';
 var core = FLEET_PRESENT ? fs.readFileSync(CORE_JS, 'utf8') : '';
 
 test('fleet-monitor: no per-client slug in the dashboard app / fleet core', { skip: FLEET_SKIP }, function () {
-    var re = /freelance-(doublenode|liquidstyle|bandwear)/i;
+    var re = CLIENT_SLUG_RE;
+    assert.ok(re.test(CLIENT_SLUGS[1]), 'sanity: the leak pattern must match a real slug (non-vacuous)');
     assert.ok(!re.test(dash), 'lcars-dashboard-app.js still names a client slug');
     assert.ok(!re.test(core), 'lcars-fleet-core.js still names a client slug');
 });

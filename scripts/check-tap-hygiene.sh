@@ -15,7 +15,7 @@
 #
 #   3. Stale rebrand filenames — Any tracked filename containing "doublenode"
 #      (case-insensitive) outside the allow-list is a leftover from the DoubleNode
-#      rebrand (see XACA-0252). These files are dead weight and confuse the
+#      rebrand (see XACA-0252) or a shipped client team config (XACA-1337). These files are dead weight and confuse the
 #      debrand-guard content checks.
 #
 # Invoked from:
@@ -114,18 +114,17 @@ fi
 # Any tracked filename matching *doublenode* (case-insensitive) is a leftover
 # from the DoubleNode rebrand (XACA-0252). Check is filename-only, not content.
 #
-# Allow-list (two forms, both skipped):
-#   - REBRAND_ALLOWLIST     exact path: the bats test that references the term.
-#   - REBRAND_ALLOWLIST_DIR config dir for freelance CLIENT configs created by
-#     XACA-0521. Here "doublenode" is the CLIENT name (working dir
-#     /Users/Shared/Development/DoubleNode/...), parallel to freelance-liquidstyle-*,
-#     NOT rebrand debt. Renaming would break team_transfer identity +
-#     amb-session-map.json refs. Only DIRECT children matching freelance-*.yaml
-#     are excused (dirname guard) so a genuine rebrand leftover — whether
-#     elsewhere in the tree or nested under this dir — still fails. (XACA-0535)
+# Allow-list: ONLY REBRAND_ALLOWLIST (exact path: the bats test that references the
+# term). There is deliberately NO allowance for freelance client configs. XACA-0535
+# used to excuse direct children share/lcars-ui/team_transfer/config/freelance-*.yaml
+# on the argument that "doublenode" there is a CLIENT name, not rebrand debt - but that
+# legitimized SHIPPING the client roster. XACA-1337 moved client team configs to
+# per-machine overlays (~/.aiteamforge/team_transfer/config/) and removed the
+# allowance, so a freelance-<client>-*.yaml carrying that name now FAILS this check
+# like any other leftover. The repo-wide content ratchet is dev-team's
+# scripts/check-no-client-slugs.sh (XACA-1337-017).
 # ─────────────────────────────────────────────────────────────────────────────
 REBRAND_ALLOWLIST="tests/xaca-0139-debrand-guard.bats"
-REBRAND_ALLOWLIST_DIR="share/lcars-ui/team_transfer/config"
 
 stale_found=false
 while IFS= read -r tracked_file; do
@@ -133,25 +132,12 @@ while IFS= read -r tracked_file; do
   if [ "$tracked_file" = "$REBRAND_ALLOWLIST" ]; then
     continue
   fi
-  # Skip allow-listed freelance client configs — DIRECT children of the flat
-  # config dir only. The quoted dir + literal `freelance-*.yaml` glob matches
-  # the family; the dirname guard then rejects any nested path the glob's `*`
-  # would otherwise span (e.g. config/freelance-X/evil-doublenode.yaml stays a
-  # failure). Keeps the allow-list narrow to where 'doublenode' is the CLIENT
-  # name, not rebrand debt. (XACA-0535)
-  case "$tracked_file" in
-    "$REBRAND_ALLOWLIST_DIR"/freelance-*.yaml)
-      if [ "$(dirname "$tracked_file")" = "$REBRAND_ALLOWLIST_DIR" ]; then
-        continue
-      fi
-      ;;
-  esac
   fail "Stale rebrand filename: ${tracked_file} (tracked filename contains 'doublenode' — remove or rename)"
   stale_found=true
 done < <(git -C "$TAP_ROOT" ls-files | grep -iE 'doublenode' || true)
 
 if [ "$stale_found" = false ]; then
-  ok "No stale rebrand filenames found (allow-listed: ${REBRAND_ALLOWLIST}, ${REBRAND_ALLOWLIST_DIR}/freelance-*.yaml)"
+  ok "No stale rebrand filenames found (allow-listed: ${REBRAND_ALLOWLIST})"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────

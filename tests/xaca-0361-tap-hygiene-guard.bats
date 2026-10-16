@@ -109,71 +109,72 @@ teardown() {
   [[ "$output" =~ "foo-doublenode.html" ]]
 }
 
+
 # ─────────────────────────────────────────────────────────────────────────────
-# Test 5: Freelance client config matching 'doublenode' is allow-listed (XACA-0535)
-# freelance-<client>-*.yaml under team_transfer/config is the CLIENT name, not
-# rebrand debt — it must NOT trip Check 3. Regression guard for the false-positive
-# that forced a --no-verify bypass during XACA-0528.
+# Tests 5-8: the XACA-0535 allowlist is RETIRED (XACA-1337-017)
+#
+# XACA-0535 excused direct children share/lcars-ui/team_transfer/config/freelance-*.yaml
+# because "doublenode" there is a CLIENT name. That legitimized shipping the client
+# roster; client team configs now live in per-machine overlays and must never be in the
+# tap. These cases were INVERTED from "is allow-listed and passes" to "FAILS".
+#
+# The client slug is assembled at runtime (two adjacent quoted halves) so this SHIPPED
+# test file does not itself contain it - dev-team's scripts/check-no-client-slugs.sh
+# scans every tap-tracked file with zero tolerance.
 # ─────────────────────────────────────────────────────────────────────────────
-@test "xaca-0361: freelance client config (doublenode) is allow-listed and passes" {
-  # Add a tracked freelance client config whose name contains 'doublenode'
+CLIENT_SLUG="freelance-double""node"
+
+@test "xaca-1337: freelance client config (doublenode) now FAILS the guard (allowlist retired)" {
   mkdir -p "${FIXTURE_DIR}/share/lcars-ui/team_transfer/config"
-  printf 'team: freelance-doublenode-foo\n' \
-    > "${FIXTURE_DIR}/share/lcars-ui/team_transfer/config/freelance-doublenode-foo.yaml"
-  git -C "${FIXTURE_DIR}" add share/lcars-ui/team_transfer/config/freelance-doublenode-foo.yaml
+  printf 'team: x\n' > "${FIXTURE_DIR}/share/lcars-ui/team_transfer/config/${CLIENT_SLUG}-foo.yaml"
+  git -C "${FIXTURE_DIR}" add "share/lcars-ui/team_transfer/config/${CLIENT_SLUG}-foo.yaml"
   git -C "${FIXTURE_DIR}" commit -q -m "add freelance client config"
 
   run bash "${FIXTURE_DIR}/scripts/check-tap-hygiene.sh"
-  [ "$status" -eq 0 ]
-  [[ "$output" =~ "passed" ]]
-  # The allow-listed config must not appear as a failure
-  [[ ! "$output" =~ "Stale rebrand filename" ]]
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "Stale rebrand filename" ]]
+  [[ "$output" =~ "${CLIENT_SLUG}-foo.yaml" ]]
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Test 6: Allow-list stays narrow — a doublenode file OUTSIDE the freelance config
-# dir still fails even when a legit freelance config is also present.
-# ─────────────────────────────────────────────────────────────────────────────
-@test "xaca-0361: allow-list is narrow — doublenode file outside config dir still fails" {
+@test "xaca-1337: client config and a generic stale file are BOTH flagged" {
   mkdir -p "${FIXTURE_DIR}/share/lcars-ui/team_transfer/config"
-  printf 'team: freelance-doublenode-foo\n' \
-    > "${FIXTURE_DIR}/share/lcars-ui/team_transfer/config/freelance-doublenode-foo.yaml"
-  # A genuine rebrand leftover elsewhere must NOT be excused by the glob
+  printf 'team: x\n' > "${FIXTURE_DIR}/share/lcars-ui/team_transfer/config/${CLIENT_SLUG}-foo.yaml"
   mkdir -p "${FIXTURE_DIR}/fleet-monitor/legacy"
   touch "${FIXTURE_DIR}/fleet-monitor/legacy/bar-doublenode.js"
   git -C "${FIXTURE_DIR}" add \
-    share/lcars-ui/team_transfer/config/freelance-doublenode-foo.yaml \
+    "share/lcars-ui/team_transfer/config/${CLIENT_SLUG}-foo.yaml" \
     fleet-monitor/legacy/bar-doublenode.js
-  git -C "${FIXTURE_DIR}" commit -q -m "add freelance config + stale file"
+  git -C "${FIXTURE_DIR}" commit -q -m "add client config + stale file"
 
   run bash "${FIXTURE_DIR}/scripts/check-tap-hygiene.sh"
   [ "$status" -eq 1 ]
   [[ "$output" =~ "bar-doublenode.js" ]]
-  # The freelance config must NOT be among the flagged files
-  [[ ! "$output" =~ "freelance-doublenode-foo.yaml" ]]
+  [[ "$output" =~ "${CLIENT_SLUG}-foo.yaml" ]]
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Test 7: dirname guard — a NESTED path under the freelance config dir is NOT
-# excused. The allow-list glob's '*' would otherwise span '/'; the dirname guard
-# keeps the allow-list to direct children of the flat config dir. (XACA-0535)
-# ─────────────────────────────────────────────────────────────────────────────
-@test "xaca-0361: nested path under freelance config dir still fails (dirname guard)" {
-  # A direct-child freelance config (allow-listed) ...
+@test "xaca-1337: nested AND direct-child client configs under the config dir both fail" {
   mkdir -p "${FIXTURE_DIR}/share/lcars-ui/team_transfer/config/freelance-X"
-  printf 'team: freelance-doublenode-foo\n' \
-    > "${FIXTURE_DIR}/share/lcars-ui/team_transfer/config/freelance-doublenode-foo.yaml"
-  # ... and a NESTED doublenode file the bare glob would wrongly excuse
+  printf 'team: x\n' > "${FIXTURE_DIR}/share/lcars-ui/team_transfer/config/${CLIENT_SLUG}-foo.yaml"
   touch "${FIXTURE_DIR}/share/lcars-ui/team_transfer/config/freelance-X/evil-doublenode.yaml"
   git -C "${FIXTURE_DIR}" add \
-    share/lcars-ui/team_transfer/config/freelance-doublenode-foo.yaml \
+    "share/lcars-ui/team_transfer/config/${CLIENT_SLUG}-foo.yaml" \
     share/lcars-ui/team_transfer/config/freelance-X/evil-doublenode.yaml
   git -C "${FIXTURE_DIR}" commit -q -m "add direct + nested config"
 
   run bash "${FIXTURE_DIR}/scripts/check-tap-hygiene.sh"
   [ "$status" -eq 1 ]
-  # The nested file is flagged ...
   [[ "$output" =~ "freelance-X/evil-doublenode.yaml" ]]
-  # ... but the direct-child config is still excused
-  [[ ! "$output" =~ "freelance-doublenode-foo.yaml" ]]
+  [[ "$output" =~ "${CLIENT_SLUG}-foo.yaml" ]]
+}
+
+@test "xaca-1337: a generic (non-client) freelance config still passes; the pass message names no freelance allowance" {
+  mkdir -p "${FIXTURE_DIR}/share/lcars-ui/team_transfer/config"
+  printf 'team: freelance-acme-app\n' > "${FIXTURE_DIR}/share/lcars-ui/team_transfer/config/freelance-acme-app.yaml"
+  git -C "${FIXTURE_DIR}" add share/lcars-ui/team_transfer/config/freelance-acme-app.yaml
+  git -C "${FIXTURE_DIR}" commit -q -m "add generic freelance config"
+
+  run bash "${FIXTURE_DIR}/scripts/check-tap-hygiene.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "passed" ]]
+  [[ ! "$output" =~ "freelance-*.yaml" ]]
 }
