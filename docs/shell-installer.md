@@ -78,28 +78,15 @@ export AITEAMFORGE_STARDATE=true           # Enable stardate
 - DNS (LD): 11 agents
 - Generic: 6 standard agents
 
-### 5. Kanban Aliases
-**Location:** `share/templates/aliases/kanban-aliases.sh`
-**Installed to:** `$AITEAMFORGE_DIR/share/aliases/kanban-aliases.sh`
+### 5. Kanban Aliases (retired)
+`share/templates/aliases/kanban-aliases.sh` was retired in XACA-1337 and no longer
+ships. It was never installed by `install-shell.sh`, and the standalone fallback
+role it once played in `install-kanban.sh` / `aiteamforge-upgrade.sh` is gone.
 
-**Provides:**
-- `kb-list()` - List items
-- `kb-backlog()` - List backlog
-- `kb-add()` - Add item
-- `kb-update()` - Update item
-- `kb-move()` - Move item to status
-- `kb-start()` - Start working on item
-- `kb-done()` - Mark item done
-- `kb-view()` - View item details
-- `kb-search()` - Search items
-- `kb-stats()` - Show statistics
-- `kb-set-worktree()` - Set current item from worktree
-- `kb-pr()` - Mark item in review
-- `kb-merged()` - Mark item merged
-- `kb-team()` - Switch team context
-- `kb-help()` - Show help
-
-**Backend:** Calls Python kanban-manager.py for all operations
+The `kb-*` functions come from `kanban-helpers.sh`, rendered from
+`share/templates/kanban/kanban-helpers.template.sh` by `install-kanban.sh`
+(fresh install) and `aiteamforge-upgrade.sh` (upgrade), and sourced from
+`aiteamforge-env.sh`.
 
 ### 6. Worktree Aliases
 **Location:** `share/templates/aliases/worktree-aliases.sh`
@@ -254,10 +241,9 @@ rm -rf ~/test-aiteamforge
 | aiteamforge-env.sh | 70 | Environment loader |
 | aiteamforge-prompt.sh | 116 | Prompt config |
 | agent-aliases.sh | 211 | Agent switching |
-| kanban-aliases.sh | 244 | Kanban helpers |
 | worktree-aliases.sh | 293 | Worktree helpers |
 | secrets.env.template | 65 | Secrets template |
-| **Total** | **1,258** | |
+| **Total** | **1,014** | |
 
 ## Known Limitations
 

@@ -58,9 +58,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TAP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 UPGRADE_SH="$TAP_ROOT/libexec/commands/aiteamforge-upgrade.sh"
 REAL_TEMPLATE="$TAP_ROOT/share/templates/kanban/kanban-helpers.template.sh"
-REAL_ALIASES="$TAP_ROOT/share/templates/aliases/kanban-aliases.sh"
 
-for _need in "$UPGRADE_SH" "$REAL_TEMPLATE" "$REAL_ALIASES"; do
+for _need in "$UPGRADE_SH" "$REAL_TEMPLATE"; do
     if [ ! -f "$_need" ]; then
         echo "FATAL: required file not found: $_need" >&2
         echo "  This test must run from inside the homebrew-tap checkout." >&2
@@ -225,7 +224,6 @@ _build_framework_sandbox() {
     local dir="$1"
     mkdir -p "$dir/share/templates/kanban" "$dir/share/templates/aliases"
     cp "$REAL_TEMPLATE" "$dir/share/templates/kanban/kanban-helpers.template.sh"
-    cp "$REAL_ALIASES" "$dir/share/templates/aliases/kanban-aliases.sh"
 }
 
 # Runner: extracts update_shell_helpers (current file, or HEAD blob when

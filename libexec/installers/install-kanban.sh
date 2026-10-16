@@ -486,30 +486,23 @@ init_kanban_board() {
 
 # Install kanban-helpers.sh
 install_kanban_helpers() {
-    # XACA-1095: prefer the FULL kanban-helpers.template.sh (86-function parity
-    # target on canonical dev-team/kanban-helpers.sh; 61+ functions here,
+    # XACA-1095 / XACA-1337: render the FULL kanban-helpers.template.sh (86-function
+    # parity target on canonical dev-team/kanban-helpers.sh; 61+ functions here,
     # including kb-sweep/kb-epic/kb-release*/kb-run/kb-work/kb-pick/kb-recover
-    # — the whole PR-merge-gate and worktree-lifecycle family). Fall back to the
-    # tiny, standalone kanban-aliases.sh (20 functions; works without tmux/
-    # dev-team context) only if the full template is missing.
+    # — the whole PR-merge-gate and worktree-lifecycle family). It is the ONLY
+    # source: the tiny standalone kanban-aliases.sh fallback was retired in
+    # XACA-1337. If the template is missing we warn and skip (see below); we do
+    # not fall back to a reduced function surface.
     #
-    # Prior to XACA-1095 this preference was INVERTED — kanban-aliases.sh was
-    # preferred and the full template was the fallback. That was backwards: a
-    # real consumer install always has the full template available (it ships
-    # in the tap unconditionally), so the fallback branch was structurally
-    # unreachable in practice and every fresh install silently got the tiny
-    # 20-function surface instead of the real one. The very guard immediately
-    # below already knew this was wrong for a DEV checkout ("the sed-redirect
+    # History: before XACA-1095 the preference was inverted (the tiny aliases
+    # file won), so every fresh install silently got the reduced surface. The
+    # dev-checkout guard below already knew that was wrong ("the sed-redirect
     # would silently replace the full source-of-truth helpers with the tiny
     # aliases template, dropping kb-sweep/kb-merge and breaking PR merge
-    # gates") — that guard is a no-op on a real install ($AITEAMFORGE_DIR is
-    # never a git repo there), so real consumers got exactly the breakage the
-    # guard's own comment warned about. See XACA-1095 for the full investigation.
+    # gates"). See XACA-1095 for the full investigation.
     local template=""
     if [ -f "$INSTALL_ROOT/share/templates/kanban/kanban-helpers.template.sh" ]; then
         template="$INSTALL_ROOT/share/templates/kanban/kanban-helpers.template.sh"
-    elif [ -f "$INSTALL_ROOT/share/templates/aliases/kanban-aliases.sh" ]; then
-        template="$INSTALL_ROOT/share/templates/aliases/kanban-aliases.sh"
     fi
     local target="$AITEAMFORGE_DIR/kanban-helpers.sh"
 
@@ -557,11 +550,11 @@ install_kanban_helpers() {
     info "Installing kanban helper functions (from $(basename "$template"))"
 
     # Substitute placeholders in template.
-    # XACA-1095: kanban-helpers.template.sh (now the preferred source) uses
+    # XACA-1095: kanban-helpers.template.sh uses
     # {{SHARED_DEV_ROOT}} / {{ORG_NAME}} in live executable code (default
     # per-platform kanban-dir guesses for iOS/Android/Firebase-style teams —
-    # see _kb_get_kanban_dir's "well-known case arms"), unlike kanban-aliases.sh
-    # which never references either. Substituting only {{AITEAMFORGE_DIR}} (the
+    # see _kb_get_kanban_dir's "well-known case arms"). Substituting only
+    # {{AITEAMFORGE_DIR}} (the
     # pre-XACA-1095 behavior) left those two placeholders LITERALLY in the
     # rendered file whenever the full template was selected. Mirrors the same
     # three substitutions aiteamforge-upgrade.sh's update_shell_helpers already

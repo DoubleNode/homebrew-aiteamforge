@@ -29,25 +29,13 @@
 #      and its own summary are authoritative, and this file no longer prints
 #      a second, ownership-confused, always-zero one.
 #
-#   2. WRONG SHIPPED FILE. This test's ALIASES_PATH pointed only at
-#      share/templates/aliases/kanban-aliases.sh. XACA-1095 flipped both
-#      install_kanban_helpers() and update_shell_helpers() to PREFER
-#      share/templates/kanban/kanban-helpers.template.sh — a real consumer
-#      install/upgrade now receives the template, not kanban-aliases.sh,
-#      whenever the template is present (which is unconditional in a real
-#      tap payload). A drift test that only watched the fallback file was no
-#      longer covering what actually ships. Fixed by adding PART A below,
-#      which runs the full case set against the template FIRST (as the
-#      primary, ship-accurate target) — the pre-existing aliases coverage is
-#      kept as PART B, retained because: (a) kanban-aliases.sh is still a
-#      real shipped fallback (selected when the template is absent) and (b)
-#      several sibling tests (test-xaca-0649-kanban-dir-resolver.sh,
-#      test-kb-quarantine-stub.sh, test-xaca-0746/0770/0831/0819) already
-#      depend on kanban-aliases.sh directly for unrelated contracts, so this
-#      file dropping its own aliases coverage would silently narrow the only
-#      place kb-variance-in-the-fallback-file is exercised.
+#   2. SINGLE SHIPPED FILE (XACA-1337). This test once also covered
+#      share/templates/aliases/kanban-aliases.sh (PART B, the install/upgrade
+#      fallback). That file was RETIRED in XACA-1337; the template below is the
+#      sole tap kanban-helpers source, so PART B and ALIASES_PATH were removed.
+#      The FATAL guard below makes a missing template a hard failure.
 #
-# What this test pins for BOTH files:
+# What this test pins for the template:
 #   - the function is present and runnable in the shipped file
 #   - --json emits the spec §7 payload with deterministic, spec-anchored values
 #   - human / empty-state / --help paths render
@@ -55,18 +43,13 @@
 #   - (when reachable) the shipped copy's --json is byte-identical to the dev
 #     canonical, catching sibling-drift before it ships
 #
-# Runtime shell note: BOTH share/templates/kanban/kanban-helpers.template.sh
-# and share/templates/aliases/kanban-aliases.sh are zsh-only (`#!/bin/zsh`,
+# Runtime shell note: share/templates/kanban/kanban-helpers.template.sh
+# is zsh-only (`#!/bin/zsh`,
 # zsh glob-qualifier syntax that bash's parser rejects outright). Sourcing the
 # template under bash aborts at a syntax error BEFORE reaching kb-variance()'s
 # definition at all (verified: bash -c source on the template dies at an
-# earlier `fi` with no kb-variance defined). Sourcing kanban-aliases.sh under
-# bash happens to leave kb-variance defined only because its own break point
-# falls after kb-variance's definition but before kb-help's — the exact
-# "pre-existing test bug" this file's original Case 6 comment already flagged
-# for kb-help. Rather than keep relying on that coincidence for cases 1-5,
-# every invocation below (both files) now runs under zsh — the real runtime
-# shell both files are actually written for and sourced by.
+# earlier `fi` with no kb-variance defined). Every invocation below therefore
+# runs under zsh -- the real runtime shell the file is written for.
 #
 # Designed to run standalone OR via test-runner.sh.
 # Exit 0 = all cases pass.  Exit 1 = at least one case failed (standalone only
@@ -77,13 +60,12 @@ set -o pipefail
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Locate the SHIPPED files under test.
-# Source-of-truth is kanban-helpers.sh in dev-team; both files below are tap
-# copies of it (or, for kanban-aliases.sh, a curated subset).
+# Source-of-truth is kanban-helpers.sh in dev-team; the file below is a tap
+# copies of it.
 # ─────────────────────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TAP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TEMPLATE_PATH="$TAP_ROOT/share/templates/kanban/kanban-helpers.template.sh"
-ALIASES_PATH="$TAP_ROOT/share/templates/aliases/kanban-aliases.sh"
 
 if ! command -v zsh >/dev/null 2>&1; then
     echo "FATAL: zsh not available — both shipped files under test are zsh-only." >&2
@@ -155,14 +137,9 @@ if [ ! -f "$TEMPLATE_PATH" ]; then
     echo "  This test must run from inside the homebrew-tap checkout." >&2
     exit 1
 fi
-if [ ! -f "$ALIASES_PATH" ]; then
-    echo "FATAL: Shipped aliases file not found at: $ALIASES_PATH" >&2
-    echo "  This test must run from inside the homebrew-tap checkout." >&2
-    exit 1
-fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Deterministic fixture (spec-anchored values) — shared by both PART A and B.
+# Deterministic fixture (spec-anchored values) — used by every case below.
 #   A-1: 1pt   / 1.5h  → ratio 1.50   bucket <=1h
 #   A-2: 2pt   / 2.5h  → ratio 1.25   bucket 1-4h
 #   A-3: 6pt   / 5.0h  → ratio 0.833… bucket 4-8h
@@ -205,11 +182,10 @@ _run_variance() {
 }
 
 # ═════════════════════════════════════════════════════════════════════════════
-# PART A — kanban-helpers.template.sh (PRIMARY)
+# kanban-helpers.template.sh (sole shipped source)
 # This is what a real install/upgrade actually renders into a consumer's
 # kanban-helpers.sh as of XACA-1095 (install_kanban_helpers /
-# update_shell_helpers both prefer this file over kanban-aliases.sh whenever
-# it is present, which is unconditional in a real tap payload).
+# update_shell_helpers both render this file -- the sole source since XACA-1337).
 # ═════════════════════════════════════════════════════════════════════════════
 
 test_start "[template] kb-variance is defined in kanban-helpers.template.sh"
@@ -285,81 +261,6 @@ else
         test_pass
     else
         test_fail "template and dev kb-variance --json diverged — re-sync the port"
-    fi
-fi
-
-# ═════════════════════════════════════════════════════════════════════════════
-# PART B — kanban-aliases.sh (fallback surface)
-# Still shipped and still selected by install_kanban_helpers /
-# update_shell_helpers whenever the template is ABSENT, and still targeted
-# directly by several sibling tests for unrelated contracts (kb-quarantine-
-# stub, kanban-dir-resolver, knowledge-in-tap, alloc-slot-atomicity,
-# pause-resume-active-span) — kept here so kb-variance-in-the-fallback-file
-# has at least one place watching it for drift too.
-# ═════════════════════════════════════════════════════════════════════════════
-
-test_start "[aliases] kb-variance is defined in the shipped aliases file"
-if grep -q '^kb-variance()' "$ALIASES_PATH"; then test_pass; else test_fail "no kb-variance() definition"; fi
-
-test_start "[aliases] kb-variance --json emits spec §7 payload with expected values"
-_TB_JSON=$(_run_variance "$ALIASES_PATH" --json --board-file "$_FIXTURE")
-if ! printf '%s' "$_TB_JSON" | jq -e . >/dev/null 2>&1; then
-    test_fail "output is not valid JSON: $_TB_JSON"
-else
-    _caseB2_fail_before=$(_fail_count_now)
-    assert_eq "$(printf '%s' "$_TB_JSON" | jq -r '.eligible')"            "4"
-    assert_eq "$(printf '%s' "$_TB_JSON" | jq -r '.excluded.no_estimate')" "1"
-    assert_eq "$(printf '%s' "$_TB_JSON" | jq -r '.excluded.no_time')"     "1"
-    assert_eq "$(printf '%s' "$_TB_JSON" | jq -r '.excluded.both_missing')" "1"
-    assert_eq "$(printf '%s' "$_TB_JSON" | jq -r '.excluded.total')"        "3"
-    assert_eq "$(printf '%s' "$_TB_JSON" | jq -r '.global.handicap')"       "1.21"
-    assert_eq "$(printf '%s' "$_TB_JSON" | jq -r '.global.median')"         "1.32"
-    assert_eq "$(printf '%s' "$_TB_JSON" | jq -r '.global.sumEstimatedHours')" "19"
-    assert_eq "$(printf '%s' "$_TB_JSON" | jq -r '.global.sumActualHours')"    "23"
-    assert_eq "$(printf '%s' "$_TB_JSON" | jq -r '.buckets | length')"      "4"
-    assert_eq "$(printf '%s' "$_TB_JSON" | jq -r '.buckets[2].handicap')"   "0.83"
-    [ "$(_fail_count_now)" -eq "$_caseB2_fail_before" ] && test_pass
-fi
-
-test_start "[aliases] kb-variance human table renders global + bucket rows"
-_TB_HUMAN=$(_run_variance "$ALIASES_PATH" --board-file "$_FIXTURE")
-_caseB3_fail_before=$(_fail_count_now)
-assert_contains "$_TB_HUMAN" "Estimate-vs-Actual Handicap"
-assert_contains "$_TB_HUMAN" "Eligible items: 4"
-assert_contains "$_TB_HUMAN" "Global weighted handicap : 1.21"
-assert_contains "$_TB_HUMAN" "<=1h"
-assert_contains "$_TB_HUMAN" ">8h"
-[ "$(_fail_count_now)" -eq "$_caseB3_fail_before" ] && test_pass
-
-test_start "[aliases] kb-variance prints empty-state when no eligible items"
-_TB_EMPTYOUT=$(_run_variance "$ALIASES_PATH" --board-file "$_EMPTY")
-_caseB4_fail_before=$(_fail_count_now)
-assert_contains "$_TB_EMPTYOUT" "Not enough tracked data yet"
-[ "$(_fail_count_now)" -eq "$_caseB4_fail_before" ] && test_pass
-
-test_start "[aliases] kb-variance --help prints usage"
-_TB_HELP=$(_run_variance "$ALIASES_PATH" --help)
-_caseB5_fail_before=$(_fail_count_now)
-assert_contains "$_TB_HELP" "Estimate-vs-actual handicap analytics"
-assert_contains "$_TB_HELP" "Usage: kb-variance"
-[ "$(_fail_count_now)" -eq "$_caseB5_fail_before" ] && test_pass
-
-test_start "[aliases] kb-help lists kb-variance under Reporting / Analytics"
-_TB_KBHELP=$(zsh -c "source '$ALIASES_PATH' >/dev/null 2>&1; kb-help" 2>/dev/null)
-_caseB6_fail_before=$(_fail_count_now)
-assert_contains "$_TB_KBHELP" "kb-variance"
-[ "$(_fail_count_now)" -eq "$_caseB6_fail_before" ] && test_pass
-
-test_start "[aliases] tap kb-variance --json == dev kb-variance --json (sibling-drift guard)"
-if [ -z "$_DEV_HELPERS" ]; then
-    printf "  SKIP: dev kanban-helpers.sh not reachable (consumer tap checkout)\n"
-else
-    _TB_TAP_JSON=$(zsh -c "source '$ALIASES_PATH' >/dev/null 2>&1; kb-variance --json --board-file '$_FIXTURE'" 2>/dev/null | grep -v generatedAt)
-    _TB_DEV_JSON=$(zsh -c "source '$_DEV_HELPERS' >/dev/null 2>&1; kb-variance --json --board-file '$_FIXTURE'" 2>/dev/null | grep -v generatedAt)
-    if [ -n "$_TB_TAP_JSON" ] && [ "$_TB_TAP_JSON" = "$_TB_DEV_JSON" ]; then
-        test_pass
-    else
-        test_fail "aliases and dev kb-variance --json diverged — re-sync the port"
     fi
 fi
 

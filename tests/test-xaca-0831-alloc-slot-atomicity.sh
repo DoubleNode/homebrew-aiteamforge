@@ -2,9 +2,10 @@
 # tests/test-xaca-0831-alloc-slot-atomicity.sh
 #
 # XACA-0831-004: validation test for the XACA-0818 atomic knowledge-ID
-# allocator (_kb_alloc_slot), now ported into BOTH tap-shipped helper files:
+# allocator (_kb_alloc_slot), now ported into the tap-shipped helper file:
 #   share/templates/kanban/kanban-helpers.template.sh
-#   share/templates/aliases/kanban-aliases.sh
+# (XACA-1337: share/templates/aliases/kanban-aliases.sh, the second copy, was
+# retired; the template is the sole shipped helper file.)
 #
 # _kb_alloc_slot <target_dir> <prefix> <slug> serializes the whole
 # "scan existing <prefix>NNN-*.md -> compute next NNN -> reserve an empty
@@ -21,9 +22,8 @@
 # it had no way to prevent. This suite proves Mechanism A now actually
 # prevents what Mechanism B would otherwise have to report.
 #
-#   PART A -- concurrency / no-duplicate-slot, run separately against EACH
-#     ported copy (template AND aliases -- a fix present in one file but not
-#     the other must fail this test). >=20 concurrent `_kb_alloc_slot` calls,
+#   PART A -- concurrency / no-duplicate-slot, run against the shipped
+#     template. >=20 concurrent `_kb_alloc_slot` calls,
 #     each in its own backgrounded `zsh -c` subshell (own interpreter, own
 #     `source` -- matching real independent concurrent callers, not just
 #     backgrounded functions sharing one process), fired at ONE shared target
@@ -85,22 +85,13 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TAP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TEMPLATE_PATH="$TAP_ROOT/share/templates/kanban/kanban-helpers.template.sh"
-ALIASES_PATH="$TAP_ROOT/share/templates/aliases/kanban-aliases.sh"
 
 if [ ! -f "$TEMPLATE_PATH" ]; then
     echo "FATAL: kanban-helpers.template.sh not found at: $TEMPLATE_PATH" >&2
     exit 1
 fi
-if [ ! -f "$ALIASES_PATH" ]; then
-    echo "FATAL: kanban-aliases.sh not found at: $ALIASES_PATH" >&2
-    exit 1
-fi
 if ! grep -q '_kb_alloc_slot()' "$TEMPLATE_PATH"; then
     echo "FATAL: _kb_alloc_slot() not found in $TEMPLATE_PATH -- has the XACA-0818 port regressed?" >&2
-    exit 1
-fi
-if ! grep -q '_kb_alloc_slot()' "$ALIASES_PATH"; then
-    echo "FATAL: _kb_alloc_slot() not found in $ALIASES_PATH -- has the XACA-0818 port regressed?" >&2
     exit 1
 fi
 # Hard prerequisites. zsh IS the system-under-test's runtime -- if it is
@@ -164,7 +155,7 @@ cleanup() {
 trap cleanup EXIT
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Render both shipped files (install-time {{PLACEHOLDER}} substitution) --
+# Render the shipped template (install-time {{PLACEHOLDER}} substitution) --
 # mirrors test-xaca-0746's / test-xaca-0788's rendering approach. Neither
 # file's _kb_alloc_slot consumes these placeholders directly, but the files
 # must parse cleanly end-to-end when sourced.
@@ -180,9 +171,6 @@ _render() {
 
 TEMPLATE_RENDERED="$WORK_DIR/kanban-helpers-template-rendered.sh"
 _render "$TEMPLATE_PATH" "$TEMPLATE_RENDERED"
-
-ALIASES_RENDERED="$WORK_DIR/kanban-aliases-rendered.sh"
-_render "$ALIASES_PATH" "$ALIASES_RENDERED"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Mechanism B mirror: the fleet duplicate-slot detector, copied verbatim
@@ -305,16 +293,11 @@ _run_concurrent_alloc() {
 }
 
 # ═══════════════════════════════════════════════════════════════════════════
-# PART A/B -- run against EACH ported copy independently.
+# PART A/B -- run against the shipped template.
 # ═══════════════════════════════════════════════════════════════════════════
-for _label in template aliases; do
-    if [ "$_label" = "template" ]; then
-        _rendered="$TEMPLATE_RENDERED"
-        _display="kanban-helpers.template.sh"
-    else
-        _rendered="$ALIASES_RENDERED"
-        _display="kanban-aliases.sh"
-    fi
+for _label in template; do
+    _rendered="$TEMPLATE_RENDERED"
+    _display="kanban-helpers.template.sh"
 
     printf '\n%s\n' "--- ${_display}: ${N_WRITERS} concurrent _kb_alloc_slot calls at one shared target dir ---"
     _run_concurrent_alloc "$_label" "$_rendered"

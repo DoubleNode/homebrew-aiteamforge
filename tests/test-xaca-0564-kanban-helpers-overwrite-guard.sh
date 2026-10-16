@@ -16,12 +16,10 @@ TAP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 INSTALLERS_DIR="$TAP_ROOT/libexec/installers"
 
 INSTALLER="$INSTALLERS_DIR/install-kanban.sh"
-# XACA-1095: install_kanban_helpers now prefers the FULL
-# kanban-helpers.template.sh over kanban-aliases.sh (see that function's
-# header comment for the full rationale — the old preference order shipped
-# the 20-function aliases surface to every real consumer instead of the
-# 61+-function template, dropping kb-sweep/kb-epic/kb-release*/kb-run/
-# kb-work/kb-pick/kb-recover in the field).
+# XACA-1095 / XACA-1337: install_kanban_helpers renders the FULL
+# kanban-helpers.template.sh -- the sole tap helpers source since XACA-1337
+# retired kanban-aliases.sh (a missing template warns and skips; see
+# test-xaca-1095-helpers-template-preference.sh for that ratchet).
 TEMPLATE="$TAP_ROOT/share/templates/kanban/kanban-helpers.template.sh"
 
 # Sentinel content written into fixture kanban-helpers.sh files.

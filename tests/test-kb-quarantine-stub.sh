@@ -1,7 +1,7 @@
 #!/bin/bash
 # test-kb-quarantine-stub.sh
 # Drift-detection test for kb-quarantine-stub and _kb_realpath in the SHIPPED
-# tap aliases file.  Catches future deletions, renames, or contract breakage
+# tap kanban-helpers template (XACA-1337: sole tap helpers source).  Catches future deletions, renames, or contract breakage
 # before they reach users.
 #
 # Designed to run standalone OR via test-runner.sh.
@@ -10,12 +10,12 @@
 set -o pipefail
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Locate the SHIPPED aliases file — the whole point of this test.
+# Locate the SHIPPED helpers template — the whole point of this test.
 # Source-of-truth is kanban-helpers.sh in dev-team; THIS file is the tap copy.
 # ─────────────────────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TAP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-ALIASES_PATH="$TAP_ROOT/share/templates/aliases/kanban-aliases.sh"
+TEMPLATE_PATH="$TAP_ROOT/share/templates/kanban/kanban-helpers.template.sh"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Minimal self-contained test framework
@@ -64,9 +64,9 @@ if ! declare -F assert_file_not_exists &>/dev/null; then
     }
 fi
 
-# Hard-stop on missing aliases file — nothing else can be tested.
-if [ ! -f "$ALIASES_PATH" ]; then
-    echo "FATAL: Shipped aliases file not found at: $ALIASES_PATH" >&2
+# Hard-stop on missing template (a missing target must FAIL, never skip) — nothing else can be tested.
+if [ ! -f "$TEMPLATE_PATH" ]; then
+    echo "FATAL: Shipped kanban-helpers template not found at: $TEMPLATE_PATH" >&2
     echo "  This test must run from inside the homebrew-tap checkout." >&2
     exit 1
 fi
@@ -93,7 +93,7 @@ _teardown_sandbox() {
     _TEST_TMP=""
 }
 
-# Source the aliases into a subshell and run a command, returning stdout,
+# Source the template into a subshell and run a command, returning stdout,
 # stderr, and exit code.  We use a wrapper so that AITEAMFORGE_DIR and HOME
 # are scoped to each invocation.
 #
@@ -114,11 +114,8 @@ _run_in_sandbox() {
     local home_dir="$1" atf_dir="$2"
     shift 2
     local cmd=("$@")
-    # Run in a clean bash subshell (not zsh) so declare -F works predictably.
-    # The aliases file is written as zsh but the functions are POSIX-compatible
-    # enough for bash sourcing in tests; where zsh-only constructs appear
-    # (array slicing) we avoid exercising them here.
-    # Shell-escape each cmd element before splicing into the bash -c body so
+    # Run in a clean zsh subshell: the template is zsh-only (bash cannot parse it).
+    # Shell-escape each cmd element before splicing into the zsh -c body so
     # arguments containing spaces or special chars survive intact.
     local _quoted_cmd
     _quoted_cmd=$(printf '%q ' "${cmd[@]}")
@@ -127,8 +124,8 @@ _run_in_sandbox() {
         KANBAN_TEAM="finance-personal" \
         PATH="$PATH" \
         TERM="${TERM:-dumb}" \
-        bash --noprofile --norc -c "
-            source '$ALIASES_PATH' 2>/dev/null
+        zsh -f -c "
+            source '$TEMPLATE_PATH' 2>/dev/null
             # Override AFTER sourcing — the template unconditionally sets the var.
             AITEAMFORGE_DIR='$atf_dir'
             $_quoted_cmd
@@ -155,33 +152,33 @@ trap '_cleanup_tmp_files; _teardown_sandbox; _cleanup_placeholder_leaks' EXIT IN
 # ─────────────────────────────────────────────────────────────────────────────
 # CASE 1: Function kb-quarantine-stub is defined in the shipped file
 # ─────────────────────────────────────────────────────────────────────────────
-test_start "Case 1: kb-quarantine-stub is defined after sourcing shipped aliases"
+test_start "Case 1: kb-quarantine-stub is defined after sourcing the shipped template"
 env -i HOME="$HOME" AITEAMFORGE_DIR="${AITEAMFORGE_DIR:-$HOME/aiteamforge}" PATH="$PATH" \
-    bash --noprofile --norc -c "
-        source '$ALIASES_PATH' 2>/dev/null
-        declare -F kb-quarantine-stub >/dev/null 2>&1
+    zsh -f -c "
+        source '$TEMPLATE_PATH' 2>/dev/null
+        (( \$+functions[kb-quarantine-stub] ))
     "
 rc=$?
 if [ "$rc" -eq 0 ]; then
     test_pass
 else
-    test_fail "declare -F kb-quarantine-stub returned $rc (function not defined)"
+    test_fail "kb-quarantine-stub not defined: rc $rc (function not defined)"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CASE 2: Helper _kb_realpath is defined in the shipped file
 # ─────────────────────────────────────────────────────────────────────────────
-test_start "Case 2: _kb_realpath is defined after sourcing shipped aliases"
+test_start "Case 2: _kb_realpath is defined after sourcing the shipped template"
 env -i HOME="$HOME" AITEAMFORGE_DIR="${AITEAMFORGE_DIR:-$HOME/aiteamforge}" PATH="$PATH" \
-    bash --noprofile --norc -c "
-        source '$ALIASES_PATH' 2>/dev/null
-        declare -F _kb_realpath >/dev/null 2>&1
+    zsh -f -c "
+        source '$TEMPLATE_PATH' 2>/dev/null
+        (( \$+functions[_kb_realpath] ))
     "
 rc=$?
 if [ "$rc" -eq 0 ]; then
     test_pass
 else
-    test_fail "declare -F _kb_realpath returned $rc (function not defined)"
+    test_fail "_kb_realpath not defined: rc $rc (function not defined)"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -189,8 +186,8 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 test_start "Case 3: kb-quarantine-stub --help exits 0 and contains expected strings"
 env -i HOME="$HOME" AITEAMFORGE_DIR="${AITEAMFORGE_DIR:-$HOME/aiteamforge}" PATH="$PATH" \
-    bash --noprofile --norc -c "
-        source '$ALIASES_PATH' 2>/dev/null
+    zsh -f -c "
+        source '$TEMPLATE_PATH' 2>/dev/null
         kb-quarantine-stub --help
     " >"$_STDOUT_FILE" 2>"$_STDERR_FILE"
 rc=$?
@@ -214,8 +211,8 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 test_start "Case 4: Unknown team 'zaphod' is rejected with no known stub path message"
 env -i HOME="$HOME" AITEAMFORGE_DIR="${AITEAMFORGE_DIR:-$HOME/aiteamforge}" PATH="$PATH" \
-    bash --noprofile --norc -c "
-        source '$ALIASES_PATH' 2>/dev/null
+    zsh -f -c "
+        source '$TEMPLATE_PATH' 2>/dev/null
         kb-quarantine-stub zaphod
     " >"$_STDOUT_FILE" 2>"$_STDERR_FILE"
 rc=$?
@@ -233,8 +230,8 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 test_start "Case 5: Missing team argument rejected with 'team argument is required'"
 env -i HOME="$HOME" AITEAMFORGE_DIR="${AITEAMFORGE_DIR:-$HOME/aiteamforge}" PATH="$PATH" \
-    bash --noprofile --norc -c "
-        source '$ALIASES_PATH' 2>/dev/null
+    zsh -f -c "
+        source '$TEMPLATE_PATH' 2>/dev/null
         kb-quarantine-stub
     " >"$_STDOUT_FILE" 2>"$_STDERR_FILE"
 rc=$?

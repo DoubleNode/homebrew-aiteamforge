@@ -1,6 +1,16 @@
 #!/bin/bash
 # test-xaca-1095-helpers-template-preference.sh
 #
+# XACA-1337 RETIREMENT NOTE: share/templates/aliases/kanban-aliases.sh was retired;
+# share/templates/kanban/kanban-helpers.template.sh is now the SOLE tap
+# kanban-helpers source. The original "template preferred over aliases" cases
+# (T1-T4 selection order, with pre-fix proofs T2/T4) no longer have a second
+# source to prefer and were replaced by: T1/T3 (template is the source),
+# T12-T16 (retirement ratchet: aliases file absent, neither installer names it,
+# a MISSING template produces a loud warning and NO helper file, never a
+# silent pass). T5-T11 are unchanged in intent. The history below describes the
+# original XACA-1095 defect.
+#
 # Regression coverage for XACA-1095: install_kanban_helpers()
 # (libexec/installers/install-kanban.sh) and update_shell_helpers()
 # (libexec/commands/aiteamforge-upgrade.sh) both preferred the tiny,
@@ -60,7 +70,7 @@ TAP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 INSTALL_KANBAN="$TAP_ROOT/libexec/installers/install-kanban.sh"
 UPGRADE_SH="$TAP_ROOT/libexec/commands/aiteamforge-upgrade.sh"
 REAL_TEMPLATE="$TAP_ROOT/share/templates/kanban/kanban-helpers.template.sh"
-REAL_ALIASES="$TAP_ROOT/share/templates/aliases/kanban-aliases.sh"
+RETIRED_ALIASES="$TAP_ROOT/share/templates/aliases/kanban-aliases.sh"   # must NOT exist (XACA-1337)
 
 # The commit immediately BEFORE the XACA-1095 fix. Resolved via `git`'s own
 # revision-walk syntax (never a hand-typed/guessed SHA) so this stays correct
@@ -69,7 +79,7 @@ REAL_ALIASES="$TAP_ROOT/share/templates/aliases/kanban-aliases.sh"
 # fail — the current-behavior assertions do not depend on it and still run.
 PRE_FIX_REV="1d49bfb^"
 
-for _need in "$INSTALL_KANBAN" "$UPGRADE_SH" "$REAL_TEMPLATE" "$REAL_ALIASES"; do
+for _need in "$INSTALL_KANBAN" "$UPGRADE_SH" "$REAL_TEMPLATE"; do
     if [ ! -f "$_need" ]; then
         echo "FATAL: required file not found: $_need" >&2
         echo "  This test must run from inside the homebrew-tap checkout." >&2
@@ -222,15 +232,13 @@ _run_update_shell_helpers() {
 
 _build_install_sandbox() {
     local dir="$1"
-    mkdir -p "$dir/share/templates/kanban" "$dir/share/templates/aliases"
+    mkdir -p "$dir/share/templates/kanban"
     cp "$REAL_TEMPLATE" "$dir/share/templates/kanban/kanban-helpers.template.sh"
-    cp "$REAL_ALIASES" "$dir/share/templates/aliases/kanban-aliases.sh"
 }
 _build_upgrade_framework_sandbox() {
     local dir="$1"
-    mkdir -p "$dir/share/templates/kanban" "$dir/share/templates/aliases"
+    mkdir -p "$dir/share/templates/kanban"
     cp "$REAL_TEMPLATE" "$dir/share/templates/kanban/kanban-helpers.template.sh"
-    cp "$REAL_ALIASES" "$dir/share/templates/aliases/kanban-aliases.sh"
 }
 
 _pre_fix_skip_msg() {
@@ -238,10 +246,10 @@ _pre_fix_skip_msg() {
 }
 
 # ═══════════════════════════════════════════════════════════════════════════
-# GROUP 1 — SOURCE SELECTION: install and upgrade both prefer the template
+# GROUP 1 — SOURCE: install and upgrade both render from the template
 # ═══════════════════════════════════════════════════════════════════════════
 
-test_start "T1: install_kanban_helpers (current) selects kanban-helpers.template.sh over kanban-aliases.sh"
+test_start "T1: install_kanban_helpers (current) renders kb-sweep from kanban-helpers.template.sh (sole source)"
 T1_ROOT="$(_next_sandbox)"; T1_TARGET="$(_next_sandbox)"
 _build_install_sandbox "$T1_ROOT"
 _run_install_kanban_helpers current "$T1_ROOT" "$T1_TARGET" >/dev/null 2>&1
@@ -251,21 +259,7 @@ else
     test_fail "kb-sweep not found in rendered kanban-helpers.sh — template was not selected (or install failed)"
 fi
 
-test_start "T2 (proof): pre-fix install_kanban_helpers selected kanban-aliases.sh instead — T1's assertion would have FAILED"
-if [ "$_PRE_FIX_AVAILABLE" != true ]; then
-    _pre_fix_skip_msg
-else
-    T2_ROOT="$(_next_sandbox)"; T2_TARGET="$(_next_sandbox)"
-    _build_install_sandbox "$T2_ROOT"
-    _run_install_kanban_helpers old "$T2_ROOT" "$T2_TARGET" >/dev/null 2>&1
-    if [ -f "$T2_TARGET/kanban-helpers.sh" ] && ! grep -q '^kb-sweep()' "$T2_TARGET/kanban-helpers.sh"; then
-        test_pass
-    else
-        test_fail "pre-fix install_kanban_helpers unexpectedly selected the template (or produced no output) — proof invalid, verify PRE_FIX_REV"
-    fi
-fi
-
-test_start "T3: update_shell_helpers (current) selects kanban-helpers.template.sh over kanban-aliases.sh"
+test_start "T3: update_shell_helpers (current) renders kb-sweep from kanban-helpers.template.sh (sole source)"
 T3_FW="$(_next_sandbox)"; T3_WORK="$(_next_sandbox)"
 _build_upgrade_framework_sandbox "$T3_FW"
 printf '#!/bin/zsh\n# placeholder — will be refreshed\n' > "$T3_WORK/kanban-helpers.sh"
@@ -275,22 +269,6 @@ if grep -q '^kb-sweep()' "$T3_WORK/kanban-helpers.sh"; then
     test_pass
 else
     test_fail "kb-sweep not found after update — template was not selected (or update failed)"
-fi
-
-test_start "T4 (proof): pre-fix update_shell_helpers selected kanban-aliases.sh instead — T3's assertion would have FAILED"
-if [ "$_PRE_FIX_AVAILABLE" != true ]; then
-    _pre_fix_skip_msg
-else
-    T4_FW="$(_next_sandbox)"; T4_WORK="$(_next_sandbox)"
-    _build_upgrade_framework_sandbox "$T4_FW"
-    printf '#!/bin/zsh\n# placeholder — will be refreshed\n' > "$T4_WORK/kanban-helpers.sh"
-    touch -t 200001010000 "$T4_WORK/kanban-helpers.sh"
-    _run_update_shell_helpers old "$T4_FW" "$T4_WORK" false false >/dev/null 2>&1
-    if ! grep -q '^kb-sweep()' "$T4_WORK/kanban-helpers.sh"; then
-        test_pass
-    else
-        test_fail "pre-fix update_shell_helpers unexpectedly selected the template — proof invalid, verify PRE_FIX_REV"
-    fi
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -316,9 +294,8 @@ if [ -z "$_missing" ]; then test_pass; else test_fail "missing: $_missing"; fi
 
 # ═══════════════════════════════════════════════════════════════════════════
 # GROUP 3 — AT-RISK PORTED FUNCTIONS: the four functions XACA-1095-007 named
-# as newly restored FROM kanban-aliases.sh INTO kanban-helpers.template.sh
-# (see that file's "functions restored from ... kanban-aliases.sh" block) —
-# confirm the preference flip did not strand them a second time.
+# as newly restored INTO kanban-helpers.template.sh (retired aliases file
+# was their former home) — confirm they remain defined in the rendered output.
 # ═══════════════════════════════════════════════════════════════════════════
 
 test_start "T7: rendered kanban-helpers.sh (install) still defines _kb_realpath, kb-quarantine-stub, kb-variance, kb-merged"
@@ -397,6 +374,46 @@ if [ "$_T11_BEFORE" = "$_T11_AFTER" ]; then
 else
     test_fail "DRY_RUN=true modified kanban-helpers.sh — dry-run must be a no-op"
 fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# GROUP 5 — RETIREMENT RATCHET (XACA-1337): the template is the SOLE source.
+# ═══════════════════════════════════════════════════════════════════════════
+
+test_start "T12: share/templates/aliases/kanban-aliases.sh does not exist (retired, XACA-1337)"
+if [ ! -e "$RETIRED_ALIASES" ]; then test_pass; else test_fail "retired file reappeared: $RETIRED_ALIASES"; fi
+
+test_start "T13: neither installer code path references kanban-aliases (no fallback elif can return)"
+_refs="$(grep -n 'kanban-aliases\|kanban_aliases' "$INSTALL_KANBAN" "$UPGRADE_SH" | grep -v '^[^:]*:[0-9]*:[[:space:]]*#' || true)"
+if [ -z "$_refs" ]; then test_pass; else test_fail "non-comment reference(s) to the retired file: $_refs"; fi
+
+test_start "T14: install_kanban_helpers with the template MISSING warns loudly and writes NO helper file"
+T14_ROOT="$(_next_sandbox)"; T14_TARGET="$(_next_sandbox)"
+mkdir -p "$T14_ROOT/share/templates/kanban"   # directory exists, template absent
+_T14_FN="$(_extract_fn_from_file "$INSTALL_KANBAN" "install_kanban_helpers")"
+_T14_OUT="$(
+    info() { :; }; error() { :; }; success() { :; }
+    warning() { echo "WARNING: $*"; }
+    export INSTALL_ROOT="$T14_ROOT" AITEAMFORGE_DIR="$T14_TARGET"
+    eval "$_T14_FN"
+    install_kanban_helpers 2>&1; echo "rc=$?"
+)"
+if [ -n "$_T14_FN" ] && echo "$_T14_OUT" | grep -q 'WARNING:.*template not found' && [ ! -e "$T14_TARGET/kanban-helpers.sh" ]; then
+    test_pass
+else
+    test_fail "expected warning + no kanban-helpers.sh; got: $_T14_OUT"
+fi
+
+test_start "T15: update_shell_helpers with the template MISSING leaves the installed copy untouched (no aliases fallback)"
+T15_FW="$(_next_sandbox)"; T15_WORK="$(_next_sandbox)"
+mkdir -p "$T15_FW/share/templates/kanban"
+printf '%s' "$_STALE_TARGET_CONTENT" > "$T15_WORK/kanban-helpers.sh"
+_T15_BEFORE="$(cat "$T15_WORK/kanban-helpers.sh")"
+_run_update_shell_helpers current "$T15_FW" "$T15_WORK" false false >/dev/null 2>&1
+_T15_AFTER="$(cat "$T15_WORK/kanban-helpers.sh" 2>/dev/null || echo "")"
+if [ "$_T15_BEFORE" = "$_T15_AFTER" ]; then test_pass; else test_fail "installed copy changed with no template available"; fi
+
+test_start "T16: upgrade source reports the missing template by name (message names kanban-helpers.template.sh)"
+if grep -q 'kanban-helpers.template.sh is missing' "$UPGRADE_SH"; then test_pass; else test_fail "upgrade missing-template warning text not found"; fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Summary (standalone mode only — see header comment).

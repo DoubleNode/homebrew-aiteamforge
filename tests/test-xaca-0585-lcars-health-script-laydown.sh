@@ -245,12 +245,8 @@ CASE6_DIR="$SANDBOX_DIR/case6-missing-source"
 FAKE_ROOT="$SANDBOX_DIR/fake-tap-root"
 mkdir -p "$CASE6_DIR"
 mkdir -p "$FAKE_ROOT/share/scripts"
-mkdir -p "$FAKE_ROOT/share/templates/aliases"
-# Provide a minimal kanban-aliases.sh template so install_kanban_helpers doesn't abort
-if [ -f "$TAP_ROOT/share/templates/aliases/kanban-aliases.sh" ]; then
-    cp "$TAP_ROOT/share/templates/aliases/kanban-aliases.sh" \
-       "$FAKE_ROOT/share/templates/aliases/kanban-aliases.sh"
-fi
+# (XACA-1337: no helpers-template fixture needed -- only the single install_*_script
+# function under test is invoked, and it never reads share/templates/.)
 # Deliberately do NOT put lcars-health-check.sh in fake-tap-root/share/scripts/
 
 CASE6_EXIT=$(

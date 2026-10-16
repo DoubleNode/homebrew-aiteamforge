@@ -2,11 +2,14 @@
 # test-xaca-0770-local-only-knowledge-in-tap.sh
 #
 # XACA-0770: ports dev-team/kanban-helpers.sh's local-only team knowledge
-# (PII containment, XACA-0754/XACA-0754-013/XACA-0754-014) into BOTH shipped
-# helper files. Before this ticket, finance/legal/medical knowledge authored
+# (PII containment, XACA-0754/XACA-0754-013/XACA-0754-014) into the shipped
+# helper file (XACA-1337: kanban-aliases.sh was retired, so the template is the
+# sole shipped helper file and the former aliases PartA was removed).
+#
+# Before this ticket, finance/legal/medical knowledge authored
 # on a tap host (e.g. M4Mini) had ZERO local routing — kb-knowledge-add wrote
 # every tier straight to the synced ~/knowledge root, leaking PII fleet-wide
-# on the next sync-daemon run. This test proves both shipped files now:
+# on the next sync-daemon run. This test proves the shipped template:
 #
 #   1. Define the full local-routing function roster (parity).
 #   2. Route finance/legal/medical team- and agent-tier writes to
@@ -28,19 +31,14 @@
 #      entries living under the local root.
 #
 # Mirrors test-xaca-0746-kb-knowledge-in-tap.sh's structure/harness exactly
-# (same _run_zsh sandbox pattern, same PartA=aliases/PartB=template split).
+# (same _run_zsh sandbox pattern; template only since XACA-1337).
 #
 # Requires: bash, zsh. No dev-team checkout, no tmux, no network.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TAP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-ALIASES_PATH="$TAP_ROOT/share/templates/aliases/kanban-aliases.sh"
 TEMPLATE_PATH="$TAP_ROOT/share/templates/kanban/kanban-helpers.template.sh"
 
-if [ ! -f "$ALIASES_PATH" ]; then
-    echo "FATAL: kanban-aliases.sh not found at: $ALIASES_PATH" >&2
-    exit 1
-fi
 if [ ! -f "$TEMPLATE_PATH" ]; then
     echo "FATAL: kanban-helpers.template.sh not found at: $TEMPLATE_PATH" >&2
     exit 1
@@ -79,15 +77,8 @@ cleanup() {
 trap cleanup EXIT
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Render both shipped files (placeholder substitution — same as XACA-0746).
+# Render the shipped template (placeholder substitution — same as XACA-0746).
 # ─────────────────────────────────────────────────────────────────────────────
-A_RENDERED="$WORK_DIR/kanban-aliases-rendered.sh"
-sed "s|{{AITEAMFORGE_DIR}}|$WORK_DIR/aiteamforge|g; \
-     s|{{SHARED_DEV_ROOT}}|$WORK_DIR/shared|g; \
-     s|{{ORG_NAME}}|TestOrg|g; \
-     s|{{ORG_SLUG}}|testorg|g" \
-    "$ALIASES_PATH" > "$A_RENDERED"
-
 B_RENDERED="$WORK_DIR/kanban-helpers-template-rendered.sh"
 sed "s|{{AITEAMFORGE_DIR}}|$WORK_DIR/aiteamforge|g; \
      s|{{SHARED_DEV_ROOT}}|$WORK_DIR/shared|g; \
@@ -121,6 +112,11 @@ STDERR_FILE="$WORK_DIR/stderr.txt"
 _run_zsh() {
     local rendered_file="$1" home_dir="$2" global_root="$3" local_root="$4" extra_env="$5"
     shift 5
+    # TMUX_TMPDIR points at an empty dir so _kb_detect_context's tmux layer cannot
+    # attach to a live tmux server on a dev machine (env -i keeps PATH, and tmux's
+    # default socket is found by uid). Without this the "unresolvable context"
+    # cases are environment-dependent: green on CI, red inside a dev tmux session.
+    mkdir -p "$WORK_DIR/no-tmux-socket"
     env -i \
         HOME="$home_dir" \
         PATH="$PATH" \
@@ -128,6 +124,7 @@ _run_zsh() {
         KB_KNOWLEDGE_GLOBAL_ROOT="$global_root" \
         KB_KNOWLEDGE_LOCAL_ROOT="$local_root" \
         KB_SEARCH_TELEMETRY_DISABLED=1 \
+        TMUX_TMPDIR="$WORK_DIR/no-tmux-socket" \
         $extra_env \
         zsh -c "
             cd '$home_dir' 2>/dev/null
@@ -175,8 +172,8 @@ _assert_all_defined() {
 # ═══════════════════════════════════════════════════════════════════════════
 # Shared test bodies — parameterized by (label, rendered_file, team_env_var)
 # team_env_var is the var this file's context resolver actually reads for an
-# explicit team override: KANBAN_TEAM (aliases.sh's own _kb_get_team) vs
-# KB_TEAM (template.sh's _kb_detect_context, via _kb_resolve_explicit_env_context).
+# explicit team override: KB_TEAM for the template (_kb_detect_context, via
+# _kb_resolve_explicit_env_context).
 # ═══════════════════════════════════════════════════════════════════════════
 _run_shared_suite() {
     local label="$1" rendered_file="$2" team_env_var="$3"
@@ -298,43 +295,13 @@ _run_shared_suite() {
 }
 
 # ═══════════════════════════════════════════════════════════════════════════
-# PART A — kanban-aliases.sh (FALLBACK installed file as of XACA-1095; _kb_get_team
-#          resolver). Until XACA-1095 this file was PREFERRED by both
-#          install_kanban_helpers and update_shell_helpers; that preference is now
-#          inverted in favour of kanban-helpers.template.sh, and this file is
-#          selected only when the template is absent. The contract below is still
-#          worth testing — the file is still shipped — but it is no longer what a
-#          real consumer receives.
+# kanban-helpers.template.sh (sole shipped file, _kb_detect_context resolver)
 # ═══════════════════════════════════════════════════════════════════════════
-_run_shared_suite "PartA(aliases)" "$A_RENDERED" "KANBAN_TEAM"
-
-# ── A-guard: aliases.sh's _kb_get_team ALWAYS resolves (KANBAN_TEAM defaults
-# to "academy"), so the ambiguous-tier-write-guard is a documented no-op here
-# — a subject-tier write with NO team env set at all still succeeds (lands
-# in global, since the default "academy" is non-local). This is the expected
-# consequence of this file's single-env-var team model (see the port's
-# _kb_context_resolved comment) — proving it does NOT regress into an
-# unexpected refusal for the common no-KANBAN_TEAM-set case.
-test_start "PartA(aliases): subject-tier add succeeds with NO team env set at all (defaults to academy, non-local, guard no-ops)"
-A_G_HOME=$(_next_home); A_G_GLOBAL="$A_G_HOME/knowledge"; A_G_LOCAL="$A_G_HOME/knowledge-local"
-_run_zsh "$A_RENDERED" "$A_G_HOME" "$A_G_GLOBAL" "$A_G_LOCAL" "" \
-    "kb-knowledge-add subject default-team-check 'no override needed'; echo RC=\$?"
-A_G_OUT="$(_stdout)"
-A_G_FILE=$(find "$A_G_GLOBAL/subjects/default-team-check" -maxdepth 1 -name 's001-*.md' 2>/dev/null | head -1)
-if echo "$A_G_OUT" | grep -q 'RC=0' && [ -n "$A_G_FILE" ]; then
-    test_pass
-else
-    test_fail "expected RC=0 and a scaffolded file under $A_G_GLOBAL/subjects/default-team-check; got: $A_G_OUT (stderr=$(_stderr))"
-fi
-
-# ═══════════════════════════════════════════════════════════════════════════
-# PART B — kanban-helpers.template.sh (FALLBACK file, _kb_detect_context resolver)
-# ═══════════════════════════════════════════════════════════════════════════
-_run_shared_suite "PartB(template)" "$B_RENDERED" "KB_TEAM"
+_run_shared_suite "Template" "$B_RENDERED" "KB_TEAM"
 
 # ── B-guard-1: ambiguous context (no tmux, no KB_TEAM/LCARS_TEAM/AITEAMFORGE_TEAM)
 # refuses a subject-tier write WITHOUT --force.
-test_start "PartB(template): subject-tier add is REFUSED when context is unresolvable and --force is absent"
+test_start "Template: subject-tier add is REFUSED when context is unresolvable and --force is absent"
 B_G1_HOME=$(_next_home); B_G1_GLOBAL="$B_G1_HOME/knowledge"; B_G1_LOCAL="$B_G1_HOME/knowledge-local"
 _run_zsh "$B_RENDERED" "$B_G1_HOME" "$B_G1_GLOBAL" "$B_G1_LOCAL" "" \
     "kb-knowledge-add subject ambiguous-check 'should be refused'; echo RC=\$?"
@@ -351,7 +318,7 @@ else
 fi
 
 # ── B-guard-2: same ambiguous context, but --force proceeds to the SHARED/global root ──
-test_start "PartB(template): --force proceeds to the shared/global root despite unresolvable context (with a warning)"
+test_start "Template: --force proceeds to the shared/global root despite unresolvable context (with a warning)"
 B_G2_HOME=$(_next_home); B_G2_GLOBAL="$B_G2_HOME/knowledge"; B_G2_LOCAL="$B_G2_HOME/knowledge-local"
 _run_zsh "$B_RENDERED" "$B_G2_HOME" "$B_G2_GLOBAL" "$B_G2_LOCAL" "" \
     "kb-knowledge-add subject forced-check 'proceeds anyway' --force; echo RC=\$?"
@@ -367,7 +334,7 @@ else
 fi
 
 # ── B-guard-3: team-paths.json "local_only":true flag extends protection to a NEW team ──
-test_start "PartB(template): team-paths.json local_only:true flag routes a non-hardcoded team to local_root"
+test_start "Template: team-paths.json local_only:true flag routes a non-hardcoded team to local_root"
 B_G3_HOME=$(_next_home); B_G3_GLOBAL="$B_G3_HOME/knowledge"; B_G3_LOCAL="$B_G3_HOME/knowledge-local"
 mkdir -p "$B_G3_HOME/.aiteamforge"
 cat > "$B_G3_HOME/.aiteamforge/team-paths.json" <<'JSONEOF'

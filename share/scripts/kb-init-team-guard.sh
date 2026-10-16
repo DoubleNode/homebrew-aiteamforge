@@ -248,12 +248,11 @@ _kb_is_noninteractive() {
 # the canonical board for <instance-id>.  Used by
 # _kb_detect_and_quarantine_stub to locate the stub without the full
 # kanban-helpers.sh loaded.  Mirrors the stub map in kanban-helpers.sh
-# _kb_check_dual_boards and kanban-aliases.sh kb-quarantine-stub.
+# _kb_check_dual_boards (the standalone aliases-file copy was retired in XACA-1337).
 #
 # XACA-0649: k501 sibling-drift note — this table must stay in sync with:
 #   kanban-helpers.sh   _kb_check_dual_boards  _checks array
-#   kanban-aliases.sh   kb-quarantine-stub     case "$team" stub_path assignments
-# All three must be updated together when new parameterized teams are added.
+# Both must be updated together when new parameterized teams are added.
 _kb_stub_paths_for_instance() {
     local instance_id="$1"
     case "$instance_id" in
@@ -339,8 +338,8 @@ _kb_detect_and_quarantine_stub() {
     printf '\n' >&2
 
     # ── Try to delegate to kb-quarantine-stub ────────────────────────────────
-    # kb-quarantine-stub is defined in kanban-helpers.sh (dev) or kanban-aliases.sh
-    # (consumer install); it is available after either file is sourced.
+    # kb-quarantine-stub is defined in kanban-helpers.sh (dev checkout and the
+    # rendered consumer install alike); it is available once that file is sourced.
     if command -v kb-quarantine-stub &>/dev/null 2>&1; then
         _kbitg_cyan "[kb-guard] Running: kb-quarantine-stub ${instance_id} --yes"
         if kb-quarantine-stub "$instance_id" --yes 2>&1 | sed 's/^/  [quarantine] /' >&2; then

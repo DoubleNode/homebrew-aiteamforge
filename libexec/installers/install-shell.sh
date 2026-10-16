@@ -155,9 +155,9 @@ install_aliases() {
     info "Installing shell aliases"
 
     # Install each alias file
-    # Note: kanban-aliases.sh is intentionally omitted — kanban-helpers.sh
-    # (installed by install-kanban.sh) is sourced directly from aiteamforge-env.sh
-    # and provides the full kb-* function set.
+    # Note: there is no kanban alias file here (kanban-aliases.sh was retired in
+    # XACA-1337) — kanban-helpers.sh (installed by install-kanban.sh) is sourced
+    # directly by the shell env loader and provides the full kb-* function set.
     for alias_file in agent-aliases.sh cc-aliases.sh worktree-aliases.sh; do
         local template="$INSTALL_ROOT/share/templates/aliases/$alias_file"
         local target="$aliases_dir/$alias_file"

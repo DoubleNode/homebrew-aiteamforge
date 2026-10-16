@@ -5911,29 +5911,23 @@ update_shell_helpers() {
   tap_share="${FRAMEWORK_DIR}/share"
 
   # Update kanban-helpers.sh (root of WORKING_DIR).
-  # XACA-1095: prefer the FULL kanban-helpers.template.sh (the 61+-function
-  # source-of-truth surface — kb-sweep/kb-epic/kb-release*/kb-run/kb-work/
-  # kb-pick/kb-recover and the rest of the PR-merge-gate + worktree lifecycle
-  # family). Fall back to the tiny, standalone kanban-aliases.sh (20 functions)
-  # only if the full template is absent. This INVERTS the pre-XACA-1095
-  # preference (which mirrored install_kanban_helpers' old, also-inverted,
-  # choice under the XACA-0649 "keep install/upgrade in sync" banner — the
-  # intent to keep the two in sync was correct, the chosen winner was not).
-  # See install_kanban_helpers in libexec/installers/install-kanban.sh for the
-  # parallel fix and full rationale; both still substitute the same three
-  # placeholders below, so install and upgrade keep agreeing.
+  # XACA-1095 / XACA-1337: render the FULL kanban-helpers.template.sh (the
+  # 61+-function source-of-truth surface — kb-sweep/kb-epic/kb-release*/kb-run/
+  # kb-work/kb-pick/kb-recover and the rest of the PR-merge-gate + worktree
+  # lifecycle family). It is the ONLY source: the tiny standalone
+  # kanban-aliases.sh fallback was retired in XACA-1337, so a missing template
+  # takes the warn-and-skip branch below. Install and upgrade keep agreeing:
+  # see install_kanban_helpers in libexec/installers/install-kanban.sh; both
+  # substitute the same three placeholders.
   local kanban_template="${tap_share}/templates/kanban/kanban-helpers.template.sh"
-  local kanban_aliases_template="${tap_share}/templates/aliases/kanban-aliases.sh"
   local _kanban_src=""
   if [ -f "$kanban_template" ]; then
     _kanban_src="$kanban_template"
-  elif [ -f "$kanban_aliases_template" ]; then
-    _kanban_src="$kanban_aliases_template"
   fi
   local kanban_target="${WORKING_DIR}/kanban-helpers.sh"
 
   if [ -z "$_kanban_src" ]; then
-    print_warning "No kanban-helpers source found under ${tap_share} (neither kanban-helpers.template.sh nor kanban-aliases.sh) — skipping kanban-helpers.sh refresh"
+    print_warning "No kanban-helpers source found under ${tap_share} (kanban-helpers.template.sh is missing) — skipping kanban-helpers.sh refresh"
   elif [ ! -f "$kanban_target" ]; then
     # XACA-1095: previously this whole file-refresh block was gated on
     # `[ -f "$kanban_target" ]`, so a MISSING kanban-helpers.sh on an
@@ -6079,9 +6073,11 @@ update_shell_helpers() {
   # with `grep -o '{{ORG_SLUG}}' cc-aliases.sh | wc -l`: 44 occurrences in
   # cc-aliases.sh, and it is not "alone" -- {{ORG_SLUG}} appears in 7 shipped
   # template files, 63 occurrences total (agent-aliases.sh 1, cc-aliases.sh
-  # 44, kanban-aliases.sh 1, claude-md-global.template 9,
+  # 44, claude-md-global.template 9,
   # statusline-command.sh 2, kanban-helpers.template.sh 5,
-  # secrets.env.template 1). Non-blocking here (nothing in this function
+  # secrets.env.template 1). XACA-1337 retired the former seventh file (a
+  # standalone kanban aliases file carrying 1), so the shipped set is now
+  # 6 files / 62 occurrences. Non-blocking here (nothing in this function
   # depends on the count), but an under-counted footprint could under-scope
   # XACA-1127, which owns the actual substitution.
   local aliases_dir="${WORKING_DIR}/share/aliases"

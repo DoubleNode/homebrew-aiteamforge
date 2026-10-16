@@ -50,8 +50,8 @@ fi
 # Get the kanban directory for a specific team
 # Each team has their own kanban/ directory in their repository.
 #
-# XACA-0649: Three-tier lookup — same logic as kanban-aliases.sh and the
-# Python server — so shell and Python resolvers always agree.
+# XACA-0649: Three-tier lookup — same logic as the Python server — so shell
+# and Python resolvers always agree.
 #
 # Strategy 1: team-paths.json registry (written by install-team.sh / kb-port-reconcile).
 #   Read kanban_dir directly; only trust an entry that points to an existing dir
@@ -66,11 +66,12 @@ fi
 #   legal-coparenting et al. to the wrong directory.
 # Strategy 3: $AITEAMFORGE_DIR/kanban — catch-all for genuinely unknown teams only.
 #
-# SIBLING-DRIFT NOTE (XACA-0649): This function has three copies:
-#   1. kanban-helpers.template.sh (this file — deployed on upgrade by aiteamforge-upgrade.sh)
-#   2. kanban-aliases.sh           (deployed on fresh install by install-kanban.sh)
-#   3. kanban-helpers.sh           (dev source of truth — dev-tree only, not deployed)
-# When changing this function UPDATE ALL THREE and run
+# SIBLING-DRIFT NOTE (XACA-0649, XACA-1337): This function has two copies:
+#   1. kanban-helpers.template.sh (this file — deployed by install-kanban.sh on
+#      fresh install and by aiteamforge-upgrade.sh on upgrade)
+#   2. kanban-helpers.sh           (dev source of truth — dev-tree only, not deployed)
+# (The third copy, the standalone aliases-file fallback, was retired in XACA-1337.)
+# When changing this function UPDATE BOTH and run
 #   homebrew-tap/tests/test-xaca-0649-kanban-dir-resolver.sh
 # to verify parity.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -17234,8 +17235,8 @@ _kb_knowledge_global_root() {
 # on the global root. Search reads both roots; kb-knowledge-add routes writes
 # to whichever root the target team/persona belongs to.
 #
-# Context-adaptation note: unlike the aliases-file counterpart
-# (share/templates/aliases/kanban-aliases.sh), THIS file keeps
+# Context-adaptation note: unlike the retired aliases-file counterpart
+# (XACA-1337 deleted it), THIS file keeps
 # _kb_detect_context (the tmux-pane/env/.kb-team-sentinel resolver defined
 # above) for _kb_current_session_is_local_only_team and _kb_context_resolved
 # below — it runs in the full-helpers context where that resolver is
@@ -32453,12 +32454,12 @@ kb-help() {
 }
 
 # ═════════════════════════════════════════════════════════════════════════
-# XACA-1095: functions restored from share/templates/aliases/kanban-aliases.sh
+# XACA-1095: functions restored from the former aliases-file fallback (retired, XACA-1337)
 # ═════════════════════════════════════════════════════════════════════════
 # Regression guard for the XACA-1095 install/upgrade source-preference flip
 # (install-kanban.sh / aiteamforge-upgrade.sh now render THIS file instead of
-# the tiny kanban-aliases.sh). Ten kb-*/​_kb_* functions existed only in
-# kanban-aliases.sh and were therefore already live on every consumer today;
+# the tiny aliases-file fallback, since retired). Ten kb-*/​_kb_* functions existed only in
+# that file and were therefore already live on every consumer today;
 # flipping the preference without carrying them forward would silently
 # DELETE them from every install. Disposition, function by function:
 #

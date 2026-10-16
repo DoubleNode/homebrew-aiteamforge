@@ -695,35 +695,36 @@ if [ -n "$REGISTERED_KANBAN_DIR" ] || [ -d "$TEST_KANBAN_DIR" ]; then
   fi
 fi
 
-# _kb_get_kanban_dir lives in the consumer kanban-aliases.sh. It consults
+# _kb_get_kanban_dir lives in the consumer kanban-helpers.sh (rendered from
+# kanban-helpers.template.sh -- XACA-1337 retired kanban-aliases.sh). It consults
 # team-paths.json (AITEAMFORGE_CONFIG) FIRST (XACA-0649), so for our registered
 # team it must return the registered dir.
 #
 # XACA-0653 follow-up: the INSTALL TREE ships only TEMPLATES (…/libexec/share/
-# templates/aliases/kanban-aliases.sh still has {{…}} placeholders). The RENDERED
+# templates/kanban/kanban-helpers.template.sh still has {{…}} placeholders). The RENDERED
 # resolver ($AITEAMFORGE_DIR/kanban-helpers.sh) is produced at setup time by
 # install_kanban_helpers — which the headless wizard did NOT complete in our
 # sandbox. So the original code fell through to the raw template and the resolver
 # returned the literal '{{AITEAMFORGE_DIR}}/kanban'. We now RENDER the template
 # into the sandbox ourselves, mirroring install_kanban_helpers (which substitutes
-# {{AITEAMFORGE_DIR}}). The aliases template also carries cosmetic {{ORG_NAME}}/
+# {{AITEAMFORGE_DIR}}). The helpers template also carries cosmetic {{ORG_NAME}}/
 # {{ORG_SLUG}}/{{SHARED_DEV_ROOT}} placeholders that the resolver does NOT depend
 # on (its team lookup is purely AITEAMFORGE_DIR + team-paths.json); we substitute
 # them too with harmless values so the sourced file is brace-clean and can't throw.
-ALIASES_TEMPLATE=""
+HELPERS_TEMPLATE=""
 for t in \
-    "$(brew --prefix aiteamforge 2>/dev/null)/libexec/share/templates/aliases/kanban-aliases.sh" \
-    "$AITEAMFORGE_DIR/share/templates/aliases/kanban-aliases.sh" \
-    "$TAP_ROOT/share/templates/aliases/kanban-aliases.sh"; do
-  [ -f "$t" ] && { ALIASES_TEMPLATE="$t"; break; }
+    "$(brew --prefix aiteamforge 2>/dev/null)/libexec/share/templates/kanban/kanban-helpers.template.sh" \
+    "$AITEAMFORGE_DIR/share/templates/kanban/kanban-helpers.template.sh" \
+    "$TAP_ROOT/share/templates/kanban/kanban-helpers.template.sh"; do
+  [ -f "$t" ] && { HELPERS_TEMPLATE="$t"; break; }
 done
 RENDERED_RESOLVER="$AITEAMFORGE_DIR/kanban-helpers.sh"
-if [ -n "$ALIASES_TEMPLATE" ] && [ ! -f "$RENDERED_RESOLVER" ]; then
+if [ -n "$HELPERS_TEMPLATE" ] && [ ! -f "$RENDERED_RESOLVER" ]; then
   if sed -e "s|{{AITEAMFORGE_DIR}}|$AITEAMFORGE_DIR|g" \
          -e "s|{{ORG_NAME}}|E2E|g" \
          -e "s|{{ORG_SLUG}}|e2e|g" \
          -e "s|{{SHARED_DEV_ROOT}}|$AITEAMFORGE_DIR|g" \
-         "$ALIASES_TEMPLATE" > "$RENDERED_RESOLVER" 2>/dev/null; then
+         "$HELPERS_TEMPLATE" > "$RENDERED_RESOLVER" 2>/dev/null; then
     note "rendered resolver into sandbox (mirrors install_kanban_helpers): $RENDERED_RESOLVER"
   fi
 fi
@@ -731,10 +732,7 @@ fi
 # Pick the resolver source — prefer the rendered consumer copy, and NEVER trust a
 # file that still carries unrendered {{…}} placeholders (the original bug).
 RESOLVER_SRC=""
-for r in \
-    "$RENDERED_RESOLVER" \
-    "$AITEAMFORGE_DIR/share/aliases/kanban-aliases.sh" \
-    "$(brew --prefix aiteamforge 2>/dev/null)/libexec/share/aliases/kanban-aliases.sh"; do
+for r in "$RENDERED_RESOLVER"; do
   if [ -f "$r" ] && ! grep -q '{{' "$r" 2>/dev/null; then RESOLVER_SRC="$r"; break; fi
 done
 

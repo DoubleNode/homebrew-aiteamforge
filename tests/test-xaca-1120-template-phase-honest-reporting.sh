@@ -86,9 +86,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TAP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 UPGRADE_SH="$TAP_ROOT/libexec/commands/aiteamforge-upgrade.sh"
 REAL_TEMPLATE="$TAP_ROOT/share/templates/kanban/kanban-helpers.template.sh"
-REAL_ALIASES="$TAP_ROOT/share/templates/aliases/kanban-aliases.sh"
 
-for _need in "$UPGRADE_SH" "$REAL_TEMPLATE" "$REAL_ALIASES"; do
+for _need in "$UPGRADE_SH" "$REAL_TEMPLATE"; do
     if [ ! -f "$_need" ]; then
         echo "FATAL: required file not found: $_need" >&2
         echo "  This test must run from inside the homebrew-tap checkout." >&2
@@ -994,19 +993,32 @@ _run_update_shell_helpers() {
     ) 2>&1
 }
 
+# XACA-1337: the retired aliases file used to double as the "deliberately stale,
+# tiny" installed helper. Replace it with an explicit stale fixture (3 kb-*
+# functions, far below the shipped template's inventory) so the render/inventory
+# cases keep a stale starting point that provably differs from the template.
+_write_stale_helpers() {
+    cat > "$1" <<'STALEEOF'
+#!/bin/zsh
+# STALE-XACA1120-FIXTURE -- deliberately NOT the shipped template
+kb-stale-one() { echo one; }
+kb-stale-two() { echo two; }
+kb-stale-three() { echo three; }
+STALEEOF
+}
+
 _make_helpers_sandbox() {
     local sbx="$1"
     mkdir -p "$sbx/framework/share/templates/kanban"
-    mkdir -p "$sbx/framework/share/templates/aliases"
+    mkdir -p "$sbx/framework/share/templates/aliases"   # sibling aliases (cc/worktree/agent) land here
     mkdir -p "$sbx/working"
     cp "$REAL_TEMPLATE" "$sbx/framework/share/templates/kanban/kanban-helpers.template.sh"
-    cp "$REAL_ALIASES"  "$sbx/framework/share/templates/aliases/kanban-aliases.sh"
 }
 
 test_start "kb-* inventory of the rendered helper matches the shipped template"
 _sbx="$(_next_sandbox)"; _make_helpers_sandbox "$_sbx"
-# Start from a deliberately stale render (the tiny aliases file) to force work.
-cp "$REAL_ALIASES" "$_sbx/working/kanban-helpers.sh"
+# Start from a deliberately stale render (a tiny stale fixture) to force work.
+_write_stale_helpers "$_sbx/working/kanban-helpers.sh"
 _run_update_shell_helpers "$_sbx" >/dev/null 2>&1
 _tpl_n="$(_count_kb_fns "$_sbx/framework/share/templates/kanban/kanban-helpers.template.sh")"
 _got_n="$(_count_kb_fns "$_sbx/working/kanban-helpers.sh")"
@@ -1024,14 +1036,14 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 test_start "NEGATIVE CONTROL: a skipped render leaves the kb-* inventory mismatched"
 _sbx="$(_next_sandbox)"; _make_helpers_sandbox "$_sbx"
-cp "$REAL_ALIASES" "$_sbx/working/kanban-helpers.sh"
+_write_stale_helpers "$_sbx/working/kanban-helpers.sh"
 # Do NOT run the render.
 _tpl_n="$(_count_kb_fns "$_sbx/framework/share/templates/kanban/kanban-helpers.template.sh")"
 _got_n="$(_count_kb_fns "$_sbx/working/kanban-helpers.sh")"
 if [ "$_tpl_n" != "$_got_n" ]; then
     test_pass
 else
-    test_fail "aliases and template have the same kb-* count (${_tpl_n}) - case 8 cannot distinguish rendered from skipped"
+    test_fail "stale fixture and template have the same kb-* count (${_tpl_n}) - case 8 cannot distinguish rendered from skipped"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1040,7 +1052,7 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 test_start "no-op kanban-helpers.sh render is reported, not silent"
 _sbx="$(_next_sandbox)"; _make_helpers_sandbox "$_sbx"
-cp "$REAL_ALIASES" "$_sbx/working/kanban-helpers.sh"
+_write_stale_helpers "$_sbx/working/kanban-helpers.sh"
 _run_update_shell_helpers "$_sbx" >/dev/null 2>&1   # first pass renders
 _out="$(_run_update_shell_helpers "$_sbx")"          # second pass is a no-op
 if echo "$_out" | grep -q 'kanban-helpers.sh already current'; then
@@ -1106,8 +1118,7 @@ _run_update_shell_helpers_rev() {
 # warning and moves on to the aliases loop, which is all this case needs.
 _make_aliases_only_sandbox() {
     local sbx="$1" _af
-    mkdir -p "$sbx/framework/share/templates/aliases"
-    mkdir -p "$sbx/working"
+    mkdir -p "$sbx/framework/share/templates/aliases" "$sbx/working"
     for _af in agent-aliases.sh cc-aliases.sh worktree-aliases.sh; do
         printf '# %s fixture\n# dir: {{AITEAMFORGE_DIR}}\n# shared: {{SHARED_DEV_ROOT}}\n# org: {{ORG_NAME}}\n' "$_af" \
             > "$sbx/framework/share/templates/aliases/$_af"
