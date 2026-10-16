@@ -133,7 +133,9 @@ function parseFleetData() {
             let divisionKey  = division;
             let divisionName = division;
             if (division === 'freelance' && project) {
-                const projectSuffix = project.replace('doublenode-', '');
+                // client-agnostic: drop the client segment (matches server.js resolveDivisionKey, XACA-1337)
+                const dash = project.indexOf('-');
+                const projectSuffix = dash > 0 && dash < project.length - 1 ? project.slice(dash + 1) : project;
                 divisionKey  = `freelance-${projectSuffix}`;
                 divisionName = divisionKey;
             }

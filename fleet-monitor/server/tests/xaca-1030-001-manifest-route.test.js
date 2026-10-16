@@ -73,6 +73,12 @@ function loadDashboardConfig() {
     return { dashboards: [], divisions: [], meta: { version: '1.0.0' } };
 }
 
+// server.js's loadDashboardConfigOrRespond only adds the malformed-overlay 500 path
+// (XACA-1337-023, covered by xaca-1337-016); this suite's loader has no overlay.
+function loadDashboardConfigOrRespond(res) { // eslint-disable-line no-unused-vars
+    return loadDashboardConfig();
+}
+
 const MANIFEST_LCARS2_PATHS = {
     academy: '/lcars2/lcars-index.html',
     mainevent: '/lcars2/lcars-mainevent.html',
@@ -86,7 +92,8 @@ const MANIFEST_DEFAULT_UI = 'lcars';
 const MANIFEST_SHORT_NAME_MAX_LEN = 12;
 
 function manifestRouteHandler(req, res) {
-    const config = loadDashboardConfig();
+    const config = loadDashboardConfigOrRespond(res);
+    if (!config) return;
     const dashboards = config.dashboards || [];
     const validIds = new Set(dashboards.map((d) => d.id));
 

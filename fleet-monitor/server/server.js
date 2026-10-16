@@ -126,9 +126,6 @@ const KANBAN_DIRS = [
     path.join('/Users/Shared/Development/Main Event/MainEventApp-Functions', 'kanban'),
     path.join('/Users/Shared/Development/Main Event/dev-team', 'kanban'),
     path.join('/Users/Shared/Development/DNSFramework', 'kanban'),
-    path.join('/Users/Shared/Development/DoubleNode/Starwords', 'kanban'),
-    path.join('/Users/Shared/Development/DoubleNode/WorkStats', 'kanban'),
-    path.join('/Users/Shared/Development/DoubleNode/appPlanning', 'kanban'),
     path.join(HOME_DIR, 'legal', 'coparenting', 'kanban'),
     path.join(HOME_DIR, 'medical', 'general', 'kanban'),
     path.join(HOME_DIR, 'finance', 'personal', 'kanban'),
@@ -782,7 +779,8 @@ const MANIFEST_SHORT_NAME_MAX_LEN = 12;
  * allow-list closes that off entirely rather than merely encoding it.
  */
 app.get('/appicons/fleet.webmanifest', (req, res) => {
-    const config = loadDashboardConfig();
+    const config = loadDashboardConfigOrRespond(res);
+    if (!config) return;
     const dashboards = config.dashboards || [];
     const validIds = new Set(dashboards.map((d) => d.id));
 
@@ -894,7 +892,8 @@ app.get('/lcars/lcars-dashboard.html', (req, res, next) => {
         return next();
     }
 
-    const config = loadDashboardConfig();
+    const config = loadDashboardConfigOrRespond(res);
+    if (!config) return;
     const dashboards = config.dashboards || [];
     const validIds = new Set(dashboards.map((d) => d.id));
 
@@ -3037,6 +3036,26 @@ function loadDashboardConfig() {
         enumerable: false,
     });
     return merged;
+}
+
+/**
+ * loadDashboardConfig() for routes that have NO surrounding try/catch (the
+ * webmanifest + dashboard page routes). A malformed overlay must not fall to
+ * Express's default error handler: outside production that handler returns the
+ * stack trace and the overlay path. Log the detail server-side (loadDashboardConfig
+ * already did) and send a generic body. Returns the config, or null after
+ * responding -- callers `return` on null. (XACA-1337-023)
+ */
+function loadDashboardConfigOrRespond(res) {
+    try {
+        return loadDashboardConfig();
+    } catch (error) {
+        if (!(error instanceof dashboardOverlay.DashboardOverlayError)) {
+            console.error('[dashboards] unexpected error loading dashboard config:', error);
+        }
+        res.status(500).type('text/plain').send('Dashboard configuration unavailable');
+        return null;
+    }
 }
 
 /**

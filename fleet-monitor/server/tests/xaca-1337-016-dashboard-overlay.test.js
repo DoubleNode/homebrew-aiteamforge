@@ -269,4 +269,31 @@ describe('server.js loadDashboardConfig/saveDashboardConfig (sandboxed real serv
         assert.match(stderr, /dashboards overlay .* is not valid JSON/);
         fs.writeFileSync(overlayFile, JSON.stringify(VALID_OVERLAY, null, 2));
     });
+    // XACA-1337-023: the two routes with no try/catch used to fall to Express's default
+    // error handler, which (outside production) returns the stack trace + overlay path.
+    for (const route of ['/appicons/fleet.webmanifest', '/lcars/lcars-dashboard.html']) {
+        test(`malformed overlay -> GET ${route} is a CONTROLLED 500 (no stack, no overlay path)`, async () => {
+            fs.writeFileSync(overlayFile, '{ "dashboards": [ not json');
+            try {
+                const before = stderr.length;
+                const res = await fetch(`${baseUrl}${route}`);
+                const body = await res.text();
+                assert.equal(res.status, 500);
+                assert.equal(body.includes(overlayFile), false, 'response leaked the overlay path');
+                assert.equal(body.includes(path.basename(overlayFile)), false, 'response leaked the overlay file name');
+                assert.equal(/\n\s+at\s/.test(body) || /node_modules|server\.js/.test(body), false, 'response leaked a stack frame');
+                assert.equal(/DashboardOverlayError|not valid JSON/.test(body), false, 'response leaked the error detail');
+                assert.match(stderr.slice(before), /dashboards overlay .* is not valid JSON/, 'detail must be logged server-side');
+            } finally {
+                fs.writeFileSync(overlayFile, JSON.stringify(VALID_OVERLAY, null, 2));
+            }
+        });
+    }
+
+    test('valid overlay restored -> both routes serve normally again', async () => {
+        const m = await fetch(`${baseUrl}/appicons/fleet.webmanifest`);
+        assert.equal(m.status, 200);
+        const p = await fetch(`${baseUrl}/lcars/lcars-dashboard.html`);
+        assert.equal(p.status, 200);
+    });
 });
