@@ -235,7 +235,7 @@ test('GET /api/fleet: freelance divisionKey splitting applies identically to lca
         status: 'online', sessions: [], session_count: 0,
         first_seen: new Date().toISOString(), last_seen: new Date().toISOString(), uptime_history: [],
         lcars_services: [
-            { session_name: 'freelance-doublenode-workstats-lcars', division: 'freelance', project: 'doublenode-workstats', team: 'lcars', port: 8901, reachable: true, source: 'portfile' }
+            { session_name: 'freelance-acme-workstats-lcars', division: 'freelance', project: 'acme-workstats', team: 'lcars', port: 8901, reachable: true, source: 'portfile' }
         ]
     });
     const { app } = createApp({ machines });
@@ -243,7 +243,7 @@ test('GET /api/fleet: freelance divisionKey splitting applies identically to lca
     const res = await request(app).get('/api/fleet');
     const div = res.body.fleet.divisions['freelance-workstats'];
     assert.ok(div, 'expected divisionKey "freelance-workstats" (matching the sessions-path splitting rule)');
-    const team = div.projects['doublenode-workstats'].teams.lcars;
+    const team = div.projects['acme-workstats'].teams.lcars;
     assert.equal(team.lcars_service.port, 8901);
 });
 

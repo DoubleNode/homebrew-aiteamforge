@@ -74,6 +74,66 @@ def __getattr__(name: str) -> str:
 # Packaged default config directory (relative to this file).
 _PACKAGE_CONFIG_DIR = Path(__file__).parent / "config"
 
+# XACA-1337-016: per-machine OVERLAY config directory. Client-specific team
+# configs (freelance-<client>-<project>) must not ship in the package, so a
+# machine that hosts such a team keeps its YAML here instead. Searched BEFORE the
+# packaged dir, so an overlay file wins on a name collision. An absent dir is the
+# normal consumer case. The variable override exists for tests and unusual
+# layouts; an empty value means "unset" (default location).
+OVERLAY_CONFIG_DIR_VAR = "AITEAMFORGE_TEAM_TRANSFER_CONFIG_DIR"
+
+
+class TeamConfigError(ValueError):
+    """A team config exists but is unusable (malformed overlay, overlay path that
+    is not a directory). Raised instead of silently falling back to a packaged
+    config or reporting 'no config' -- a broken overlay must be loud."""
+
+
+def overlay_config_dir() -> Path:
+    """Return the per-machine overlay dir (may not exist)."""
+    override = os.environ.get(OVERLAY_CONFIG_DIR_VAR, "").strip()
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".aiteamforge" / "team_transfer" / "config"
+
+
+def _overlay_candidate(team: str) -> Path | None:
+    """The overlay candidate for <team>, or None when no overlay dir exists.
+    Raises TeamConfigError when the overlay path exists but is not a directory."""
+    d = overlay_config_dir()
+    if not d.exists():
+        return None
+    if not d.is_dir():
+        raise TeamConfigError(
+            f"team_transfer overlay path {d} exists but is not a directory "
+            f"(fix it, or point ${OVERLAY_CONFIG_DIR_VAR} elsewhere)"
+        )
+    return d / f"{team}.yaml"
+
+
+def _validate_overlay_config(team: str, path: Path, cfg: dict) -> None:
+    """Structural check for overlay-sourced configs. Packaged configs are covered
+    by test_migration_config_contract; overlays are hand-copied per machine and
+    get no CI, so they are checked at load time and fail loudly."""
+    problems = []
+    declared = cfg.get("team")
+    if not isinstance(declared, str) or not declared.strip():
+        problems.append("missing 'team' key")
+    elif declared != team and not path.is_symlink():
+        problems.append(f"'team: {declared}' does not match file name {team!r}")
+    pd = cfg.get("product_dir")
+    if not isinstance(pd, str) or not pd.strip():
+        problems.append("missing/empty 'product_dir'")
+    if not isinstance(cfg.get("personas"), list):
+        problems.append("missing 'personas' list")
+    # "" is legitimate (Option B: absolute-path teams outside $HOME); absent is not.
+    if not isinstance(cfg.get("home_relative_root"), str):
+        problems.append("missing 'home_relative_root'")
+    if problems:
+        raise TeamConfigError(
+            f"malformed team_transfer overlay config {path}: " + "; ".join(problems)
+        )
+
 
 @dataclass
 class ChannelRule:
@@ -109,18 +169,32 @@ def load_team_config(team: str, *, config_dir: Path | None = None) -> dict:
 
     Resolution order:
       1. Explicit config_dir/<team>.yaml (if config_dir provided)
-      2. Packaged default: team_transfer/config/<team>.yaml
-      3. FileNotFoundError
+      2. Per-machine overlay: $AITEAMFORGE_TEAM_TRANSFER_CONFIG_DIR/<team>.yaml,
+         default ~/.aiteamforge/team_transfer/config/<team>.yaml (XACA-1337-016)
+      3. Packaged default: team_transfer/config/<team>.yaml
+      4. FileNotFoundError
+
+    An overlay file that exists but is malformed raises TeamConfigError; it never
+    falls through to the packaged config.
 
     Tokens in the returned config are NOT yet resolved — call resolve_tokens() or
     default_rules() which handles token substitution.
     """
     candidates = _team_config_candidates(team, config_dir)
 
+    overlay = _overlay_candidate(team)
     for path in candidates:
         if path.exists():
-            text = path.read_text(encoding="utf-8")
-            return _parse_team_yaml(text)
+            if not path.is_file():
+                raise TeamConfigError(f"team config {path} exists but is not a regular file")
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as e:
+                raise TeamConfigError(f"cannot read team config {path}: {e}") from e
+            cfg = _parse_team_yaml(text)
+            if overlay is not None and path == overlay:
+                _validate_overlay_config(team, path, cfg)
+            return cfg
 
     searched = ", ".join(str(c) for c in candidates)
     raise FileNotFoundError(f"No team config found for {team!r}. Searched: {searched}")
@@ -132,6 +206,9 @@ def _team_config_candidates(team: str, config_dir: Path | None) -> list[Path]:
     candidates: list[Path] = []
     if config_dir is not None:
         candidates.append(Path(config_dir) / f"{team}.yaml")
+    overlay = _overlay_candidate(team)
+    if overlay is not None:
+        candidates.append(overlay)
     candidates.append(_PACKAGE_CONFIG_DIR / f"{team}.yaml")
     return candidates
 

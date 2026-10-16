@@ -1617,7 +1617,7 @@ test_start "T10 [XACA-0845-015]: upgrade composes freelance-<client>-<project> a
 T10_SBX="$(_new_install_sandbox)"
 T10_REGISTRY="$T10_SBX/home/.aiteamforge/team-paths.json"
 _write_registry "$T10_REGISTRY"
-_write_install_config "$T10_SBX/aiteamforge/.aiteamforge-config" "freelance:doublenode:starwords"
+_write_install_config "$T10_SBX/aiteamforge/.aiteamforge-config" "freelance:acme:app"
 _write_install_profile_marker "$T10_SBX/aiteamforge" "full"
 _install_print_stubs
 HOME="$T10_SBX/home" \
@@ -1626,7 +1626,7 @@ FRAMEWORK_DIR="$TAP_ROOT" WORKING_DIR="$T10_SBX/aiteamforge" LIBEXEC_DIR="$TAP_R
 AITEAMFORGE_CONFIG="$T10_REGISTRY" \
     update_connect_scripts >"$WORK_DIR/t10-upgrade.log" 2>&1
 # XACA-0862: the internal composition (upgrade -> install-team.sh --client
-# doublenode --project starwords) is unchanged; only install-team.sh's OUTPUT
+# acme --project app) is unchanged; only install-team.sh's OUTPUT
 # filename changed, from the composed instance id to the team-scoped id.
 T10_CONNECT="$T10_SBX/aiteamforge/freelance-connect.sh"
 T10_DISCONNECT="$T10_SBX/aiteamforge/freelance-disconnect.sh"
@@ -1642,10 +1642,10 @@ T10_OK=true
 grep -qF 'TMUX_SOCKET="freelance"' "$T10_CONNECT" 2>/dev/null || T10_OK=false
 # The pre-XACA-0845-015 symptoms must be gone.
 grep -qi "cannot split" "$_STUB_LOG" && T10_OK=false
-grep -qF "freelance-starwords-connect.sh" "$_STUB_LOG" && T10_OK=false
+grep -qF "freelance-app-connect.sh" "$_STUB_LOG" && T10_OK=false
 # No retired instance-scoped (doubly-qualified or client-less) twin.
-[ -e "$T10_SBX/aiteamforge/freelance-doublenode-starwords-connect.sh" ] && T10_OK=false
-[ -e "$T10_SBX/aiteamforge/freelance-starwords-connect.sh" ] && T10_OK=false
+[ -e "$T10_SBX/aiteamforge/freelance-acme-app-connect.sh" ] && T10_OK=false
+[ -e "$T10_SBX/aiteamforge/freelance-app-connect.sh" ] && T10_OK=false
 if [ "$T10_OK" = true ]; then
     test_pass
 else
@@ -1658,7 +1658,7 @@ fi
 # sandbox. The patch is pinned by a marker assertion first (house convention),
 # so if the composition is ever restructured this control fails loudly rather
 # than silently testing nothing.
-test_start "NC4 [negative control, XACA-0845-015]: the client-ignoring reader composes 'freelance-starwords' and creates NOTHING"
+test_start "NC4 [negative control, XACA-0845-015]: the client-ignoring reader composes 'freelance-app' and creates NOTHING"
 NC4_SRC="$WORK_DIR/update_connect_scripts.prefix015.sh"
 NC4_PATCH_OK=true
 python3 - "$UPD_FN_SRC" "$NC4_SRC" <<'PYEOF' || NC4_PATCH_OK=false
@@ -1699,7 +1699,7 @@ else
     NC4_SBX="$(_new_install_sandbox)"
     NC4_REGISTRY="$NC4_SBX/home/.aiteamforge/team-paths.json"
     _write_registry "$NC4_REGISTRY"
-    _write_install_config "$NC4_SBX/aiteamforge/.aiteamforge-config" "freelance:doublenode:starwords"
+    _write_install_config "$NC4_SBX/aiteamforge/.aiteamforge-config" "freelance:acme:app"
     _install_print_stubs
     HOME="$NC4_SBX/home" \
     AITEAMFORGE_ORG_CONFIG="$NC4_SBX/home/.aiteamforge/organization.yaml" \
@@ -1708,12 +1708,12 @@ else
         update_connect_scripts_prefix015 >"$WORK_DIR/nc4-upgrade.log" 2>&1
     # The defect, reproduced: the wrong id is composed, the decomposition
     # rejects it, and no script is created.
-    if [ ! -e "$NC4_SBX/aiteamforge/freelance-doublenode-starwords-connect.sh" ] \
+    if [ ! -e "$NC4_SBX/aiteamforge/freelance-acme-app-connect.sh" ] \
         && grep -qi "cannot split" "$_STUB_LOG" \
-        && grep -qF "freelance-starwords" "$_STUB_LOG"; then
+        && grep -qF "freelance-app" "$_STUB_LOG"; then
         test_pass
     else
-        test_fail "pre-fix reader should have composed 'freelance-starwords', warned 'cannot split' and created nothing; on_disk=$(ls -1 "$NC4_SBX/aiteamforge" 2>/dev/null | tr '\n' ' '); stub_log=$(cat "$_STUB_LOG")"
+        test_fail "pre-fix reader should have composed 'freelance-app', warned 'cannot split' and created nothing; on_disk=$(ls -1 "$NC4_SBX/aiteamforge" 2>/dev/null | tr '\n' ' '); stub_log=$(cat "$_STUB_LOG")"
     fi
 fi
 
@@ -1723,14 +1723,14 @@ fi
 # ═══════════════════════════════════════════════════════════════════════════
 test_start "D4 [XACA-0845-015 / XACA-0862]: doctor reports a freelance install as PRESENT via its team-scoped script, not missing-plus-orphan"
 D4_SBX="$(_new_install_sandbox)"
-_write_install_config "$D4_SBX/aiteamforge/.aiteamforge-config" "freelance:doublenode:starwords"
+_write_install_config "$D4_SBX/aiteamforge/.aiteamforge-config" "freelance:acme:app"
 _write_install_profile_marker "$D4_SBX/aiteamforge" "full"
 # XACA-0862: freelance is parametric (TEAM_REQUIRES_CLIENT_ID="true" AND
 # TEAM_HAS_PROJECTS="true"), so the real install-team.sh renders exactly ONE
 # team-scoped freelance-connect.sh regardless of client/project — never a
-# per-instance freelance-doublenode-starwords-connect.sh. The client_id
+# per-instance freelance-acme-app-connect.sh. The client_id
 # composition bug XACA-0845-015 originally guarded against (composing
-# "freelance-starwords" instead of "freelance-doublenode-starwords") is now
+# "freelance-app" instead of "freelance-acme-app") is now
 # structurally unreachable for THIS check: client_id/project_id are never
 # read at all for a parametric base, which collapses straight to "freelance".
 printf '#!/bin/zsh\necho stub\n' > "$D4_SBX/aiteamforge/freelance-connect.sh"
@@ -1743,8 +1743,8 @@ AITEAMFORGE_CONFIG="$D4_SBX/home/.aiteamforge/team-paths.json" \
 D4_OK=true
 grep -qF "Connect script present for freelance" "$D4_LOG" || D4_OK=false
 # Neither half of the pre-XACA-0862 double false positive may appear.
-grep -qF "freelance-starwords" "$D4_LOG" && D4_OK=false
-grep -qF "freelance-doublenode-starwords" "$D4_LOG" && D4_OK=false
+grep -qF "freelance-app" "$D4_LOG" && D4_OK=false
+grep -qF "freelance-acme-app" "$D4_LOG" && D4_OK=false
 grep -qi "matches no installed instance" "$D4_LOG" && D4_OK=false
 grep -qi "has no connect script" "$D4_LOG" && D4_OK=false
 if [ "$D4_OK" = true ]; then

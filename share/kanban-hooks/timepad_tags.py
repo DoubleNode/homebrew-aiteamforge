@@ -1,7 +1,7 @@
 """Content-based category classifier for TimePad time entries.
 
 EPIC-0039 Child B (XACA-0620) — relocated and generalized from the retired
-Bandwear-only ``timeapp_tags.py``.
+single-client ``timeapp_tags.py``.
 
 This module maps a time-entry description to one or more human-readable
 **category names** (e.g. "Development", "Research") using keyword heuristics.
@@ -70,7 +70,7 @@ def classify_names(description, coordination=False):
         coordination:  When True and no keyword matches, fall back to ["Admin"]
                        (a bare-branch coordination session with no kanban item)
                        instead of ["Development"]. Generalizes the old
-                       Bandwear-specific "Bandwear Android — <branch>" heuristic.
+                       client-specific "<Client> Android — <branch>" heuristic.
 
     Always returns at least one name.
     """

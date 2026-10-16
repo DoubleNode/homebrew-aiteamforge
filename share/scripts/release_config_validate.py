@@ -638,7 +638,7 @@ def resolve_secret_ref(ref: str, team: str) -> str:
 # Test-only hook (XACA-1342-021): a module-level override for the
 # registered-team-id set, so a test can exercise _resolve_vault_ref()'s
 # team-isolation logic against a fixture registry (e.g. one that includes
-# the real mainevent-* / freelance-doublenode-* collision shapes) without
+# the real mainevent-* / freelance-acme-* collision shapes) without
 # touching the live ~/.aiteamforge/team-paths.json. None (the default)
 # means "load the real registry". Set via
 # monkeypatch.setattr(rcv, "_TEAM_IDS_OVERRIDE", frozenset({...})).

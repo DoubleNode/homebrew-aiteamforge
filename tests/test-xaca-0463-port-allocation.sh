@@ -245,39 +245,39 @@ fi
 # Note: freelance is template-client-project, so --client AND --project are
 # required (no default project is defined in freelance.conf).
 # ─────────────────────────────────────────────────────────────────────────────
-test_start "XACA-0463-port case-2a: freelance-doublenode-starwords gets port 8500 (freelance band base)"
+test_start "XACA-0463-port case-2a: freelance-acme-app gets port 8500 (freelance band base)"
 new_sandbox "2"
 _c2_pass=true
 
-if ! run_install "fw1" freelance --client doublenode --project starwords; then
-    test_fail "install-team.sh exited non-zero for freelance --client doublenode --project starwords (see $_SB/install-fw1.err)"
+if ! run_install "fw1" freelance --client acme --project app; then
+    test_fail "install-team.sh exited non-zero for freelance --client acme --project app (see $_SB/install-fw1.err)"
     _c2_pass=false
 fi
 
 if [[ "$_c2_pass" = true ]]; then
-    _c2_port1="$(jq -r '.teams["freelance-doublenode-starwords"].lcars_port // empty' "$_SB_CONFIG" 2>/dev/null)"
+    _c2_port1="$(jq -r '.teams["freelance-acme-app"].lcars_port // empty' "$_SB_CONFIG" 2>/dev/null)"
     if [[ "$_c2_port1" = "8500" ]]; then
         test_pass
     else
-        test_fail "expected freelance-doublenode-starwords.lcars_port=8500, got '${_c2_port1:-<empty>}'"
+        test_fail "expected freelance-acme-app.lcars_port=8500, got '${_c2_port1:-<empty>}'"
         _c2_pass=false
     fi
 fi
 
-test_start "XACA-0463-port case-2b: freelance-doublenode-workstats gets port 8501 (next free)"
+test_start "XACA-0463-port case-2b: freelance-acme-web gets port 8501 (next free)"
 if [[ "$_c2_pass" = true ]]; then
-    if ! run_install "fw2" freelance --client doublenode --project workstats; then
-        test_fail "install-team.sh exited non-zero for freelance --client doublenode --project workstats (see $_SB/install-fw2.err)"
+    if ! run_install "fw2" freelance --client acme --project web; then
+        test_fail "install-team.sh exited non-zero for freelance --client acme --project web (see $_SB/install-fw2.err)"
         _c2_pass=false
     fi
 fi
 
 if [[ "$_c2_pass" = true ]]; then
-    _c2_port2="$(jq -r '.teams["freelance-doublenode-workstats"].lcars_port // empty' "$_SB_CONFIG" 2>/dev/null)"
+    _c2_port2="$(jq -r '.teams["freelance-acme-web"].lcars_port // empty' "$_SB_CONFIG" 2>/dev/null)"
     if [[ "$_c2_port2" = "8501" ]]; then
         test_pass
     else
-        test_fail "expected freelance-doublenode-workstats.lcars_port=8501, got '${_c2_port2:-<empty>}'"
+        test_fail "expected freelance-acme-web.lcars_port=8501, got '${_c2_port2:-<empty>}'"
     fi
 fi
 

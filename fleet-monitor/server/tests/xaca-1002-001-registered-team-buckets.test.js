@@ -138,9 +138,9 @@ const RESOLVER_TABLE = [
     { key: 'command', division: 'command', project: undefined },
     { key: 'firebase', division: 'firebase', project: undefined },
     { key: 'ios', division: 'ios', project: undefined },
-    { key: 'freelance-doublenode-appplanning', division: 'freelance-appplanning', project: 'doublenode-appplanning' },
-    { key: 'freelance-doublenode-starwords', division: 'freelance-starwords', project: 'doublenode-starwords' },
-    { key: 'freelance-doublenode-workstats', division: 'freelance-workstats', project: 'doublenode-workstats' },
+    { key: 'freelance-acme-appplanning', division: 'freelance-appplanning', project: 'acme-appplanning' },
+    { key: 'freelance-acme-starwords', division: 'freelance-starwords', project: 'acme-starwords' },
+    { key: 'freelance-acme-workstats', division: 'freelance-workstats', project: 'acme-workstats' },
     { key: 'legal-coparenting', division: 'legal', project: 'coparenting' },
     { key: 'medical-general', division: 'medical', project: 'general' }
 ];
@@ -608,9 +608,9 @@ test('SOURCE PARITY: the REAL server.js resolveRegistryKey resolves all 11 live 
         'command': ['command', '_default'],
         'firebase': ['firebase', '_default'],
         'ios': ['ios', '_default'],
-        'freelance-doublenode-appplanning': ['freelance-appplanning', 'doublenode-appplanning'],
-        'freelance-doublenode-starwords': ['freelance-starwords', 'doublenode-starwords'],
-        'freelance-doublenode-workstats': ['freelance-workstats', 'doublenode-workstats'],
+        'freelance-acme-appplanning': ['freelance-appplanning', 'acme-appplanning'],
+        'freelance-acme-starwords': ['freelance-starwords', 'acme-starwords'],
+        'freelance-acme-workstats': ['freelance-workstats', 'acme-workstats'],
         'legal-coparenting': ['legal', 'coparenting'],
         'medical-general': ['medical', 'general']
     };
@@ -761,4 +761,24 @@ test('XACA-1002-016: degenerate registry keys resolve safely and are never mater
     assert.ok(divisions['freelance'], 'the bare freelance- entry still materializes under _default');
     assert.ok(divisions['freelance'].projects['_default'].teams['beta'], 'its terminal lands in _default');
     assert.equal(countAllTeams(divisions), 1, 'exactly one bucket total — the empty key contributed none');
+});
+
+// XACA-1337-016: resolveDivisionKey's freelance rule is client-AGNOSTIC. It used
+// to strip one hardcoded client prefix, so every other client's segment leaked
+// into the division key and a client name was baked into shipped code.
+test('XACA-1337-016: freelance registry keys drop ANY client segment from the division, keep it in the project', () => {
+    const real = loadRealServerImplementation(realRegisteredTeamsMap());
+    const cases = [
+        ['freelance-acme-starwords', 'freelance-starwords', 'acme-starwords'],
+        ['freelance-otherco-starwords', 'freelance-starwords', 'otherco-starwords'],
+        ['freelance-acme-widgets-ios', 'freelance-widgets-ios', 'acme-widgets-ios'],
+        ['freelance-starwords', 'freelance-starwords', 'starwords'],
+    ];
+    for (const [key, division, project] of cases) {
+        assert.deepStrictEqual(real.resolveRegistryKey(key, {}), { division, project }, key);
+    }
+    const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+    const fn = src.slice(src.indexOf('function resolveDivisionKey('), src.indexOf('function ensureTeamBucket('));
+    assert.ok(fn.length > 0, 'resolveDivisionKey not found in server.js');
+    assert.equal(/\.replace\(\s*['"][a-z]+-['"]/.test(fn), false, 'resolveDivisionKey must not strip a hardcoded client prefix');
 });

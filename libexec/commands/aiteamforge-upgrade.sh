@@ -761,15 +761,28 @@ update_lcars() {
     local tt_src="${lcars_source}/team_transfer/config"
     local tt_dst="${lcars_target}/team_transfer/config"
     if [ -d "$tt_src" ]; then
-      local src_n dst_n
-      # Count regular files AND symlinks: 3 of the per-team configs are intra-dir
+      # Include regular files AND symlinks: 3 of the per-team configs are intra-dir
       # symlink aliases (e.g. medical.yaml -> medical-general.yaml). rsync -a ships
       # them as symlinks, so a -type f count would under-report and let a dropped
       # alias slip past the guard.
-      src_n=$(find "$tt_src" -maxdepth 1 -name '*.yaml' \( -type f -o -type l \) 2>/dev/null | wc -l | tr -d ' ')
-      dst_n=$(find "$tt_dst" -maxdepth 1 -name '*.yaml' \( -type f -o -type l \) 2>/dev/null | wc -l | tr -d ' ')
-      if [ "$src_n" != "$dst_n" ]; then
-        print_warning "team_transfer/config yaml mismatch: installed ${dst_n} vs framework ${src_n} (import/export may be impaired — re-run upgrade or report XACA-0600)"
+      #
+      # XACA-1337-016: compare by NAME, not count. rsync runs without --delete, so a
+      # yaml the framework STOPPED shipping (the client-specific freelance-<client>-*
+      # configs moved to the per-machine overlay ~/.aiteamforge/team_transfer/config/)
+      # lingers in the installed copy. A count comparison then warned on every upgrade
+      # forever. What matters is that every framework yaml reached the install.
+      local missing_tt="" f base
+      while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        base="${f##*/}"
+        if [ ! -e "$tt_dst/$base" ] && [ ! -L "$tt_dst/$base" ]; then
+          missing_tt="${missing_tt} ${base}"
+        fi
+      done <<EOF_TT
+$(find "$tt_src" -maxdepth 1 -name '*.yaml' \( -type f -o -type l \) 2>/dev/null)
+EOF_TT
+      if [ -n "$missing_tt" ]; then
+        print_warning "team_transfer/config yaml missing from install:${missing_tt} (import/export may be impaired — re-run upgrade or report XACA-0600)"
       fi
     fi
   else

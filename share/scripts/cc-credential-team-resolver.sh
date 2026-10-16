@@ -10,7 +10,7 @@
 # freelance/scripts/freelance-engineering-startup.sh). LCARS Settings,
 # however, saves a routed credential under the INSTANCE key
 # freelance-<client>-<project> — teams.freelance itself is never populated
-# (MEASURED on M4Mini 2026-09-22: teams.freelance-bandwear-android.ai.
+# (MEASURED on M4Mini 2026-09-22: teams.freelance-acme-android.ai.
 # credential is set; teams.freelance is absent). Every lookup above
 # therefore resolves "no credential for this team" and silently falls
 # through to default OAuth, even when the operator correctly routed the
@@ -38,8 +38,8 @@
 #     (terminal in lcars/command/engineering/science/sickbay/tactical/comms/helm)
 #   freelance/scripts/freelance-helm-startup.sh:23  (mirrored per-terminal)
 #     SESSION_CODE="${SESSION_TYPE}-${GROUP_LOWER}-${PROJECT_LOWER}-${SESSION_NAME}"
-# So a real #S looks like "freelance-bandwear-android-helm", while the
-# registered slug is "freelance-bandwear-android" — an exact-match check
+# So a real #S looks like "freelance-acme-android-helm", while the
+# registered slug is "freelance-acme-android" — an exact-match check
 # against #S never hits. _cc_credential_team_tmux_candidates strips one
 # trailing "-segment" at a time (longest candidate first) until a REGISTERED
 # one is found.
@@ -53,7 +53,7 @@
 #     PROJECT must match ^[a-z0-9]+$ (alphanumeric only, no hyphens)
 #   scripts/kb-freelance:822-825  _write_sentinel writes
 #     "freelance:%s:%s\n" "$CLIENT" "$PROJECT"
-# So a real sentinel line looks like "freelance:bandwear:android" — THREE
+# So a real sentinel line looks like "freelance:acme:android" — THREE
 # colon-separated fields, the first one literally "freelance", the other two
 # already-lowercased client/project segments — not "<team>:<terminal>".
 # Taking everything before the first colon (the general form's own rule)

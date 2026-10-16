@@ -12,7 +12,7 @@ from pathlib import Path
 
 from . import channels as channels_mod
 from . import domain_claude, domain_devteam, domain_git, domain_kanban, domain_knowledge
-from .channels import load_team_config, resolve_team_config_path
+from .channels import TeamConfigError, load_team_config, resolve_team_config_path
 from .checklist import emit_pre_export_checklist
 from .checksum import safe_relpath
 from .db_integrity import probe_db
@@ -51,7 +51,9 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         team_config = load_team_config(args.team, config_dir=team_cfg_dir)
-    except FileNotFoundError as e:
+    except (FileNotFoundError, TeamConfigError) as e:
+        # XACA-1337-016: a malformed per-machine overlay is a config error (exit 2),
+        # never a silent fallback to the packaged config.
         print(f"[generator] ERROR: {e}", file=sys.stderr)
         return 2
 

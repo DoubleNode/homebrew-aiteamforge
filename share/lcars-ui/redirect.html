@@ -156,11 +156,11 @@
         function startRouter() {
             const urlParams = new URLSearchParams(window.location.search);
             const targetTeam = urlParams.get('team') || window.LCARS_TARGET_TEAM;
-            // Session name for precise matching (e.g., freelance-doublenode-starwords-lcars vs workstats)
+            // Session name for precise matching (e.g., freelance-acme-app-lcars vs freelance-acme-web-lcars)
             const targetSession = urlParams.get('session') || window.LCARS_TARGET_SESSION;
 
             if (targetSession) {
-                // Extract project name from session (e.g., "starwords" from "freelance-doublenode-starwords-lcars")
+                // Extract project name from session (e.g., "app" from "freelance-acme-app-lcars")
                 const parts = targetSession.split('-');
                 const projectName = parts.length >= 3 ? parts[2].toUpperCase() : targetSession.toUpperCase();
                 document.getElementById('status').textContent = `Scanning for ${projectName} LCARS server...`;

@@ -37,9 +37,6 @@ function getBasePath() {
     const path = window.location.pathname;
     const knownPrefixes = [
         '/academy', '/firebase', '/dns', '/freelance',
-        '/freelance-workstats', '/freelance-starwords',
-        '/freelance-doublenode-workstats', '/freelance-doublenode-starwords',
-        '/freelance-appplanning', '/freelance-doublenode-appplanning',
         '/command', '/ios', '/android', '/mainevent',
         '/legal', '/legal-coparenting', '/spacedock'
     ];
@@ -48,6 +45,14 @@ function getBasePath() {
         if (path.startsWith(prefix + '/') || path === prefix) {
             return prefix;
         }
+    }
+
+    // Per-client freelance teams (freelance-<client>-<project>) are
+    // machine-local registrations, so their prefixes cannot be listed here.
+    // Any first path segment that starts with "freelance-" is the base path.
+    const firstSegment = path.split('/')[1] || '';
+    if (/^freelance-[^/]+$/.test(firstSegment)) {
+        return '/' + firstSegment;
     }
     return '';
 }
@@ -311,7 +316,7 @@ function updateOSInTags(tags, newOS) {
 /**
  * Get the logo team name - maps sub-teams to their parent for logo lookup
  * e.g., 'freelance-starwords' -> 'freelance'
- * e.g., 'freelance-doublenode-starwords' -> 'freelance'
+ * e.g., 'freelance-acme-app' -> 'freelance'
  */
 function getLogoTeamName(team) {
     if (!team) return null;
@@ -18626,6 +18631,19 @@ async function loadServerConfig() {
 }
 
 /**
+ * Resolve a team's org/div colors from a color map.
+ * Exact match wins; otherwise the first dash-separated segment is tried, so any
+ * per-client team (freelance-<client>-<project>) inherits the 'freelance'
+ * colors instead of silently falling through to the default team's crimson.
+ * Anything still unmatched gets the map's fallbackTeam entry.
+ */
+function resolveTeamColors(colorMap, team, fallbackTeam) {
+    if (colorMap[team]) return colorMap[team];
+    const family = String(team || '').split('-')[0];
+    return colorMap[family] || colorMap[fallbackTeam];
+}
+
+/**
  * Apply team-specific theme to container for org/div color theming
  * Directly sets CSS custom properties on the container element for reliability
  * This bypasses all CSS specificity issues from multiple stylesheets
@@ -18647,11 +18665,10 @@ function applyTeamTheme() {
         'command':  { org: '#ff4466', div: '#ff6688' },  // crimson / rose
 
         // DoubleNode Organization (blue) teams
-        'dns':                            { org: '#9999ff', div: '#ccccff' },  // blue / lavender
-        'freelance':                      { org: '#9999ff', div: '#cc99ff' },  // blue / purple
-        'freelance-doublenode-starwords': { org: '#9999ff', div: '#aa77dd' },  // blue / violet
-        'freelance-doublenode-workstats': { org: '#9999ff', div: '#cc99cc' },  // blue / mauve
-        'freelance-doublenode-appplanning': { org: '#9999ff', div: '#bb88ee' },  // blue / light violet
+        // Per-client freelance teams (freelance-<client>-<project>) are not
+        // listed: resolveTeamColors() maps them to 'freelance' by first segment.
+        'dns':       { org: '#9999ff', div: '#ccccff' },  // blue / lavender
+        'freelance': { org: '#9999ff', div: '#cc99ff' },  // blue / purple
 
         // DevTeam Organization (cyan) teams
         'academy':   { org: '#99ccff', div: '#ffcc99' },  // cyan / peach
@@ -18659,7 +18676,7 @@ function applyTeamTheme() {
     };
 
     const team = CONFIG.team || 'ios';
-    const colors = TEAM_COLORS[team] || TEAM_COLORS['ios'];
+    const colors = resolveTeamColors(TEAM_COLORS, team, 'ios');
 
     // Directly set CSS custom properties on the container
     // This overrides any stylesheet definitions
@@ -18669,8 +18686,7 @@ function applyTeamTheme() {
     // Also add team class for any other styling
     container.classList.remove(
         'team-ios', 'team-android', 'team-firebase', 'team-command',
-        'team-dns', 'team-freelance', 'team-freelance-doublenode-starwords',
-        'team-freelance-doublenode-workstats', 'team-freelance-doublenode-appplanning', 'team-academy',
+        'team-dns', 'team-freelance', 'team-academy',
         'team-spacedock'
     );
     const teamClass = `team-${team}`;

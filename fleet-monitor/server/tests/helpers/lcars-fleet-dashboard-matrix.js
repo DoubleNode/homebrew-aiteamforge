@@ -198,7 +198,7 @@ const POPULATED_DIVISIONS_FIXTURE = withUnmappedDivision(buildPopulatedDivisions
 const PRIORITY_CODES = [
     'command', 'android', 'firebase', 'ios',
     'academy', 'dns', 'freelance', 'legal', 'legal-coparenting',
-    'freelance-doublenode-starwords', 'legal-someothersuffix',
+    'freelance-acme-starwords', 'legal-someothersuffix',
     'unregistered-code', UNMAPPED_DIVISION_CODE,
     'COMMAND', 'Freelance'
 ];

@@ -1924,7 +1924,7 @@ _run_check_only() {
         # Presence of the case label within the function is sufficient; the port value
         # may be on a separate line (e.g. backslash-continued multi-team arm).
         # Previously used a two-pipe grep|grep that required _port= on the same line as
-        # the label — false-negative for freelance-doublenode-awaysentry (line 11646).
+        # the label — false-negative for freelance-acme-awaysentry (line 11646).
         _check_site "kanban-helpers.sh _kb_team_lcars_port port entry" \
             _chk_case_label _kb_team_lcars_port "$KANBAN_HELPERS" "$TEAM_ID" || all_ok=1
 

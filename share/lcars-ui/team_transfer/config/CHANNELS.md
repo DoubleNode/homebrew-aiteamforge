@@ -280,7 +280,7 @@ Confirm all `export_database` entries pass SCHEMA.
 
 The transfer toolkit ships one YAML per canonical team plus alias symlinks where two team names share a working_dir.
 
-### Canonical configs (17)
+### Canonical configs (9)
 
 | Team | YAML | Working dir | Board | Prefix |
 |---|---|---|---|---|
@@ -293,14 +293,17 @@ The transfer toolkit ships one YAML per canonical team plus alias symlinks where
 | dns | dns.yaml | /Users/Shared/Development/DNSFramework | dns-board.json | XDNS- |
 | legal-coparenting | legal-coparenting.yaml | ~/legal/coparenting | legal-coparenting-board.json | XLCP- |
 | medical-general | medical-general.yaml | ~/medical/general | medical-general-board.json | XMED- |
-| freelance-doublenode-starwords | freelance-doublenode-starwords.yaml | /Users/Shared/Development/DoubleNode/Starwords | freelance-doublenode-starwords-board.json | XFSW- |
-| freelance-doublenode-caravan | freelance-doublenode-caravan.yaml | /Users/Shared/Development/DoubleNode/Caravan | freelance-doublenode-caravan-board.json | XVAN- |
-| freelance-doublenode-awaysentry | freelance-doublenode-awaysentry.yaml | /Users/Shared/Development/DoubleNode/AwaySentry | freelance-doublenode-awaysentry-board.json | XFAS- |
-| freelance-doublenode-appplanning | freelance-doublenode-appplanning.yaml | /Users/Shared/Development/DoubleNode/appPlanning | freelance-doublenode-appplanning-board.json | XFAP- |
-| freelance-doublenode-workstats | freelance-doublenode-workstats.yaml | /Users/Shared/Development/DoubleNode/WorkStats | freelance-doublenode-workstats-board.json | XFWS- |
-| freelance-doublenode-lifeboard | freelance-doublenode-lifeboard.yaml | /Users/Shared/Development/DoubleNode/LifeBoard | freelance-doublenode-lifeboard-board.json | XFLB- |
-| freelance-liquidstyle-agentbadges-app | freelance-liquidstyle-agentbadges-app.yaml | /Users/Shared/Development/Liquidstyle/AgentBadges-APP | freelance-liquidstyle-agentbadges-app-board.json | XFLA- |
-| freelance-liquidstyle-agentbadges-ios | freelance-liquidstyle-agentbadges-ios.yaml | /Users/Shared/Development/Liquidstyle/AgentBadges-IOS | freelance-liquidstyle-agentbadges-ios-board.json | XFLI- |
+
+### Per-machine overlay configs (client teams)
+
+Client-specific freelance teams (`freelance-<client>-<project>`) are NOT packaged
+(XACA-1337-016). A machine that hosts one keeps `<team>.yaml` in the overlay dir
+`~/.aiteamforge/team_transfer/config/` (override: `$AITEAMFORGE_TEAM_TRANSFER_CONFIG_DIR`).
+Resolution order: explicit `--team-config-dir`, then the overlay, then the packaged
+dir; an overlay file wins on a name collision. A malformed overlay file (missing
+`team`/`product_dir`/`personas`/`home_relative_root`, or a `team:` that does not
+match the file name) is a hard config error (generator exit 2), never a silent
+fallback. `scripts/kb-migrate-client-overlays` seeds the overlay from git history.
 
 ### Alias symlinks
 

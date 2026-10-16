@@ -1082,9 +1082,22 @@ cleanupLegacyMachines();
 // k501-sibling-heuristic-drift-pattern in project knowledge): a fix to one
 // copy silently not applying to the other.
 function resolveDivisionKey(division, project) {
-    // For freelance division, split by project name (e.g., "doublenode-starwords" -> "freelance-doublenode-starwords")
+    // For the freelance division, split by project. A freelance project id is
+    // "<client>-<project>" (registry key freelance-<client>-<project>); the
+    // division drops the CLIENT segment, so "acme-starwords" -> "freelance-starwords",
+    // while the project key keeps the full "acme-starwords". A project with no
+    // client segment ("starwords") maps to "freelance-starwords" unchanged.
+    //
+    // XACA-1337-016: this used to strip ONE hardcoded client prefix,
+    // which baked a client name into shipped code and treated every other client
+    // differently (their client segment leaked into the division key). The rule
+    // is now client-agnostic, matching the dashboard client's
+    // buildDivisionToTeamMap / getDivisionTitle and lcars-fleet-core's FL- strip
+    // (XACA-1337-015). Consequence: two clients with the SAME project name share
+    // a division (their projects stay separate buckets inside it).
     if (division === 'freelance' && project) {
-        const projectSuffix = project.replace('doublenode-', '');
+        const dash = project.indexOf('-');
+        const projectSuffix = dash > 0 && dash < project.length - 1 ? project.slice(dash + 1) : project;
         const divisionKey = `freelance-${projectSuffix}`;
         return { divisionKey, divisionName: divisionKey };
     }
@@ -1123,7 +1136,7 @@ function ensureTeamBucket(divisions, divisionKey, divisionName, projectKey, proj
 }
 
 // XACA-1002: invert resolveDivisionKey() -- map a REGISTRY key (the Map key
-// under `registeredTeams`, e.g. "freelance-doublenode-starwords",
+// under `registeredTeams`, e.g. "freelance-acme-starwords",
 // "legal-coparenting", "dns") to the (division, project) pair the LIVE
 // payload actually uses. Returning only a division would be wrong: a
 // mis-resolved project doesn't produce a missing card, it produces a
@@ -1133,7 +1146,7 @@ function ensureTeamBucket(divisions, divisionKey, divisionName, projectKey, proj
 // undefined means "_default", never the literal string) so callers can do
 // `projectKey = project || '_default'` exactly like the session loop does.
 //
-// Reuses resolveDivisionKey() for the freelance doublenode- stripping rule
+// Reuses resolveDivisionKey() for the freelance client-segment stripping rule
 // rather than re-implementing it -- see that function's header comment on
 // why a second copy of that rule is the sibling-heuristic-drift antipattern
 // this codebase has repeated datapoints on.
@@ -1160,8 +1173,8 @@ function resolveRegistryKey(registryKey, liveDivisions) {
         return { division: registryKey, project };
     }
 
-    // 2. freelance-<project> -- e.g. "freelance-doublenode-starwords".
-    // Division strips "doublenode-" (via resolveDivisionKey); project keeps it.
+    // 2. freelance-<client>-<project> -- e.g. "freelance-acme-starwords".
+    // Division drops the client segment (via resolveDivisionKey); project keeps it.
     if (registryKey.startsWith('freelance-')) {
         const rest = registryKey.slice('freelance-'.length);
         const { divisionKey } = resolveDivisionKey('freelance', rest);
@@ -2986,11 +2999,12 @@ app.get('/api/credentials', async (req, res) => {
 // ============================================================================
 
 const DASHBOARDS_FILE = path.join(__dirname, 'data', 'dashboards.json');
+// XACA-1337-016: client-specific divisions live in a per-machine overlay
+// (~/.aiteamforge/dashboards.local.json, override $FLEET_DASHBOARDS_LOCAL_FILE),
+// never in the shipped data/dashboards.json. See lib/dashboard-overlay.js.
+const dashboardOverlay = require('./lib/dashboard-overlay');
 
-/**
- * Load dashboard configuration from file
- */
-function loadDashboardConfig() {
+function readShippedDashboardConfig() {
     try {
         if (fs.existsSync(DASHBOARDS_FILE)) {
             return JSON.parse(fs.readFileSync(DASHBOARDS_FILE, 'utf8'));
@@ -3002,7 +3016,33 @@ function loadDashboardConfig() {
 }
 
 /**
- * Save dashboard configuration to file
+ * Load dashboard configuration: shipped file merged with the per-machine overlay.
+ * A malformed overlay THROWS (DashboardOverlayError) -- callers return 500 --
+ * rather than silently rendering dashboards without the divisions it declares.
+ * The returned object carries a non-enumerable __overlaySource so that
+ * saveDashboardConfig() can split overlay content back out on write.
+ */
+function loadDashboardConfig() {
+    const shippedRaw = readShippedDashboardConfig();
+    let overlay;
+    try {
+        overlay = dashboardOverlay.readOverlay();
+    } catch (error) {
+        console.error(`[dashboards] ${error.message}`);
+        throw error;
+    }
+    const merged = dashboardOverlay.mergeDashboardConfig(JSON.parse(JSON.stringify(shippedRaw)), overlay);
+    Object.defineProperty(merged, '__overlaySource', {
+        value: { shippedRaw, overlay },
+        enumerable: false,
+    });
+    return merged;
+}
+
+/**
+ * Save dashboard configuration. Overlay-owned content goes back to the overlay
+ * file; ONLY shipped content is written to data/dashboards.json (XACA-1337-016:
+ * folding the overlay into the shipped file would re-leak client slugs).
  */
 function saveDashboardConfig(config) {
     try {
@@ -3010,8 +3050,15 @@ function saveDashboardConfig(config) {
         if (!fs.existsSync(dataDir)) {
             fs.mkdirSync(dataDir, { recursive: true });
         }
+        config.meta = config.meta || {};
         config.meta.last_modified = new Date().toISOString();
-        fs.writeFileSync(DASHBOARDS_FILE, JSON.stringify(config, null, 2));
+        const source = config.__overlaySource
+            || { shippedRaw: readShippedDashboardConfig(), overlay: dashboardOverlay.readOverlay() };
+        const { shipped, overlay } = dashboardOverlay.splitForSave(config, source.shippedRaw, source.overlay);
+        fs.writeFileSync(DASHBOARDS_FILE, JSON.stringify(shipped, null, 2));
+        if (overlay && JSON.stringify(overlay) !== JSON.stringify(source.overlay)) {
+            fs.writeFileSync(dashboardOverlay.overlayPath(), JSON.stringify(overlay, null, 2) + '\n');
+        }
         return true;
     } catch (error) {
         console.error('Error saving dashboard config:', error.message);

@@ -34,7 +34,7 @@ LCARS_PORTS_DIR="${AITEAMFORGE_DIR:-$HOME/dev-team}/lcars-ports"
 # Use team-specific tmux socket if set, otherwise use default server
 TMUX_CMD="tmux${TMUX_SOCKET:+ -L $TMUX_SOCKET}"
 
-# Compute LCARS team name for data isolation (e.g., freelance-doublenode-starwords)
+# Compute LCARS team name for data isolation (e.g., freelance-acme-starwords)
 LCARS_TEAM_NAME="${SESSION_TYPE}-${SESSION_PROJECT}"
 
 $TMUX_CMD has-session -t $SESSION_CODE 2>/dev/null

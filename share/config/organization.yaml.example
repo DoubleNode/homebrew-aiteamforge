@@ -103,7 +103,7 @@ paths:
 # Example (DoubleNode install):
 #     plugins:
 #       enabled:
-#         - "doublenode"    # adds freelance-doublenode-* teams
+#         - "doublenode"    # adds freelance-<client>-* teams
 #
 # Example (fresh third-party install — no plugins):
 #     plugins:

@@ -11,7 +11,7 @@
 # Session name format: <team>-<terminal>
 #   Simple:        "academy-reno"    -> team=academy
 #   Multi-segment: "legal-coparenting-advocate" -> team=legal-coparenting
-#   Three-part:    "freelance-doublenode-starwords-archer" -> team=freelance-doublenode-starwords
+#   Three-part:    "freelance-acme-starwords-archer" -> team=freelance-acme-starwords
 #
 # This mirrors:
 #   - _get_team_kanban_dir() in claude/statusline-command.sh (shell)

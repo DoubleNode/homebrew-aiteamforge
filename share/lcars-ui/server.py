@@ -323,7 +323,7 @@ def _hardcoded_team_kanban_dirs() -> dict:
         "firebase": Path("/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban"),
         "command": Path("/Users/Shared/Development/Main Event/dev-team/kanban"),
         "dns": Path("/Users/Shared/Development/DNSFramework/kanban"),
-        # Freelance per-client/project slugs (DoubleNode/Liquidstyle/Bandwear) live
+        # Freelance per-client/project slugs (freelance-<client>-<project>) live
         # ONLY in the per-machine overlay (~/.aiteamforge/team-paths.json) as of
         # XACA-0628. At runtime _build_team_kanban_dirs() enumerates them via
         # list_teams()/get_team_kanban_dir(). This hardcoded dict is the
@@ -345,7 +345,7 @@ def _hardcoded_team_kanban_dirs() -> dict:
 # the team-id contract (docs/architecture/team-id-contract.md §3). A bare
 # template id like "freelance" or "medical" appearing as a TEAM_KANBAN_DIRS key
 # is a contract violation — those keys must be instance ids like
-# "finance-personal" or "freelance-doublenode-starwords".
+# "finance-personal" or "freelance-acme-starwords".
 # Single source of truth lives in aiteamforge_paths (XACA-0643) so the server's
 # contract filter and the config-layer scrub can never drift apart. Fall back to
 # a literal when that module is unavailable or predates the export.
@@ -1730,7 +1730,7 @@ def _resolve_team_repo_root(team):
     """Team's git work-tree root, or None.
 
     XACA-1477: resolved by aiteamforge_paths.get_team_repo_root, which looks INSIDE container-layout
-    working dirs (MainEventApp-iOS/DEV, Bandwear/Android/develop) instead of returning the non-git
+    working dirs (MainEventApp-iOS/DEV, <Client>/Android/develop) instead of returning the non-git
     container. A REGISTERED team whose repo cannot be resolved returns None with its reason recorded;
     it never reaches the fallback below. The fallback (kanban dir's parent) is unchanged and serves
     only teams the registry does not know.
@@ -2032,7 +2032,7 @@ def _split_team_id(team_id):
         ios                            -> ("ios", [])
         finance-personal               -> ("finance", ["personal"])
         legal-coparenting              -> ("legal", ["coparenting"])
-        freelance-doublenode-starwords -> ("freelance", ["doublenode", "starwords"])
+        freelance-acme-starwords -> ("freelance", ["acme", "starwords"])
     """
     if '-' not in team_id:
         return team_id, []
@@ -2312,6 +2312,30 @@ def _export_missing_roots_summary(missing_roots: list) -> dict:
     }
 
 
+def _resolve_team_transfer_team(team_id, base_team):
+    """Return the team_transfer config key to export (team_id, else base_team), or
+    None when neither has a config.
+
+    XACA-1337-016: resolution delegates to team_transfer.channels so the export
+    button and the generator subprocess search the SAME candidate list (per-machine
+    overlay dir ~/.aiteamforge/team_transfer/config/ first, then the packaged dir).
+    Before this, server.py only looked at the packaged dir, so a client team whose
+    YAML lives only in the overlay was reported as having no config.
+    Raises TeamConfigError (a ValueError) for a malformed overlay.
+    """
+    lcars_ui_dir = str(Path(__file__).parent)
+    if lcars_ui_dir not in sys.path:
+        sys.path.insert(0, lcars_ui_dir)
+    from team_transfer.channels import load_team_config, resolve_team_config_path
+    for candidate in (team_id, base_team):
+        if candidate and resolve_team_config_path(candidate) is not None:
+            # Parse now so a malformed overlay fails the job up front with its own
+            # message instead of surfacing as an opaque generator exit 2.
+            load_team_config(candidate)
+            return candidate
+    return None
+
+
 def generate_export(job_id, team_id):
     """Generate a per-team export zip (runs in background thread).
 
@@ -2349,10 +2373,18 @@ def generate_export(job_id, team_id):
         # Resolve the team_transfer config key (team_id may be a derived form
         # like "finance-personal"; fall back to base_team).
         lcars_ui_dir = Path(__file__).parent
-        tt_config_dir = lcars_ui_dir / "team_transfer" / "config"
-        tt_team = team_id if (tt_config_dir / f"{team_id}.yaml").exists() else (
-            base_team if (tt_config_dir / f"{base_team}.yaml").exists() else None
-        )
+        try:
+            tt_team = _resolve_team_transfer_team(team_id, base_team)
+        except ValueError as e:
+            # XACA-1337-016: malformed per-machine overlay -> loud failure, never
+            # a silent fallback to the packaged config or a "no config" message.
+            _export_job_update(job_id, {
+                'status': 'failed',
+                'progress': 0,
+                'message': f'Invalid team_transfer config for team {team_id}',
+                'error': str(e),
+            })
+            return
 
         if tt_team is None:
             _export_job_update(job_id, {
@@ -4976,7 +5008,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
     # Path prefixes to strip (for Tailscale funnel path-based routing)
     # Note: Team names follow specific formats:
-    # - Freelance: freelance-{clientId}-{projectId} (e.g., freelance-doublenode-workstats)
+    # - Freelance: freelance-{clientId}-{projectId} (e.g., freelance-acme-workstats)
     # - Legal: legal-{projectId} (e.g., legal-coparenting)
     # - Medical: medical-{projectId} (e.g., medical-general)
     # - MainEvent floaters: mainevent-{projectId} (project-specific)
@@ -7469,7 +7501,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         """Get the plan documents directory for a team.
 
         Args:
-            team: Team name (e.g., 'academy', 'ios', 'android', 'firebase', 'freelance-doublenode-appplanning')
+            team: Team name (e.g., 'academy', 'ios', 'android', 'firebase', 'freelance-acme-appplanning')
 
         Returns:
             Path to the team's kanban directory where plan docs are stored, or None if team not recognized
@@ -7854,7 +7886,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         Per-board only (XACA-0692 hard design constraint): release IDs are
         namespaced per board — the same ID string can denote unrelated
         releases in different boards (verified collisions: REL-2026-Q2-006
-        in academy/firebase/freelance-bandwear). This method only ever
+        in academy/firebase/freelance-<client>). This method only ever
         reads/writes `team`'s own board_file via `self._get_board_file
         (team)` — it must NEVER be extended to scan or touch another
         board's items, even on an exact releaseId string match. See
@@ -7977,7 +8009,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
         Team naming conventions:
         - Static teams: ios, android, firebase, academy, command, dns
-        - Freelance: freelance-{clientId}-{projectId} (REQUIRED format, e.g., freelance-doublenode-workstats)
+        - Freelance: freelance-{clientId}-{projectId} (REQUIRED format, e.g., freelance-acme-workstats)
         - Legal: legal-{projectId} (REQUIRED format, e.g., legal-coparenting)
         - MainEvent floaters: mainevent-{projectId} (project-specific)
 
@@ -25939,7 +25971,7 @@ end tell
 
                     team_name = team_dir.name
 
-                    # Filter to current team and sub-teams (e.g., "freelance" matches "freelance-doublenode-starwords")
+                    # Filter to current team and sub-teams (e.g., "freelance" matches "freelance-acme-starwords")
                     if effective_filter:
                         filter_lower = effective_filter.lower()
                         team_lower = team_name.lower()

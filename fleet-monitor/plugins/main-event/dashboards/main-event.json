@@ -27,9 +27,7 @@
       "url_path": "/lcars/doublenode",
       "html_file": "lcars-dashboard.html?dashboard=doublenode",
       "divisions": [
-        "freelance-doublenode-starwords",
-        "freelance-doublenode-workstats",
-        "freelance-doublenode-appplanning"
+        "freelance"
       ],
       "machines": [],
       "org_color": "cyan",
@@ -46,19 +44,9 @@
       "description": "Main Event mobile app development"
     },
     {
-      "id": "freelance-doublenode-starwords",
-      "name": "Freelance: StarWords",
-      "description": "DoubleNode StarWords project"
-    },
-    {
-      "id": "freelance-doublenode-workstats",
-      "name": "Freelance: WorkStats",
-      "description": "DoubleNode WorkStats project"
-    },
-    {
-      "id": "freelance-doublenode-appplanning",
-      "name": "Freelance: AppPlanning",
-      "description": "DoubleNode AppPlanning project"
+      "id": "freelance",
+      "name": "Freelance",
+      "description": "Freelance client projects"
     }
   ],
   "all_fleet_dashboard_ids": [

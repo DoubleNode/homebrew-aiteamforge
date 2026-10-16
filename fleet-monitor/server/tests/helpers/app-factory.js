@@ -68,7 +68,8 @@ function formatUptime(seconds) {
 // prose.
 function resolveDivisionKey(division, project) {
     if (division === 'freelance' && project) {
-        const projectSuffix = project.replace('doublenode-', '');
+        const dash = project.indexOf('-');
+        const projectSuffix = dash > 0 && dash < project.length - 1 ? project.slice(dash + 1) : project;
         const divisionKey = `freelance-${projectSuffix}`;
         return { divisionKey, divisionName: divisionKey };
     }
@@ -113,8 +114,8 @@ function resolveRegistryKey(registryKey, liveDivisions) {
         return { division: registryKey, project };
     }
 
-    // 2. freelance-<project> -- e.g. "freelance-doublenode-starwords".
-    // Division strips "doublenode-" (via resolveDivisionKey); project keeps it.
+    // 2. freelance-<client>-<project> -- e.g. "freelance-acme-starwords".
+    // Division drops the client segment (via resolveDivisionKey); project keeps it.
     if (registryKey.startsWith('freelance-')) {
         const rest = registryKey.slice('freelance-'.length);
         const { divisionKey } = resolveDivisionKey('freelance', rest);

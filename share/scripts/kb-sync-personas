@@ -22,6 +22,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEV_TEAM="$(dirname "$SCRIPT_DIR")"
 
 MANIFEST="${DEV_TEAM}/.claude/personas-manifest.json"
+# XACA-1337-016: per-machine LOCAL manifest overlay. Client-specific
+# deployments (freelance-<client>-<project>) no longer ship in the manifest
+# above; a machine that hosts them lists them here instead. NOT mirrored to the
+# tap, never written by sync-tap. Absent = normal (consumer) case; malformed =
+# hard error (see _kbsp_apply_local_overlay). Env override for tests.
+LOCAL_MANIFEST="${KBSP_LOCAL_MANIFEST:-$HOME/.aiteamforge/personas-manifest.local.json}"
+# The SHIPPED manifest path, kept even after MANIFEST is re-pointed at the
+# merged view, so `refresh` can write shipped rows back to the shipped file and
+# overlay rows back to the overlay -- never fold overlay rows into the shipped
+# file (that would re-leak client slugs into the tap mirror).
+MANIFEST_BASE="$MANIFEST"
+KBSP_OVERLAY_TEAMS=""
+KBSP_MERGED_MANIFEST=""
 MASTER_RELATIVE="$(jq -r '.masterRoot' "$MANIFEST" 2>/dev/null || echo ".claude/agents-master")"
 MASTER_ROOT="${DEV_TEAM}/${MASTER_RELATIVE}"
 SCHEMA_VERSION="$(jq -r '.schemaVersion' "$MANIFEST" 2>/dev/null || echo "1")"
@@ -1453,11 +1466,16 @@ USAGE:
     --prune                                          Delete orphaned files in worktree target
   kb-sync-personas diff <team>                       Show per-file diff (diff -u)
   kb-sync-personas refresh                           Update manifest exists hints
+  kb-sync-personas effective-manifest                Print the merged (shipped + local) manifest
   kb-sync-personas selftest                          Run self-test suite (uses temp dirs)
   kb-sync-personas help                              This message
 
 MANIFEST:
-  ~/dev-team/.claude/personas-manifest.json
+  ~/dev-team/.claude/personas-manifest.json        (shipped; generic teams only)
+  ~/.aiteamforge/personas-manifest.local.json      (per-machine overlay, optional;
+                                                    override: $KBSP_LOCAL_MANIFEST)
+  Overlay rows replace shipped rows with the same "team"; new rows are appended.
+  A malformed overlay is a hard error, never silently ignored.
 
 MASTER:
   ~/dev-team/.claude/agents-master/
@@ -2286,9 +2304,34 @@ _kbsp_refresh() {
   done
 
   if [ "$updated" -gt 0 ]; then
-    local tmp
+    # XACA-1337-016: $MANIFEST may be the merged (shipped + local overlay) view.
+    # Write each changed hint back to the file its row came from, keyed by team
+    # (indices differ between the merged view and either source file).
+    local tmp changed_json overlay_json
+    changed_json=$(jq -c "$jq_updates" "$MANIFEST" | jq -c '[.deployments[] | {team, exists}]')
+    overlay_json=$(printf '%s\n' "$KBSP_OVERLAY_TEAMS" | jq -R -s -c 'split("\n") | map(select(length > 0))')
     tmp=$(mktemp)
-    jq "$jq_updates" "$MANIFEST" > "$tmp" && mv "$tmp" "$MANIFEST"
+    if ! jq --argjson ch "$changed_json" --argjson ov "$overlay_json" '
+      ($ch | map({key: .team, value: .exists}) | from_entries) as $m
+      | .deployments |= map(.team as $t
+          | if (($ov | index($t)) == null) and ($m | has($t))
+            then .exists = $m[$t] else . end)' "$MANIFEST_BASE" > "$tmp"; then
+      _err "refresh: failed to rewrite $MANIFEST_BASE (left unchanged)"
+      exit 1
+    fi
+    mv "$tmp" "$MANIFEST_BASE"
+    if [ -n "$KBSP_OVERLAY_TEAMS" ] && [ -f "$LOCAL_MANIFEST" ]; then
+      tmp=$(mktemp)
+      if ! jq --argjson ch "$changed_json" '
+        ($ch | map({key: .team, value: .exists}) | from_entries) as $m
+        | .deployments |= map(.team as $t
+            | if ($m | has($t)) then .exists = $m[$t] else . end)' \
+        "$LOCAL_MANIFEST" > "$tmp"; then
+        _err "refresh: failed to rewrite local overlay $LOCAL_MANIFEST (left unchanged)"
+        exit 1
+      fi
+      mv "$tmp" "$LOCAL_MANIFEST"
+    fi
     _info "Manifest updated: $updated deployment(s) refreshed."
   else
     _info "All exists hints are current, no changes needed."
@@ -4340,10 +4383,84 @@ else
   unset _xaca1261_has_group_content _xaca1261_group_dir
 fi
 
+# ---------------------------------------------------------------------------
+# XACA-1337-016: merge the per-machine local manifest overlay.
+# ---------------------------------------------------------------------------
+# Absent overlay: no-op (the normal consumer case). Present overlay: validate,
+# then point MANIFEST at a private merged temp file so every reader
+# (_deployment_count/_deploy_field/_deploy_index_by_team/groups) sees one view.
+# Malformed overlay: hard error naming every problem -- never silently dropping
+# the client teams it was supposed to add (that would make `check` report a
+# clean, exit-0 result with those teams simply missing).
+_kbsp_cleanup_merged() {
+  if [ -n "$KBSP_MERGED_MANIFEST" ] && [ -f "$KBSP_MERGED_MANIFEST" ]; then
+    rm -- "$KBSP_MERGED_MANIFEST"
+  fi
+}
+
+_kbsp_apply_local_overlay() {
+  [ -e "$LOCAL_MANIFEST" ] || return 0
+  if [ ! -f "$LOCAL_MANIFEST" ]; then
+    _err "Local manifest overlay exists but is not a regular file: $LOCAL_MANIFEST"
+    exit 1
+  fi
+  local problems
+  if ! problems=$(jq -r '
+      if type != "object" then "overlay root is not a JSON object"
+      elif (.deployments | type) != "array" then "overlay .deployments is missing or not an array"
+      else
+        (.deployments | to_entries[] | .key as $i | .value |
+          if type != "object" then "deployments[\($i)] is not an object"
+          else
+            (if (.team | type) != "string" or (.team | length) == 0 then "deployments[\($i)].team is missing/empty" else empty end),
+            (if (.targetRepo | type) != "string" or (.targetRepo | length) == 0 then "deployments[\($i)] (\(.team)): targetRepo is missing/empty" else empty end),
+            (if (.targetDir | type) != "string" or (.targetDir | length) == 0 then "deployments[\($i)] (\(.team)): targetDir is missing/empty" else empty end),
+            (if (.groups | type) != "array" or (.groups | length) == 0 or any(.groups[]; type != "string")
+               then "deployments[\($i)] (\(.team)): groups must be a non-empty array of strings" else empty end)
+          end),
+        ([.deployments[] | objects | .team | strings] | group_by(.) | map(select(length > 1) | .[0])[]
+           | "duplicate team \(.) in overlay")
+      end' "$LOCAL_MANIFEST" 2>&1); then
+    _err "Local manifest overlay is not valid JSON: $LOCAL_MANIFEST"
+    _err "  $problems"
+    exit 1
+  fi
+  if [ -n "$problems" ]; then
+    _err "Local manifest overlay is malformed: $LOCAL_MANIFEST"
+    printf '%s\n' "$problems" | while IFS= read -r _p; do _err "  - $_p"; done
+    _err "Refusing to proceed: ignoring it would silently drop the teams it declares."
+    exit 1
+  fi
+  KBSP_MERGED_MANIFEST=$(mktemp "${TMPDIR:-/tmp}/kbsp-merged-manifest.XXXXXX")
+  trap _kbsp_cleanup_merged EXIT
+  if ! jq -s '
+      .[0] as $b | .[1] as $o
+      | ($o.deployments | map({key: .team, value: .}) | from_entries) as $om
+      | ($b.deployments | map(.team)) as $bt
+      | $b
+      | .deployments = (
+          [ $b.deployments[] | if $om[.team] then $om[.team] else . end ]
+          + [ $o.deployments[] | select(.team as $t | ($bt | index($t)) == null) ])
+    ' "$MANIFEST_BASE" "$LOCAL_MANIFEST" > "$KBSP_MERGED_MANIFEST"; then
+    _err "Failed to merge local manifest overlay $LOCAL_MANIFEST into $MANIFEST_BASE"
+    exit 1
+  fi
+  KBSP_OVERLAY_TEAMS=$(jq -r '.deployments[].team' "$LOCAL_MANIFEST")
+  MANIFEST="$KBSP_MERGED_MANIFEST"
+}
+
 CMD="${1:-help}"
 shift || true
 
+# selftest builds its own synthetic manifests and must stay hermetic; help
+# needs no manifest content. Everything else sees the merged view.
 case "$CMD" in
+  selftest|help|--help|-h) ;;
+  *) _kbsp_apply_local_overlay ;;
+esac
+
+case "$CMD" in
+  effective-manifest) jq . "$MANIFEST" ;;
   list)            _kbsp_list "$@" ;;
   check)           _kbsp_check "$@" ;;
   sync)            _kbsp_sync "$@" ;;

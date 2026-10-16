@@ -180,7 +180,7 @@ def parse_session_name(session_name):
 
     Works for any number of segments:
       freelance-command → team=freelance, terminal=command
-      freelance-doublenode-starwords-command → team=freelance-doublenode-starwords, terminal=command
+      freelance-acme-starwords-command → team=freelance-acme-starwords, terminal=command
       ios-bridge → team=ios, terminal=bridge
 
     Returns:
@@ -226,7 +226,7 @@ def get_lcars_tmp_dir(session_name: str) -> str:
     Session name format: <team>-<terminal>
       Simple:        "academy-reno"                      -> team=academy
       Multi-segment: "legal-coparenting-advocate"        -> team=legal-coparenting
-      Three-part:    "freelance-doublenode-starwords-archer" -> team=freelance-doublenode-starwords
+      Three-part:    "freelance-acme-starwords-archer" -> team=freelance-acme-starwords
 
     Algorithm:
       1. Extract team via parse_session_name() (everything before the last "-")

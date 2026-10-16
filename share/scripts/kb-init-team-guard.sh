@@ -421,7 +421,7 @@ PYEOF
 # Main entry point. Call this early in a *-startup.sh before any kanban work.
 #
 # ARGUMENTS
-#   team-id      The team identifier, e.g. "academy" or "freelance-bandwear-android"
+#   team-id      The team identifier, e.g. "academy" or "freelance-acme-android"
 #   kanban-dir   Absolute path to the team's kanban directory
 #
 # RETURN CODES (see file header for full contract)

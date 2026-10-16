@@ -181,7 +181,7 @@ def live_sessions():
     """Return a set of (team, terminal) tuples for every live tmux session on
     this machine. Session names split on the LAST hyphen exactly like
     _kb_detect_context: 'academy-engineering' -> ('academy', 'engineering'),
-    'freelance-doublenode-starwords-command' -> (...'-starwords', 'command')."""
+    'freelance-acme-starwords-command' -> (...'-starwords', 'command')."""
     found = set()
     for sock in _tmux_sockets():
         try:

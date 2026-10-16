@@ -20083,8 +20083,8 @@ _kb_knowledge_project_path() {
         # if the canonical dir can't be resolved with confidence, or it's
         # identical to {repo_root}/kanban (the kanban-inside-repo case, where
         # no rewrite is needed), emit exactly what the pre-fix code emitted.
-        # There are unregistered container projects on this machine (Bandwear
-        # x2, Caravan, 2 DNS sub-repos) the registry cannot resolve; breaking
+        # There are unregistered container projects on this machine (two
+        # client repos, Caravan, 2 DNS sub-repos) the registry cannot resolve; breaking
         # them would be a worse regression than the bug being fixed. Silent —
         # no warning spam on every call.
         if [[ -n "$canonical_kanban_dir" ]] && [[ "$canonical_kanban_dir" != "${repo_root}/kanban" ]]; then
@@ -22188,7 +22188,7 @@ kb-knowledge-add() {
 
     # XACA-0994-012: a title that already starts with the entry id ("K027: foo")
     # was slugified AND re-prefixed into the H1, yielding k027-k027-foo.md,
-    # `id: k027-k027-foo` and "# K027: K027: foo" (Bandwear XBWA-0122 retro).
+    # `id: k027-k027-foo` and "# K027: K027: foo" (freelance-project retro).
     # Strip the leading id from the raw title BEFORE the slug and the H1 are
     # derived; the allocator mints the one real id.
     local _kb_add_title_stripped
@@ -24892,7 +24892,7 @@ kb-knowledge-validate() {
         # XACA-0994-011: stale-INDEX WARN. The tag list and summary in INDEX.md
         # are frozen at the last reindex, so an entry written/edited after it is
         # missing from (or mis-described in) the INDEX and Tag Index rows until
-        # someone reindexes (Bandwear XBWA-0122: reed K028 absent from 3 rows).
+        # someone reindexes (freelance-project retro: reed K028 absent from 3 rows).
         # mtime compare via zsh -nt (no fork); strictly newer only, so a same-
         # second write by reindex itself never self-flags. WARN only; no
         # auto-reindex here by design.
@@ -25716,7 +25716,7 @@ lcars-restart() {
 # kb-restart(). That array rotted well past this ticket's original two-team
 # scope: two freelance entries were stale by a whole port-band renumber, three
 # more were already wrong before this ticket touched anything, and one
-# registered freelance team (bandwear-android) was absent entirely — "Unknown
+# registered freelance team (acme-android) was absent entirely — "Unknown
 # team" on a team that genuinely exists. A hardcoded per-client table can never
 # keep up with `kb-init-team` provisioning new freelance instances at runtime.
 #

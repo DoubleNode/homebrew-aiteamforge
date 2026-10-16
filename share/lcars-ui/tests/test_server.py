@@ -378,9 +378,9 @@ class TestExtractTeamFromItemId(unittest.TestCase):
     def test_dns_prefix(self):
         self.assertEqual(self._extract("XDNS-0001"), "dns")
 
-    def test_freelance_doublenode_workstats(self):
-        # Freelance per-client/project teams (e.g. "freelance-doublenode-workstats",
-        # prefix XFWS) are registered only in this machine's live, mutable
+    def test_freelance_per_client_project_team(self):
+        # Freelance per-client/project teams (e.g. "freelance-acme-web",
+        # prefix XFAW) are registered only in this machine's live, mutable
         # overlay (~/.aiteamforge/team-paths.json), populated by kb-freelance —
         # never in a tracked/default config (XACA-0628). Asserting against
         # that live overlay makes this test's pass/fail a function of which
@@ -393,9 +393,9 @@ class TestExtractTeamFromItemId(unittest.TestCase):
         # deterministic input and passes identically on any machine and in CI.
         self.handler.ITEM_PREFIX_TO_TEAM = {
             **self.handler.ITEM_PREFIX_TO_TEAM,
-            "XFWS": "freelance-doublenode-workstats",
+            "XFAW": "freelance-acme-web",
         }
-        self.assertEqual(self._extract("XFWS-0003"), "freelance-doublenode-workstats")
+        self.assertEqual(self._extract("XFAW-0003"), "freelance-acme-web")
 
     def test_legal_coparenting(self):
         self.assertEqual(self._extract("XLCP-0001"), "legal-coparenting")

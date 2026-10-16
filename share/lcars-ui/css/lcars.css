@@ -218,15 +218,7 @@
     --current-org-color: var(--org-doublenode);
     --current-div-color: var(--div-freelance-workstats);
 }
-/* Full names with group included (freelance-doublenode-xxx) */
-.team-freelance-doublenode-starwords {
-    --current-org-color: var(--org-doublenode);
-    --current-div-color: var(--div-freelance-starwords);
-}
-.team-freelance-doublenode-workstats {
-    --current-org-color: var(--org-doublenode);
-    --current-div-color: var(--div-freelance-workstats);
-}
+/* Per-client freelance teams (freelance-<client>-<project>) get their colors from lcars.js applyTeamTheme() inline. */
 
 /* Academy (under DevTeam organization) */
 .team-academy {

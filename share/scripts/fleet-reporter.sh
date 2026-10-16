@@ -629,7 +629,7 @@ parse_session_name() {
             project="${PARTS[1]}"
             team="${PARTS[2]}"
         else
-            # If 4+ parts: division-group-project-team (e.g., freelance-doublenode-workstats-command)
+            # If 4+ parts: division-group-project-team (e.g., freelance-acme-workstats-command)
             # Join middle parts as project name
             project="${PARTS[1]}"
             last_index=$((${#PARTS[@]} - 1))

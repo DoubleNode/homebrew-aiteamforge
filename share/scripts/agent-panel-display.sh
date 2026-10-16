@@ -1601,7 +1601,7 @@ render_panel() {
     # Derive terminal logo from session code with fallback chain
     # Try _panel.png first, then fall back to full _logo.png
     # Full match: academy-engineering → academy_engineering_logo_panel.png
-    # Team + last part: freelance-doublenode-starwords-command → freelance_command_logo_panel.png
+    # Team + last part: freelance-acme-starwords-command → freelance_command_logo_panel.png
     local logo_file=""
     for suffix in "_logo_panel.png" "_logo.png"; do
         # Try full match

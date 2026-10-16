@@ -1090,7 +1090,7 @@ def local_teams(slug, routing_map):
     FILE presence and never looked at `primary_host` at all — that is the
     bug: a dormant board file left behind by a migration outranked an
     explicit declaration of who owns the team now, misclassifying
-    freelance-liquidstyle-agentbadges-{app,ios} as local on M3Pro months
+    freelance-acme-widgets-{app,ios} as local on M3Pro months
     after both moved to M4Mini (both carry `primary_host=darren-m4-mini`
     in the live registry; their M3Pro trees are inert leftovers — 1
     completed item each, no activity since 2026-03).

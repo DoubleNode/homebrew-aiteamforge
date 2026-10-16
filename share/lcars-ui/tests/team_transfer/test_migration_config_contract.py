@@ -1,5 +1,6 @@
-"""XACA-0954-007: structural contract test over the 17 canonical team-transfer
-YAML configs.
+"""XACA-0954-007: structural contract test over the 9 canonical team-transfer
+YAML configs (17 until XACA-1337-016 moved the 8 client-specific
+freelance-<client>-<project> configs to the per-machine overlay dir).
 
 CRITICAL CI CONSTRAINT: this test MUST NEVER assert that ~/dev-team/<product_dir>
 or ~/knowledge*/agents/<persona> exist on disk. Those directories exist on this
@@ -22,23 +23,23 @@ _CONFIG_DIR = Path(__file__).resolve().parents[2] / "team_transfer" / "config"
 # Symlinked aliases (a team shares config + working_dir with another team --
 # see the "Freelance alias" / "Command alias" comments inside the target
 # files). Intentional, not accidental duplication -- excluded from the
-# "17 canonical configs" count and separately pinned as symlinks below.
+# "9 canonical configs" count and separately pinned as symlinks below.
 _SYMLINK_ALIASES = {"command.yaml", "freelance.yaml", "medical.yaml"}
 
 
 def _canonical_config_files() -> list[Path]:
-    """Return the REAL (non-symlink) yaml config files -- the 17 canonical configs."""
+    """Return the REAL (non-symlink) yaml config files -- the 9 canonical configs."""
     return sorted(p for p in _CONFIG_DIR.glob("*.yaml") if not p.is_symlink())
 
 
-def test_seventeen_canonical_configs_present():
+def test_nine_canonical_configs_present():
     """Pins the count itself via a command that was actually run (Path.glob +
     is_symlink filter), not asserted from memory -- a config silently added or
     removed should be a visible test failure.
     """
     files = _canonical_config_files()
-    assert len(files) == 17, (
-        f"expected 17 canonical (non-symlink) team-transfer configs, found "
+    assert len(files) == 9, (
+        f"expected 9 canonical (non-symlink) team-transfer configs, found "
         f"{len(files)}: {[p.name for p in files]}"
     )
 
@@ -81,7 +82,7 @@ def test_symlink_aliases_remain_symlinks():
         p = _CONFIG_DIR / name
         assert p.exists(), f"{name} should exist (as a symlink)"
         assert p.is_symlink(), f"{name} is expected to be a symlink alias, but is a regular file"
-        # The alias must still resolve to one of the 17 canonical configs, not
+        # The alias must still resolve to one of the 9 canonical configs, not
         # to another symlink or a dangling target.
         target = p.resolve()
         assert target.is_file() and not target.is_symlink(), (

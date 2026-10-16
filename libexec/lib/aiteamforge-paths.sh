@@ -250,7 +250,7 @@ _AITEAMFORGE_DEFAULT_TEAMS_DATA() {
         printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "command"       "${_org_prefix}/dev-team/kanban"                            "${_org_prefix}/dev-team"                                   "8234"  "8230" "10"  "CMD"
         printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "dns"           "${_shared_prefix}/DNSFramework/kanban"                     "${_shared_prefix}/DNSFramework"                            "8180"  "8180" "10"  "DNS"
         # ── Freelance — per-client/project entries (overlay-only, XACA-0628) ──
-        # The 9 per-CLIENT/PROJECT freelance slugs (DoubleNode/Liquidstyle/Bandwear)
+        # The 9 per-CLIENT/PROJECT freelance slugs
         # were removed from this registry in XACA-0628 and now live solely in the
         # per-machine overlay (~/.aiteamforge/team-paths.json). Overlay team_codes
         # MERGE on top of these defaults, so the overlay entries
@@ -1325,7 +1325,7 @@ aiteamforge_lcars_port_team_map() {
     # aiteamforge_team_for_lcars_port() returns the FIRST team in this map that
     # owns a port, so when two DIFFERENT teams claim the same port the map order
     # decides the winner. That happens on live data: measured on this host
-    # 2026-09-10, port 8505 is claimed by `freelance-bandwear-android` in the
+    # 2026-09-10, port 8505 is claimed by `freelance-acme-android` in the
     # overlay AND by the `freelance` template row in the baked-in seed. Emitting
     # a single list in team-name order would hand 8505 to `freelance` purely
     # because f-r-e sorts before f-r-e-e-l-a-n-c-e-'-'-b, inverting the tier

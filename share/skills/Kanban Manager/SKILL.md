@@ -474,9 +474,9 @@ Location: Each team's board is in their own repository under `kanban/`:
 | Firebase | `<firebase-repo>/kanban/firebase-board.json` |
 | Command | `<command-repo>/kanban/command-board.json` |
 | DNS | `<dns-repo>/kanban/dns-board.json` |
-| Starwords | `<starwords-repo>/kanban/freelance-doublenode-starwords-board.json` |
-| appPlanning | `<appplanning-repo>/kanban/freelance-doublenode-appplanning-board.json` |
-| WorkStats | `<workstats-repo>/kanban/freelance-doublenode-workstats-board.json` |
+| Starwords | `<starwords-repo>/kanban/freelance-acme-starwords-board.json` |
+| appPlanning | `<appplanning-repo>/kanban/freelance-acme-appplanning-board.json` |
+| WorkStats | `<workstats-repo>/kanban/freelance-acme-workstats-board.json` |
 | Legal | `~/legal/coparenting/kanban/legal-coparenting-board.json` |
 
 ```json

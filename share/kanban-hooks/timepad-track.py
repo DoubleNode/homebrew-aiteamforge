@@ -2,7 +2,7 @@
 """TimePad auto-tracking dispatcher — team-aware, config-driven.
 
 EPIC-0039 Child B (XACA-0620). Relocated from ~/.config/timeapp/timeapp-track.py
-and generalized from the hardcoded Bandwear block into a team-aware dispatcher.
+and generalized from the hardcoded single-client block into a team-aware dispatcher.
 
 Invoked by the SessionStart / SessionEnd hooks via timepad-track.sh. Always exits
 0 — time tracking must NEVER block or slow a Claude Code session.

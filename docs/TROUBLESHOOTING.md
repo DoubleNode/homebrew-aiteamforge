@@ -718,7 +718,7 @@ Instance IDs follow this pattern:
 - **Finance:** `finance-<profile>` (e.g., `finance-personal`, `finance-business`)
 - **Medical:** `medical-<specialty>` (e.g., `medical-general`, `medical-pediatric`)
 - **Legal:** `legal-<case-type>` (e.g., `legal-coparenting`)
-- **Freelance:** `freelance-<client>-<project>` (e.g., `freelance-doublenode-starwords`)
+- **Freelance:** `freelance-<client>-<project>` (e.g., `freelance-acme-app`)
 
 **Verification:**
 

@@ -90,12 +90,12 @@ class TestDetectMultiCollisionFreelance(unittest.TestCase):
         # Order in JSON dict is insertion order (Python 3.7+)
         return _make_team_paths(
             **{
-                "freelance-doublenode-starwords":   _entry(8505, "2025-01-01T00:00:00Z"),
-                "freelance-doublenode-appplanning": _entry(8505, "2025-02-01T00:00:00Z"),
-                "freelance-doublenode-workstats":   _entry(8505, "2025-03-01T00:00:00Z"),
-                "freelance-doublenode-lifeboard":   _entry(8505, "2025-04-01T00:00:00Z"),
-                "freelance-doublenode-caravan":     _entry(8505, "2025-05-01T00:00:00Z"),
-                "freelance-doublenode-awaysentry":  _entry(8505, "2025-06-01T00:00:00Z"),
+                "freelance-acme-alpha":    _entry(8505, "2025-01-01T00:00:00Z"),
+                "freelance-acme-beta":     _entry(8505, "2025-02-01T00:00:00Z"),
+                "freelance-acme-gamma":    _entry(8505, "2025-03-01T00:00:00Z"),
+                "freelance-acme-delta":    _entry(8505, "2025-04-01T00:00:00Z"),
+                "freelance-acme-epsilon":  _entry(8505, "2025-05-01T00:00:00Z"),
+                "freelance-acme-zeta":     _entry(8505, "2025-06-01T00:00:00Z"),
             }
         )
 
@@ -106,7 +106,7 @@ class TestDetectMultiCollisionFreelance(unittest.TestCase):
         self.assertEqual(len(plan["collisions"]), 1)
         group = plan["collisions"][0]
         self.assertEqual(group["port"], 8505)
-        self.assertEqual(group["winner"], "freelance-doublenode-starwords")
+        self.assertEqual(group["winner"], "freelance-acme-alpha")
         self.assertEqual(len(group["renumber"]), 5)
 
     def test_renumbers_have_distinct_ports_freelance(self):

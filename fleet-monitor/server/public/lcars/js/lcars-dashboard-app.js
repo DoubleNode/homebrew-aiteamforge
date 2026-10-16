@@ -503,7 +503,7 @@
     /**
      * Build mapping from fleet division keys to registered team keys.
      * Handles naming mismatches:
-     *   fleet "freelance-starwords" → registered "freelance-doublenode-starwords"
+     *   fleet "freelance-app" → registered "freelance-acme-app"
      *   fleet "legal" → registered "legal-coparenting"
      *   fleet "medical" → registered "medical-general"
      */
@@ -515,10 +515,13 @@
             // Direct mapping: teamId IS the division key for simple cases
             divisionToTeamMap[teamId] = teamId;
 
-            // freelance-doublenode-X → also map freelance-X
-            if (teamId.indexOf('freelance-doublenode-') === 0) {
-                var suffix = teamId.replace('freelance-doublenode-', '');
-                divisionToTeamMap['freelance-' + suffix] = teamId;
+            // freelance-<client>-<project> → also map freelance-<project>
+            // (never shadows a registered team id of the same name)
+            if (/^freelance-[^-]+-.+/.test(teamId)) {
+                var aliasKey = 'freelance-' + teamId.split('-').slice(2).join('-');
+                if (!teamConfig.teams[aliasKey]) {
+                    divisionToTeamMap[aliasKey] = teamId;
+                }
             }
             // legal-X → also map "legal" (single project)
             else if (teamId.indexOf('legal-') === 0) {
@@ -3228,9 +3231,6 @@
             'dns': 'DNS FRAMEWORK - STAR TREK: LOWER DECKS',
             'firebase': 'FIREBASE - STAR TREK: DS9',
             'freelance': 'FREELANCE - STAR TREK: ENT',
-            'freelance-doublenode-starwords': 'STARWORDS - STAR TREK: ENT',
-            'freelance-doublenode-workstats': 'WORKSTATS - STAR TREK: ENT',
-            'freelance-doublenode-appplanning': 'APPPLANNING - STAR TREK: ENT',
             'ios': 'IOS - STAR TREK: TNG',
             'legal': 'COPARENTING',
             'legal-coparenting': 'COPARENTING',
@@ -3240,7 +3240,9 @@
             'spacedock': 'STARFLEET SPACE DOCK'
         };
         if (!titles[code] && code.startsWith('freelance')) {
-            const suffix = code.replace('freelance-', '').toUpperCase();
+            // freelance-<client>-<project> shows the project; freelance-<project> too
+            const parts = code.split('-');
+            const suffix = (parts.length >= 3 ? parts.slice(2) : parts.slice(1)).join('-').toUpperCase();
             return suffix + ' - STAR TREK: ENT';
         }
         // Fallback for any legal-* variant
@@ -3313,9 +3315,6 @@
             'command': 'div-command',
             'dns': 'div-dns',
             'freelance': 'div-freelance',
-            'freelance-doublenode-starwords': 'div-freelance-doublenode-starwords',
-            'freelance-doublenode-workstats': 'div-freelance-doublenode-workstats',
-            'freelance-doublenode-appplanning': 'div-freelance-doublenode-appplanning',
             'academy': 'div-academy',
             'medical': 'div-medical',
             'medical-general': 'div-medical',

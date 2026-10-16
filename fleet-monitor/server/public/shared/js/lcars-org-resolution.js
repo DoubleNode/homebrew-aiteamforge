@@ -72,7 +72,7 @@
     /**
      * Prefix fallbacks for division codes that carry a qualifier the static map
      * cannot enumerate — notably freelance, which the server splits per project
-     * (`freelance-doublenode-starwords` and friends).
+     * (`freelance-acme-starwords` and friends).
      */
     var PREFIX_ORGS = [
         ['freelance', 'DOUBLENODE'],
@@ -113,7 +113,7 @@
     /**
      * Resolve a division code to an organization name.
      *
-     * @param {string} divisionCode  e.g. "finance", "legal", "freelance-doublenode-starwords"
+     * @param {string} divisionCode  e.g. "finance", "legal", "freelance-acme-starwords"
      * @param {object} [teamConfig]  the /api/team-config payload, if loaded
      * @returns {string} organization name, or 'UNKNOWN' if nothing matched
      */

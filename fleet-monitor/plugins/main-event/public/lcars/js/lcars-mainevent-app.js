@@ -660,7 +660,7 @@
                     statusLabel = 'Restored';
                 }
 
-                // Format display name (e.g., "freelance-doublenode-starwords" -> "FREELANCE-STARWORDS")
+                // Format display name (e.g., "freelance-acme-app" -> "FL-APP")
                 const displayName = (window.LCARS_CORE && LCARS_CORE.formatBackupDisplayName) ? LCARS_CORE.formatBackupDisplayName(boardName) : boardName.toUpperCase();
                 backupStatuses.push('<span class="backup-team-status"><span class="backup-team-name">' + displayName + ':</span><span class="' + statusClass + '">' + statusText + '</span></span>');
 
@@ -1306,16 +1306,15 @@
             'dns': 'DNS FRAMEWORK - STAR TREK: LOWER DECKS',
             'firebase': 'FIREBASE - STAR TREK: DS9',
             'freelance': 'FREELANCE - STAR TREK: ENT',
-            'freelance-doublenode-starwords': 'STARWORDS - STAR TREK: ENT',
-            'freelance-doublenode-workstats': 'WORKSTATS - STAR TREK: ENT',
-            'freelance-doublenode-appplanning': 'APPPLANNING - STAR TREK: ENT',
             'ios': 'IOS - STAR TREK: TNG',
             'legal': 'COPARENTING',
             'legal-coparenting': 'COPARENTING'
         };
         // Fallback for any freelance-* variant not explicitly listed
         if (!titles[code] && code.startsWith('freelance')) {
-            const suffix = code.replace('freelance-', '').toUpperCase();
+            // freelance-<client>-<project> shows the project; freelance-<project> too
+            const parts = code.split('-');
+            const suffix = (parts.length >= 3 ? parts.slice(2) : parts.slice(1)).join('-').toUpperCase();
             return suffix + ' - STAR TREK: ENT';
         }
         // Fallback for any legal-* variant
@@ -1328,7 +1327,7 @@
 
     function getOrganizationGroup(divisionCode) {
         const code = divisionCode.toLowerCase();
-        // Handle freelance-* divisions (freelance-doublenode-starwords, freelance-doublenode-workstats, etc.)
+        // Handle freelance-* divisions (freelance-acme-app, freelance-acme-web, etc.)
         if (code.startsWith('freelance')) {
             return 'DOUBLENODE';
         }
@@ -1383,9 +1382,6 @@
             'command': 'div-command',
             'dns': 'div-dns',
             'freelance': 'div-freelance',
-            'freelance-doublenode-starwords': 'div-freelance-doublenode-starwords',
-            'freelance-doublenode-workstats': 'div-freelance-doublenode-workstats',
-            'freelance-doublenode-appplanning': 'div-freelance-doublenode-appplanning',
             'academy': 'div-academy'
         };
         // Fallback for any freelance-* variant not explicitly listed

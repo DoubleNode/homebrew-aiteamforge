@@ -1751,16 +1751,15 @@ window.LCARS_CORE = window.LCARS_CORE || {};
      *   "academy"                         -> "ACADEMY"
      *   "ios"                             -> "IOS"
      *   "freelance"                       -> "FREELANCE"
-     *   "freelance-doublenode-starwords"   -> "FL-STARWORDS"
-     *   "freelance-doublenode-appplanning" -> "FL-APPPLANNING"
-     *   "freelance-doublenode-workstats"   -> "FL-WORKSTATS"
+     *   "freelance-acme-app"              -> "FL-APP"
+     *   "freelance-acme-dashboard"        -> "FL-DASHBOARD"
      *   "freelance-appplanning"           -> "FL-APPPLANNING"
      *   "legal-coparenting"               -> "LEGAL-COPARENTING"
      */
     LCARS.formatBackupDisplayName = function(boardName) {
         var name = boardName.toUpperCase();
-        // Shorten "FREELANCE-DOUBLENODE-X" to "FL-X"
-        name = name.replace(/^FREELANCE-DOUBLENODE-/, 'FL-');
+        // Shorten "FREELANCE-<CLIENT>-X" to "FL-X"
+        name = name.replace(/^FREELANCE-[^-]+-(?=.)/, 'FL-');
         // Shorten "FREELANCE-X" to "FL-X"
         name = name.replace(/^FREELANCE-/, 'FL-');
         return name;

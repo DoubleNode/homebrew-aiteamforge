@@ -352,7 +352,7 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
     },
 
     # ── Freelance — per-client/project entries (overlay-only, XACA-0628) ──
-    # The 9 per-CLIENT/PROJECT freelance slugs (DoubleNode/Liquidstyle/Bandwear)
+    # The 9 per-CLIENT/PROJECT freelance slugs
     # were removed from DEFAULT_TEAMS in XACA-0628 and now live solely in the
     # per-machine overlay (~/.aiteamforge/team-paths.json). build_team_code_map()
     # MERGES overlay team_codes on top of these defaults, so the overlay entries
@@ -715,7 +715,7 @@ def config_is_structurally_valid(teams_keys, has_schema: bool) -> bool:
 # the team-id contract (docs/architecture/team-id-contract.md §3). A bare key
 # like "freelance" or "medical" in a config's "teams" map is a contract
 # violation — valid keys are instance ids ("medical-general",
-# "freelance-doublenode-starwords"). This is the SINGLE SOURCE OF TRUTH: both
+# "freelance-acme-starwords"). This is the SINGLE SOURCE OF TRUTH: both
 # lcars-ui/server.py and homebrew-tap/libexec/commands/kb-port-fix.py import this
 # frozenset (with a literal fallback) so they cannot drift. (XACA-0643)
 _PARAMETERIZED_TEMPLATES: frozenset[str] = frozenset({"finance", "legal", "medical", "freelance"})
@@ -3485,7 +3485,7 @@ def get_team_repo_root(team: str, *, config: dict | None = None) -> Path:
 
     working_dir is the parent of kanban_dir, which for container-layout teams
     is NOT a git repository: the repo is a child of it (MainEventApp-Android/
-    develop, MainEventApp-iOS/DEV, Bandwear/Android/develop). The child's name
+    develop, MainEventApp-iOS/DEV, Acme/Android/develop). The child's name
     varies, so it is discovered, never assumed. Order:
 
       1. the entry's optional ``repo_dir`` — an explicit override, which must
@@ -3676,7 +3676,7 @@ def build_team_code_map(*, config: dict | None = None) -> dict[str, str]:
     1. Start from DEFAULT_TEAMS team_codes (the always-present base).
     2. Overlay live-config (team-paths.json) team_codes ON TOP — live wins on
        conflict, and overlay-only slugs (per-project freelance codes that have
-       NO DEFAULT_TEAMS entry, e.g. freelance-bandwear-dashboard → BWD) are
+       NO DEFAULT_TEAMS entry, e.g. freelance-acme-dashboard → ACD) are
        additive.
     3. Only include entries with a non-empty team_code field.
 

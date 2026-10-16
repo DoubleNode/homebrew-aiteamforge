@@ -26,11 +26,13 @@ from pathlib import Path
 # All 20 canonical teams with their expected 3-letter codes.
 # XACA-0542-015: This table is the parity fixture for the MERGED team-code map
 # (build_team_code_map / get_team_code / get_team_from_code).
-# XACA-0628: the 9 per-client/project freelance slugs (FSW/FAP/FWS/FLB/VAN/FAS/
-# FLA/FLI/BWA) were moved OUT of DEFAULT_TEAMS and now resolve via the per-machine
-# overlay (~/.aiteamforge/team-paths.json) — so the parity tests below validate
-# the merged (DEFAULT_TEAMS + overlay) result, not DEFAULT_TEAMS alone. On this
-# dev machine the overlay supplies those 9 codes; the table stays complete.
+# XACA-0628: per-client/project freelance slugs live OUTSIDE DEFAULT_TEAMS and
+# resolve via the per-machine overlay (~/.aiteamforge/team-paths.json), so the
+# parity tests below validate the merged (DEFAULT_TEAMS + overlay) result, not
+# DEFAULT_TEAMS alone. XACA-1337: the 9 per-client rows use SYNTHETIC slugs
+# (_SYNTHETIC_FREELANCE_OVERLAY below) and TestTeamCodeParity injects them as
+# the overlay, so the suite never depends on a real machine's registry (and
+# ships no client names). The table stays complete.
 # ---------------------------------------------------------------------------
 _EXPECTED_TEAM_CODES: dict[str, str] = {
     "academy":                             "ACA",
@@ -39,20 +41,28 @@ _EXPECTED_TEAM_CODES: dict[str, str] = {
     "firebase":                            "FIR",
     "command":                             "CMD",
     "dns":                                 "DNS",
-    "freelance-doublenode-starwords":      "FSW",
-    "freelance-doublenode-appplanning":    "FAP",
-    "freelance-doublenode-workstats":      "FWS",
-    "freelance-doublenode-lifeboard":      "FLB",
-    "freelance-doublenode-caravan":        "VAN",
-    "freelance-doublenode-awaysentry":     "FAS",
-    "freelance-liquidstyle-agentbadges-app": "FLA",
-    "freelance-liquidstyle-agentbadges-ios": "FLI",
-    "freelance-bandwear-android":          "BWA",
+    "freelance-acme-alpha":                "FAA",
+    "freelance-acme-beta":                 "FAB",
+    "freelance-acme-gamma":                "FAG",
+    "freelance-acme-delta":                "FAD",
+    "freelance-acme-epsilon":              "FAE",
+    "freelance-acme-zeta":                 "FAZ",
+    "freelance-widgets-app":               "FWA",
+    "freelance-widgets-ios":               "FWI",
+    "freelance-acme-android":              "FAN",
     "legal-coparenting":                   "LCP",
     "medical-general":                     "MED",
     "finance-personal":                    "FIN",
     "mainevent":                           "MEV",
     "freelance":                           "FRE",
+}
+
+# The overlay a machine would carry for the freelance rows above (synthetic;
+# plain "freelance" is overlay-only too, not a DEFAULT_TEAMS entry).
+_SYNTHETIC_FREELANCE_OVERLAY: dict[str, dict] = {
+    team: {"team_code": code}
+    for team, code in _EXPECTED_TEAM_CODES.items()
+    if team == "freelance" or team.startswith("freelance-")
 }
 
 # ---------------------------------------------------------------------------
@@ -211,6 +221,16 @@ class TestComputeInstancePort(unittest.TestCase):
 class TestTeamCodeParity(unittest.TestCase):
     """XACA-0542-015: Parity regression for team_code registry coverage."""
 
+    def setUp(self):
+        # XACA-1337: inject the synthetic per-client overlay so these tests are
+        # machine-independent (no live ~/.aiteamforge registry, no client names).
+        patcher = mock.patch.object(
+            aiteamforge_paths, "load_config",
+            return_value={"schema_version": 1, "teams": _SYNTHETIC_FREELANCE_OVERLAY},
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     # ── build_team_code_map coverage ──────────────────────────────────────
 
     def test_build_team_code_map_all_20_teams_present(self):
@@ -345,7 +365,7 @@ class TestTeamCodeParity(unittest.TestCase):
 # live-config (team-paths.json) team_codes overlaid ON TOP:
 #   - no overlay codes  → identical to the DEFAULT_TEAMS-derived map (regression)
 #   - overlay-only slug  → additive (per-project freelance code with no
-#                          DEFAULT_TEAMS entry, e.g. BWD → ...bandwear-dashboard)
+#                          DEFAULT_TEAMS entry, e.g. ACD → ...acme-dashboard)
 #   - overlay collision  → live wins
 #   - non-freelance teams unaffected
 # ---------------------------------------------------------------------------
@@ -398,21 +418,21 @@ class TestBuildTeamCodeMapMerge(unittest.TestCase):
 
     def test_overlay_only_slug_routes_with_no_default_teams_entry(self):
         """An overlay-only slug (no DEFAULT_TEAMS entry) with a team_code is
-        additive — XBWD acceptance criterion."""
+        additive — XACD acceptance criterion."""
         self.assertNotIn(
-            "freelance-bandwear-dashboard", DEFAULT_TEAMS,
+            "freelance-acme-dashboard", DEFAULT_TEAMS,
             "Fixture invalid: dashboard slug must NOT exist in DEFAULT_TEAMS",
         )
         self.assertNotIn(
-            "BWD", _default_teams_code_map(),
-            "Fixture invalid: BWD must not already be a DEFAULT_TEAMS code",
+            "ACD", _default_teams_code_map(),
+            "Fixture invalid: ACD must not already be a DEFAULT_TEAMS code",
         )
         with self._patch_overlay({
-            "freelance-bandwear-dashboard": {"team_code": "BWD"},
+            "freelance-acme-dashboard": {"team_code": "ACD"},
         }):
             result = build_team_code_map()
-        self.assertIn("BWD", result, "Overlay-only code BWD must be in the map")
-        self.assertEqual(result["BWD"], "freelance-bandwear-dashboard")
+        self.assertIn("ACD", result, "Overlay-only code ACD must be in the map")
+        self.assertEqual(result["ACD"], "freelance-acme-dashboard")
         # And every DEFAULT_TEAMS code is still present (merge, not replace).
         for code in _default_teams_code_map():
             self.assertIn(
@@ -447,7 +467,7 @@ class TestBuildTeamCodeMapMerge(unittest.TestCase):
         """Adding an overlay-only freelance slug must not perturb the
         non-freelance team routing."""
         with self._patch_overlay({
-            "freelance-bandwear-dashboard": {"team_code": "BWD"},
+            "freelance-acme-dashboard": {"team_code": "ACD"},
         }):
             result = build_team_code_map()
         for team in (
