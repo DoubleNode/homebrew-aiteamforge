@@ -157,8 +157,6 @@
     --div-command: var(--lcars-rose);
     --div-dns: var(--lcars-lavender);
     --div-freelance: var(--lcars-purple);
-    --div-freelance-starwords: var(--lcars-violet);
-    --div-freelance-workstats: var(--lcars-mauve);
     --div-academy: var(--lcars-peach);
     --div-legal: var(--lcars-green);
     --div-legal-coparenting: var(--lcars-green-dark);
@@ -209,14 +207,6 @@
 .team-freelance {
     --current-org-color: var(--org-doublenode);
     --current-div-color: var(--div-freelance);
-}
-.team-freelance-starwords {
-    --current-org-color: var(--org-doublenode);
-    --current-div-color: var(--div-freelance-starwords);
-}
-.team-freelance-workstats {
-    --current-org-color: var(--org-doublenode);
-    --current-div-color: var(--div-freelance-workstats);
 }
 /* Per-client freelance teams (freelance-<client>-<project>) get their colors from lcars.js applyTeamTheme() inline. */
 
