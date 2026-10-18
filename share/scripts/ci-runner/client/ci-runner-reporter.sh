@@ -450,6 +450,13 @@ def cmd_build(args):
     payload = {'schema_version': 1, 'machine': e['B_MACHINE'], 'reportedAt': iso(time.time()),
                'reporterVersion': e['B_VERSION'], 'host': host, 'vm': vm,
                'runners': uniq[:16], 'jobs': jobs[:50]}
+    # XACA-1537-004: the Linux GUEST's root filesystem (the volume that filled on 2026-10-15; the
+    # host disk above is not the constraint). OPTIONAL and omitted -- never zero, never a guess --
+    # whenever it could not be read. The server turns an omitted field into 'unknown'.
+    gt, gf = e.get('B_GUEST_TOTAL', ''), e.get('B_GUEST_FREE', '')
+    if vm is not None and vm_state == 'running' and gt.isdigit() and gf.isdigit() \
+            and int(gt) > 0 and int(gf) <= int(gt):
+        payload['guestDisk'] = {'path': '/', 'totalBytes': int(gt), 'freeBytes': int(gf)}
     if pretty:
         print(json.dumps(payload, indent=2))
     else:
@@ -540,6 +547,24 @@ collect_disk() {
     printf '%s %s' "$((total * 1024))" "$((free * 1024))"
 }
 
+# XACA-1537-004: echoes "total free" in bytes for the Linux guest's "/", or nothing on ANY
+# failure (guest exec failed/timed out, df output unparseable, mount point not "/", free > total).
+# Nothing is the honest answer: the payload then omits guestDisk and the server reads it as
+# 'unknown'. Never echo a partial or guessed number.
+collect_guest_disk() {
+    local out line total free mnt extra fs blocks used pct
+    [ -n "$VM_NAME" ] || return 1
+    out=$(run_with_timeout 20 "$TMP_DIR/empty" "$LIMACTL" shell --workdir /tmp "$VM_NAME" -- df -k -P / 2>/dev/null) || return 1
+    line=$(printf '%s\n' "$out" | tail -n 1)
+    [ -n "$line" ] || return 1
+    read -r fs blocks used free pct mnt extra <<<"$line"
+    total="$blocks"
+    [ -n "$mnt" ] && [ -z "$extra" ] && [ "$mnt" = "/" ] || return 1
+    case "$total$free" in *[!0-9]*|"") return 1 ;; esac
+    [ "$total" -gt 0 ] && [ "$free" -le "$total" ] || return 1
+    printf '%s %s' "$((total * 1024))" "$((free * 1024))"
+}
+
 # echoes none | running | stopped | broken | unknown
 #   none    = host has no VM (limactl absent, or instance not listed)
 #   unknown = the query itself failed
@@ -624,13 +649,17 @@ main() {
             >"$lin_json" 2>/dev/null || rm -f "$lin_json"
     fi
 
+    # XACA-1537-004: guest root-fs free space; failure leaves it empty (field omitted).
+    local gdisk=""
+    [ "$vm_state" = "running" ] && { gdisk=$(collect_guest_disk) || gdisk=""; }
+
     local pretty=compact
     [ "$DRY_RUN" = true ] && pretty=pretty
     local payload_file="$TMP_DIR/payload.json"
     B_HOSTNAME="${CI_RUNNER_HOSTNAME-$(hostname 2>/dev/null | awk 'NR==1')}" \
     B_MACHINE="$machine" B_VERSION="$REPORTER_VERSION" B_UPTIME="$uptime" \
     B_DISK_PATH="$disk_path" B_DISK_TOTAL="${disk%% *}" B_DISK_FREE="${disk##* }" \
-    B_VM_NAME="$VM_NAME" B_VM_STATE="$vm_state" \
+    B_VM_NAME="$VM_NAME" B_VM_STATE="$vm_state" B_GUEST_TOTAL="${gdisk%% *}" B_GUEST_FREE="${gdisk##* }" \
     B_MAC_NAME="$mac_name" B_MAC_STATE="$mac_state" B_MAC_JSON="$mac_json" \
     B_LINUX_NAMES="$LINUX_RUNNERS" B_LINUX_JSON="$lin_json" \
     B_LABELS_MAC="$LABELS_MAC" B_LABELS_LINUX="$LABELS_LINUX" \

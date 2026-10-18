@@ -218,6 +218,10 @@ MAC_JIT_SRC="${_PH_CLIENT}/ci-runner-jit-macos.sh"
 JOB_STARTED_SRC="${_PH_CLIENT}/ci-runner-job-started.sh"
 GUEST_JIT_DEST="/usr/local/sbin/ci-runner-jit.sh"
 GUEST_JOB_STARTED_DEST="/usr/local/sbin/ci-runner-job-started.sh"
+# XACA-1537-003: workspace git-pack consolidation hook for the PERSISTENT Linux runners. OPTIONAL payload: a shipped
+# bundle that predates it (its file list lives in the tap, outside this repo) is warned about and skipped, never refused.
+GC_SRC="${_PH_CLIENT}/ci-runner-workspace-gc.sh"
+GUEST_GC_DEST="/usr/local/sbin/ci-runner-workspace-gc.sh"
 MAC_JIT_DEST="${LIBEXEC_DIR}/ci-runner-jit-macos.sh"
 MAC_JOB_STARTED_DEST="${LIBEXEC_DIR}/ci-runner-job-started.sh"
 
@@ -907,6 +911,105 @@ systemctl is-active "$svc"
 GUEST
 }
 
+# XACA-1537-003: wire the workspace-gc hook into the PERSISTENT runner services (guest, as root).
+# Args: HOOK_PATH COUNT [SYSTEMD_DIR] [OPT_DIR] [CGROUP_ROOT] [PROC_ROOT]  (the last four exist for the test fixture;
+# production uses the defaults).
+# One systemd drop-in per persistent unit sets ACTIONS_RUNNER_HOOK_JOB_STARTED (not the runner's dotenv file: a drop-in
+# is root-owned, reviewable with `systemctl cat`, and survives a runner self-update). JIT slots never come through here.
+# GAP, deliberately unchanged here: the persistent runners have no fork-defence job-started hook (only the JIT launchers
+# export one), so this points at the gc hook ONLY. Adding the fork-defence hook is a separate security decision.
+# A changed drop-in applies only at the unit's NEXT START, and restarting a runner mid-job KILLS the job, so a unit is
+# restarted only when BOTH busy probes say idle (XACA-1537-013): the path probe (pgrep <dir>/bin/Runner.Worker) AND the
+# path-independent cgroup probe ci-pool-agent.py uses (_GUEST_BUSY_SH: any Runner.Worker among the unit's cgroup.procs),
+# so a self-updated runner whose worker moved still reads busy. Busy, or unknowable (either probe errs, an active unit
+# with no readable cgroup) = left alone with a loud PENDING-RESTART line; the next provision/refresh re-detects it
+# (drop-in newer than the unit's start time). RESIDUAL WINDOW (XACA-1537-012), stated not hidden: the probe runs
+# immediately before `systemctl restart`, but a job the runner accepts in the milliseconds between them is killed and
+# must be re-run. The runner has no drain-then-restart command; closing the window fully needs a GitHub-side drain.
+guest_gc_wire_script() {
+  cat <<'GUEST'
+#!/bin/bash
+set -euo pipefail
+HOOK="$1"; COUNT="$2"; SYSD="${3:-/etc/systemd/system}"; OPT="${4:-/opt}"
+CGROOT="${5:-/sys/fs/cgroup}"; PROCROOT="${6:-/proc}"
+NAME="xaca-1537-workspace-gc.conf"
+# busy <unit> <dir>: rc 0 = a job is running, 1 = idle, 2 = unknowable. Idle ONLY when both probes say idle.
+busy() {
+  local unit="$1" dir="$2" cg f p prc=0
+  pgrep -f "${dir}/bin/Runner.Worker" >/dev/null 2>&1 || prc=$?
+  [ "$prc" = 0 ] && return 0
+  [ "$prc" = 1 ] || return 2
+  cg=$(systemctl show -p ControlGroup --value "$unit" 2>/dev/null) || return 2
+  [ -n "$cg" ] || return 2
+  f="${CGROOT}${cg}/cgroup.procs"
+  [ -r "$f" ] || return 2
+  # No pipe into `grep -q` (XACA-1537-014): under this script's pipefail, grep -q exits at the first match, the loop
+  # dies of SIGPIPE, the pipeline fails and a BUSY unit read as idle. Scan every pid's cmdline without a pipe instead.
+  # The `{ ...; } 2>/dev/null` wraps the input redirect so a pid that exits mid-scan is silent.
+  for p in $(cat "$f"); do
+    case "$({ tr '\0' ' ' <"${PROCROOT}/${p}/cmdline"; } 2>/dev/null || true)" in
+      *Runner.Worker*) return 0 ;;
+    esac
+  done
+  return 1
+}
+want() {
+  printf '%s\n' '# XACA-1537: consolidate git packs in this PERSISTENT runner workspace before each job (provision-host.sh owns this file).' \
+    '# Deliberately ONLY the gc hook: the fork-defence job-started hook is not wired to persistent runners (separate decision).' \
+    '[Service]' "Environment=ACTIONS_RUNNER_HOOK_JOB_STARTED=${HOOK}"
+}
+units=""; changed=""
+i=1
+while [ "$i" -le "$COUNT" ]; do
+  dir="${OPT}/actions-runner-${i}"
+  if [ ! -f "${dir}/.service" ]; then
+    echo "gc-wire: runner ${i}: no ${dir}/.service (not registered); nothing to wire"
+    i=$((i + 1)); continue
+  fi
+  unit=$(cat "${dir}/.service")
+  d="${SYSD}/${unit}.d"; f="${d}/${NAME}"
+  tmp=$(mktemp)
+  want >"$tmp"
+  if [ -f "$f" ] && cmp -s "$tmp" "$f"; then
+    command rm -- "$tmp"; echo "gc-wire: ${unit}: drop-in already current"
+  else
+    mkdir -p "$d"; chmod 755 "$d"
+    cp "$tmp" "$f"; chmod 644 "$f"; command rm -- "$tmp"
+    changed="${changed} ${unit}"; echo "gc-wire: ${unit}: wrote ${f}"
+  fi
+  units="${units} ${i}:${unit}"
+  i=$((i + 1))
+done
+[ -z "$changed" ] || systemctl daemon-reload
+
+pending=0
+for pair in $units; do
+  i="${pair%%:*}"; unit="${pair#*:}"; dir="${OPT}/actions-runner-${i}"; f="${SYSD}/${unit}.d/${NAME}"
+  need=0
+  case " ${changed} " in *" ${unit} "*) need=1 ;; esac
+  if [ "$need" = 0 ] && systemctl is-active --quiet "$unit"; then
+    # unchanged drop-in, but is it newer than the running process? (an earlier run may have left it pending)
+    ts=$(systemctl show -p ActiveEnterTimestamp --value "$unit" 2>/dev/null || true)
+    start=$(date -d "$ts" +%s 2>/dev/null || echo "")
+    mt=$(stat -c %Y "$f" 2>/dev/null || echo 0)
+    if [ -z "$start" ] || [ "$mt" -ge "$start" ]; then need=1; fi
+  fi
+  if [ "$need" = 0 ]; then echo "gc-wire: ${unit}: hook already in effect"; continue; fi
+  if ! systemctl is-active --quiet "$unit"; then
+    echo "gc-wire: ${unit}: not running; the hook applies when it starts"; continue
+  fi
+  rc=0; busy "$unit" "$dir" || rc=$?
+  if [ "$rc" = 1 ]; then
+    systemctl restart "$unit"; echo "gc-wire: ${unit}: idle, restarted (hook now in effect)"
+  else
+    pending=$((pending + 1))
+    echo "gc-wire: PENDING-RESTART ${unit}: $([ "$rc" = 0 ] && echo 'a job is running' || echo 'busy state unknowable (a busy probe failed)'); NOT restarted. It picks up the hook on its next restart; re-run 'aiteamforge ci refresh' when idle."
+  fi
+done
+echo "gc-wire: done (${pending} unit(s) pending restart)"
+GUEST
+}
+
 # ── Stages ────────────────────────────────────────────────────────────────
 check_no_host_mounts() {
   local cfg mounts
@@ -987,6 +1090,30 @@ stage_linux_runners() {
     fi
     i=$((i + 1))
   done
+}
+
+# XACA-1537-003: install the workspace-gc hook (root:root 755, only rewritten when it differs) and wire it into the
+# persistent runner services. Runs without --with-agent: the persistent runners exist in the classic model too.
+stage_guest_workspace_gc() {
+  local want have meta out
+  if [ "$NO_LINUX" = "1" ]; then log "workspace-gc hook skipped (--no-linux)"; return 0; fi
+  if [ ! -f "$GC_SRC" ]; then
+    warn "workspace-gc hook source not found (${GC_SRC}): persistent runner workspaces will NOT be gc'd (XACA-1537). Update the bundle: aiteamforge upgrade"
+    return 0
+  fi
+  want=$(shasum -a 256 "$GC_SRC" | awk '{print $1}')
+  have=$(guest_sh "sha256sum ${GUEST_GC_DEST} 2>/dev/null | awk '{print \$1}' || true" | tr -d '[:space:]')
+  if [ "$want" != "$have" ]; then
+    guest sudo install -m 755 -o root -g root /dev/stdin "$GUEST_GC_DEST" <"$GC_SRC"
+    log "installed guest ${GUEST_GC_DEST}"
+  else
+    log "guest ${GUEST_GC_DEST} already current"
+  fi
+  meta=$(guest_sh "stat -c '%U:%G %a' ${GUEST_GC_DEST}" | tr -d '\r')
+  [ "$meta" = "root:root 755" ] || die "guest ${GUEST_GC_DEST} is '${meta}', want 'root:root 755'"
+  out=$(guest_gc_wire_script | guest sudo bash -s -- "$GUEST_GC_DEST" "$LINUX_RUNNER_COUNT" 2>&1) || { printf '%s\n' "$out" >&2; die "workspace-gc drop-in wiring failed in the guest"; }
+  printf '%s\n' "$out"
+  case "$out" in *PENDING-RESTART*) warn "workspace-gc hook is wired but NOT yet active on a busy runner unit (see PENDING-RESTART above); re-run 'aiteamforge ci refresh' when idle" ;; esac
 }
 
 stage_macos_runner() {
@@ -1399,6 +1526,7 @@ do_dry_run() {
     # The package list lives only in the guest script (single copy, pinned by the
     # XACA-1386 parity check), so read it from there rather than restating it.
     plan "guest: apt baseline $(guest_baseline_script | sed -n 's/^PKGS="\(.*\)"$/\1/p') (skips if present); user runner + /etc/sudoers.d/90-runner"
+    plan "guest: workspace-gc (XACA-1537): install ${GC_SRC##*/} -> ${GUEST_GC_DEST} (root:root 755, only if it differs; source $([ -f "$GC_SRC" ] && echo present || echo 'MISSING: would warn and skip')); systemd drop-in xaca-1537-workspace-gc.conf (ACTIONS_RUNNER_HOOK_JOB_STARTED=${GUEST_GC_DEST}) on the persistent units of /opt/actions-runner-{${linux_idx}} only, never the JIT slots; daemon-reload; restart a unit ONLY if its runner is idle, else leave it and report PENDING-RESTART"
     plan "guest: ${linux_names} in /opt/actions-runner-{${linux_idx}}: download+sha256 verify, installdependencies.sh, config.sh --labels ${RUNNER_LABELS} (skip if .runner exists), svc.sh install/start"
   fi
   if [ "$NO_MACOS" = "1" ]; then
@@ -1493,6 +1621,10 @@ write_provision_manifest() {
   if [ "$NO_MACOS" != "1" ]; then
     ci_provision_runner_entry osx-arm64 "$VERSION" "$RUNNER_SHA_OSX" "$RUNNER_SOURCE" || ok=0
   fi
+  # XACA-1537-003: only when the source ships in this bundle (see GC_SRC); recorded so a changed hook shows as guest: drift.
+  if [ "$NO_LINUX" != "1" ] && [ -f "$GC_SRC" ]; then
+    ci_provision_entry guest client/ci-runner-workspace-gc.sh "$GUEST_GC_DEST" "$GC_SRC" || ok=0
+  fi
   CI_PM_RUNNER_CHECKED_AT_W="$RUNNER_CHECKED_AT"
   if [ "$ok" != "1" ]; then
     warn "provision manifest NOT written: a bundle file could not be hashed; 'aiteamforge ci' will keep reporting this host as behind"
@@ -1586,6 +1718,7 @@ check_no_host_mounts
 stage_guest_baseline
 stage_linux_runners "$VERSION" "$REGISTER"
 if [ "$MODE" != "baseline-only" ]; then
+  stage_guest_workspace_gc
   stage_macos_runner "$VERSION"
   stage_reporter
   if [ "$WITH_AGENT" = "1" ]; then

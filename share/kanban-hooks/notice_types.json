@@ -11,6 +11,7 @@
     {"id": "machine-offline",       "defaultSeverity": "critical", "description": "A fleet machine stopped reporting past the offline threshold."},
     {"id": "machine-recovered",     "defaultSeverity": "info",     "description": "A previously offline fleet machine is reporting again."},
     {"id": "accessory-on-battery",  "defaultSeverity": "high",     "description": "A UPS accessory switched to battery power."},
-    {"id": "accessory-restored",    "defaultSeverity": "info",     "description": "A UPS accessory is back on mains power."}
+    {"id": "accessory-restored",    "defaultSeverity": "info",     "description": "A UPS accessory is back on mains power."},
+    {"id": "ci-runner-disk-low",    "defaultSeverity": "high",     "description": "A CI runner guest VM is low on free disk space and will soon fail jobs."}
   ]
 }

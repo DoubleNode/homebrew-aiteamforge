@@ -72,6 +72,15 @@ const FUTURE_DAY_TOLERANCE = 1;   // days: reporter clock skew allowed past the 
 const DAY_MS = 86400 * 1000;
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 
+// Guest-disk alarm (XACA-1537-004). Alarm when the Linux guest's "/" has LESS than either floor.
+// Overridable per server process: FLEET_CI_GUEST_DISK_MIN_FREE_PERCENT (0-100) and
+// FLEET_CI_GUEST_DISK_MIN_FREE_GIB (>= 0). A bad value falls back to the default, never disables.
+const GIB = 1024 * 1024 * 1024;
+const DEFAULT_GUEST_DISK_MIN_FREE_PERCENT = 15;
+const DEFAULT_GUEST_DISK_MIN_FREE_GIB = 8;
+const MAX_DISK_BYTES = 2 ** 50;     // 1 PiB: bounded, far above any real volume, well inside 2^53
+const GUEST_DISK_NOTICE_DEDUPE_MS = 60 * 60 * 1000;
+
 const MACHINE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const HOSTNAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/;
 const RUNNER_NAME_RE = /^[A-Za-z0-9._-]+$/;
@@ -241,6 +250,22 @@ function validateHost(h) {
     return out;
 }
 
+/**
+ * Optional top-level guestDisk (XACA-1537-004): the Linux guest's "/" -- {path:"/", totalBytes, freeBytes}.
+ * Absent/undefined/null = "could not read it" (the server derives 'unknown'). Anything else must be
+ * exactly this shape; a malformed value rejects the push (same posture as host.disk), so a reporter
+ * bug is loud rather than silently reading as a healthy disk.
+ */
+function validateGuestDisk(g) {
+    if (g === undefined || g === null) return null;
+    const okBytes = (n) => isInt0(n) && n <= MAX_DISK_BYTES;
+    if (!isObj(g) || g.path !== '/' || !okBytes(g.totalBytes) || !okBytes(g.freeBytes)
+        || g.totalBytes <= 0 || g.freeBytes > g.totalBytes) {
+        throw new ValidationError('guestDisk', 'bad guestDisk');
+    }
+    return { path: '/', totalBytes: g.totalBytes, freeBytes: g.freeBytes };
+}
+
 function validateVm(v) {
     if (v === null) return null;
     if (!isObj(v) || !cleanStr(v.name, 64) || !VM_STATES.includes(v.state)) throw new ValidationError('vm', 'bad vm');
@@ -261,6 +286,7 @@ function validatePush(body) {
     const host = validateHost(body.host);
     if (!('vm' in body)) throw new ValidationError('vm', 'vm is required (null when the host has no VM)');
     const vm = validateVm(body.vm);
+    const guestDisk = validateGuestDisk(body.guestDisk);
     if (!Array.isArray(body.runners)) throw new ValidationError('runners', 'runners must be an array');
     if (body.runners.length > MAX_RUNNERS) throw new ValidationError('runners', `at most ${MAX_RUNNERS} runners`);
     const runners = body.runners.map(validateRunner);
@@ -284,7 +310,7 @@ function validatePush(body) {
     }
     return {
         machine: body.machine,
-        record: { reportedAt: body.reportedAt, reporterVersion: body.reporterVersion, host, vm, runners },
+        record: { reportedAt: body.reportedAt, reporterVersion: body.reporterVersion, host, vm, runners, ...(guestDisk ? { guestDisk } : {}) },
         jobs,
         jobsRejected,
     };
@@ -332,6 +358,9 @@ function rebuildStoredRecord(id, raw) {
         if (e instanceof ValidationError) return null;
         throw e;
     }
+    // A bad stored guestDisk is dropped, not fatal: the machine then reads 'unknown', never ok.
+    let guestDisk = null;
+    try { guestDisk = validateGuestDisk(raw.guestDisk); } catch (e) { if (!(e instanceof ValidationError)) throw e; }
     let droppedRunners = 0;
     const runners = [];
     const names = new Set();
@@ -367,6 +396,7 @@ function rebuildStoredRecord(id, raw) {
         rec: {
             machine: id, receivedAt: raw.receivedAt, reportedAt: raw.reportedAt, reporterVersion: raw.reporterVersion,
             host, vm, runners, jobs: jobs.slice(0, MAX_JOBS_PER_MACHINE),
+            ...(guestDisk ? { guestDisk } : {}),
         },
         droppedRunners,
         droppedJobs,
@@ -385,6 +415,47 @@ function utcDay(ms) { return new Date(ms).toISOString().slice(0, 10); }
 function durationOf(j) {
     if (isInt0(j.durationSeconds)) return j.durationSeconds;
     return Math.max(0, Math.round((Date.parse(j.endedAt) - Date.parse(j.startedAt)) / 1000));
+}
+
+/**
+ * Guest-disk alarm floors (XACA-1537-004) from a variables object (the server passes its process
+ * variables). One warning line per bad value; a bad/absent value yields the default, never "off".
+ */
+function guestDiskFloorsFrom(vars) {
+    const v = vars || {};
+    const num = (raw, lo, hi, dflt, name) => {
+        if (raw === undefined || raw === '') return dflt;
+        const n = Number(raw);
+        if (!Number.isFinite(n) || n < lo || n > hi) {
+            console.warn(`[CI-RUNNERS] ignoring ${name}=${String(raw).slice(0, 32)} (want ${lo}-${hi}); using ${dflt}`);
+            return dflt;
+        }
+        return n;
+    };
+    return {
+        minFreePercent: num(v.FLEET_CI_GUEST_DISK_MIN_FREE_PERCENT, 0, 100, DEFAULT_GUEST_DISK_MIN_FREE_PERCENT, 'FLEET_CI_GUEST_DISK_MIN_FREE_PERCENT'),
+        minFreeBytes: Math.round(num(v.FLEET_CI_GUEST_DISK_MIN_FREE_GIB, 0, 1048576, DEFAULT_GUEST_DISK_MIN_FREE_GIB, 'FLEET_CI_GUEST_DISK_MIN_FREE_GIB') * GIB),
+    };
+}
+
+/**
+ * THE one place the guest-disk alarm is derived (contract machines[].guestDisk and the push-time
+ * notice both call it). Three states, never reassuring on missing data:
+ *   null     -- the host has no VM (nothing to measure)
+ *   unknown  -- a VM is reported but no usable reading (older reporter, guest exec failed, VM down)
+ *   low      -- free < floor.percent of total OR free < floor.bytes   (strictly LESS than)
+ *   ok       -- otherwise
+ */
+function deriveGuestDisk(rec, floors) {
+    if (!rec || !rec.vm) return null;
+    const g = rec.guestDisk;
+    if (!g || !isInt0(g.totalBytes) || !isInt0(g.freeBytes) || g.totalBytes <= 0 || g.freeBytes > g.totalBytes) {
+        return { path: '/', totalBytes: null, freeBytes: null, freePercent: null, alarm: 'unknown', floors: { minFreePercent: floors.minFreePercent, minFreeBytes: floors.minFreeBytes } };
+    }
+    const freePercent = Math.round((g.freeBytes / g.totalBytes) * 1000) / 10;
+    // cross-multiplied, not divided: exact at the boundary for any realistic volume size
+    const low = g.freeBytes * 100 < floors.minFreePercent * g.totalBytes || g.freeBytes < floors.minFreeBytes;
+    return { path: '/', totalBytes: g.totalBytes, freeBytes: g.freeBytes, freePercent, alarm: low ? 'low' : 'ok', floors: { minFreePercent: floors.minFreePercent, minFreeBytes: floors.minFreeBytes } };
 }
 
 /** GitHub per-job billing rounding. */
@@ -480,7 +551,8 @@ function contractJob(j, osByRunner) {
  * the records' stored jobs through the SAME recordJob() path, so the two can
  * never disagree on how a job is counted. The store always passes its own.
  */
-function buildContractResponse(records, now, { jobsLimit = DEFAULT_JOBS_LIMIT, rollups = null } = {}) {
+function buildContractResponse(records, now, { jobsLimit = DEFAULT_JOBS_LIMIT, rollups = null, guestDiskFloors = null } = {}) {
+    const floors = guestDiskFloors || guestDiskFloorsFrom(process['env']);
     const nowMs = now.getTime();
     const today = utcDay(nowMs);
     const month = today.slice(0, 7);
@@ -517,6 +589,7 @@ function buildContractResponse(records, now, { jobsLimit = DEFAULT_JOBS_LIMIT, r
             uptimeSeconds: rec.host && isInt0(rec.host.uptimeSeconds) ? rec.host.uptimeSeconds : null,
             vm: rec.vm ? { name: rec.vm.name, status: VM_STATUS[rec.vm.state] || 'Unknown', uptimeSeconds: null } : null,
             disk,
+            guestDisk: deriveGuestDisk(rec, floors),
             runners: rec.runners.map((r) => ({
                 name: r.name,
                 os: osByRunner.get(r.name),
@@ -870,7 +943,8 @@ function createRollupStore(file, { maxIdsPerDay = MAX_IDS_PER_DAY } = {}) {
  * opts.rollupFile : default "<dir of file>/ci-runner-rollups.json"
  * opts.clock      : () => Date, default the real clock (tests inject one)
  */
-function createCiRunnerStore(file, { rollupFile, clock = () => new Date() } = {}) {
+function createCiRunnerStore(file, { rollupFile, clock = () => new Date(), guestDiskFloors = null } = {}) {
+    const floors = guestDiskFloors || guestDiskFloorsFrom(process['env']);
     const machines = new Map();
     const rollups = createRollupStore(rollupFile || path.join(path.dirname(file), ROLLUP_FILE_NAME));
 
@@ -1017,10 +1091,10 @@ function createCiRunnerStore(file, { rollupFile, clock = () => new Date() } = {}
 
     /** The GET /api/ci-runners contract response. */
     function snapshot({ jobsLimit = DEFAULT_JOBS_LIMIT, now = clock() } = {}) {
-        return buildContractResponse([...machines.values()], now, { jobsLimit, rollups });
+        return buildContractResponse([...machines.values()], now, { jobsLimit, rollups, guestDiskFloors: floors });
     }
 
-    return { load, save, applyPush, snapshot, machines, rollups };
+    return { load, save, applyPush, snapshot, machines, rollups, guestDiskFloors: floors };
 }
 
 function parseJobsLimit(raw) {
@@ -1044,8 +1118,32 @@ const REFRESH_TIMEOUT_MS = 8000;
  */
 function registerCiRunnersRoutes(app, opts = {}) {
     const file = opts.file || process.env.FLEET_CI_RUNNERS_FILE || path.join(__dirname, '..', 'data', 'ci-runners.json');
-    const store = createCiRunnerStore(file, { rollupFile: opts.rollupFile, clock: opts.clock });
+    const store = createCiRunnerStore(file, { rollupFile: opts.rollupFile, clock: opts.clock, guestDiskFloors: opts.guestDiskFloors });
     store.load();
+
+    // XACA-1537-004: push-time guest-disk notice. Fired through the existing fleet-notice hub
+    // (lib/fleet-notices.emitFleetNotice, the same path the CI dispatcher alerts use); opts.notify
+    // replaces it in tests. Deduped per machine: one notice per GUEST_DISK_NOTICE_DEDUPE_MS while the
+    // machine stays low; going back to ok re-arms it. 'unknown' is surfaced in the GET payload only
+    // (an old reporter would otherwise page forever) and never notifies.
+    const notify = typeof opts.notify === 'function' ? opts.notify : (n) => require('./fleet-notices').emitFleetNotice(n);
+    const lowSince = new Map();   // machine -> epoch ms of the last low notice
+    function noticeGuestDisk(machine, rec, nowMs) {
+        try {
+            const d = deriveGuestDisk(rec, store.guestDiskFloors);
+            if (!d || d.alarm !== 'low') { lowSince.delete(machine); return; }
+            const prev = lowSince.get(machine);
+            if (prev !== undefined && nowMs - prev < GUEST_DISK_NOTICE_DEDUPE_MS) return;
+            lowSince.set(machine, nowMs);
+            const gib = (b) => (b / GIB).toFixed(1);
+            const body = `Guest / on ${machine} has ${gib(d.freeBytes)} GiB free of ${gib(d.totalBytes)} GiB (${d.freePercent}%); floor is ${store.guestDiskFloors.minFreePercent}% or ${gib(store.guestDiskFloors.minFreeBytes)} GiB. Jobs will fail with ENOSPC if it fills. Run the workspace gc / prune, see docs/ci-runner-runbook.md.`;
+            console.error(`[CI-RUNNERS] ALERT ci-runner-disk-low: ${body}`);
+            const r = notify({ type: 'ci-runner-disk-low', severity: 'high', title: `CI runner guest disk low: ${machine}`, body, ref: machine });
+            if (r && typeof r.catch === 'function') r.catch(() => {});
+        } catch (e) {
+            console.error(`[CI-RUNNERS] guest-disk notice failed (${String(e && e.name || 'Error')})`);
+        }
+    }
 
     // XACA-1422: opts.poolStore is the CI pool store holding the per-host telemetry key hashes.
     // Without it the gate rejects every push; it never falls back to the fleet token.
@@ -1073,6 +1171,7 @@ function registerCiRunnersRoutes(app, opts = {}) {
                 }
                 throw e;
             }
+            noticeGuestDisk(parsed.machine, store.machines.get(parsed.machine), Date.parse(result.receivedAt));
             console.log(`[CI-RUNNERS] push from '${parsed.machine}': +${result.jobsAccepted} jobs, ${result.jobsDuplicate} dup, ${parsed.jobsRejected.length} rejected`);
             const ru = result.rollup;
             if (ru.future || ru.truncated) {
@@ -1137,6 +1236,12 @@ module.exports = {
     jobAccounting,
     rebuildStoredRecord,
     validatePush,
+    validateGuestDisk,
+    deriveGuestDisk,
+    guestDiskFloorsFrom,
+    DEFAULT_GUEST_DISK_MIN_FREE_PERCENT,
+    DEFAULT_GUEST_DISK_MIN_FREE_GIB,
+    GIB,
     validateJob,
     deriveOs,
     ValidationError,

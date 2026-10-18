@@ -25,8 +25,9 @@
  *   - A type that is NOT in the bundled notice-type catalog is a configuration defect, not a
  *     quiet miss: it is logged AND an ok:false receipt (team 'fleet', error 'unknown notice
  *     type') is written so it shows in GET /api/notify/receipts. The catalog is deliberately not
- *     extended for the ci-* alert types (the Python side pins its size and the tap mirrors it),
- *     so those alerts are visible in receipts but not routable until the catalog grows them.
+ *     extended for the ci-dispatcher alert types (the Python side pins its size and the tap
+ *     mirrors it), so those alerts are visible in receipts but not routable until the catalog
+ *     grows them. ci-runner-disk-low (XACA-1537-004) IS in the catalog and routes normally.
  *   - Before configure() (hub not wired) it logs and resolves {routed:false, reason:'not-configured'}.
  */
 
