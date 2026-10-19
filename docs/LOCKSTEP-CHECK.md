@@ -11,7 +11,7 @@
 > - Every remedy below that reads "run `./sync-tap.sh` and push the two commits" is a **legacy remedy**. If one of these gates blocks your feature PR, the first question is no longer "how do I mirror this?" but **"why is my feature PR touching the tap at all?"** — under the decouple it should not be.
 > - The gates themselves are unchanged and still authoritative, as are all bypass trailers and labels. What changed is who is expected to satisfy them.
 >
-> The paths this does **not** cover, where the guidance below still applies verbatim: `kb-tap-release` (release cuts), and any deliberate hand push to tap `main`. ⚠️ **PENDING:** tap `main` is not yet protected — `gh api repos/DoubleNode/homebrew-aiteamforge/branches/main/protection` → **404 (branch not protected)**, MEASURED 2026-09-09 — so "only the publisher writes the tap" is a convention, not an enforced guarantee, until XACA-1122-023 lands.
+> The paths this does **not** cover, where the guidance below still applies verbatim: `kb-tap-release` (release cuts), and any deliberate hand push to tap `main`. ⚠️ **PENDING:** tap `main` is not yet protected — `gh api repos/DoubleNode/homebrew-aiteamforge/branches/main/protection` → **404 (branch not protected)**, MEASURED 2026-09-09 — so "only the publisher writes the tap" is a convention, not an enforced guarantee, until XACA-1170-004 lands.
 
 ---
 

@@ -98,7 +98,7 @@ Partial-failure recovery:
 
   Phase 2 — tap inner commit + tag landed locally, neither pushed:
     Re-run with --no-push aborted-partway is the same recovery — push by hand:
-    cd homebrew-tap && git push origin main && git push origin "vX.Y.Z" && cd ..
+    cd homebrew-tap && TAP_SINGLE_WRITER_RELEASE=1 git push origin main && git push origin "vX.Y.Z" && cd ..
     git add homebrew-tap && git commit -m "..." && git push <outer-remote> develop
 
   Phase 3 — outer commit landed locally, push failed:
@@ -934,7 +934,11 @@ echo "  Tagged: v${NEW_VERSION}"
 
 if [ "$NO_PUSH" -eq 0 ]; then
   echo "  Pushing tap main..."
-  git -C "${TAP_DIR}" push origin main
+  # XACA-1170-026: identify this push as a sanctioned release cut to the tap's
+  # single-writer pre-push hook. Scoped to THIS command only (env prefix, never
+  # `export`) so a later hand push in the same shell is still refused. The tag push
+  # below needs nothing: the hook only guards refs/heads/main.
+  TAP_SINGLE_WRITER_RELEASE=1 git -C "${TAP_DIR}" push origin main
   echo "  Pushing tap tag v${NEW_VERSION}..."
   git -C "${TAP_DIR}" push origin "v${NEW_VERSION}"
   echo "  Tap push complete."

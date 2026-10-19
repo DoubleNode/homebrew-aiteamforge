@@ -1,0 +1,293 @@
+#!/usr/bin/env bash
+# pre-push — SINGLE-WRITER GUARD for tap main (XACA-1122-023).
+#
+# CANONICAL SOURCE (XACA-1170-005): this file is authored in dev-team at
+# scripts/templates/tap/tap-single-writer-pre-push.sh. sync-tap.sh mirrors it to
+# .githooks/pre-push in the TAP repository (DoubleNode/homebrew-aiteamforge) and
+# the armed publisher ships it post-merge. Edit THIS copy, never the tap copy
+# (XACA-0340: a tap-side edit is reverted by the next mirror). It is NOT the
+# outer dev-team .githooks/pre-push — that is a different file with a different
+# job (XACA-1122-007).
+#
+# ── WHAT IT ENFORCES ──────────────────────────────────────────────────────────
+# Refuse any push to the tap mainline that does not originate from either:
+#   (a) the serialized post-merge publisher running in GitHub Actions, or
+#   (b) a sanctioned release cut driven by scripts/kb-tap-release.
+#
+# Everything else — most importantly a human or agent running
+# `./sync-tap.sh --commit` inside the shared ~/dev-team/homebrew-tap checkout and
+# then pushing by hand — is refused.
+#
+# ── WHY THE THIRD WRITER IS THE POINT ─────────────────────────────────────────
+# XACA-1122's decision of record says "because there is exactly one writer to tap
+# main, a second writer cannot exist." Traced mechanically that was NOT true.
+# THREE writers survive: the publisher, kb-tap-release, and a hand push.
+#
+# MEASURED 2026-09-09: plain `./sync-tap.sh` (and `--commit`) never pushes; it
+# commits both sides and stops, telling a HUMAN to push. (Its `--publish` mode,
+# added later for the publisher, DOES push -- `git -C "$TAP" push "$TAP_REMOTE"
+# "HEAD:${TAP_BRANCH}"` -- and only the publisher should run that.)
+# Removing the gitlink from feature PRs does not remove that capability. The
+# shared tap checkout is exactly where such a push originates, and it produced
+# three distinct cross-session hazards in one week (XACA-1122 subitems 017/019/
+# 020/022).
+#
+# ── SCOPE: MAINLINE ONLY ──────────────────────────────────────────────────────
+# Fires only for pushes whose REMOTE ref is the tap mainline (refs/heads/main).
+# Side branches, tags, and every other ref are untouched — pushing a topic branch
+# to the tap stays as easy as it is today. Deleting or force-updating main IS in
+# scope, because both are writes to main.
+#
+# ── HONEST LIMITS — DO NOT OVERSELL THIS HOOK ─────────────────────────────────
+# 1. IT IS ADVISORY. `git push --no-verify` skips every pre-push hook, and the
+#    allow-signals below are environment variables that any local caller can set.
+#    A determined or careless local actor defeats it. That is inherent to hooks,
+#    not a defect in this one.
+# 2. IT IS PER-CLONE AND OPT-IN, WHICH IS NOT WHAT XACA-1122-023 WAS BRIEFED.
+#    MEASURED 2026-09-09: `core.hooksPath` for the tap resolves from
+#    file:/Users/darrenehlers/dev-team/.git/modules/homebrew-tap/config — it is
+#    LOCAL REPOSITORY CONFIG. Git never transports config as content. Proven with
+#    a fixture: a clone of a repo that has a tracked .githooks/pre-push AND
+#    core.hooksPath=.githooks comes back with core.hooksPath EMPTY and its
+#    effective hooks dir at .git/hooks. So committing this file ships the FILE to
+#    every clone but NOT its ACTIVATION. The tap's own .githooks/README.md agrees,
+#    calling these hooks "Opt-in", and docs/LOCKSTEP-CHECK.md records that
+#    "Existing machines must be done by hand."
+#    => Coverage is exactly: clones where someone set core.hooksPath (or installed
+#       the global init.templateDir dispatcher). That INCLUDES the shared
+#       ~/dev-team/homebrew-tap checkout, which is the highest-risk site and the
+#       origin of the recorded incidents. It does NOT include an arbitrary fresh
+#       clone.
+# 3. THEREFORE THIS HOOK IS THE SECOND LAYER, NOT THE FIRST. Server-side push
+#    restriction on tap main is the mechanism that cannot be bypassed locally.
+#    See homebrew-tap-staged/docs/protection/README.md (dev-team, reference only) for the exact
+#    command, and for the reason it needs enforce_admins=true to bind at all.
+#
+# ── WHY IT CANNOT SELF-BLOCK THE PUBLISHER (verified, not assumed) ────────────
+# Two independent reasons, either of which alone is sufficient:
+#   (i)  actions/checkout performs a fresh clone, so core.hooksPath is unset and
+#        git looks in .git/hooks — this file is never consulted. MEASURED above.
+#   (ii) even if a workflow deliberately sets core.hooksPath, the publisher
+#        context is an explicit ALLOW branch below.
+# Note also what this hook deliberately does NOT do: it never resolves
+# dev-team/develop, never fetches the outer repo, and never reads the mirror map.
+# Its predicate is pure identity, evaluated from the environment. That removes the
+# entire class of "cannot resolve the outer repo from a CI clone" failure that the
+# XACA-0848 ordering guard (.githooks/tap-pre-push in dev-team) has to handle.
+# The two guards are complementary and answer different questions:
+#   tap-pre-push  — "does a matching canonical exist?"  (ordering)
+#   this hook     — "are you allowed to write main?"    (authorship)
+#
+# ── DISPATCHER: THIS FILE ALSO CHAINS THE LOCAL XACA-0848 ORDERING GUARD ──────
+# (XACA-1170-027.) This file is the TRACKED <tap>/.githooks/pre-push. The XACA-0848
+# ordering guard (dev-team .githooks/tap-pre-push) is installed per-clone by
+# scripts/install-tap-hooks.sh and, with core.hooksPath=.githooks, used to want the
+# SAME path -- so a checkout of this file silently overwrote it, and a re-install
+# replaced this tracked file and dirtied the tap worktree. Now they never share a
+# path: the installer writes the 0848 guard to <hooks-dir>/pre-push.local (excluded
+# via .git/info/exclude), and this file runs, in order:
+#   1. the single-writer check below (re-exec'd as a stage of itself);
+#   2. <dir of this file>/pre-push.local, if present and executable.
+# Both stages receive the SAME argv and the SAME stdin ref lines (stdin is buffered
+# once into a temp file, because a pipe can only be read once). FAIL CLOSED: the
+# first non-zero stage rc is propagated and the next stage does not run. A missing
+# pre-push.local is optional per-clone, but its ABSENCE is not silent when the push
+# updates the tap mainline (XACA-1170-033): a clone provisioned by the OLD installer
+# had the 0848 guard at this very path (excluded), and a `git pull
+# --recurse-submodules` / `git submodule update` that advances the tap SILENTLY
+# overwrites an excluded untracked file (MEASURED -- git only refuses over
+# non-ignored files). That leaves the dispatcher with no guard to chain, so a main
+# push with no pre-push.local prints a loud WARNING (exit status unchanged: the
+# first line of defence is still on, and a release cut on an unprovisioned machine
+# must not be blocked). One that exists but is not executable is WARNED about too
+# (git would skip it, so the 0848 guard is off).
+# TAP_SINGLE_WRITER_OVERRIDE=1 satisfies stage 1 only; stage 2 keeps its own
+# TAP_MIRROR_ALLOW_AHEAD=1 escape hatch.
+#
+# ── EXIT CODES ────────────────────────────────────────────────────────────────
+#   0 — allowed: out of scope, publisher, sanctioned release cut, or override
+#   1 — REFUSED: unsanctioned writer
+#   2 — REFUSED: cannot determine scope (malformed stdin). Distinct from 1 so
+#       "could not judge" is never confused with "judged bad" — but BOTH block.
+#   There is no silent-pass exit. A guard that allows on "I could not check" is
+#   the fail-open shape this repo has shipped before and must not repeat.
+#
+# ── ESCAPE HATCH ──────────────────────────────────────────────────────────────
+#   TAP_SINGLE_WRITER_OVERRIDE=1 git push        # loud, audited in the log
+#   Prefer this over --no-verify: --no-verify disables EVERY hook, including the
+#   XACA-0848 ordering guard, and leaves no trace that a guard was bypassed.
+#
+# ── ENVIRONMENT ───────────────────────────────────────────────────────────────
+#   TAP_SINGLE_WRITER_OVERRIDE  "1" => allow, loudly (emergency)
+#   TAP_SINGLE_WRITER_RELEASE   "1" => sanctioned release cut (set by
+#                               scripts/kb-tap-release; see XACA-1122-008)
+#   TAP_MAIN_BRANCH             tap mainline branch name   (default: main)
+#   TAP_PUBLISHER_WORKFLOW      publisher workflow name    (default: Tap Publisher)
+#   TAP_PUBLISHER_REPOSITORY    owner/repo the publisher runs in
+#                               (default: DoubleNode/dev-team)
+#
+# ── PORTABILITY ───────────────────────────────────────────────────────────────
+# bash 3.2 compatible (no associative arrays, no mapfile, no `local -n`) so it
+# runs on stock macOS /bin/bash as well as CI bash 5.
+
+set -eu
+
+SELF="tap-single-writer"
+ZERO_SHA="0000000000000000000000000000000000000000"
+TAP_MAIN_BRANCH="${TAP_MAIN_BRANCH:-main}"
+MAIN_REF="refs/heads/${TAP_MAIN_BRANCH}"
+PUB_WORKFLOW="${TAP_PUBLISHER_WORKFLOW:-Tap Publisher}"
+PUB_REPO="${TAP_PUBLISHER_REPOSITORY:-DoubleNode/dev-team}"
+
+say()  { echo "[${SELF}] $*"; }
+warn() { echo "[${SELF}] $*" >&2; }
+
+# ── 0. DISPATCH — buffer stdin once, run the single-writer stage, then the local
+# 0848 guard (see "DISPATCHER" in the header). The re-exec'd inner stage is marked by
+# an ARGV sentinel (STAGE_FLAG as $1), never by an environment variable: an
+# environment marker (the original TAP_PREPUSH_STAGE) could be exported by the
+# caller and silently skip chaining pre-push.local -- fail-open (XACA-1170-032).
+# Git only ever passes <remote> <url>, so git cannot produce the sentinel; the
+# outer stage strips it before handing argv to pre-push.local.
+STAGE_FLAG="--tap-single-writer-stage"
+if [ "${1:-}" = "$STAGE_FLAG" ]; then
+  shift
+else
+  HOOK_DIR="$(cd "$(dirname "$0")" && pwd)" || { warn "ERROR: cannot resolve hook directory. Refusing."; exit 2; }
+  LOCAL_HOOK="${HOOK_DIR}/pre-push.local"
+  BUF="$(mktemp "${TMPDIR:-/tmp}/tap-pre-push.XXXXXX")" || { warn "ERROR: cannot buffer pre-push input. Refusing."; exit 2; }
+  trap 'rm -f "$BUF"' EXIT
+  cat > "$BUF" || { warn "ERROR: cannot read pre-push input. Refusing."; exit 2; }
+  rc=0
+  bash "$0" "$STAGE_FLAG" "$@" < "$BUF" || rc=$?
+  if [ "$rc" -ne 0 ]; then exit "$rc"; fi
+  if [ ! -e "$LOCAL_HOOK" ]; then
+    # Only a push that updates the tap mainline is warned about; the outer stage runs
+    # once per push, so this prints once.
+    if grep -qE "^[^ ]+ [^ ]+ ${MAIN_REF} " "$BUF" 2>/dev/null; then
+      warn ""
+      warn "  ==============================================================="
+      warn "  WARNING: XACA-0848 ordering guard is NOT ACTIVE on this clone"
+      warn "  ==============================================================="
+      warn ""
+      warn "  This push updates tap ${TAP_MAIN_BRANCH}, but ${LOCAL_HOOK} does not exist."
+      warn "  The single-writer check above passed; the ordering guard (which refuses"
+      warn "  mirrored content pushed ahead of canonical dev-team/develop) did NOT run."
+      warn "  A clone set up by the old installer loses that guard when the tap advances:"
+      warn "  git overwrites its excluded pre-push with this dispatcher, silently."
+      warn ""
+      warn "  Fix: run  scripts/install-tap-hooks.sh  from your dev-team checkout"
+      warn "       (e.g.  bash ~/dev-team/scripts/install-tap-hooks.sh)."
+      warn "  The push is NOT blocked."
+      warn ""
+    fi
+  elif [ -e "$LOCAL_HOOK" ]; then
+    if [ -x "$LOCAL_HOOK" ]; then
+      "$LOCAL_HOOK" "$@" < "$BUF" || rc=$?
+      if [ "$rc" -ne 0 ]; then exit "$rc"; fi
+    else
+      warn "WARNING: ${LOCAL_HOOK} exists but is not executable -- the XACA-0848 ordering guard is NOT running."
+      warn "         Fix: chmod +x '${LOCAL_HOOK}'  (or re-run scripts/install-tap-hooks.sh)."
+    fi
+  fi
+  exit 0
+fi
+
+# ── 1. Emergency override, checked first so it works even when nothing else can
+if [ "${TAP_SINGLE_WRITER_OVERRIDE:-0}" = "1" ]; then
+  warn ""
+  warn "  ***************************************************************"
+  warn "  *  WARNING: TAP_SINGLE_WRITER_OVERRIDE=1                      *"
+  warn "  *  SINGLE-WRITER GUARD BYPASSED for tap ${TAP_MAIN_BRANCH}"
+  warn "  ***************************************************************"
+  warn ""
+  warn "  You are pushing to the tap mainline outside the publisher and outside"
+  warn "  a release cut. If a publisher run is in flight this can interleave with"
+  warn "  it and strand consumers. Verify nothing else is writing before you"
+  warn "  continue, and say why in the commit message."
+  warn ""
+  exit 0
+fi
+
+# ── 2. Scope — is the tap mainline among the refs being pushed?
+# git feeds pre-push one line per ref on stdin:
+#   <local ref> <local sha> <remote ref> <remote sha>
+# A missing/empty stdin means git had nothing to push; that is not a write.
+TOUCHES_MAIN=false
+SAW_LINE=false
+DELETING_MAIN=false
+
+while read -r local_ref local_sha remote_ref remote_sha || [ -n "${local_ref:-}" ]; do
+  [ -z "${local_ref:-}" ] && continue
+  SAW_LINE=true
+  # Malformed line: we cannot tell what is being written. Fail CLOSED.
+  if [ -z "${remote_ref:-}" ]; then
+    warn "ERROR: malformed pre-push input line: [${local_ref} ${local_sha:-} ${remote_ref:-} ${remote_sha:-}]"
+    warn "Cannot determine whether tap ${TAP_MAIN_BRANCH} is being written. Refusing."
+    exit 2
+  fi
+  if [ "$remote_ref" = "$MAIN_REF" ]; then
+    TOUCHES_MAIN=true
+    [ "${local_sha:-}" = "$ZERO_SHA" ] && DELETING_MAIN=true
+  fi
+done
+
+if [ "$SAW_LINE" = false ]; then
+  exit 0
+fi
+
+if [ "$TOUCHES_MAIN" = false ]; then
+  exit 0
+fi
+
+# ── 3. ALLOW: the serialized post-merge publisher, running in GitHub Actions.
+# All three signals are required. GITHUB_ACTIONS alone is not enough — any CI job
+# in any repo sets it, and this guard is specifically about the tap publisher.
+if [ "${GITHUB_ACTIONS:-}" = "true" ] \
+   && [ "${GITHUB_REPOSITORY:-}" = "$PUB_REPO" ] \
+   && [ "${GITHUB_WORKFLOW:-}" = "$PUB_WORKFLOW" ]; then
+  say "publisher context (${PUB_REPO} / ${PUB_WORKFLOW}) — allowing push to ${TAP_MAIN_BRANCH}."
+  exit 0
+fi
+
+# ── 4. ALLOW: a sanctioned release cut.
+# scripts/kb-tap-release sets TAP_SINGLE_WRITER_RELEASE=1 inline on its tap push
+# (XACA-1122-008). A release cut is a legitimate second writer, serialized against
+# the publisher by the lock ref, NOT by this hook.
+if [ "${TAP_SINGLE_WRITER_RELEASE:-0}" = "1" ]; then
+  say "sanctioned release cut (TAP_SINGLE_WRITER_RELEASE=1) — allowing push to ${TAP_MAIN_BRANCH}."
+  exit 0
+fi
+
+# ── 5. REFUSE.
+warn ""
+warn "  ==============================================================="
+warn "  REFUSED: unsanctioned push to tap ${TAP_MAIN_BRANCH}"
+warn "  ==============================================================="
+warn ""
+if [ "$DELETING_MAIN" = true ]; then
+  warn "  You are attempting to DELETE ${MAIN_REF}."
+else
+  warn "  Only two writers may push to the tap mainline:"
+  warn "    1. the serialized post-merge publisher (GitHub Actions)"
+  warn "    2. a release cut via scripts/kb-tap-release"
+fi
+warn ""
+warn "  This push is neither. The most common way to reach this message is"
+warn "  running ./sync-tap.sh --commit and then pushing by hand. A plain"
+warn "  ./sync-tap.sh run does not push -- it commits and asks you to -- and that"
+warn "  manual step is exactly the third writer XACA-1122 exists to remove."
+warn "  (./sync-tap.sh --publish does push; it is the publisher's mode, not yours.)"
+warn ""
+warn "  WHAT TO DO INSTEAD"
+warn "    * Mirrored content: let the publisher ship it. Merge your canonical"
+warn "      change to dev-team/develop; the publisher pushes the tap half and"
+warn "      bumps the gitlink, in that order, under a lock."
+warn "    * Cutting a release: use scripts/kb-tap-release, which sets"
+warn "      TAP_SINGLE_WRITER_RELEASE=1 and takes the lock. Never hand-roll the commit"
+warn "      and tag — a hand-cut subject also trips tap-changelog-completeness."
+warn "    * Genuine emergency: TAP_SINGLE_WRITER_OVERRIDE=1 git push"
+warn "      (loud and audited; preferred over --no-verify, which silently"
+warn "      disables the XACA-0848 ordering guard as well)."
+warn ""
+exit 1
