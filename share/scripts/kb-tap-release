@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # kb-tap-release — One-shot homebrew-tap release-cut command.
 #
-# Usage: kb-tap-release {patch|minor|major} [--dry-run] [--no-push] [--help]
+# Usage: kb-tap-release {patch|minor|major} [--dry-run] [--no-push] [--as-human] [--help]
+#        kb-tap-release --push-only [--as-human]
 #
 # Cuts a release of the AITeamForge homebrew tap:
 #   Phase 0: Acquire the tap-writer lock (XACA-1122-008; skipped by --dry-run
@@ -9,6 +10,13 @@
 #   Phase 1: Compute new version, edit CHANGELOG.md / VERSION / Formula
 #   Phase 2: Tap inner commit + tag + push (origin main)
 #   Phase 3: Outer pointer bump commit + push (<outer-remote>/develop)
+#
+# XACA-1170-003: the two TAP pushes (main + release tag) are made as the
+# `aiteamforge-release` GitHub App, not as the human admin. Under STRICT tap
+# protection exactly two identities may write tap main: the publisher App and
+# this one. The OUTER develop push (phase 3) stays the human admin on purpose —
+# dev-team develop is ruleset-protected with bypass only for the publisher App
+# and admins, so routing it through the release App would be refused.
 #
 # This script is one of exactly TWO writers to tap `main`; the other is the
 # post-merge publisher workflow. They serialize against each other through
@@ -28,8 +36,9 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: kb-tap-release {patch|minor|major} [--dry-run] [--no-push]
+Usage: kb-tap-release {patch|minor|major} [--dry-run] [--no-push] [--as-human]
                        [--tap-ahead-release="<reason>"] [--help]
+       kb-tap-release --push-only [--as-human]
 
 Cut a release of the AITeamForge homebrew tap.
 
@@ -56,7 +65,43 @@ Flags:
                 Does NOT waive CANONICAL-AHEAD or DIVERGED drift — those still
                 hard-fail unconditionally; sync-tap.sh's remedy is CORRECT for
                 those two directions.
+  --as-human    EMERGENCY ESCAPE HATCH (also TAP_RELEASE_PUSH_AS_HUMAN=1): push the
+                tap as the invoking human instead of the aiteamforge-release App.
+                Prints a loud banner. Once STRICT tap protection is applied this
+                push is REFUSED by GitHub unless that human holds an admin bypass.
+                There is NO silent fallback: without this flag any credential or
+                mint failure aborts BEFORE anything is committed or pushed.
+  --push-only   Recovery: re-run ONLY the tap pushes (main + the single v* tag
+                that points at tap HEAD) as the release App, after a release
+                whose push step failed. Takes the tap-writer lock. Does not
+                touch the outer repo; finish that by hand (see Partial-failure
+                recovery). Cannot be combined with a bump level, --dry-run or
+                --no-push.
   -h, --help    Print this usage and exit 0.
+
+Release identity (XACA-1170-003) — one-time setup, per machine:
+  The tap pushes authenticate as the `aiteamforge-release` GitHub App. Configure:
+    mkdir -p ~/.config/gh-tap-release && chmod 700 ~/.config/gh-tap-release
+    echo <APP_ID> > ~/.config/gh-tap-release/app-id        # or TAP_RELEASE_APP_ID
+    # private key: exactly ONE <name>.private-key.pem in that directory, mode
+    # 0600 (or TAP_RELEASE_APP_KEY_PATH=/path/to/key). A group/world-readable
+    # key is refused. The App id and key are never defaulted or guessed.
+  A short-lived installation token scoped to homebrew-aiteamforge with
+  contents:write only is minted per run and handed to git through GIT_CONFIG_*
+  environment variables — never argv, never disk, never git config. The
+  credential headers are scoped to the tap's own URL (git's http.<url>.* /
+  credential.<url>.* keys), so a git command that reaches another repo — e.g. the
+  tap pre-push hook's fetch of the outer dev-team remote — never receives the
+  token and keeps its normal credential helper. The token is minted LAST: after
+  the config/URL checks, the tap-writer lock wait and preflight, immediately
+  before the first push, so a long KB_TAP_RELEASE_LOCK_WAIT cannot age it. It is
+  not minted for --dry-run or --no-push (they push nothing); --dry-run only
+  checks that the App id and key resolve, without touching the network.
+  The App push also pins GIT_ALLOW_PROTOCOL=https. That is inherited by the tap's
+  pre-push hook, whose outer fetch therefore needs an https outer remote (the
+  repo's `dev-team` remote is); with an ssh outer remote the hook refuses with
+  "transport 'ssh' not allowed" — point TAP_MIRROR_OUTER_REMOTE at an https
+  remote, or use --as-human.
 
 Environment:
   KB_TAP_RELEASE_LOCK_WAIT      Seconds to wait for the tap-writer lock before
@@ -89,17 +134,17 @@ Partial-failure recovery:
   substitute your outer-remote name if different (e.g. "dev-team").
 
   Phase 2 — tap inner push (main) succeeds, tag push fails:
-    cd homebrew-tap
-    git push origin "vX.Y.Z"
-    cd ..
+    scripts/kb-tap-release --push-only     # re-pushes main + tag as the release App
     git add homebrew-tap
     git commit -m "chore: Bump homebrew-tap submodule to vX.Y.Z"
     git push <outer-remote> develop
 
   Phase 2 — tap inner commit + tag landed locally, neither pushed:
-    Re-run with --no-push aborted-partway is the same recovery — push by hand:
-    cd homebrew-tap && TAP_SINGLE_WRITER_RELEASE=1 git push origin main && git push origin "vX.Y.Z" && cd ..
+    (also the recovery after a --no-push cut). Under STRICT tap protection a
+    hand-typed push to tap main is refused, so use:
+    scripts/kb-tap-release --push-only
     git add homebrew-tap && git commit -m "..." && git push <outer-remote> develop
+    (the outer push stays the human admin — develop's ruleset bypasses admins.)
 
   Phase 3 — outer commit landed locally, push failed:
     git push <outer-remote> develop    # retry; nothing else to undo
@@ -114,6 +159,9 @@ EOF
 LEVEL=""
 DRY_RUN=0
 NO_PUSH=0
+PUSH_ONLY=0
+PUSH_AS_HUMAN=0
+if [ "${TAP_RELEASE_PUSH_AS_HUMAN:-}" = "1" ]; then PUSH_AS_HUMAN=1; fi
 TAP_AHEAD_RELEASE_REASON=""
 
 for arg in "$@"; do
@@ -126,6 +174,12 @@ for arg in "$@"; do
       ;;
     --no-push)
       NO_PUSH=1
+      ;;
+    --as-human)
+      PUSH_AS_HUMAN=1
+      ;;
+    --push-only)
+      PUSH_ONLY=1
       ;;
     --tap-ahead-release=*)
       # =value syntax (not a separate positional token) — this loop iterates
@@ -157,7 +211,12 @@ for arg in "$@"; do
   esac
 done
 
-if [ -z "$LEVEL" ]; then
+if [ "$PUSH_ONLY" -eq 1 ] && { [ -n "$LEVEL" ] || [ "$DRY_RUN" -eq 1 ] || [ "$NO_PUSH" -eq 1 ]; }; then
+  echo "Error: --push-only cannot be combined with a bump level, --dry-run or --no-push." >&2
+  exit 1
+fi
+
+if [ -z "$LEVEL" ] && [ "$PUSH_ONLY" -eq 0 ]; then
   echo "Error: bump level is required (patch, minor, or major)." >&2
   usage >&2
   exit 1
@@ -386,6 +445,354 @@ with open(CHANGELOG_PATH, "w") as fh:
 print("Footer updated.")
 PYEOF
 
+# ─── release identity: push the TAP as the aiteamforge-release App ────────────
+# XACA-1170-003. See the header comment for the why. Everything below is about
+# ONE property: the installation token reaches git without ever appearing in
+# argv (ps), on disk, or in git config, and a failure at any step aborts the run
+# instead of falling back to the human's credentials.
+
+TAP_APP_SLUG="DoubleNode/homebrew-aiteamforge"
+TAP_APP_CONFIG_DIR="${TAP_RELEASE_CONFIG_DIR:-${HOME}/.config/gh-tap-release}"
+TAP_APP_API="https://api.github.com"
+TAP_APP_ID=""
+TAP_APP_KEY=""
+TAP_APP_TOKEN=""          # never exported, never echoed
+TAP_PUSH_MODE="human"     # "app" once a token is minted (or still "human" for --as-human)
+TAP_PUSH_TARGET="origin"  # becomes the explicit tap URL in app mode
+
+# The tap URL the token is sent to. Only TWO shapes are ever accepted (allow-list,
+# not a deny-list: every spelling of "somewhere else" - scp-style `git@host:path`,
+# bare `host:path`, ssh://, git://, http(s) to another host, https to another
+# owner/repo, ext:: - falls out by default):
+#   1. https://github.com/<TAP_APP_SLUG>[.git]   - the only place a token is sent.
+#   2. TEST-ONLY: an absolute local path or a file:/// URL, via
+#      KB_TAP_RELEASE_TAP_URL (the tests stand a local bare repo in for the tap).
+#      Safe for the token: it is attached only under an http.<https tap URL>.extraheader
+#      key, which git never sends to a local path; and tap_authed_git pins
+#      GIT_ALLOW_PROTOCOL so a local target can never be rerouted to the network.
+tap_app_push_url() {
+  local u="${KB_TAP_RELEASE_TAP_URL:-https://github.com/${TAP_APP_SLUG}.git}"
+  case "$u" in
+    "https://github.com/${TAP_APP_SLUG}"|"https://github.com/${TAP_APP_SLUG}.git") ;;
+    /*|file:///*) ;;
+    *)
+      echo "Error: KB_TAP_RELEASE_TAP_URL must be https://github.com/${TAP_APP_SLUG}(.git) (or, for tests only, an absolute local path / file:/// URL) - refusing to send the release token elsewhere." >&2
+      return 1 ;;
+  esac
+  printf '%s' "$u"
+}
+
+# tap_app_refuse_url_rewrite <url> — fail closed when git would push <url> somewhere
+# else. `url.<base>.insteadOf` and `url.<base>.pushInsteadOf` (system, global, the
+# tap clone's local config, [include]d files, GIT_CONFIG_COUNT / GIT_CONFIG_PARAMETERS
+# env, GIT_CONFIG_GLOBAL/SYSTEM) rewrite the URL of an explicit `git push <url>` AFTER
+# we chose it, so the push would run as the human while we print "as the App".
+# `git ls-remote --get-url` honours insteadOf but NOT pushInsteadOf (measured, git
+# 2.54), so it cannot be the only check. We also ask git for every applicable rule
+# (`config --show-scope` merges all scopes, includes and env) and refuse if ANY
+# rule's prefix matches the URL: git rewrites on a prefix match, so a match IS a
+# rewrite. A rule for an unrelated prefix does not match and is allowed.
+# Called BEFORE minting: a refusal never creates a token.
+tap_app_refuse_url_rewrite() {
+  local url="$1" tmp scope origin rec key val rc=0 hit="" resolved
+  if ! resolved="$(git -C "$TAP_DIR" ls-remote --get-url "$url" 2>/dev/null)"; then
+    echo "Error: could not ask git how it resolves the tap URL — refusing to mint (fail closed)." >&2
+    return 1
+  fi
+  if [ "$resolved" != "$url" ]; then
+    hit="git resolves ${url} to ${resolved} (a url.<base>.insteadOf rule is active)"
+  fi
+  # XACA-1170-042: parse NUL-delimited (-z). Records are  scope\0origin\0key\nvalue\0 ;
+  # a base/prefix may contain spaces (even a newline), so splitting on whitespace
+  # would mis-split the key (the base lives IN the key) and let the rule through.
+  # Goes via a temp file: bash cannot hold NUL in a variable, and a process
+  # substitution would hide git's exit status.
+  tmp="$(mktemp "${TMPDIR:-/tmp}/kb-tap-release-cfg.XXXXXX")" || {
+    echo "Error: could not create a temp file to read git config — refusing to mint (fail closed)." >&2
+    return 1
+  }
+  # exit 1 = no matching key (fine); anything else = git could not read its config.
+  local re='^url\..*\.(push)?insteadof$'
+  git -C "$TAP_DIR" config -z --show-scope --show-origin --get-regexp "$re" >"$tmp" 2>/dev/null || rc=$?
+  if [ "$rc" -gt 1 ]; then
+    rm -f "$tmp"
+    echo "Error: could not read git config to check for URL rewrites (rc=${rc}) — refusing to mint (fail closed)." >&2
+    return 1
+  fi
+  # shellcheck disable=SC2034  # origin is read only to keep the record in step
+  while IFS= read -r -d '' scope && IFS= read -r -d '' origin && IFS= read -r -d '' rec; do
+    case "$rec" in
+      *$'\n'*) key="${rec%%$'\n'*}"; val="${rec#*$'\n'}" ;;
+      *)       key="$rec"; val="" ;;      # valueless key: treat as match-all (fail closed)
+    esac
+    # empty value = empty prefix = matches everything; otherwise literal prefix match
+    if [ -z "$val" ] || [ "${url#"$val"}" != "$url" ]; then
+      hit="${key} = ${val}   [scope: ${scope}]"
+      break
+    fi
+  done <"$tmp"
+  rm -f "$tmp"
+  if [ -n "$hit" ]; then
+    {
+      echo "Error: git would NOT push the tap to ${url} — a URL rewrite is configured:"
+      echo "         ${hit}"
+      echo "       The push would silently go somewhere else (as the human) while we say it is the App."
+      echo "       Refusing before minting a token."
+      echo "       Remedy: remove that url.*.insteadOf / pushInsteadOf entry"
+      echo "       (see: git config --show-origin --get-regexp '^url\\..*insteadof'), or push as yourself"
+      echo "       knowingly with --as-human."
+    } >&2
+    return 1
+  fi
+  return 0
+}
+
+# tap_app_resolve_config — find the App id and private key. Prints an actionable
+# error and returns 1 on any problem. Touches no network.
+tap_app_resolve_config() {
+  local dir="$TAP_APP_CONFIG_DIR" f mode n
+  TAP_APP_ID="${TAP_RELEASE_APP_ID:-}"
+  if [ -z "$TAP_APP_ID" ] && [ -f "${dir}/app-id" ]; then
+    TAP_APP_ID="$(tr -d '[:space:]' < "${dir}/app-id" 2>/dev/null || true)"
+  fi
+  if [ -z "$TAP_APP_ID" ]; then
+    echo "Error: aiteamforge-release App id not configured." >&2
+    echo "       Set TAP_RELEASE_APP_ID, or: echo <APP_ID> > ${dir}/app-id" >&2
+    return 1
+  fi
+  case "$TAP_APP_ID" in
+    *[!0-9]*) echo "Error: aiteamforge-release App id '${TAP_APP_ID}' is not numeric." >&2; return 1 ;;
+  esac
+
+  TAP_APP_KEY="${TAP_RELEASE_APP_KEY_PATH:-}"
+  if [ -z "$TAP_APP_KEY" ]; then
+    n=0
+    for f in "${dir}"/*.private-key.pem; do
+      [ -f "$f" ] || continue
+      TAP_APP_KEY="$f"
+      n=$((n + 1))
+    done
+    if [ "$n" -eq 0 ]; then
+      echo "Error: no release App private key found in ${dir}/." >&2
+      echo "       Put exactly one <name>.private-key.pem there (mode 0600), or set TAP_RELEASE_APP_KEY_PATH." >&2
+      return 1
+    elif [ "$n" -gt 1 ]; then
+      echo "Error: ${n} private keys in ${dir}/ — ambiguous. Leave exactly one, or set TAP_RELEASE_APP_KEY_PATH." >&2
+      return 1
+    fi
+  fi
+  if [ ! -f "$TAP_APP_KEY" ] || [ ! -r "$TAP_APP_KEY" ]; then
+    echo "Error: release App private key '${TAP_APP_KEY}' is not a readable file." >&2
+    return 1
+  fi
+  # GNU stat first: on BSD/macOS `stat -c` fails and falls through to -f.
+  mode="$(stat -c '%a' "$TAP_APP_KEY" 2>/dev/null || stat -f '%Lp' "$TAP_APP_KEY" 2>/dev/null || true)"
+  case "$mode" in
+    ''|*[!0-7]*)
+      echo "Error: cannot determine the mode of '${TAP_APP_KEY}' — refusing to use a key whose permissions are unknown." >&2
+      return 1 ;;
+  esac
+  if [ $(( 8#${mode} & 8#077 )) -ne 0 ]; then
+    echo "Error: release App private key '${TAP_APP_KEY}' is mode ${mode} — group/world-accessible." >&2
+    echo "       Fix: chmod 600 '${TAP_APP_KEY}'" >&2
+    return 1
+  fi
+  return 0
+}
+
+_tap_app_b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+
+# _tap_app_api METHOD URL BEARER [JSON-BODY] — prints "<body>\n<http-code>".
+# The bearer goes to curl on STDIN as a config line (`-K -`), so it is in neither
+# argv nor a temp file; printf is a builtin, so it is not in any argv either.
+_tap_app_api() {
+  local method="$1" url="$2" bearer="$3" data="${4:-}"
+  if [ -n "$data" ]; then
+    printf 'header = "Authorization: Bearer %s"\n' "$bearer" \
+      | curl -sS --max-time 30 -K - -X "$method" \
+          -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" \
+          -H "Content-Type: application/json" --data "$data" \
+          -w '\n%{http_code}' "$url"
+  else
+    printf 'header = "Authorization: Bearer %s"\n' "$bearer" \
+      | curl -sS --max-time 30 -K - -X "$method" \
+          -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" \
+          -w '\n%{http_code}' "$url"
+  fi
+}
+
+_tap_app_mint_inner() {
+  local now payload signing_input signature jwt out code body inst repo_name
+  repo_name="${TAP_APP_SLUG#*/}"
+  now="$(date +%s)"
+  # iat backdated 60s for clock skew; exp 480s (GitHub rejects > 600s).
+  payload="$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' "$((now - 60))" "$((now + 480))" "$TAP_APP_ID")"
+  signing_input="$(printf '%s' '{"alg":"RS256","typ":"JWT"}' | _tap_app_b64url).$(printf '%s' "$payload" | _tap_app_b64url)"
+  signature="$(printf '%s' "$signing_input" | openssl dgst -sha256 -sign "$TAP_APP_KEY" -binary | _tap_app_b64url)" || {
+    echo "Error: could not sign the App JWT — is '${TAP_APP_KEY}' a valid RSA private key?" >&2
+    return 1
+  }
+  jwt="${signing_input}.${signature}"
+
+  out="$(_tap_app_api GET "${TAP_APP_API}/repos/${TAP_APP_SLUG}/installation" "$jwt")" || {
+    echo "Error: could not reach api.github.com to resolve the App installation." >&2
+    return 1
+  }
+  code="${out##*$'\n'}"; body="${out%$'\n'*}"
+  case "$code" in
+    200) ;;
+    401) echo "Error: GitHub rejected the App JWT (HTTP 401) — wrong App id, or the key is not this App's." >&2; return 1 ;;
+    404) echo "Error: the release App is not installed on ${TAP_APP_SLUG} (HTTP 404) — install it in the org UI." >&2; return 1 ;;
+    *)   echo "Error: installation lookup failed (HTTP ${code})." >&2; return 1 ;;
+  esac
+  inst="$(printf '%s' "$body" | python3 -I -c 'import json,sys; print(int(json.load(sys.stdin)["id"]))' 2>/dev/null)" || {
+    echo "Error: unparseable installation response." >&2; return 1; }
+
+  out="$(_tap_app_api POST "${TAP_APP_API}/app/installations/${inst}/access_tokens" "$jwt" \
+        "{\"repositories\":[\"${repo_name}\"],\"permissions\":{\"contents\":\"write\"}}")" || {
+    echo "Error: could not reach api.github.com to mint the installation token." >&2
+    return 1
+  }
+  code="${out##*$'\n'}"; body="${out%$'\n'*}"
+  if [ "$code" != "201" ]; then
+    echo "Error: installation token request failed (HTTP ${code})." >&2
+    return 1
+  fi
+  # Refuse a token broader than asked for: contents:write on exactly this repo.
+  TAP_APP_TOKEN="$(printf '%s' "$body" | REPO_NAME="$repo_name" python3 -I -c '
+import json, os, sys
+d = json.load(sys.stdin)
+perms = d.get("permissions") or {}
+repos = [r.get("name") for r in (d.get("repositories") or [])]
+if perms.get("contents") != "write" or repos != [os.environ["REPO_NAME"]]:
+    sys.exit(3)
+sys.stdout.write(d["token"])
+' 2>/dev/null)" || {
+    TAP_APP_TOKEN=""
+    echo "Error: the minted token is missing, or not scoped to exactly ${TAP_APP_SLUG} with contents:write." >&2
+    return 1
+  }
+  [ -n "$TAP_APP_TOKEN" ] || { echo "Error: empty installation token." >&2; return 1; }
+  return 0
+}
+
+# tap_app_mint_token — xtrace is forced off for the duration: with `bash -x` the
+# JWT and token would otherwise be echoed into the trace.
+tap_app_mint_token() {
+  local xt=0 rc=0
+  case $- in *x*) xt=1 ;; esac
+  set +x
+  _tap_app_mint_inner || rc=$?
+  if [ "$xt" -eq 1 ]; then set -x; fi
+  return "$rc"
+}
+
+# tap_authed_git <git args...> — run git, authenticated as the release App when a
+# token was minted. Env-prefixed callers (TAP_SINGLE_WRITER_RELEASE=1) keep their
+# variable: it is inherited through the subshell into git.
+#   - http.<tap-url>.extraheader carries the credential, URL-scoped to EXACTLY the tap
+#     repo (XACA-1170-043). The env is inherited by the tap's pre-push hook, whose
+#     0848 guard fetches the OUTER dev-team remote: an unscoped github.com header
+#     would hand it a token that cannot read dev-team, and an unscoped
+#     credential.helper reset would strip its keychain, so a --push-only over
+#     mirrored paths was refused. git's urlmatch is a path-SEGMENT prefix match and
+#     is exact about the ".git" suffix (…/homebrew-aiteamforge.git does NOT match
+#     …/homebrew-aiteamforge), so the key is built from the validated push target
+#     itself, spelling and all.
+#   - credential.<tap-url>.helper is reset to empty (same scope) so a rejected token
+#     can NEVER fall through to the human's keychain (the silent fallback this whole
+#     ticket forbids); other URLs keep their helper. GIT_TERMINAL_PROMPT=0 forbids a
+#     prompt too.
+#   - `export` and printf are builtins and the subshell has xtrace off, so the
+#     token appears in no argv and no trace. Nothing is written to config or disk.
+tap_authed_git() {
+  (
+    set +x
+    if [ "$TAP_PUSH_MODE" = "app" ] || [ "$TAP_PUSH_MODE" = "app-pending" ]; then
+      n="${GIT_CONFIG_COUNT:-0}"
+      case "$n" in ''|*[!0-9]*) echo "Error: GIT_CONFIG_COUNT is not numeric ('${n}')." >&2; exit 1 ;; esac
+      if [ "$TAP_PUSH_MODE" != "app" ]; then
+        # "app-pending" = validated but not minted: refuse rather than push as the human.
+        echo "Error: tap push attempted before the release token was minted (mode '${TAP_PUSH_MODE}') — refusing." >&2
+        exit 1
+      fi
+      case "${TAP_PUSH_TARGET:-}" in
+        https://github.com/*) scope_url="$TAP_PUSH_TARGET" ;;
+        *)                    scope_url="https://github.com/${TAP_APP_SLUG}.git" ;;  # local test target: never sent
+      esac
+      b64="$(printf 'x-access-token:%s' "$TAP_APP_TOKEN" | base64 | tr -d '\n')"
+      export "GIT_CONFIG_KEY_${n}=http.${scope_url}.extraheader"
+      export "GIT_CONFIG_VALUE_${n}=Authorization: basic ${b64}"
+      export "GIT_CONFIG_KEY_$((n + 1))=credential.${scope_url}.helper"
+      export "GIT_CONFIG_VALUE_$((n + 1))="
+      export GIT_CONFIG_COUNT=$((n + 2))
+      export GIT_TERMINAL_PROMPT=0
+      # XACA-1170-039: defence in depth under the rewrite refusal. Whatever a
+      # url.*.insteadOf/pushInsteadOf (or a future bypass) turns the target into,
+      # git may speak only https - an ssh/git/ext rewrite fails hard instead of
+      # silently pushing as the human. `file` is allowed ONLY when the validated
+      # target is a local path / file:// URL (the test stand-in; the token header
+      # is scoped to https://github.com/ and never reaches it).
+      case "${TAP_PUSH_TARGET:-}" in
+        /*|file://*) export GIT_ALLOW_PROTOCOL=https:file ;;
+        *)           export GIT_ALLOW_PROTOCOL=https ;;
+      esac
+    fi
+    exec git "$@"
+  )
+}
+
+# tap_release_identity_prepare — resolve + validate, or announce the escape hatch.
+# Called BEFORE the lock and before any commit, tag or push; on failure the
+# caller's `exit 1` leaves the tree untouched. It mints NOTHING: the 1h token is
+# minted by tap_release_identity_mint, after the lock wait and preflight
+# (XACA-1170-044), so a long KB_TAP_RELEASE_LOCK_WAIT cannot age it out mid-release.
+tap_release_identity_prepare() {
+  if [ "$PUSH_AS_HUMAN" -eq 1 ]; then
+    {
+      echo ""
+      echo "  ***************************************************************"
+      echo "  *  WARNING: --as-human / TAP_RELEASE_PUSH_AS_HUMAN=1          *"
+      echo "  *  Pushing the TAP as the HUMAN, not as aiteamforge-release.  *"
+      echo "  ***************************************************************"
+      echo "  Once STRICT tap protection is applied, GitHub REFUSES this push"
+      echo "  unless you hold an admin bypass. Emergency use only."
+      echo ""
+    } >&2
+    TAP_PUSH_MODE="human"
+    TAP_PUSH_TARGET="origin"
+    return 0
+  fi
+  tap_app_resolve_config || return 1
+  TAP_PUSH_TARGET="$(tap_app_push_url)" || return 1
+  tap_app_refuse_url_rewrite "$TAP_PUSH_TARGET" || return 1
+  TAP_PUSH_MODE="app-pending"   # tap_authed_git refuses to run until the mint succeeds
+  echo "  Release App credentials and push URL validated; the token is minted just before the first push."
+  return 0
+}
+
+# tap_release_identity_mint — mint the 1h installation token. Called LAST: after the
+# lock is held and (release path) preflight has passed, immediately before the first
+# tap push. A failure aborts before anything is committed (release path) or pushed.
+tap_release_identity_mint() {
+  [ "$TAP_PUSH_MODE" = "app-pending" ] || return 0   # --as-human: nothing to mint
+  echo "  Minting a short-lived aiteamforge-release installation token (contents:write, ${TAP_APP_SLUG##*/} only)..."
+  tap_app_mint_token || return 1
+  TAP_PUSH_MODE="app"
+  echo "  Tap pushes will run as the aiteamforge-release App."
+  return 0
+}
+
+# tap_release_identity_mint_or_exit — mint, or refuse the release (shared by both paths).
+tap_release_identity_mint_or_exit() {
+  tap_release_identity_mint || {
+    echo "" >&2
+    echo "Refusing to release: could not mint the release App token (details above)." >&2
+    echo "  Nothing was pushed$([ "${PUSH_ONLY:-0}" -eq 1 ] || echo ' (and nothing was committed or tagged)'). To push as yourself in an emergency: --as-human" >&2
+    exit 1
+  }
+}
+
 # ─── locate tap dir ───────────────────────────────────────────────────────────
 
 OUTER_DIR="$(pwd)"
@@ -472,6 +879,18 @@ if [ "$DRY_RUN" -eq 0 ] && [ "$NO_PUSH" -eq 0 ]; then
   # shellcheck source=scripts/kb-tap-lock.sh
   . "$LOCK_LIB"
 
+  # XACA-1170-003: fail closed on the release identity BEFORE taking the lock or
+  # touching anything (after the checkout/lock-library diagnosis above, which
+  # names the more fundamental problem first). Config, key and push-URL validation
+  # happen here (cheap, no network); the token is minted later, after the lock
+  # (XACA-1170-044).
+  tap_release_identity_prepare || {
+    echo "" >&2
+    echo "Refusing to release: could not establish the tap push identity (details above)." >&2
+    echo "  Nothing was committed, tagged or pushed. To push as yourself in an emergency: --as-human" >&2
+    exit 1
+  }
+
   KB_TAP_LOCK_TAP_DIR="$TAP_DIR"
   export KB_TAP_LOCK_TAP_DIR
 
@@ -481,7 +900,7 @@ if [ "$DRY_RUN" -eq 0 ] && [ "$NO_PUSH" -eq 0 ]; then
   # would abort the script before the diagnostics below could print.
   LOCK_RC=0
   kb_tap_lock_acquire \
-    "kb-tap-release ${LEVEL} — $(id -un 2>/dev/null || echo unknown)@$(hostname -s 2>/dev/null || echo unknown)" \
+    "kb-tap-release ${LEVEL:-push-only} — $(id -un 2>/dev/null || echo unknown)@$(hostname -s 2>/dev/null || echo unknown)" \
     "${KB_TAP_RELEASE_LOCK_WAIT:-0}" || LOCK_RC=$?
 
   case "$LOCK_RC" in
@@ -496,7 +915,7 @@ if [ "$DRY_RUN" -eq 0 ] && [ "$NO_PUSH" -eq 0 ]; then
       echo "" >&2
       echo "  If that is a publisher run, wait for it to finish and re-run — it is short." >&2
       echo "  To wait automatically instead of failing:" >&2
-      echo "      KB_TAP_RELEASE_LOCK_WAIT=600 kb-tap-release ${LEVEL}" >&2
+      echo "      KB_TAP_RELEASE_LOCK_WAIT=600 kb-tap-release ${LEVEL:---push-only}" >&2
       echo "  To inspect the holder at any time:" >&2
       echo "      scripts/kb-tap-lock.sh status" >&2
       echo "" >&2
@@ -511,6 +930,37 @@ if [ "$DRY_RUN" -eq 0 ] && [ "$NO_PUSH" -eq 0 ]; then
       exit 1
       ;;
   esac
+fi
+
+# ─── --push-only: recovery path (XACA-1170-003) ──────────────────────────────
+# Re-runs just the two tap pushes. Deliberately minimal: no preflight, no
+# commits. It refuses unless tap HEAD is on main and exactly one v* tag points at
+# it, so it can only ever publish a release commit this script (or its operator)
+# already made locally.
+if [ "$PUSH_ONLY" -eq 1 ]; then
+  if [ ! -e "${TAP_DIR}/.git" ]; then
+    echo "Error: ${TAP_DIR} is not an initialized tap checkout." >&2
+    exit 1
+  fi
+  PO_BRANCH="$(git -C "${TAP_DIR}" branch --show-current 2>/dev/null || true)"
+  if [ "$PO_BRANCH" != "main" ]; then
+    echo "Error: --push-only requires the tap on 'main' (found '${PO_BRANCH}')." >&2
+    exit 1
+  fi
+  PO_TAGS="$(git -C "${TAP_DIR}" tag --points-at HEAD --list 'v[0-9]*' 2>/dev/null || true)"
+  PO_VERSION="${PO_TAGS#v}"
+  if [ -z "$PO_TAGS" ] || [ "$(printf '%s\n' "$PO_TAGS" | grep -c .)" -ne 1 ]; then
+    echo "Error: --push-only needs exactly one v* tag pointing at tap HEAD; found: ${PO_TAGS:-<none>}" >&2
+    exit 1
+  fi
+  tap_release_identity_mint_or_exit   # after the lock wait, right before the pushes
+  echo "=== --push-only: tap main + ${PO_TAGS} ==="
+  TAP_SINGLE_WRITER_RELEASE=1 tap_authed_git -C "${TAP_DIR}" push "${TAP_PUSH_TARGET}" main
+  git -C "${TAP_DIR}" update-ref refs/remotes/origin/main HEAD
+  tap_authed_git -C "${TAP_DIR}" push "${TAP_PUSH_TARGET}" "v${PO_VERSION}"
+  echo "  Tap push complete."
+  echo "  Next (human admin, outer repo): git add homebrew-tap && git commit -m \"chore: Bump homebrew-tap submodule to ${PO_TAGS}\" && git push <outer-remote> develop"
+  exit 0
 fi
 
 # ─── preflight ────────────────────────────────────────────────────────────────
@@ -775,6 +1225,18 @@ else
   check_fail "Cannot compute new version — CUR_VERSION is empty (VERSION file missing or unreadable)."
 fi
 
+# 13. Release identity resolves (XACA-1170-003). Config only — no network, no
+#     token. Skipped when nothing will be pushed, or the escape hatch is explicit.
+if [ "$NO_PUSH" -eq 0 ] && [ "$PUSH_AS_HUMAN" -eq 0 ]; then
+  if CFG_MSG="$(tap_app_resolve_config 2>&1)"; then
+    check_pass "Release App id and private key resolve (key mode ok)."
+  else
+    check_fail "Release App credentials not usable: ${CFG_MSG}"
+  fi
+elif [ "$PUSH_AS_HUMAN" -eq 1 ] && [ "$NO_PUSH" -eq 0 ]; then
+  check_pass "Release identity check skipped: --as-human escape hatch (tap push will be as the human)."
+fi
+
 echo ""
 echo "=== Preflight: $PASS_COUNT passed, $FAIL_COUNT failed ==="
 echo ""
@@ -797,9 +1259,13 @@ if [ "$DRY_RUN" -eq 1 ]; then
     echo "[DRY-RUN] Would push:    (skipped — --no-push)"
   else
     echo "[DRY-RUN] Would take:    tap-writer lock ${KB_TAP_LOCK_REF:-refs/locks/tap-writer} (released on exit)"
-    echo "[DRY-RUN] Would push:    homebrew-tap  origin main + tag v${NEW_VERSION}"
+    if [ "$PUSH_AS_HUMAN" -eq 1 ]; then
+      echo "[DRY-RUN] Would push:    homebrew-tap  origin main + tag v${NEW_VERSION}  (AS HUMAN: --as-human)"
+    else
+      echo "[DRY-RUN] Would push:    homebrew-tap  main + tag v${NEW_VERSION}  (as the aiteamforge-release App; token minted at run time)"
+    fi
     echo "[DRY-RUN] Would commit:  outer         \"chore: Bump homebrew-tap submodule to v${NEW_VERSION}\""
-    echo "[DRY-RUN] Would push:    outer         ${OUTER_REMOTE} develop"
+    echo "[DRY-RUN] Would push:    outer         ${OUTER_REMOTE} develop  (as the human admin)"
   fi
   echo ""
   echo "Dry run complete. No changes made."
@@ -807,6 +1273,13 @@ if [ "$DRY_RUN" -eq 1 ]; then
 fi
 
 # ─── phase 1: compute & edit ─────────────────────────────────────────────────
+
+# XACA-1170-044: the 1h token is minted only now — lock wait and preflight are behind
+# us — and still before anything is committed, so a mint failure leaves the tree
+# untouched. (--no-push mints nothing: it pushes nothing.)
+if [ "$NO_PUSH" -eq 0 ]; then
+  tap_release_identity_mint_or_exit
+fi
 
 echo "=== Phase 1: Editing tap files ==="
 echo ""
@@ -938,9 +1411,14 @@ if [ "$NO_PUSH" -eq 0 ]; then
   # single-writer pre-push hook. Scoped to THIS command only (env prefix, never
   # `export`) so a later hand push in the same shell is still refused. The tag push
   # below needs nothing: the hook only guards refs/heads/main.
-  TAP_SINGLE_WRITER_RELEASE=1 git -C "${TAP_DIR}" push origin main
+  #
+  # XACA-1170-003: tap_authed_git runs the push as the aiteamforge-release App
+  # (identity validated before the lock, token minted after it; see tap_release_identity_prepare/_mint), to an
+  # explicit URL in app mode — so refresh the tracking ref by hand afterwards.
+  TAP_SINGLE_WRITER_RELEASE=1 tap_authed_git -C "${TAP_DIR}" push "${TAP_PUSH_TARGET}" main
+  git -C "${TAP_DIR}" update-ref refs/remotes/origin/main HEAD
   echo "  Pushing tap tag v${NEW_VERSION}..."
-  git -C "${TAP_DIR}" push origin "v${NEW_VERSION}"
+  tap_authed_git -C "${TAP_DIR}" push "${TAP_PUSH_TARGET}" "v${NEW_VERSION}"
   echo "  Tap push complete."
 else
   echo "  (Skipping push — --no-push)"
@@ -977,7 +1455,7 @@ OUTER_COMMIT_SHA="$(git rev-parse HEAD)"
 echo "  Committed: ${OUTER_COMMIT_SHA} (chore: Bump homebrew-tap submodule to v${NEW_VERSION})"
 
 if [ "$NO_PUSH" -eq 0 ]; then
-  echo "  Pushing outer develop to ${OUTER_REMOTE}..."
+  echo "  Pushing outer develop to ${OUTER_REMOTE} (as the human admin — develop's ruleset bypasses admins, not the release App)..."
   git push "${OUTER_REMOTE}" develop
   echo "  Outer push complete."
 else
