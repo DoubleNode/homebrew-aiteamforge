@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1568 (1/2) adopt ci-runner-bundle.sh as dev-team canonical; publisher stages libexec/
+- Tap files updated in this publish: `share/scripts/kb-ttyd-bridge.sh`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1537 — consolidate persistent runner workspace git packs; guest disk alarm
 - Tap files updated in this publish: `fleet-monitor/server/config/notice_types.json`,`fleet-monitor/server/lib/ci-runners-routes.js` `fleet-monitor/server/lib/fleet-notices.js`,`fleet-monitor/server/package.json` `fleet-monitor/server/tests/xaca-1537-004-guest-disk-alarm.test.js`,`share/kanban-hooks/notice_types.json` `share/scripts/ci-runner/client/ci-runner-reporter.sh`,`share/scripts/ci-runner/client/ci-runner-workspace-gc.sh` (+1 more). Run `brew upgrade aiteamforge` to receive them.
 

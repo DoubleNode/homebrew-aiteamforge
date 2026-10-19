@@ -60,8 +60,9 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # This file and its template are CANONICAL SOURCE in dev-team and are mirrored to
 # the tap by sync-tap.sh (both sync_file entries are already added). But
-# `libexec/` is NOT mirrored by sync-tap.sh — it is tap-native with no dev-team
-# source — so the three call-site edits below had to be made INSIDE the
+# `libexec/` is tap-native with no dev-team source (the one exception since
+# XACA-1568 is libexec/lib/ci-runner-bundle.sh, which sync-tap.sh mirrors; the
+# files below are NOT mirrored) — so the three call-site edits below had to be made INSIDE the
 # homebrew-tap submodule, which was uninitialized in the worktree where this was
 # written. An unwired reconciler is inert, which is precisely the XACA-0814
 # failure shape.
