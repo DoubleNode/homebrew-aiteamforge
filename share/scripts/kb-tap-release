@@ -379,6 +379,10 @@ EOF
 # fresh, properly-randomized temp file.
 rm -f /tmp/kb-tap-release-footer.XXXXXX.py
 FOOTER_SCRIPT=$(mktemp "${TMPDIR:-/tmp}/kb-tap-release-footer.XXXXXX")
+# XACA-1170-056: every path the cleanup trap removes is initialised HERE, before the trap is
+# installed, so a value inherited from the caller's environment can never be deleted by it.
+KTR_CFG_TMP=""; DRIFT_RECORDS_FILE=""
+PTE_MAP_FILE=""; PTE_DIRS_FILE=""; PTE_FILES_FILE=""; PTE_SHAS_FILE=""; PTE_OFFENCES_FILE=""; PTE_SYNC_ROOT=""
 
 # XACA-1122-008: this trap now has TWO jobs. It is the `always()`-equivalent
 # release path for the tap-writer lock — the lock must come off on every exit,
@@ -391,6 +395,8 @@ FOOTER_SCRIPT=$(mktemp "${TMPDIR:-/tmp}/kb-tap-release-footer.XXXXXX")
 _kb_tap_release_cleanup() {
   _cleanup_rc=$?
   rm -f "$FOOTER_SCRIPT"
+  # XACA-1170-055: function-scoped temp files registered here so SIGTERM cannot strand them.
+  rm -f "${KTR_CFG_TMP:-}" "${DRIFT_RECORDS_FILE:-}"
   # XACA-1170-041: --push-tap-edit temp files (function is defined later; absent on other paths).
   if type _pte_cleanup >/dev/null 2>&1; then _pte_cleanup; fi
   if [ "${KB_TAP_LOCK_ACQUIRED:-0}" -eq 1 ]; then
@@ -574,6 +580,7 @@ tap_app_refuse_url_rewrite() {
     echo "Error: could not create a temp file to read git config — refusing to mint (fail closed)." >&2
     return 1
   }
+  KTR_CFG_TMP="$tmp"   # XACA-1170-055: removed by the EXIT/INT/TERM trap too
   # exit 1 = no matching key (fine); anything else = git could not read its config.
   local re='^url\..*\.(push)?insteadof$'
   git -C "$TAP_DIR" config -z --show-scope --show-origin --get-regexp "$re" >"$tmp" 2>/dev/null || rc=$?
@@ -1213,7 +1220,9 @@ pte_check_commit() {
   # paths: every added/modified/deleted/type-changed path; renames arrive as delete + add.
   # Through a temp file, not process substitution: a failing git must be SEEN, not read as
   # "no paths changed".
-  dt="$(mktemp "${TMPDIR:-/tmp}/kb-tap-release-dt.XXXXXX")" || { echo "${short}: mktemp failed (refused)" >> "$PTE_OFFENCES_FILE"; return 0; }
+  # XACA-1170-055: under PTE_SYNC_ROOT (removed by _pte_cleanup on EXIT/INT/TERM), like 053's files.
+  [ -d "${PTE_SYNC_ROOT:-}" ] || { echo "${short}: sync work dir missing (refused)" >> "$PTE_OFFENCES_FILE"; return 0; }
+  dt="$(mktemp "${PTE_SYNC_ROOT}/dt.XXXXXX")" || { echo "${short}: mktemp failed (refused)" >> "$PTE_OFFENCES_FILE"; return 0; }
   if ! git -C "$TAP_DIR" diff-tree --no-commit-id -r -z --no-renames --name-status --root "$sha" > "$dt" 2>/dev/null; then
     rm -f "$dt"
     echo "${short}: could not list the paths this commit touches (refused)" >> "$PTE_OFFENCES_FILE"
