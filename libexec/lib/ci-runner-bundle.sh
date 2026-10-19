@@ -51,6 +51,7 @@ _aitf_ci_runner_bundle_files() {
 755 client/ci-runner-jit-macos.sh
 755 client/ci-runner-job-started.sh
 755 client/ci-runner-reporter.sh
+755 client/ci-runner-workspace-gc.sh
 LIST
 }
 

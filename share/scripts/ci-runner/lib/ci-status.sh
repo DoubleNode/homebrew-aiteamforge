@@ -69,7 +69,7 @@
 
 # The bundle files `aiteamforge ci` needs on disk. MUST equal libexec/lib/ci-runner-bundle.sh's list
 # (tests/test-xaca-1443-ci-status.sh pins the two together; it also covers this file itself).
-CI_STATUS_BUNDLE_FILES="provision-host.sh ci-host.sh create-ci-runner-user.sh teardown-host.sh runner-pin.conf lib/ci-host-lib.sh lib/ci-enable-guard.sh lib/ci-headroom.sh lib/ci-provision-version.sh lib/ci-runner-version.sh lib/ci-status.sh client/ci-pool-agent.py client/ci-runner-jit-guest.sh client/ci-runner-jit-macos.sh client/ci-runner-job-started.sh client/ci-runner-reporter.sh"
+CI_STATUS_BUNDLE_FILES="provision-host.sh ci-host.sh create-ci-runner-user.sh teardown-host.sh runner-pin.conf lib/ci-host-lib.sh lib/ci-enable-guard.sh lib/ci-headroom.sh lib/ci-provision-version.sh lib/ci-runner-version.sh lib/ci-status.sh client/ci-pool-agent.py client/ci-runner-jit-guest.sh client/ci-runner-jit-macos.sh client/ci-runner-job-started.sh client/ci-runner-reporter.sh client/ci-runner-workspace-gc.sh"
 
 _cis_add() { # var-name line   (append a line to a newline list)
     eval "$1=\"\${$1:+\${$1}

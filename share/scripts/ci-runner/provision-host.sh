@@ -218,8 +218,9 @@ MAC_JIT_SRC="${_PH_CLIENT}/ci-runner-jit-macos.sh"
 JOB_STARTED_SRC="${_PH_CLIENT}/ci-runner-job-started.sh"
 GUEST_JIT_DEST="/usr/local/sbin/ci-runner-jit.sh"
 GUEST_JOB_STARTED_DEST="/usr/local/sbin/ci-runner-job-started.sh"
-# XACA-1537-003: workspace git-pack consolidation hook for the PERSISTENT Linux runners. OPTIONAL payload: a shipped
-# bundle that predates it (its file list lives in the tap, outside this repo) is warned about and skipped, never refused.
+# XACA-1537-003: workspace git-pack consolidation hook for the PERSISTENT Linux runners. REQUIRED payload on a Linux
+# run (XACA-1568-004): the bundle ships it, so a missing source is FAIL CLOSED (stage_guest_workspace_gc dies; --dry-run
+# reports it as a blocking problem), never warned about and skipped. --no-linux needs no hook and skips it.
 GC_SRC="${_PH_CLIENT}/ci-runner-workspace-gc.sh"
 GUEST_GC_DEST="/usr/local/sbin/ci-runner-workspace-gc.sh"
 MAC_JIT_DEST="${LIBEXEC_DIR}/ci-runner-jit-macos.sh"
@@ -1097,10 +1098,9 @@ stage_linux_runners() {
 stage_guest_workspace_gc() {
   local want have meta out
   if [ "$NO_LINUX" = "1" ]; then log "workspace-gc hook skipped (--no-linux)"; return 0; fi
-  if [ ! -f "$GC_SRC" ]; then
-    warn "workspace-gc hook source not found (${GC_SRC}): persistent runner workspaces will NOT be gc'd (XACA-1537). Update the bundle: aiteamforge upgrade"
-    return 0
-  fi
+  # XACA-1568-004: fail closed. The hook ships in the bundle (ci-runner-bundle.sh), so a missing source is a broken
+  # or stale bundle, not an "older bundle": provisioning must not report success with unbounded runner workspaces.
+  [ -f "$GC_SRC" ] || die "workspace-gc hook source not found (${GC_SRC}); the bundle is incomplete. Update it: aiteamforge upgrade"
   want=$(shasum -a 256 "$GC_SRC" | awk '{print $1}')
   have=$(guest_sh "sha256sum ${GUEST_GC_DEST} 2>/dev/null | awk '{print \$1}' || true" | tr -d '[:space:]')
   if [ "$want" != "$have" ]; then
@@ -1526,7 +1526,7 @@ do_dry_run() {
     # The package list lives only in the guest script (single copy, pinned by the
     # XACA-1386 parity check), so read it from there rather than restating it.
     plan "guest: apt baseline $(guest_baseline_script | sed -n 's/^PKGS="\(.*\)"$/\1/p') (skips if present); user runner + /etc/sudoers.d/90-runner"
-    plan "guest: workspace-gc (XACA-1537): install ${GC_SRC##*/} -> ${GUEST_GC_DEST} (root:root 755, only if it differs; source $([ -f "$GC_SRC" ] && echo present || echo 'MISSING: would warn and skip')); systemd drop-in xaca-1537-workspace-gc.conf (ACTIONS_RUNNER_HOOK_JOB_STARTED=${GUEST_GC_DEST}) on the persistent units of /opt/actions-runner-{${linux_idx}} only, never the JIT slots; daemon-reload; restart a unit ONLY if its runner is idle, else leave it and report PENDING-RESTART"
+    plan "guest: workspace-gc (XACA-1537): install ${GC_SRC##*/} -> ${GUEST_GC_DEST} (root:root 755, only if it differs; source $([ -f "$GC_SRC" ] && echo present || echo 'MISSING: BLOCKING, a real run would REFUSE (fail closed, bundle incomplete; run: aiteamforge upgrade)')); systemd drop-in xaca-1537-workspace-gc.conf (ACTIONS_RUNNER_HOOK_JOB_STARTED=${GUEST_GC_DEST}) on the persistent units of /opt/actions-runner-{${linux_idx}} only, never the JIT slots; daemon-reload; restart a unit ONLY if its runner is idle, else leave it and report PENDING-RESTART"
     plan "guest: ${linux_names} in /opt/actions-runner-{${linux_idx}}: download+sha256 verify, installdependencies.sh, config.sh --labels ${RUNNER_LABELS} (skip if .runner exists), svc.sh install/start"
   fi
   if [ "$NO_MACOS" = "1" ]; then
