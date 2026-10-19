@@ -3,6 +3,7 @@
 #
 # Usage: kb-tap-release {patch|minor|major} [--dry-run] [--no-push] [--as-human] [--help]
 #        kb-tap-release --push-only [--as-human]
+#        kb-tap-release --push-tap-edit [--dry-run] [--as-human]
 #
 # Cuts a release of the AITeamForge homebrew tap:
 #   Phase 0: Acquire the tap-writer lock (XACA-1122-008; skipped by --dry-run
@@ -10,6 +11,11 @@
 #   Phase 1: Compute new version, edit CHANGELOG.md / VERSION / Formula
 #   Phase 2: Tap inner commit + tag + push (origin main)
 #   Phase 3: Outer pointer bump commit + push (<outer-remote>/develop)
+#
+# XACA-1170-041: --push-tap-edit is the sanctioned way to push an already-prepared
+# TAP-ONLY commit (a file with no dev-team canonical: tests/, libexec/, bin/, ...)
+# to tap main as the release App once STRICT tap protection leaves no other write
+# path. It is not a release cut: it commits nothing, tags nothing, bumps no version.
 #
 # XACA-1170-003: the two TAP pushes (main + release tag) are made as the
 # `aiteamforge-release` GitHub App, not as the human admin. Under STRICT tap
@@ -39,6 +45,7 @@ usage() {
 Usage: kb-tap-release {patch|minor|major} [--dry-run] [--no-push] [--as-human]
                        [--tap-ahead-release="<reason>"] [--help]
        kb-tap-release --push-only [--as-human]
+       kb-tap-release --push-tap-edit [--dry-run] [--as-human]
 
 Cut a release of the AITeamForge homebrew tap.
 
@@ -77,6 +84,44 @@ Flags:
                 touch the outer repo; finish that by hand (see Partial-failure
                 recovery). Cannot be combined with a bump level, --dry-run or
                 --no-push.
+  --push-tap-edit
+                Push the tap's HEAD (one or more ALREADY-COMMITTED, TAP-ONLY commits)
+                to tap main as the release App, under the tap-writer lock, with the
+                single-writer hook's release marker on that one push. For files that
+                have NO dev-team canonical (tests/, libexec/ except the one mirrored
+                file, bin/, plugins/, Formula/, README.md, ...). It is NOT for mirrored
+                content: that is the publisher's. Run from the outer checkout whose
+                homebrew-tap/ holds the commit(s). Every precondition is checked
+                BEFORE the lock and before any token is minted; any failure aborts
+                with nothing pushed:
+                  - the tap working tree and index are clean (untracked files too);
+                  - tap main is fetched from the tap URL (read-only, no token) and HEAD
+                    is a strict fast-forward of it with >= 1 new commit (behind,
+                    diverged, or equal = refused);
+                  - the new range is LINEAR (a merge commit is refused: its diff
+                    against the first parent hides what the other parent brought);
+                  - EVERY new commit carries exactly one trailer
+                    'Tap-Only-Edit: intentional' (exact key and value, parsed by
+                    git interpret-trailers - not a grep of the body; git itself
+                    normalises the ':' spacing);
+                  - NO new commit touches a path the publisher owns: any destination
+                    in `zsh sync-tap.sh --check --porcelain` (the authoritative map,
+                    evaluated exactly as the publisher does: develop's script over
+                    develop's tree, materialised with git archive - nothing local is
+                    read), anything under a TAP_STAGE_PATHS directory (share/,
+                    fleet-monitor/server/, docs/), and the exact files the publisher
+                    stages by name (.githooks/pre-push, CHANGELOG.md - derived from
+                    sync-tap.sh's own `git add` calls). Adds, modifies, deletes and
+                    BOTH sides of a rename count; offenders are listed per commit.
+                    Needs zsh on PATH (fail closed without it).
+                After the lock is taken tap main is re-fetched and must be unchanged,
+                and HEAD must still be the commit that was checked. On success it
+                prints the new tap SHA and the two-step follow-up (a dev-team PR that
+                bumps the gitlink - this command never touches the outer repo).
+                Cannot be combined with a bump level, --push-only, --no-push or
+                --tap-ahead-release. --dry-run runs every precondition and nothing
+                else (no lock, no token, no push). --as-human is allowed, with the loud
+                banner, and is refused by GitHub once STRICT is applied.
   -h, --help    Print this usage and exit 0.
 
 Release identity (XACA-1170-003) — one-time setup, per machine:
@@ -97,6 +142,11 @@ Release identity (XACA-1170-003) — one-time setup, per machine:
   before the first push, so a long KB_TAP_RELEASE_LOCK_WAIT cannot age it. It is
   not minted for --dry-run or --no-push (they push nothing); --dry-run only
   checks that the App id and key resolve, without touching the network.
+  Every App git call also pins GIT_ASKPASS=false and REFUSES to run when an inherited
+  GIT_CONFIG_PARAMETERS (a `git -c` wrapper) sets credential.*, url.*, http.*,
+  protocol.*, include*, or core.sshCommand/askPass/gitProxy/hooksPath: git applies those
+  AFTER the URL-scoped credential reset, so a 401 on the App token could otherwise fall
+  through to the human's credential helper (XACA-1170-047). Unrelated -c settings pass.
   The App push also pins GIT_ALLOW_PROTOCOL=https. That is inherited by the tap's
   pre-push hook, whose outer fetch therefore needs an https outer remote (the
   repo's `dev-team` remote is); with an ssh outer remote the hook refuses with
@@ -160,6 +210,7 @@ LEVEL=""
 DRY_RUN=0
 NO_PUSH=0
 PUSH_ONLY=0
+PUSH_TAP_EDIT=0
 PUSH_AS_HUMAN=0
 if [ "${TAP_RELEASE_PUSH_AS_HUMAN:-}" = "1" ]; then PUSH_AS_HUMAN=1; fi
 TAP_AHEAD_RELEASE_REASON=""
@@ -180,6 +231,9 @@ for arg in "$@"; do
       ;;
     --push-only)
       PUSH_ONLY=1
+      ;;
+    --push-tap-edit)
+      PUSH_TAP_EDIT=1
       ;;
     --tap-ahead-release=*)
       # =value syntax (not a separate positional token) — this loop iterates
@@ -216,7 +270,14 @@ if [ "$PUSH_ONLY" -eq 1 ] && { [ -n "$LEVEL" ] || [ "$DRY_RUN" -eq 1 ] || [ "$NO
   exit 1
 fi
 
-if [ -z "$LEVEL" ] && [ "$PUSH_ONLY" -eq 0 ]; then
+if [ "$PUSH_TAP_EDIT" -eq 1 ]; then
+  if [ "$PUSH_ONLY" -eq 1 ] || [ -n "$LEVEL" ] || [ "$NO_PUSH" -eq 1 ] || [ -n "$TAP_AHEAD_RELEASE_REASON" ]; then
+    echo "Error: --push-tap-edit cannot be combined with a bump level, --push-only, --no-push or --tap-ahead-release." >&2
+    exit 1
+  fi
+fi
+
+if [ -z "$LEVEL" ] && [ "$PUSH_ONLY" -eq 0 ] && [ "$PUSH_TAP_EDIT" -eq 0 ]; then
   echo "Error: bump level is required (patch, minor, or major)." >&2
   usage >&2
   exit 1
@@ -330,6 +391,8 @@ FOOTER_SCRIPT=$(mktemp "${TMPDIR:-/tmp}/kb-tap-release-footer.XXXXXX")
 _kb_tap_release_cleanup() {
   _cleanup_rc=$?
   rm -f "$FOOTER_SCRIPT"
+  # XACA-1170-041: --push-tap-edit temp files (function is defined later; absent on other paths).
+  if type _pte_cleanup >/dev/null 2>&1; then _pte_cleanup; fi
   if [ "${KB_TAP_LOCK_ACQUIRED:-0}" -eq 1 ]; then
     KB_TAP_LOCK_ACQUIRED=0
     _rel_rc=0
@@ -687,6 +750,40 @@ tap_app_mint_token() {
   return "$rc"
 }
 
+# tap_app_refuse_inherited_git_params — XACA-1170-047. git applies an inherited
+# GIT_CONFIG_PARAMETERS (what `git -c k=v` exports to children) AFTER the
+# GIT_CONFIG_COUNT/KEY/VALUE entries tap_authed_git appends, so a `-c credential.helper=...`
+# wrapper lands AFTER our URL-scoped `credential.<tap-url>.helper=` reset and re-adds the
+# human's helper: a 401 on the App token then falls through to the human's credentials,
+# the silent fallback this whole identity forbids. Same hole for a `-c url.*.insteadOf`,
+# an `http.*.extraheader` (second Authorization header), `core.sshCommand`/`askPass`/
+# `gitProxy`/`hooksPath` and `include.path` (pulls in arbitrary config).
+# REFUSE rather than strip: unsetting GIT_CONFIG_PARAMETERS would silently drop legitimate
+# `-c` settings (color.ui, safe.directory, ...) the caller meant to keep, and a refusal
+# names the offending KEY (never the value: an extraheader value is a secret). Unrelated
+# keys pass untouched. Matched case-insensitively on the quoted-key shape of both formats
+# git has used ('key=value' and 'key'='value'); a value that merely contains such text can
+# cause an unnecessary refusal, never a miss.
+tap_app_refuse_inherited_git_params() {
+  local p lc keys
+  p="${GIT_CONFIG_PARAMETERS:-}"
+  [ -n "$p" ] || return 0
+  lc="$(printf '%s' "$p" | tr '[:upper:]' '[:lower:]')"
+  keys="$(printf '%s' "$lc" | grep -oE "'(credential\\.|url\\.|http\\.|protocol\\.|include(if)?\\.|core\\.(sshcommand|askpass|gitproxy|hookspath|fsmonitor))[^='[:space:]]*" | tr -d "'" | head -n 3 | tr '\n' ' ')" || true
+  if [ -n "$keys" ]; then
+    {
+      echo "Error: an inherited GIT_CONFIG_PARAMETERS (a 'git -c' wrapper) sets: ${keys}"
+      echo "       git applies it AFTER the release App's URL-scoped credential reset, so it can"
+      echo "       let a rejected App token fall through to YOUR credentials, or reroute the push."
+      echo "       Refusing (no token minted / no push). Remedy: run kb-tap-release from a shell"
+      echo "       where it is not nested inside 'git -c ...' (check: env | grep GIT_CONFIG_PARAMETERS),"
+      echo "       or push as yourself knowingly with --as-human."
+    } >&2
+    return 1
+  fi
+  return 0
+}
+
 # tap_authed_git <git args...> — run git, authenticated as the release App when a
 # token was minted. Env-prefixed callers (TAP_SINGLE_WRITER_RELEASE=1) keep their
 # variable: it is inherited through the subshell into git.
@@ -716,6 +813,8 @@ tap_authed_git() {
         echo "Error: tap push attempted before the release token was minted (mode '${TAP_PUSH_MODE}') — refusing." >&2
         exit 1
       fi
+      # XACA-1170-047: checked on EVERY call (fetch, push, lock ops), not only once up front.
+      tap_app_refuse_inherited_git_params || exit 1
       case "${TAP_PUSH_TARGET:-}" in
         https://github.com/*) scope_url="$TAP_PUSH_TARGET" ;;
         *)                    scope_url="https://github.com/${TAP_APP_SLUG}.git" ;;  # local test target: never sent
@@ -727,6 +826,9 @@ tap_authed_git() {
       export "GIT_CONFIG_VALUE_$((n + 1))="
       export GIT_CONFIG_COUNT=$((n + 2))
       export GIT_TERMINAL_PROMPT=0
+      # XACA-1170-047: a rejected token must not reach an askpass program either (the
+      # human's GIT_ASKPASS / core.askPass would answer the 401 retry). Env wins over config.
+      export GIT_ASKPASS=false
       # XACA-1170-039: defence in depth under the rewrite refusal. Whatever a
       # url.*.insteadOf/pushInsteadOf (or a future bypass) turns the target into,
       # git may speak only https - an ssh/git/ext rewrite fails hard instead of
@@ -764,6 +866,7 @@ tap_release_identity_prepare() {
     return 0
   fi
   tap_app_resolve_config || return 1
+  tap_app_refuse_inherited_git_params || return 1   # XACA-1170-047: before the lock and the mint
   TAP_PUSH_TARGET="$(tap_app_push_url)" || return 1
   tap_app_refuse_url_rewrite "$TAP_PUSH_TARGET" || return 1
   TAP_PUSH_MODE="app-pending"   # tap_authed_git refuses to run until the mint succeeds
@@ -854,7 +957,449 @@ fi
 
 KB_TAP_LOCK_ACQUIRED=0
 
-if [ "$DRY_RUN" -eq 0 ] && [ "$NO_PUSH" -eq 0 ]; then
+# ─── --push-tap-edit: push prepared TAP-ONLY commits to tap main (XACA-1170-041) ─────
+#
+# WHY IT EXISTS. Under STRICT tap protection exactly two identities may write tap
+# main: the publisher App (mirrored content) and this release App. ~198 tracked tap
+# files have NO dev-team canonical (tests/, libexec/ except one file, bin/, plugins/,
+# Formula/, README.md, ...), so the publisher never writes them. Without a sanctioned
+# path an edit to one of them could not be pushed at all. This is that path. It pushes
+# commits somebody already made; it commits, tags and bumps nothing.
+#
+# THE ONE SAFETY PROPERTY: it can never push something the publisher owns. That is
+# decided from the publisher's OWN map, never re-derived here, and evaluated the way the publisher
+# evaluates it: <outer remote>/develop's sync-tap.sh, run by ZSH (it is a zsh script, XACA-1170-050)
+# over develop's whole tree materialised with `git archive` (XACA-1170-048/051), never the local
+# checkout's script or sources:
+#   (1) every destination `sync-tap.sh --check --porcelain` reports (OK, DRIFT, NEW and
+#       MISSING all name a destination - a record exists for every sync_file/sync_dir
+#       pair, so the map is the exact mirrored set);
+#   (2) everything under a directory in sync-tap.sh's own TAP_STAGE_PATHS (the scope the
+#       publisher's `git add -A` stages: share/, fleet-monitor/server/, docs/) - this
+#       also covers a STALE tap file in a mirrored dir that canonical no longer has,
+#       which sync_dir would never list (it does not delete tap-only files);
+#   (3) the exact-file entries of TAP_STAGE_PATHS (.githooks/pre-push), plus every file sync-tap.sh
+#       stages by name with `git -C "$TAP" add <file>` (CHANGELOG.md, rewritten by
+#       _pub_write_tap_changelog - a tap-only edit would race that rewrite; XACA-1170-052).
+# `libexec/` is the ONE TAP_STAGE_PATHS directory NOT refused wholesale: sync-tap.sh
+# stages it whole (XACA-1568-024) but mirrors only libexec/lib/ci-runner-bundle.sh into
+# it - the other 39 files are tap-native and are exactly what this command exists for.
+# Its mirrored file is caught by (1). Paths are compared case-folded (a Linux publisher
+# sees `Share/` and `share/` as different dirs; refusing both costs nothing).
+# Fail closed: sync-tap.sh missing/erroring (rc > 1), zero records, or an unparseable
+# TAP_STAGE_PATHS line = refuse. A malformed check must not return the reassuring answer.
+#
+# Linear range only: a merge commit's diff against its first parent hides what the
+# second parent brought, so per-commit path checks would be unsound. Diffs use
+# --no-renames, so a rename shows as delete(old)+add(new) and BOTH sides are checked
+# with no pairing logic to get wrong.
+
+PTE_MAP_FILE=""; PTE_DIRS_FILE=""; PTE_FILES_FILE=""; PTE_SHAS_FILE=""; PTE_OFFENCES_FILE=""; PTE_SYNC_ROOT=""; PTE_SYNC_SCRIPT=""
+PTE_BASE=""; PTE_HEAD=""
+
+# Removed by _kb_tap_release_cleanup on every exit path. PTE_SYNC_ROOT is a mktemp -d directory
+# this script created; the recursive remove is guarded so an empty or foreign value can never
+# widen it (absolute path whose last component is the mktemp template we asked for).
+_pte_cleanup() {
+  rm -f "${PTE_MAP_FILE:-}" "${PTE_DIRS_FILE:-}" "${PTE_FILES_FILE:-}" "${PTE_SHAS_FILE:-}" "${PTE_OFFENCES_FILE:-}"
+  if [ -n "${PTE_SYNC_ROOT:-}" ] && [ "${PTE_SYNC_ROOT#/}" != "$PTE_SYNC_ROOT" ]; then
+    case "${PTE_SYNC_ROOT##*/}" in
+      kb-tap-release-sync.??*) rm -rf -- "$PTE_SYNC_ROOT" ;;
+    esac
+  fi
+}
+
+# pte_fetch_main — read-only, no token. Sets PTE_BASE to tap main's tip as the remote has
+# it NOW, with its objects fetched (FETCH_HEAD only: no tap ref is moved). In app mode the
+# fetch carries the same transport pin and askpass block as the push; a public tap needs no
+# credential. (--as-human fetches from `origin` with no pin: it is the human's own path.)
+pte_fetch_main() {
+  local out rc=0
+  if [ "$TAP_PUSH_MODE" = "human" ]; then
+    out="$(GIT_TERMINAL_PROMPT=0 git -C "$TAP_DIR" fetch --quiet --no-tags "$TAP_PUSH_TARGET" refs/heads/main 2>&1)" || rc=$?
+  else
+    local pin="https"
+    case "$TAP_PUSH_TARGET" in /*|file://*) pin="https:file" ;; esac
+    out="$(GIT_ALLOW_PROTOCOL="$pin" GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=false \
+          git -C "$TAP_DIR" fetch --quiet --no-tags "$TAP_PUSH_TARGET" refs/heads/main 2>&1)" || rc=$?
+  fi
+  if [ "$rc" -ne 0 ]; then
+    echo "Error: could not fetch tap main from ${TAP_PUSH_TARGET}:" >&2
+    printf '%s\n' "$out" | sed 's/^/       /' >&2
+    return 1
+  fi
+  PTE_BASE="$(git -C "$TAP_DIR" rev-parse --verify --quiet 'FETCH_HEAD^{commit}')" || {
+    echo "Error: fetched tap main but could not resolve its commit." >&2; return 1; }
+  return 0
+}
+
+# pte_fetch_develop_sync - XACA-1170-048/051. Materialises develop's WHOLE tree (as the OUTER remote
+# has it NOW) into $PTE_SYNC_ROOT/src. The publisher runs develop's sync-tap.sh against develop's
+# tree post-merge, so the authoritative "what does the publisher own" map is develop's script
+# evaluated over develop's sources - not this checkout's. 048 took only the script from develop and
+# ran it over the LOCAL tree: a checkout BEHIND develop made every source develop had added read
+# MISSING (sync-tap.sh then exits 2 and the command refused every push), and an AHEAD or dirty
+# checkout enumerated sync_dir sources the publisher will never see (051). A whole archive is the only
+# reliable input: the script's source paths are built from variables (team lists, persona dirs,
+# skills), so no static path list derived from it can be trusted to be complete. Measured on the
+# real tree: ~2 s, ~550 MB in $TMPDIR, removed on every exit path.
+# `git archive <sha>` reads the object database only: no checkout, no ref moves, no worktree. The
+# fetch fills FETCH_HEAD only and needs no token (the outer remote is the human's own, exactly as the
+# release path's develop fetch). Fail closed: unresolvable remote, fetch failure, no develop commit,
+# extract failure, no sync-tap.sh in the tree.
+pte_fetch_develop_sync() {
+  local out rc=0 dev
+  if ! git -C "$OUTER_DIR" remote get-url "$OUTER_REMOTE" >/dev/null 2>&1; then
+    echo "Error: outer remote '${OUTER_REMOTE}' does not exist in ${OUTER_DIR} - cannot read develop's tree (the publisher-owned map). Set KB_TAP_RELEASE_OUTER_REMOTE. Refusing (fail closed)." >&2
+    return 1
+  fi
+  out="$(GIT_TERMINAL_PROMPT=0 git -C "$OUTER_DIR" fetch --quiet --no-tags "$OUTER_REMOTE" develop 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "Error: could not fetch ${OUTER_REMOTE}/develop to read the publisher-owned map:" >&2
+    printf '%s\n' "$out" | sed 's/^/       /' >&2
+    echo "       Refusing (fail closed): the map must come from develop, not from this checkout." >&2
+    return 1
+  fi
+  dev="$(git -C "$OUTER_DIR" rev-parse --verify --quiet 'FETCH_HEAD^{commit}')" || {
+    echo "Error: fetched ${OUTER_REMOTE}/develop but could not resolve its commit. Refusing (fail closed)." >&2; return 1; }
+  PTE_SYNC_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/kb-tap-release-sync.XXXXXX")" || { echo "Error: mktemp -d failed." >&2; return 1; }
+  mkdir -p "${PTE_SYNC_ROOT}/src" "${PTE_SYNC_ROOT}/ref/homebrew-tap" || { echo "Error: could not create ${PTE_SYNC_ROOT}." >&2; return 1; }
+  if ! git -C "$OUTER_DIR" archive "$dev" | tar -x -C "${PTE_SYNC_ROOT}/src"; then
+    echo "Error: could not materialise ${OUTER_REMOTE}/develop (${dev}) from git archive. Refusing (fail closed)." >&2
+    return 1
+  fi
+  PTE_SYNC_SCRIPT="${PTE_SYNC_ROOT}/src/sync-tap.sh"
+  if [ ! -s "$PTE_SYNC_SCRIPT" ]; then
+    echo "Error: sync-tap.sh is missing or empty on ${OUTER_REMOTE}/develop (${dev}) - cannot establish the publisher-owned set. Refusing (fail closed)." >&2
+    return 1
+  fi
+  return 0
+}
+
+# pte_materialise_tap_names - XACA-1170-051. sync-tap.sh has DEST-DRIVEN loops (it iterates files the
+# tap already ships: scripts/teams/<team>/scripts/*), so the map depends on which files the tap has,
+# not only on develop. Gives it a scratch tap whose tracked paths are those of tap main as fetched
+# (PTE_BASE - what the publisher sees) as ZERO-BYTE placeholders: names only, never contents, so the
+# 317 MB tap is not copied. Why a scratch tap and not the real one: `sync-tap.sh --check` is not
+# read-only against its reference tap - the BYTECODE-GUARD pre-clean deletes __pycache__/ and *.pyc
+# there even in --check (XACA-0753) - and this command must never touch the shared tap checkout.
+pte_materialise_tap_names() {
+  local list f d last=""
+  [ -n "${PTE_BASE:-}" ] || { echo "Error: tap main is unknown; cannot mirror its file names. Refusing (fail closed)." >&2; return 1; }
+  [ -d "${PTE_SYNC_ROOT:-}" ] || { echo "Error: sync work dir missing; refusing (fail closed)." >&2; return 1; }
+  # XACA-1170-053: temp files live under PTE_SYNC_ROOT, which _pte_cleanup removes on EXIT/INT/TERM.
+  list="$(mktemp "${PTE_SYNC_ROOT}/names.XXXXXX")" || { echo "Error: mktemp failed." >&2; return 1; }
+  if ! git -C "$TAP_DIR" ls-tree -r -z --name-only "$PTE_BASE" > "$list"; then
+    rm -f "$list"; echo "Error: could not list tap main's tracked paths. Refusing (fail closed)." >&2; return 1
+  fi
+  while IFS= read -r -d '' f; do
+    d="${f%/*}"
+    if [ "$d" != "$f" ] && [ "$d" != "$last" ]; then mkdir -p "${PTE_SYNC_ROOT}/ref/homebrew-tap/${d}"; last="$d"; fi
+    : > "${PTE_SYNC_ROOT}/ref/homebrew-tap/${f}"
+  done < "$list"
+  rm -f "$list"
+  return 0
+}
+
+# pte_build_owned_map — fills the three files the classifier reads. See the block above.
+pte_build_owned_map() {
+  local porc errf rc=0 n line w sync cl
+  pte_fetch_develop_sync || return 1
+  pte_materialise_tap_names || return 1
+  sync="$PTE_SYNC_SCRIPT"
+  # sync-tap.sh is a ZSH script (shebang zsh; the publisher runs `zsh sync-tap.sh --publish`) and
+  # uses zsh-only syntax such as the (N) glob qualifier: under bash it is a syntax error (rc 2),
+  # which this command would read as "cannot establish the map" and refuse EVERY push (050).
+  if ! command -v zsh >/dev/null 2>&1; then
+    echo "Error: zsh is required to evaluate sync-tap.sh (a zsh script, as the publisher runs it) but was not found on PATH. Install zsh. Refusing (fail closed)." >&2
+    return 1
+  fi
+  [ -d "${PTE_SYNC_ROOT:-}" ] || { echo "Error: sync work dir missing; refusing (fail closed)." >&2; return 1; }
+  porc="$(mktemp "${PTE_SYNC_ROOT}/porc.XXXXXX")" || { echo "Error: mktemp failed." >&2; return 1; }
+  errf="$(mktemp "${PTE_SYNC_ROOT}/perr.XXXXXX")" || { rm -f "$porc"; return 1; }
+  PTE_MAP_FILE="$(mktemp "${TMPDIR:-/tmp}/kb-tap-release-map.XXXXXX")" || { rm -f "$porc" "$errf"; return 1; }
+  PTE_DIRS_FILE="$(mktemp "${TMPDIR:-/tmp}/kb-tap-release-dirs.XXXXXX")" || { rm -f "$porc" "$errf"; return 1; }
+  PTE_FILES_FILE="$(mktemp "${TMPDIR:-/tmp}/kb-tap-release-files.XXXXXX")" || { rm -f "$porc" "$errf"; return 1; }
+  # develop's script over develop's tree and a scratch tap (names only): nothing local is read, and
+  # nothing outside the scratch root can be written (--check never writes to the source dir).
+  # rc 0 = nothing to sync, rc 1 = drift (a normal answer here); anything else = it broke.
+  zsh "$sync" --check --porcelain --source-dir "${PTE_SYNC_ROOT}/src" --reference-dir "${PTE_SYNC_ROOT}/ref" >"$porc" 2>"$errf" || rc=$?
+  if [ "$rc" -gt 1 ]; then
+    echo "Error: 'zsh sync-tap.sh --check --porcelain' (develop's script over develop's tree) failed (rc=${rc}) - cannot establish the publisher-owned set. Refusing (fail closed)." >&2
+    tail -n 5 "$errf" | sed 's/^/       /' >&2
+    rm -f "$porc" "$errf"
+    return 1
+  fi
+  rm -f "$errf"
+  # Completeness: sync-tap.sh prints its "Checked N files." summary only after it has walked EVERY mapping.
+  # An early `exit 1` (a guard firing mid-run) also reads as "drift, a normal answer" by rc alone, and
+  # would hand back a PARTIAL map - the reassuring wrong answer. 4c682c30 under bash did exactly that.
+  if ! grep -q '^Checked [0-9][0-9]* files' "$porc"; then
+    echo "Error: 'zsh sync-tap.sh --check --porcelain' ended without its completion summary (rc=${rc}) - the listing may be PARTIAL, so the publisher-owned set cannot be established. Refusing (fail closed)." >&2
+    rm -f "$porc"
+    return 1
+  fi
+  LC_ALL=C awk -F'\t' '($1=="OK"||$1=="DRIFT"||$1=="NEW"||$1=="MISSING") && $3!="" {print $3}' "$porc" \
+    | tr '[:upper:]' '[:lower:]' > "$PTE_MAP_FILE"
+  rm -f "$porc"
+  n="$(wc -l < "$PTE_MAP_FILE" | tr -d '[:space:]')"
+  if [ -z "$n" ] || [ "$n" -lt 1 ]; then
+    echo "Error: 'sync-tap.sh --check --porcelain' produced no mirror records - cannot establish the publisher-owned set. Refusing (fail closed)." >&2
+    return 1
+  fi
+  line="$(grep -m1 '^TAP_STAGE_PATHS=(' "$sync" || true)"
+  line="${line#TAP_STAGE_PATHS=(}"; line="${line%%)*}"
+  if [ -z "${line//[[:space:]]/}" ]; then
+    echo "Error: could not read TAP_STAGE_PATHS from ${sync} - refusing (fail closed)." >&2
+    return 1
+  fi
+  for w in $line; do
+    w="$(printf '%s' "$w" | tr '[:upper:]' '[:lower:]')"
+    case "$w" in
+      libexec/) : ;;                     # tap-native except the mapped file (see above)
+      */)       printf '%s\n' "$w" >> "$PTE_DIRS_FILE" ;;
+      *)        printf '%s\n' "$w" >> "$PTE_FILES_FILE" ;;
+    esac
+  done
+  if [ ! -s "$PTE_DIRS_FILE" ] && [ ! -s "$PTE_FILES_FILE" ]; then
+    echo "Error: TAP_STAGE_PATHS in ${sync} yielded no usable entries - refusing (fail closed)." >&2
+    return 1
+  fi
+  # 052: files the publisher stages by name outside TAP_STAGE_PATHS (today: CHANGELOG.md, rewritten by
+  # _pub_write_tap_changelog and `git -C "$TAP" add`-ed in the same publish). A tap-only edit to one
+  # races the publisher's rewrite of it. Derived from the script's own staging calls, not hardcoded;
+  # none found = refuse (a refactor of the staging must be re-read here, not silently un-owned).
+  cl="$(sed -n -E 's/^[[:space:]]*git -C "\$TAP" add ([A-Za-z0-9_.][A-Za-z0-9_.\/-]*)[[:space:]]*$/\1/p' "$sync" | sort -u | tr '[:upper:]' '[:lower:]')"
+  if [ -z "$cl" ]; then
+    echo "Error: could not derive the publisher's exact-file staging (git -C \"\$TAP\" add <file>) from ${sync} - refusing (fail closed)." >&2
+    return 1
+  fi
+  printf '%s\n' "$cl" >> "$PTE_FILES_FILE"
+  return 0
+}
+
+# pte_owned_reason <path> — prints why the publisher owns the path and returns 0; returns 1
+# when the path is tap-native (free for a tap-only edit).
+pte_owned_reason() {
+  local p d
+  p="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  if grep -Fxq -- "$p" "$PTE_MAP_FILE"; then
+    printf 'mirrored destination (sync-tap.sh map)'; return 0
+  fi
+  while IFS= read -r d || [ -n "$d" ]; do
+    case "$p" in "$d"*) printf 'under publisher-staged directory %s' "$d"; return 0 ;; esac
+  done < "$PTE_DIRS_FILE"
+  if grep -Fxq -- "$p" "$PTE_FILES_FILE"; then
+    printf 'publisher-staged file'; return 0
+  fi
+  return 1
+}
+
+# pte_check_commit <sha> — appends human-readable offences (one per line) to PTE_OFFENCES_FILE.
+pte_check_commit() {
+  local sha="$1" short st pth why trailers n_key dt
+  short="$(git -C "$TAP_DIR" rev-parse --short=10 "$sha")"
+  # trailer: exact key + value, exactly once, from git's own trailer parser.
+  trailers="$(git -C "$TAP_DIR" log -1 --format=%B "$sha" | git interpret-trailers --parse 2>/dev/null || true)"
+  n_key="$(printf '%s\n' "$trailers" | grep -ciE '^Tap-Only-Edit[[:space:]]*:' || true)"
+  # Here-string, not `printf | grep -q`: under pipefail a >64 KiB trailer block lets grep -q exit
+  # on its first hit while printf is still writing, printf takes SIGPIPE, and the pipeline's
+  # status flips an accepted commit into "missing" (XACA-1404 ratchet; row B11).
+  if ! grep -Fxq 'Tap-Only-Edit: intentional' <<<"$trailers"; then
+    echo "${short}: missing the exact trailer 'Tap-Only-Edit: intentional' (key and value are case-sensitive; it must sit in the final trailer block)" >> "$PTE_OFFENCES_FILE"
+  elif [ "$n_key" -ne 1 ]; then
+    echo "${short}: carries ${n_key} Tap-Only-Edit trailers (exactly one 'Tap-Only-Edit: intentional' is allowed)" >> "$PTE_OFFENCES_FILE"
+  fi
+  # paths: every added/modified/deleted/type-changed path; renames arrive as delete + add.
+  # Through a temp file, not process substitution: a failing git must be SEEN, not read as
+  # "no paths changed".
+  dt="$(mktemp "${TMPDIR:-/tmp}/kb-tap-release-dt.XXXXXX")" || { echo "${short}: mktemp failed (refused)" >> "$PTE_OFFENCES_FILE"; return 0; }
+  if ! git -C "$TAP_DIR" diff-tree --no-commit-id -r -z --no-renames --name-status --root "$sha" > "$dt" 2>/dev/null; then
+    rm -f "$dt"
+    echo "${short}: could not list the paths this commit touches (refused)" >> "$PTE_OFFENCES_FILE"
+    return 0
+  fi
+  while IFS= read -r -d '' st && IFS= read -r -d '' pth; do
+    case "$pth" in
+      *$'\n'*) echo "${short}: path contains a newline (refused): $(printf '%q' "$pth")" >> "$PTE_OFFENCES_FILE"; continue ;;
+    esac
+    if why="$(pte_owned_reason "$pth")"; then
+      echo "${short}: [${st}] ${pth}  <- ${why}" >> "$PTE_OFFENCES_FILE"
+    fi
+  done < "$dt"
+  rm -f "$dt"
+}
+
+# pte_preconditions — everything checked BEFORE the lock and before a token exists.
+# Prints a PASS/FAIL table; every failure is counted in FAIL_COUNT. Sets PTE_BASE / PTE_HEAD.
+pte_preconditions() {
+  local st n branch merges rev first_merge
+  # (d) clean tree + index
+  st="$(git -C "$TAP_DIR" status --porcelain 2>/dev/null || echo __STATUS_FAILED__)"
+  if [ -z "$st" ]; then check_pass "Tap working tree and index are clean."
+  else check_fail "Tap working tree is not clean (uncommitted, staged or untracked changes) - commit or clean up first, so the commit you meant is what you are looking at."; fi
+
+  PTE_HEAD="$(git -C "$TAP_DIR" rev-parse --verify --quiet 'HEAD^{commit}' || true)"
+  if [ -z "$PTE_HEAD" ]; then
+    check_fail "Tap HEAD does not resolve to a commit."
+    return 1
+  fi
+  branch="$(git -C "$TAP_DIR" branch --show-current 2>/dev/null || true)"
+  check_pass "Tap HEAD ${PTE_HEAD} (${branch:-detached HEAD}); the push names its destination explicitly (<sha>:refs/heads/main), so a branch or a detached HEAD are both fine."
+
+  # (a) fetch + strict fast-forward
+  if ! pte_fetch_main; then
+    check_fail "Could not fetch tap main from ${TAP_PUSH_TARGET} (details above)."
+    return 1
+  fi
+  check_pass "Fetched tap main from ${TAP_PUSH_TARGET} (read-only, no token): ${PTE_BASE}."
+  if [ "$PTE_BASE" = "$PTE_HEAD" ]; then
+    check_fail "HEAD equals tap main - there is nothing to push."
+    return 1
+  elif git -C "$TAP_DIR" merge-base --is-ancestor "$PTE_HEAD" "$PTE_BASE" 2>/dev/null; then
+    check_fail "HEAD is BEHIND tap main - the publisher (or a release) moved it. Rebase your tap-only commit(s) onto the fetched tap main and re-run."
+    return 1
+  elif ! git -C "$TAP_DIR" merge-base --is-ancestor "$PTE_BASE" "$PTE_HEAD" 2>/dev/null; then
+    check_fail "HEAD has DIVERGED from tap main (not a fast-forward). Rebase your tap-only commit(s) onto the fetched tap main and re-run."
+    return 1
+  fi
+  n="$(git -C "$TAP_DIR" rev-list --count "${PTE_BASE}..${PTE_HEAD}")"
+  check_pass "HEAD is a strict fast-forward of tap main with ${n} new commit(s)."
+
+  PTE_SHAS_FILE="$(mktemp "${TMPDIR:-/tmp}/kb-tap-release-shas.XXXXXX")" || { check_fail "mktemp failed."; return 1; }
+  git -C "$TAP_DIR" rev-list --reverse "${PTE_BASE}..${PTE_HEAD}" > "$PTE_SHAS_FILE" || { check_fail "could not list the new commits."; return 1; }
+  merges="$(git -C "$TAP_DIR" rev-list --merges "${PTE_BASE}..${PTE_HEAD}")" || { check_fail "could not look for merge commits."; return 1; }
+  if [ -n "$merges" ]; then
+    first_merge="${merges%%$'\n'*}"   # parameter expansion, not `| head -n1` (SIGPIPE under pipefail)
+    check_fail "The new range contains a merge commit (${first_merge:0:10}). Linear history only: a merge's diff against its first parent hides what the other parent brought, so the per-commit checks below would be unsound. Rebase onto tap main."
+    return 1
+  fi
+  check_pass "The new range is linear (no merge commits)."
+
+  # (b)+(c) trailer and publisher-owned paths, per commit
+  if ! pte_build_owned_map; then
+    check_fail "Could not establish which tap paths the publisher owns (details above)."
+    return 1
+  fi
+  PTE_OFFENCES_FILE="$(mktemp "${TMPDIR:-/tmp}/kb-tap-release-off.XXXXXX")" || { check_fail "mktemp failed."; return 1; }
+  while IFS= read -r rev || [ -n "$rev" ]; do
+    [ -n "$rev" ] || continue
+    pte_check_commit "$rev"
+  done < "$PTE_SHAS_FILE"
+  if [ -s "$PTE_OFFENCES_FILE" ]; then
+    check_fail "${n} commit(s) checked; offences:"
+    sed 's/^/           /' "$PTE_OFFENCES_FILE"
+    echo "           Publisher-owned content is edited in dev-team (canonical-source rule, XACA-0340) and mirrored by the publisher; this command is only for files with no canonical."
+  else
+    check_pass "Every new commit carries 'Tap-Only-Edit: intentional' and touches no publisher-owned path ($(wc -l < "$PTE_MAP_FILE" | tr -d '[:space:]') mirrored destinations + staged directories checked)."
+  fi
+  return 0
+}
+
+# push_tap_edit_main — the whole --push-tap-edit flow. Never returns into the release path.
+push_tap_edit_main() {
+  local rc=0 n before
+  echo ""
+  echo "=== kb-tap-release --push-tap-edit ==="
+  echo ""
+  if [ ! -e "${TAP_DIR}/.git" ]; then
+    echo "Error: ${TAP_DIR} is not an initialized tap checkout. Run from the outer dev-team checkout." >&2
+    exit 1
+  fi
+  # Identity first (config, key, URL allow-list, rewrite + git -c refusals): no network, no
+  # token. It also fixes TAP_PUSH_TARGET, which the read-only fetch below uses.
+  tap_release_identity_prepare || {
+    echo "" >&2
+    echo "Refusing: could not establish the tap push identity (details above). Nothing was pushed." >&2
+    exit 1
+  }
+  pte_preconditions || true
+  if [ "$FAIL_COUNT" -gt 0 ]; then
+    echo ""
+    echo "Refusing: $FAIL_COUNT precondition(s) did not pass. Nothing was locked, minted or pushed."
+    exit 1
+  fi
+  n="$(wc -l < "$PTE_SHAS_FILE" | tr -d '[:space:]')"
+  echo ""
+  echo "  Commits to push (${n}):"
+  git -C "$TAP_DIR" log --reverse --format='    %h %s' "${PTE_BASE}..${PTE_HEAD}"
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    echo ""
+    echo "[DRY-RUN] All preconditions passed. Would take the tap-writer lock, mint the release App token,"
+    echo "[DRY-RUN] and push ${PTE_HEAD}:refs/heads/main to ${TAP_PUSH_TARGET}. No lock, token or push was made."
+    exit 0
+  fi
+
+  # Lock, THEN mint (a long KB_TAP_RELEASE_LOCK_WAIT must not age the 1h token).
+  if [ ! -f "$LOCK_LIB" ]; then
+    echo "Error: cannot find kb-tap-lock.sh (looked in ${OUTER_DIR}/scripts/ and next to this script). Refusing to push without the tap-writer lock." >&2
+    exit 1
+  fi
+  # shellcheck source=scripts/kb-tap-lock.sh
+  . "$LOCK_LIB"
+  KB_TAP_LOCK_TAP_DIR="$TAP_DIR"
+  export KB_TAP_LOCK_TAP_DIR
+  echo ""
+  echo "=== Acquiring the tap-writer lock ==="
+  kb_tap_lock_acquire \
+    "kb-tap-release push-tap-edit — $(id -un 2>/dev/null || echo unknown)@$(hostname -s 2>/dev/null || echo unknown)" \
+    "${KB_TAP_RELEASE_LOCK_WAIT:-0}" || rc=$?
+  case "$rc" in
+    0) KB_TAP_LOCK_ACQUIRED=1
+       echo "  Held: ${KB_TAP_LOCK_REF} (${KB_TAP_LOCK_HELD_SHA})" ;;
+    10) echo "" >&2
+        echo "Refusing: another writer holds the tap-writer lock (details above). Wait and re-run, or" >&2
+        echo "  KB_TAP_RELEASE_LOCK_WAIT=600 kb-tap-release --push-tap-edit    (inspect: scripts/kb-tap-lock.sh status)" >&2
+        exit 1 ;;
+    *)  echo "" >&2
+        echo "Refusing: could not determine the tap-writer lock state (exit ${rc}). Do NOT skip the lock." >&2
+        exit 1 ;;
+  esac
+
+  # Under the lock: nothing may have moved since the preconditions ran.
+  before="$PTE_BASE"
+  pte_fetch_main || { echo "Refusing: could not re-fetch tap main under the lock. Nothing was pushed." >&2; exit 1; }
+  if [ "$PTE_BASE" != "$before" ]; then
+    echo "Refusing: tap main moved while waiting for the lock (${before} -> ${PTE_BASE}). Rebase and re-run. Nothing was pushed." >&2
+    exit 1
+  fi
+  if [ "$(git -C "$TAP_DIR" rev-parse --verify --quiet 'HEAD^{commit}' || true)" != "$PTE_HEAD" ]; then
+    echo "Refusing: tap HEAD moved after the preconditions ran (another session committed in this shared checkout?). Nothing was pushed." >&2
+    exit 1
+  fi
+
+  tap_release_identity_mint_or_exit
+  echo "=== --push-tap-edit: ${PTE_HEAD} -> tap main ==="
+  # The exact commit that was verified, with an explicit destination ref: never `push origin
+  # main` (a detached HEAD pushes nothing useful) and never a moving `HEAD` (the shared tap
+  # checkout can gain a commit between the check and the push). Marker inline, not exported.
+  TAP_SINGLE_WRITER_RELEASE=1 tap_authed_git -C "${TAP_DIR}" push "${TAP_PUSH_TARGET}" "${PTE_HEAD}:refs/heads/main"
+  git -C "${TAP_DIR}" update-ref refs/remotes/origin/main "${PTE_HEAD}"
+  echo "  Tap push complete."
+  echo ""
+  echo "=== Next: TWO-STEP follow-up (the tap is now ahead of dev-team's gitlink) ==="
+  echo "  New tap main SHA: ${PTE_HEAD}"
+  echo "  Until the gitlink PR below merges, the publisher's pointer-parity gate refuses (tap main is ahead of"
+  echo "  develop's gitlink) and it catches up afterwards. So: ANNOUNCE this now (kb-msg send academy \"...\"),"
+  echo "  do it one at a time, and merge promptly."
+  echo "    git checkout -b chore/bump-tap-gitlink-${PTE_HEAD:0:10} dev-team/develop     # a branch, never develop itself"
+  echo "    git submodule update --init homebrew-tap && git -C homebrew-tap checkout ${PTE_HEAD}"
+  echo "    git add homebrew-tap"
+  echo "    git commit -m \"chore: Bump homebrew-tap gitlink to ${PTE_HEAD}\" \\"
+  echo "               -m \"Tap-only edit pushed by kb-tap-release --push-tap-edit (no dev-team canonical).\""
+  echo "    # changelog: the tap-changelog-completeness gate SKIPS commits carrying 'Tap-Only-Edit: intentional'"
+  echo "    # (yours do), so no homebrew-tap/CHANGELOG.md entry is needed. dev-team still wants its own fragment:"
+  echo "    #   scripts/kb-changelog new <ITEM-ID>   (or a 'Changelog-Skip: <reason>' trailer)"
+  echo "    git push -u dev-team HEAD && gh pr create --base develop ...   # then kb-pr-monitor as usual"
+  exit 0
+}
+
+if [ "$PUSH_TAP_EDIT" -eq 1 ]; then
+  push_tap_edit_main
+fi
+
+if [ "$DRY_RUN" -eq 0 ] && [ "$NO_PUSH" -eq 0 ] && [ "$PUSH_TAP_EDIT" -eq 0 ]; then
   if [ ! -f "$LOCK_LIB" ]; then
     # Same fact preflight #5 tests, read the same way: a gitlink is a FILE, so
     # -e rather than -d.
