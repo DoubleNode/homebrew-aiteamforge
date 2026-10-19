@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+
+## [0.21.4] - 2026-10-19
 - XACA-1170 post-arming tap publisher docs + develop ruleset references
 - Tap files updated in this publish: `share/scripts/kb-pr-monitor`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1568 (1/2) adopt ci-runner-bundle.sh as dev-team canonical; publisher stages libexec/
@@ -8013,7 +8015,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.3...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.4...HEAD
+[0.21.4]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.3...v0.21.4
 [0.21.3]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.2...v0.21.3
 [0.21.2]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.1...v0.21.2
 [0.21.1]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.0...v0.21.1
