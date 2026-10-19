@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1170 post-arming tap publisher docs + develop ruleset references
+- Tap files updated in this publish: `share/scripts/kb-pr-monitor`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1568 (1/2) adopt ci-runner-bundle.sh as dev-team canonical; publisher stages libexec/
 - Tap files updated in this publish: `share/scripts/kb-ttyd-bridge.sh`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1537 — consolidate persistent runner workspace git packs; guest disk alarm

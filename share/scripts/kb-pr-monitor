@@ -1960,10 +1960,11 @@ CHECKS_EOF
         # (a gitlink-only bump touches only `homebrew-tap`, which a feature
         # PR no longer touches under the publisher decouple).
         #
-        # required_status_checks.strict is MEASURED false on develop
-        # (re-verified 2026-09-18: `gh api
-        # repos/DoubleNode/dev-team/branches/develop/protection` ->
-        # required_status_checks.strict=false) — every forced update-branch
+        # strict status checks are MEASURED off on develop
+        # (re-verified 2026-10-19: `gh api
+        # repos/DoubleNode/dev-team/rules/branches/develop` ->
+        # strict_required_status_checks_policy=false; develop is a ruleset,
+        # so .../branches/develop/protection 404s) — every forced update-branch
         # remains OUR OWN policy, ours to tune. Do NOT "fix" staleness cost
         # by flipping strict to true (§2.3 anti-recommendation). The
         # ticket's "develop moves 11.6-13.0 commits/day" figure is ITS
