@@ -120,7 +120,9 @@ test('capacity renders as text with units; null/absent renders an em dash, never
     const t = card(env, 'm4mini').querySelector('[data-cicd-pool-capacity]').textContent;
     assert.match(t, /Reclaimable memory\s*3\.8\s*GiB/);
     assert.match(t, /Swap used \/ total/);
-    assert.match(t, /1 busy \/ 1 idle/);
+    assert.match(t, /Dispatcher slots \(JIT\)/);
+    assert.match(t, /Linux slots \(1\)\s*1 idle · 0 reserved · 0 running/);
+    assert.match(t, /macOS slots \(1\)\s*0 idle · 0 reserved · 0 running · 1 busy \(unknown\)/);   // fixture has no assignments to join
     assert.match(t, /10 CPUs/);
     const nullCard = card(env, 'm2mini');
     const dashes = nullCard.querySelectorAll('[aria-label="not reported"]');
@@ -451,4 +453,152 @@ test('legacy v1 body (no derived fields) renders every machine without throwing;
     Array.from(cards).forEach((c) => {
         assert.notEqual(c.getAttribute('data-cicd-pool-state'), 'enabled', 'a missing state is not rendered as healthy');
     });
+});
+
+// ---- XACA-1579-002/003: Dispatcher slots (JIT) rows -----------------------------------------------------
+function slotRowsFor(slots, assignments) {
+    const d = fixture('mixed', (x) => { x.machines.m1mini.slots = slots; x.assignments = assignments || []; });
+    const view = setup(d);
+    const out = {};
+    Array.from(card(view, 'm1mini').querySelectorAll('[data-cicd-pool-capacity] > div')).forEach((row) => {
+        const label = row.querySelector('dt').textContent;
+        if (/ slots \(\d+\)$/.test(label)) out[label] = row.querySelector('dd').textContent;
+    });
+    return { rows: out, text: card(view, 'm1mini').querySelector('[data-cicd-pool-capacity]').textContent, view };
+}
+const sl = (os, index, state, assignmentId) => ({ os, index, state, assignmentId: assignmentId || null });
+const asg = (id, state, boundJob) => ({ id, state, boundJob: boundJob || null });
+
+test('slots split per OS: M1Mini 4 Linux (3 idle + 1 reserved) and 1 macOS idle', () => {
+    const r = slotRowsFor([sl('Linux', 1, 'busy', 'a1'), sl('Linux', 2, 'idle'), sl('Linux', 3, 'idle'), sl('Linux', 4, 'idle'), sl('macOS', 1, 'idle')],
+        [asg('a1', 'started')]);
+    assert.deepEqual(r.rows, {
+        'Linux slots (4)': '3 idle · 1 reserved · 0 running',
+        'macOS slots (1)': '1 idle · 0 reserved · 0 running'
+    });
+    assert.match(r.text, /Dispatcher slots \(JIT\)/);
+    assert.ok(!/\d+ busy \/ \d+ idle/.test(r.text), 'the old mixed-OS busy/idle line is gone');
+});
+
+test('slots legend is visible text and its rows carry the classes the stylesheet styles', () => {
+    const r = slotRowsFor([sl('Linux', 1, 'busy', 'a1'), sl('macOS', 1, 'idle')], [asg('a1', 'started')]);
+    const cap = card(r.view, 'm1mini').querySelector('[data-cicd-pool-capacity]');
+    // "reserved" must be explained on screen, not only in a title= tooltip (keyboard/touch/AT never see those).
+    assert.match(cap.querySelector('.cicd-pool-hint').textContent, /Reserved = runner registered, waiting for a job\./);
+    assert.equal(cap.querySelectorAll('.cicd-pool-slots-head').length, 1);
+    assert.equal(cap.querySelectorAll('.cicd-pool-slot-os').length, 2, 'one nested row per OS');
+    const css = fs.readFileSync(POOL_CSS, 'utf8');
+    ['.cicd-pool-hint {', '.cicd-pool-slots-head dd {', '.cicd-pool-slot-os dt {'].forEach((sel) =>
+        assert.ok(css.includes(sel), 'lcars-ci-pool.css defines ' + sel));
+});
+
+test('all five slot states are accounted for and the printed counts sum to the OS total', () => {
+    const r = slotRowsFor([sl('Linux', 1, 'idle'), sl('Linux', 2, 'starting', 'a2'), sl('Linux', 3, 'busy', 'a3'),
+        sl('Linux', 4, 'cleaning', 'a4'), sl('Linux', 5, 'broken'), sl('Linux', 6, 'busy', 'a6')],
+        [asg('a2', 'delivered'), asg('a3', 'started'), asg('a6', 'running', { id: 1 })]);
+    assert.equal(r.rows['Linux slots (6)'], '1 idle · 1 reserved · 1 running · 1 starting · 1 cleaning · 1 broken');
+    const sum = r.rows['Linux slots (6)'].split(' · ').reduce((n, p) => n + parseInt(p, 10), 0);
+    assert.equal(sum, 6, 'every slot lands in exactly one bucket');
+    const warn = card(r.view, 'm1mini').querySelector('.cicd-warn');
+    assert.ok(warn && /1 broken/.test(warn.textContent), 'broken carries the warn class');
+});
+
+test('starting/cleaning/broken are omitted when zero', () => {
+    const r = slotRowsFor([sl('Linux', 1, 'idle')]);
+    assert.equal(r.rows['Linux slots (1)'], '1 idle · 0 reserved · 0 running');
+});
+
+test('busy slot: assignment started -> reserved, running -> running (join by assignmentId)', () => {
+    const slots = [sl('macOS', 1, 'busy', 'x'), sl('macOS', 2, 'busy', 'y')];
+    const r = slotRowsFor(slots, [asg('x', 'started'), asg('y', 'running', { id: 7 })]);
+    assert.equal(r.rows['macOS slots (2)'], '0 idle · 1 reserved · 1 running');
+    const both = slotRowsFor(slots, [asg('x', 'started'), asg('y', 'started')]);
+    assert.equal(both.rows['macOS slots (2)'], '0 idle · 2 reserved · 0 running');
+});
+
+test('busy slot without a matching assignment is "busy (unknown)", never guessed into running', () => {
+    const r = slotRowsFor([sl('Linux', 1, 'busy', 'gone'), sl('Linux', 2, 'busy', null)], [asg('other', 'running', { id: 1 })]);
+    assert.equal(r.rows['Linux slots (2)'], '0 idle · 0 reserved · 0 running · 2 busy (unknown)');
+});
+
+test('an OS with zero slots gets no row; no slots at all renders a dash', () => {
+    const r = slotRowsFor([sl('Linux', 1, 'idle')]);
+    assert.deepEqual(Object.getOwnPropertyNames(r.rows), ['Linux slots (1)']);
+    assert.deepEqual(slotRowsFor([]).rows, {});
+    const nullSlots = slotRowsFor(null);
+    assert.deepEqual(nullSlots.rows, {});
+    assert.ok(card(nullSlots.view, 'm1mini').querySelectorAll('[aria-label="not reported"]').length >= 1);
+});
+
+test('slot OS from the payload is escaped', () => {
+    const r = slotRowsFor([sl('<img src=x onerror=1>', 1, 'idle')]);
+    assert.equal(card(r.view, 'm1mini').querySelector('[data-cicd-pool-capacity] img'), null);
+});
+
+// ---- XACA-1579-006 adversarial (Thok): slot state x assignment state matrix -------------------------------
+test('1579-006: every busy-slot x assignment-state combination lands in exactly one bucket (sum == total)', () => {
+    const asgStates = ['pending', 'delivered', 'started', 'running', 'completed', 'failed', 'expired', 'cancelled', 'lost', 'bogus', undefined];
+    const expectBucket = { delivered: 'reserved', started: 'reserved', running: 'running' };
+    asgStates.forEach((as) => {
+        [null, { id: 9 }].forEach((bj) => {
+            const r = slotRowsFor([sl('Linux', 1, 'busy', 'a')], [asg('a', as, bj)]);
+            const row = r.rows['Linux slots (1)'];
+            const sum = row.split(' · ').reduce((n, p) => n + parseInt(p, 10), 0);
+            assert.equal(sum, 1, as + '/' + !!bj + ' -> ' + row);
+            let want = expectBucket[as] || 'busy (unknown)';
+            if (as === 'started' && bj) want = 'running';
+            assert.match(row, new RegExp('1 ' + want.replace(/[()]/g, '\\$&')), as + '/' + !!bj + ' -> ' + row);
+        });
+    });
+    ['idle', 'starting', 'cleaning', 'broken', 'weird', undefined, null, 42].forEach((st) => {
+        const r = slotRowsFor([{ os: 'Linux', index: 1, state: st, assignmentId: 'a' }], [asg('a', 'running', { id: 1 })]);
+        const row = r.rows['Linux slots (1)'];
+        assert.equal(row.split(' · ').reduce((n, p) => n + parseInt(p, 10), 0), 1, String(st) + ' -> ' + row);
+    });
+});
+
+test('1579-006: assignmentId 0 / prototype-ish ids / malformed entries do not throw or miscount', () => {
+    const r = slotRowsFor([sl('Linux', 1, 'busy', 0), { os: 'Linux', index: 2, state: 'busy', assignmentId: '__proto__' },
+        { os: 'Linux', index: 3, state: 'busy', assignmentId: 'constructor' }, null, undefined, {}],
+        [asg(0, 'running', { id: 1 }), null, undefined, { state: 'running' }, asg('constructor', 'started')]);
+    const labels = Object.getOwnPropertyNames(r.rows);
+    assert.ok(labels.length >= 1, JSON.stringify(r.rows));
+    let grand = 0;
+    labels.forEach((k) => {
+        const total = parseInt(k.match(/\((\d+)\)/)[1], 10);
+        grand += total;
+        assert.equal(r.rows[k].split(' · ').reduce((n, p) => n + parseInt(p, 10), 0), total, k + ' -> ' + r.rows[k]);
+    });
+    assert.equal(grand, 6, 'null/undefined/{} slots are still counted exactly once each');
+});
+
+test('1579-006: rendering the same payload twice does not rebuild the card (signature contract intact)', () => {
+    const d = fixture('mixed', (x) => { x.machines.m1mini.slots = [sl('Linux', 1, 'busy', 'a'), sl('macOS', 1, 'idle')]; x.assignments = [asg('a', 'started')]; });
+    const env = setup(d);
+    const first = card(env, 'm1mini');
+    env.api.render(d, env.el, env.opts);
+    assert.equal(card(env, 'm1mini'), first, 'same node after identical re-render');
+    const d2 = JSON.parse(JSON.stringify(d)); d2.assignments = [asg('a', 'running', { id: 3 })];
+    env.api.render(d2, env.el, env.opts);
+    assert.match(card(env, 'm1mini').querySelector('[data-cicd-pool-capacity]').textContent, /Linux slots \(1\)\s*0 idle · 0 reserved · 1 running/,
+        'an assignment-only change (slot unchanged) must refresh the slot row');
+});
+
+test('1579-016: an assignment-only change also refreshes the slot row of an EXPANDED card', () => {
+    const d = fixture('mixed', (x) => { x.machines.m1mini.slots = [sl('Linux', 1, 'busy', 'a'), sl('macOS', 1, 'idle')]; x.assignments = [asg('a', 'started')]; });
+    const env = setup(d);
+    expand(env, 'm1mini');
+    assert.equal(card(env, 'm1mini').querySelector('[data-cicd-pool-toggle]').getAttribute('aria-expanded'), 'true');
+    const d2 = JSON.parse(JSON.stringify(d)); d2.assignments = [asg('a', 'running', { id: 3 })];
+    env.api.render(d2, env.el, env.opts);
+    const c = card(env, 'm1mini');
+    assert.equal(c.querySelector('[data-cicd-pool-toggle]').getAttribute('aria-expanded'), 'true', 'still expanded after the poll');
+    assert.match(c.querySelector('[data-cicd-pool-capacity]').textContent, /Linux slots \(1\)\s*0 idle · 0 reserved · 1 running/,
+        'the expanded render path must see the new assignments too');
+});
+
+test('1579-006: other capacity rows survive the slots rewrite', () => {
+    const env = setup(fixture('mixed'));
+    const t = card(env, 'm4mini').querySelector('[data-cicd-pool-capacity]').textContent;
+    ['VM CPUs', 'VM memory', 'CI capability'].forEach((l) => assert.ok(t.includes(l), l));
 });

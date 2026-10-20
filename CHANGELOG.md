@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1579 Disambiguate CI/CD pool slots vs persistent runners
+- Tap files updated in this publish: `fleet-monitor/server/public/lcars/js/lcars-cicd.js`,`fleet-monitor/server/public/lcars/lcars-dashboard.html` `fleet-monitor/server/public/shared/css/lcars-ci-pool.css`,`fleet-monitor/server/public/shared/js/lcars-ci-pool.js` `fleet-monitor/server/tests/xaca-1444-ci-pool-ui-jsdom.test.js`,`fleet-monitor/server/tests/xaca-1476-cicd-layout-collapse-jsdom.test.js`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1445 dispatcher watcher misses queued jobs; shadow report + --jit-slots fixes
 - Tap files updated in this publish: `fleet-monitor/server/lib/ci-dispatch-watcher.js`,`fleet-monitor/server/package.json` `fleet-monitor/server/tests/xaca-1441-watcher.test.js`,`fleet-monitor/server/tests/xaca-1445-watcher-reread.test.js` `share/scripts/ci-runner/provision-host.sh`. Run `brew upgrade aiteamforge` to receive them.
 

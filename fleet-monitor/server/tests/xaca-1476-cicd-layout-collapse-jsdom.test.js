@@ -124,6 +124,23 @@ test('DOM order: summary, pool, queue, runner states, recent jobs (rendered node
     assert.ok(env.summary.contains(nodes.summary) && !env.content.contains(nodes.summary), 'summary lives only in #cicd-summary');
 });
 
+test('XACA-1579: persistent-runners heading + JIT disambiguation note render', async () => {
+    const env = setupDashboard(async (u) => {
+        if (u === '/api/ci-pool') return okJson(poolFixture('mixed'));
+        if (u === '/api/ci-runners') return okJson(runnersFixture('healthy'));
+        return status(404);
+    });
+    await env.api.refresh();
+    const head = env.content.querySelector('h3.cicd-subhead');
+    assert.equal(head.textContent, 'PERSISTENT RUNNERS (REPORTER)');
+    assert.ok(!env.content.textContent.includes('RUNNER STATES'), 'old heading gone');
+    const note = env.content.querySelector('[data-cicd-runners-note]');
+    assert.ok(note, 'note rendered');
+    assert.equal(note.textContent, "Long-lived runners reported by each machine's reporter. " +
+        'Dispatcher JIT runners are one-job and appear in the pool card above (Dispatcher slots).');
+    assert.equal(head.nextElementSibling, note, 'note sits directly under the heading');
+});
+
 test('pool cards are collapsed by default: aria-expanded=false, details hidden, right glyph, aria-controls resolves', () => {
     const env = setupPool();
     const cards = env.el.querySelectorAll('[data-cicd-pool-machine-card]');

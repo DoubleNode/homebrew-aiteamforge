@@ -541,10 +541,16 @@
             '<div class="empty-state-text">' + esc(text) + '</div></div>';
     }
 
+    // XACA-1579: this section is reporter telemetry (persistent runners) only;
+    // dispatcher JIT runners live in the pool card, so say so.
+    var RUNNERS_NOTE = 'Long-lived runners reported by each machine\'s reporter. ' +
+        'Dispatcher JIT runners are one-job and appear in the pool card above (Dispatcher slots).';
+
     function bodyHtml(data) {
         var machines = Array.isArray(data.machines) ? data.machines : [];
         var html = '';
-        html += '<h3 class="cicd-subhead">RUNNER STATES</h3>';
+        html += '<h3 class="cicd-subhead">PERSISTENT RUNNERS (REPORTER)</h3>';
+        html += '<div class="cicd-sub" data-cicd-runners-note>' + esc(RUNNERS_NOTE) + '</div>';
         if (!machines.length) {
             html += emptyStateHtml('NO CI RUNNERS REPORTING',
                 'No machine has pushed runner telemetry yet. See docs/ci-runner-runbook.md (runbook) to enroll a runner.',

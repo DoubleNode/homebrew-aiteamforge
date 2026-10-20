@@ -59,7 +59,62 @@
     function gib(b) { return (b / 1073741824).toFixed(1) + ' GiB'; }
     function num2(n) { return (Math.round(n * 100) / 100).toString(); }
 
-    function capacityRows(m, serverTime) {
+    // ---- dispatcher slots (XACA-1579-002/003) ---------------------------------
+    // A slot's `busy` only means "runner process launched"; whether a job is bound lives on the joined
+    // assignment (slot.assignmentId -> assignments[].id, same /api/ci-pool payload). Every slot lands in
+    // exactly ONE bucket so the printed counts always sum to the per-OS total.
+    var SLOT_BUCKETS = [
+        { k: 'idle', t: 'idle', always: true },
+        { k: 'reserved', t: 'reserved', always: true, tip: 'reserved (waiting for job): runner registered, no job assigned yet' },
+        { k: 'running', t: 'running', always: true },
+        { k: 'starting', t: 'starting' },
+        { k: 'cleaning', t: 'cleaning' },
+        { k: 'broken', t: 'broken', warn: true },
+        { k: 'busyUnknown', t: 'busy (unknown)', tip: 'busy, but no matching assignment in the payload' },
+        { k: 'other', t: 'unrecognized' }
+    ];
+    function slotBucket(s, byId) {
+        var st = s && s.state;
+        if (st === 'idle' || st === 'starting' || st === 'cleaning' || st === 'broken') return st;
+        if (st !== 'busy') return 'other';
+        var a = s.assignmentId !== null && s.assignmentId !== undefined ? byId[s.assignmentId] : null;
+        if (!a) return 'busyUnknown';
+        if (a.state === 'running' || (a.state === 'started' && a.boundJob)) return 'running';
+        if (a.state === 'started' || a.state === 'delivered') return 'reserved';
+        return 'busyUnknown';
+    }
+    function slotRows(slots, assignments) {
+        if (!Array.isArray(slots) || !slots.length) return [];
+        var byId = Object.create(null), perOs = Object.create(null), order = [];
+        (Array.isArray(assignments) ? assignments : []).forEach(function(a) {
+            if (a && a.id !== null && a.id !== undefined) byId[a.id] = a;
+        });
+        slots.forEach(function(s) {
+            var os = s && s.os ? String(s.os) : 'Unknown';
+            if (!perOs[os]) { perOs[os] = { total: 0, n: {} }; order.push(os); }
+            var b = slotBucket(s, byId);
+            perOs[os].total++;
+            perOs[os].n[b] = (perOs[os].n[b] || 0) + 1;
+        });
+        order.sort(function(a, b) {   // Linux, then macOS, then anything else alphabetically
+            var rank = function(o) { return o === 'Linux' ? 0 : o === 'macOS' ? 1 : 2; };
+            return rank(a) - rank(b) || (a < b ? -1 : a > b ? 1 : 0);
+        });
+        return order.map(function(os) {
+            var o = perOs[os], parts = [];
+            SLOT_BUCKETS.forEach(function(bk) {
+                var n = o.n[bk.k] || 0;
+                if (!n && !bk.always) return;
+                var txt = esc(n + ' ' + bk.t);
+                if (bk.warn) txt = '<span class="cicd-warn">' + txt + '</span>';
+                if (bk.tip) txt = '<span title="' + esc(bk.tip) + '">' + txt + '</span>';
+                parts.push(txt);
+            });
+            return [os + ' slots (' + o.total + ')', parts.join(' · '), 'cicd-pool-slot-os'];
+        });
+    }
+
+    function capacityRows(m, serverTime, assignments) {
         var c = m.capacity && typeof m.capacity === 'object' ? m.capacity : null;
         var g = function(k) { return c && isNum(c[k]) ? c[k] : null; };
         var rows = [];
@@ -75,14 +130,12 @@
         rows.push(['VM CPUs', nc === null ? dash() : esc(nc + ' CPUs')]);
         var mt = g('memTotalBytes');
         rows.push(['VM memory', mt === null ? dash() : esc(gib(mt))]);
-        var slots = Array.isArray(m.slots) ? m.slots : null;
-        var slotHtml = dash();
-        if (slots) {
-            var busy = slots.filter(function(s) { return s && s.state === 'busy'; }).length;
-            var idle = slots.filter(function(s) { return s && s.state === 'idle'; }).length;
-            slotHtml = esc(busy + ' busy / ' + idle + ' idle');
-        }
-        rows.push(['Slots', slotHtml]);
+        var sr = slotRows(m.slots, assignments);
+        // The legend is visible text, not a tooltip: title= never reaches keyboard, touch or most screen readers.
+        rows.push(['Dispatcher slots (JIT)', sr.length ? '<span class="cicd-pool-hint">One-job runners the dispatcher starts on demand. ' +
+            'Reserved = runner registered, waiting for a job. Persistent runners are listed under PERSISTENT RUNNERS.</span>' : dash(),
+            sr.length ? 'cicd-pool-slots-head' : '']);
+        sr.forEach(function(r) { rows.push(r); });
         var ageText = DASH;
         var lp = Date.parse(m.lastPollAt), sv = Date.parse(serverTime);
         if (!isNaN(lp) && !isNaN(sv)) {
@@ -118,7 +171,7 @@
     function setExpanded(id, on) { expandState.set(String(id), on === true); }
     var CHEV_CLOSED = '\u25B8', CHEV_OPEN = '\u25BE';   // same glyphs as lcars-division-collapse.js
 
-    function cardHtml(id, m, serverTime, expanded) {
+    function cardHtml(id, m, serverTime, expanded, assignments) {
         var state = STATES[m.state] ? m.state : 'unknown';
         var st = STATES[state], key = safeId(id);
         var detailsId = 'cicd-pool-details-' + key;
@@ -140,8 +193,8 @@
         }
         h += '</div><div class="cicd-pool-details" id="' + esc(detailsId) + '" data-cicd-pool-details' + (expanded ? '' : ' hidden') + '>';
         h += '<dl class="cicd-pool-cap" data-cicd-pool-capacity>';
-        capacityRows(m, serverTime).forEach(function(r) {
-            h += '<div><dt>' + esc(r[0]) + '</dt><dd>' + r[1] + '</dd></div>';
+        capacityRows(m, serverTime, assignments).forEach(function(r) {
+            h += '<div' + (r[2] ? ' class="' + esc(r[2]) + '"' : '') + '><dt>' + esc(r[0]) + '</dt><dd>' + r[1] + '</dd></div>';
         });
         h += '<div><dt>CI capability</dt><dd data-cicd-pool-capability>' + esc(m.capability || 'unknown') + '</dd></div></dl>';
         var c = controlFor(id, m);
@@ -254,7 +307,7 @@
             if (!m || typeof m !== 'object') return;
             seen[id] = true;
             var open = isExpanded(id);
-            var html = cardHtml(id, m, body.serverTime, open);
+            var html = cardHtml(id, m, body.serverTime, open, body.assignments);
             var card = findCard(list, id);
             if (!card) {
                 card = doc.createElement('li');
@@ -264,7 +317,7 @@
             }
             // The signature ignores the expand flag: a toggle is applied in place by toggleCard(), so only a real
             // content change rebuilds the card (and that rebuild re-reads the expand map via cardHtml).
-            var sig = (open ? cardHtml(id, m, body.serverTime, false) : html).replace(AGE_RE, '');
+            var sig = (open ? cardHtml(id, m, body.serverTime, false, body.assignments) : html).replace(AGE_RE, '');
             if (card._sig !== sig) {
                 if (active && card.contains(active)) {
                     if (active.hasAttribute('data-cicd-pool-toggle')) refocusToggle = id;

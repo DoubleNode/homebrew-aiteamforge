@@ -36,6 +36,10 @@
 .cicd-pool-cap > div { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; }
 .cicd-pool-cap dt { color: var(--lcars-tan); }
 .cicd-pool-cap dd { margin: 0; text-align: right; }
+/* XACA-1579: the Dispatcher slots row is a heading + prose hint, its per-OS rows nest under it. */
+.cicd-pool-slots-head dd { flex: 1 1 100%; text-align: left; }
+.cicd-pool-hint { font-size: 11px; color: var(--lcars-tan); }
+.cicd-pool-slot-os dt { padding-left: 1em; }
 .cicd-pool-controls { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px; }
 .cicd-pool-btn { min-width: 24px; min-height: 24px; padding: 6px 14px; border: 2px solid var(--lcars-cyan);
     border-radius: 16px; background: var(--lcars-darker); color: var(--lcars-cyan); font: inherit; cursor: pointer; }
