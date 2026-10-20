@@ -140,23 +140,45 @@ describe('call budget', () => {
         assert.ok(world.calls.every((c) => c.purpose === 'watcher'));
     });
 
-    test('jobs are fetched only for new or changed runs; unchanged lists (304) cost no jobs call', async () => {
+    // XACA-1445-031 changed this contract: a run in the status=queued list is re-read every cycle (F1),
+    // because GitHub does not move updated_at when a job is created or picked up. An in_progress-only
+    // run keeps the old rule, plus a backstop every IN_PROGRESS_REREAD_CYCLES cycles.
+    test('in_progress-only runs: jobs fetched only for new or changed runs (until the backstop); unchanged lists cost no jobs call', async () => {
         const { world, w } = setup();
-        world.queued = [run(1)]; world.jobs[1] = [job(11)];
+        world.in_progress = [run(1)]; world.jobs[1] = [job(11, { status: 'in_progress', runner_name: 'r' })];
         await w.runCycle();
         assert.equal(jobCalls(world).length, 1);
         assert.match(jobCalls(world)[0].path, /runs\/1\/jobs\?filter=latest&per_page=100$/);
         await w.runCycle();
         await w.runCycle();
         assert.equal(jobCalls(world).length, 1, 'unchanged updated_at => no jobs call');
-        world.queued = [run(1, { updated_at: '2026-10-06T12:01:00Z' })];
+        world.in_progress = [run(1, { updated_at: '2026-10-06T12:01:00Z' })];
         await w.runCycle();
         assert.equal(jobCalls(world).length, 2);
     });
 
-    test('a steady cycle spends exactly the two list calls', async () => {
+    test('queued runs: jobs re-read (conditionally) every cycle even with updated_at unchanged (XACA-1445-031 F1)', async () => {
         const { world, w } = setup();
         world.queued = [run(1)]; world.jobs[1] = [job(11)];
+        await w.runCycle();
+        await w.runCycle();
+        await w.runCycle();
+        assert.equal(jobCalls(world).length, 3);
+    });
+
+    test('a steady cycle spends the two list calls plus one conditional jobs call per queued run', async () => {
+        const { world, w } = setup();
+        world.queued = [run(1)]; world.jobs[1] = [job(11)];
+        await w.runCycle();
+        const before = world.calls.length;
+        await w.runCycle();
+        assert.equal(world.calls.length - before, 3);
+        assert.equal(w.snapshot().lastCycle.calls, 3);
+    });
+
+    test('a steady in_progress-only cycle spends exactly the two list calls', async () => {
+        const { world, w } = setup();
+        world.in_progress = [run(1)]; world.jobs[1] = [job(11, { status: 'in_progress', runner_name: 'r' })];
         await w.runCycle();
         const before = world.calls.length;
         await w.runCycle();

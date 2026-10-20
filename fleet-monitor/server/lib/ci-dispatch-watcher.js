@@ -17,9 +17,9 @@
  *
  * Cost control (D3 / A5):
  *   - every call is a conditional GET, and a 304 does not spend rate limit;
- *   - run jobs are fetched only for a run first seen or whose updated_at moved,
- *     plus runs that left the run lists while still holding open jobs (so a
- *     completion is observed, once, cheaply);
+ *   - run jobs are fetched for a run first seen or whose updated_at moved, plus runs that left the
+ *     run lists while still holding open jobs (so a completion is observed, cheaply), plus the
+ *     XACA-1445-031 re-reads below;
  *   - cadence is 15 s while anything is queued/in_progress, else 60 s; the
  *     client's rate mode overrides: slow => 60 s, suspended/blocked => no calls
  *     until the reset / retry-after.
@@ -37,6 +37,22 @@
  * repo is polled and a removed one is dropped (its open jobs are completed as `vanished`) without a
  * restart. The static `opts.allowlist` still works when no getter is given.
  *
+ * Re-reads (XACA-1445-031). GitHub's run `updated_at` is a RUN-STATUS clock: it does NOT move when a
+ * job is created, picked up, started or even completed while the run's status stays the same
+ * (measured live 2026-10-19). Gating job reads on it alone hid queued jobs for minutes and kept
+ * already-finished jobs "queued" (ghost JIT mints). So:
+ *   F1 every run in the `status=queued` LIST has its jobs re-read EVERY cycle (GitHub keeps a run
+ *      queued while any job is queued, so these are exactly the runs holding demand). A run listed
+ *      only as in_progress is re-read every IN_PROGRESS_REREAD_CYCLES cycles (~60 s busy), so a
+ *      persistent-runner pickup / completion is seen within a minute, not at the next status flip.
+ *   F2 a run that leaves the lists, or whose last open job closes, enters a GRACE set and is re-read
+ *      every cycle until a read made >= GRACE_MIN_MS after entry shows no open job (covers GitHub's
+ *      `max-age=60` cache and the `always()` gate job created ~1 s after a cancel). Bounded: at most
+ *      MAX_GRACE_RUNS entries (oldest evicted) and GRACE_MAX_MS each.
+ *   F3 a run's read marker (updated_at / run_attempt) is recorded only after a successful jobs
+ *      fetch, so a throwing fetch is retried next cycle instead of marking the run as read.
+ * All of these are conditional GETs; an unchanged body is a 304 and costs no rate limit.
+ *
  * Errors are logged by code/message only. The client's errors are already
  * secret-free; this module never touches a token.
  */
@@ -49,6 +65,10 @@ const OPEN_JOB_MAX_AGE_MS = 24 * 60 * 60 * 1000; // an "open" job unseen this lo
 const MAX_TRACKED_JOBS = 5000;                   // hard cap; oldest completed evicted first
 const PAGE_SIZE = 100;                           // per_page on every list call
 const MAX_PAGES = 10;                            // XACA-1441-032: pagination cap per list (1000 items)
+const IN_PROGRESS_REREAD_CYCLES = 4;             // XACA-1445-031 F1: in_progress-only run backstop (~60 s busy)
+const GRACE_MIN_MS = 60 * 1000;                  // XACA-1445-031 F2: >= GitHub's jobs-list max-age=60
+const GRACE_MAX_MS = 15 * 60 * 1000;             // XACA-1445-031 F2: a grace entry never outlives this
+const MAX_GRACE_RUNS = 200;                      // XACA-1445-031 F2: grace set cap (oldest evicted)
 
 const PRIORITY_LOOKUP_CONCURRENCY = 8;             // XACA-1479: max resolver calls in flight (rate-budget bound)
 const FIELD_CAP = 200;                           // XACA-1444: cap on branch / workflow / url strings
@@ -120,7 +140,12 @@ function createWatcher(opts = {}) {
     const maxJobs = opts.maxTrackedJobs ?? MAX_TRACKED_JOBS;
 
     const jobs = new Map(); // key -> { rec, lastSeenMs, completedSeenMs|null }
-    const runs = new Map(); // "owner/repo#runId" -> { updatedAt, runAttempt, listedCycle }
+    // "owner/repo#runId" -> { id, readOk, updatedAt, runAttempt, listedCycle, lastReadCycle, inLists, meta }.
+    // readOk/updatedAt/runAttempt/lastReadCycle are the READ MARKER, written only after a successful
+    // jobs fetch (XACA-1445-031 F3); listedCycle/inLists/meta are presence, written on every listing.
+    const runs = new Map();
+    // XACA-1445-031 F2: "owner/repo#runId" -> { owner, repo, slug, id, meta, since, firstAt }
+    const grace = new Map();
     let cycle = 0;
     let timer = null;
     let running = false;
@@ -321,6 +346,7 @@ function createWatcher(opts = {}) {
      * vanishes anything.
      */
     async function fetchJobs(r, run, nowMs, gone) {
+        const hadOpen = openJobsFor(r.owner, r.repo, run.id);
         const { items: list, allFresh, capped } = await getPaged(r, `/repos/${r.owner}/${r.repo}/actions/runs/${run.id}/jobs?filter=latest&per_page=${PAGE_SIZE}`, 'jobs');
         // Fresh = every page was a 200 (a 304 page is a replay). A capped list may be missing jobs.
         const fresh = allFresh && !capped;
@@ -342,6 +368,37 @@ function createWatcher(opts = {}) {
             if (attempt !== null && e.rec.runAttempt < attempt) vanish(e, nowMs, `superseded by attempt ${attempt}`);
             else if (gone && fresh && !seen.has(e.rec.key)) vanish(e, nowMs, 'absent from its finished run');
         }
+        // F2: our last open job of this run just closed. A follow-on job (an `always()` gate after a
+        // cancel, a `needs:` successor) may not be listed yet, and nothing moves updated_at for it.
+        if (hadOpen && !openJobsFor(r.owner, r.repo, run.id)) enterGrace(r, run, nowMs);
+        return { anyOpen: list.some((j) => j && normalizeStatus(j.status) !== 'completed') };
+    }
+
+    /** XACA-1445-031 F2: start a run's grace re-reads, or restart the min window of one already in grace. */
+    function enterGrace(r, meta, nowMs) {
+        if (!meta || !Number.isInteger(meta.id)) return;
+        const rk = `${r.slug}#${meta.id}`;
+        const g = grace.get(rk);
+        if (g) { g.since = nowMs; g.meta = meta; return; }
+        grace.set(rk, { owner: r.owner, repo: r.repo, slug: r.slug, id: meta.id, meta, since: nowMs, firstAt: nowMs });
+        while (grace.size > MAX_GRACE_RUNS) {
+            let oldestK = null; let oldest = Infinity;
+            for (const [k, v] of grace) if (v.firstAt < oldest) { oldest = v.firstAt; oldestK = k; }
+            grace.delete(oldestK);
+            log('warn', `watcher: grace set full (${MAX_GRACE_RUNS}); evicted the oldest run`);
+        }
+    }
+
+    /**
+     * F2: after a successful grace read, drop the run once a read made >= GRACE_MIN_MS after entry
+     * shows no open job (and we hold none). A 304 at that point is proof too: the conditional is
+     * evaluated against GitHub's current body, and the cache window has passed.
+     */
+    function settleGrace(rk, res, nowMs) {
+        const g = grace.get(rk);
+        if (!g) return;
+        if (nowMs - g.firstAt >= GRACE_MAX_MS) { grace.delete(rk); return; }
+        if (!res.anyOpen && !openJobsFor(g.owner, g.repo, g.id) && nowMs - g.since >= GRACE_MIN_MS) grace.delete(rk);
     }
 
     /** A gone run's job fetch failed. 404/410 = the run no longer exists. Rate limits propagate. */
@@ -358,55 +415,89 @@ function createWatcher(opts = {}) {
 
     async function pollRepo(r, nowMs) {
         const listed = new Map();
+        const queuedIds = new Set(); // F1: membership of the status=queued LIST (wr.status may be absent or lag)
         for (const status of ['queued', 'in_progress']) {
             const { items } = await getPaged(r, `/repos/${r.owner}/${r.repo}/actions/runs?status=${status}&per_page=${PAGE_SIZE}`, 'workflow_runs');
-            for (const wr of items) if (wr && Number.isInteger(wr.id)) listed.set(wr.id, wr);
+            for (const wr of items) {
+                if (!(wr && Number.isInteger(wr.id))) continue;
+                listed.set(wr.id, wr);
+                if (status === 'queued') queuedIds.add(wr.id);
+            }
         }
 
         try {
             await prefetchPriorities(r, listed);
-            return await pollListed(r, nowMs, listed);
+            return await pollListed(r, nowMs, listed, queuedIds);
         } finally {
             prioMemo.clear();
         }
     }
 
-    async function pollListed(r, nowMs, listed) {
+    async function pollListed(r, nowMs, listed, queuedIds = new Set()) {
         let active = listed.size > 0;
         for (const [id, wr] of listed) {
             const rk = `${r.slug}#${id}`;
             const prev = runs.get(rk);
-            const changed = !prev || prev.updatedAt !== wr.updated_at || prev.runAttempt !== wr.run_attempt;
-            runs.set(rk, { updatedAt: wr.updated_at, runAttempt: wr.run_attempt, listedCycle: cycle });
-            // A still-listed run is still visible: its open jobs are not "unseen" (prune bound).
-            for (const e of openEntriesFor(r.owner, r.repo, id)) e.lastSeenMs = nowMs;
-            if (!changed) continue;
-            await fetchJobs(r, {
+            const changed = !prev || !prev.readOk || prev.updatedAt !== wr.updated_at || prev.runAttempt !== wr.run_attempt;
+            const meta = {
                 id, runAttempt: wr.run_attempt, event: wr.event,
                 branch: wr.head_branch, workflow: wr.name,
                 repoFullName: (wr.repository && wr.repository.full_name) || r.slug,
                 headRepoFullName: (wr.head_repository && wr.head_repository.full_name) ?? null,
-            }, nowMs);
+            };
+            // Presence only. The read marker (readOk/updatedAt/runAttempt/lastReadCycle) is written after a
+            // successful fetch (F3): a throw leaves it untouched, so the run is re-read next cycle.
+            const entry = { readOk: false, lastReadCycle: cycle, ...prev, id, listedCycle: cycle, inLists: true, meta };
+            runs.set(rk, entry);
+            // A still-listed run is still visible: its open jobs are not "unseen" (prune bound).
+            for (const e of openEntriesFor(r.owner, r.repo, id)) e.lastSeenMs = nowMs;
+            const queuedListed = queuedIds.has(id);                                                            // F1
+            const inProgressDue = !queuedListed && cycle - entry.lastReadCycle >= IN_PROGRESS_REREAD_CYCLES;   // F1 backstop
+            const inGrace = grace.has(rk);                                                                     // F2
+            if (!(changed || queuedListed || inProgressDue || inGrace)) continue;
+            const res = await fetchJobs(r, meta, nowMs);
+            entry.readOk = true; entry.updatedAt = wr.updated_at; entry.runAttempt = wr.run_attempt; entry.lastReadCycle = cycle;
+            if (inGrace) settleGrace(rk, res, nowMs);
         }
 
-        // Runs that left the lists but still hold open jobs: look once more so the
-        // completion is observed. Conditional, so an unchanged run costs nothing.
+        // F2: a run that just left the lists starts its grace re-reads, whether or not we hold a job of it
+        // (shape A: an `always()` gate created ~1 s after a cancel is in none of our earlier reads).
+        for (const [rk, e] of runs) {
+            if (!e.inLists || listed.has(e.id) || rk !== `${r.slug}#${e.id}`) continue;
+            e.inLists = false;
+            enterGrace(r, e.meta, nowMs);
+        }
+
+        // Runs that left the lists but still hold open jobs, plus grace runs: look again so a completion
+        // (or a late-created job) is observed. Conditional, so an unchanged run costs nothing.
         const gone = new Set();
         for (const { rec } of jobs.values()) {
             if (rec.owner === r.owner && rec.repo === r.repo && rec.status !== 'completed' && !listed.has(rec.runId)) gone.add(rec.runId);
         }
+        for (const g of grace.values()) if (g.slug === r.slug && !listed.has(g.id)) gone.add(g.id);
         for (const id of gone) {
-            const prev = runs.get(`${r.slug}#${id}`);
+            const rk = `${r.slug}#${id}`;
+            const prev = runs.get(rk);
+            const g = grace.get(rk);
             const sample = [...jobs.values()].find((e) => e.rec.owner === r.owner && e.rec.repo === r.repo && e.rec.runId === id);
-            if (!sample) continue;
-            try {
-                await fetchJobs(r, {
+            let meta = null;
+            if (sample) {
+                meta = {
                     id, runAttempt: (prev && prev.runAttempt) || sample.rec.runAttempt,
                     branch: sample.rec.branch, workflow: sample.rec.workflow,
                     event: sample.rec.run.event, repoFullName: sample.rec.run.repoFullName,
                     headRepoFullName: sample.rec.run.headRepoFullName,
-                }, nowMs, true);
+                };
+            } else if (g) {
+                meta = g.meta;
+            }
+            if (!meta) continue;
+            try {
+                const res = await fetchJobs(r, meta, nowMs, true);
+                if (g) settleGrace(rk, res, nowMs);
             } catch (e) {
+                // A deleted run has nothing left to show: stop its grace re-reads.
+                if (e && (e.status === 404 || e.status === 410)) grace.delete(rk);
                 // One deleted run must not abort the loop and hide every other run's completion.
                 onGoneFetchError(r, id, e, nowMs);
             }
@@ -457,9 +548,12 @@ function createWatcher(opts = {}) {
                 .sort((a, b) => a[1].completedSeenMs - b[1].completedSeenMs);
             for (const [key] of done) { if (jobs.size <= maxJobs) break; jobs.delete(key); }
         }
+        for (const [rk, g] of grace) if (nowMs - g.firstAt >= GRACE_MAX_MS) grace.delete(rk); // F2 bound
         const live = new Set();
         for (const { rec } of jobs.values()) live.add(`${rec.owner}/${rec.repo}#${rec.runId}`);
-        for (const [rk, r] of runs) if (r.listedCycle !== cycle && !live.has(rk)) runs.delete(rk);
+        // inLists: kept until pollListed has seen it leave (F2 needs that transition; a failed repo poll
+        // would otherwise prune the entry first and the run would never get its grace re-reads).
+        for (const [rk, r] of runs) if (r.listedCycle !== cycle && !r.inLists && !live.has(rk)) runs.delete(rk);
     }
 
     function hasOpenJobs() {
@@ -499,6 +593,7 @@ function createWatcher(opts = {}) {
             const slug = rk.slice(0, rk.lastIndexOf('#')).toLowerCase();
             if (!keep.has(slug)) runs.delete(rk);
         }
+        for (const [rk, g] of grace) if (!keep.has(g.slug.toLowerCase())) grace.delete(rk);
         if (!firstRead) log('log', `watcher: allowlist now ${repos.length} repo(s)`);
     }
 
@@ -586,6 +681,7 @@ function createWatcher(opts = {}) {
             repos: repos.map((r) => r.slug),
             jobs: { queued, inProgress, completed, tracked: jobs.size },
             runsTracked: runs.size,
+            runsInGrace: grace.size,
             lastCycle: { at: last.at, ok: last.ok, error: last.error, calls: last.calls, nextDelayMs: last.nextDelayMs },
             rateMode: last.mode,
         };
@@ -596,5 +692,5 @@ function createWatcher(opts = {}) {
 
 module.exports = {
     createWatcher, BUSY_INTERVAL_MS, IDLE_INTERVAL_MS, COMPLETED_RETENTION_MS, MAX_TRACKED_JOBS,
-    PRIORITY_LOOKUP_CONCURRENCY,
+    PRIORITY_LOOKUP_CONCURRENCY, IN_PROGRESS_REREAD_CYCLES, GRACE_MIN_MS, GRACE_MAX_MS, MAX_GRACE_RUNS,
 };

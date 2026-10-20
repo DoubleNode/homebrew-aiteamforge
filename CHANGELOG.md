@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1445 dispatcher watcher misses queued jobs; shadow report + --jit-slots fixes
+- Tap files updated in this publish: `fleet-monitor/server/lib/ci-dispatch-watcher.js`,`fleet-monitor/server/package.json` `fleet-monitor/server/tests/xaca-1441-watcher.test.js`,`fleet-monitor/server/tests/xaca-1445-watcher-reread.test.js` `share/scripts/ci-runner/provision-host.sh`. Run `brew upgrade aiteamforge` to receive them.
 
 ## [0.21.4] - 2026-10-19
 - XACA-1170 post-arming tap publisher docs + develop ruleset references

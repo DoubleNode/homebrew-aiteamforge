@@ -34,6 +34,7 @@
 #                        Opt-in; without it nothing agent-related happens.
 #   --agent-key-file <p> The per-host dispatch key (fcp_...); needs --with-agent.
 #   --server-url <url>   Fleet Monitor base URL for the agent; needs --with-agent.
+#   --jit-slots <N>      agent linuxSlots, independent of --linux-count; needs --with-agent.
 #   --telemetry-key-file <p>  The per-host CI telemetry key (fct_ + 43 chars; XACA-1422)
 #                        the reporter pushes with. Refused unless it has that exact shape,
 #                        so the fleet-wide token can never be placed. Without it a
@@ -198,6 +199,7 @@ FLEET_CONFIG_SRC="${FLEET_CONFIG_SRC:-}"   # --fleet-config / env; default resol
 
 # Fleet CI Pool agent (XACA-1442). Only used under --with-agent.
 WITH_AGENT=0
+JIT_SLOTS=""             # XACA-1445-029: --jit-slots N; empty = agent.json linuxSlots follows --linux-count
 NO_REGISTER=0
 SEND_PAUSE_MARKER=1       # XACA-1457: agent.json sendPauseMarker; --no-pause-marker sets 0
 REFUSE_IF_BUSY=0         # XACA-1443-015: `ci refresh` re-provisions an ENABLED host; refuse (rc 3) while a pool job runs
@@ -248,7 +250,7 @@ Usage:
 
 Host shape (all optional except --host):
   --host <name>        host name: runner names <name>-linux-N / <name>-macos-1, label <name>
-  --linux-count <N>    Linux runners in the VM (default 2)
+  --linux-count <N>    PERSISTENT Linux runners in the VM (default 2)
   --vm-cpus <N>        VM CPUs (default 4)
   --vm-memory <GiB>    VM memory in GiB (default 6)
   --vm-name <name>     override the derived VM name (ci-linux-<host>)
@@ -266,6 +268,9 @@ Fleet CI Pool agent (XACA-1442, opt-in; nothing is installed without --with-agen
   --with-agent         install the agent daemon (runs as root) + JIT scripts
   --agent-key-file <p> per-host dispatch key file (must start fcp_); needs --with-agent
   --server-url <url>   Fleet Monitor base URL (https://...); needs --with-agent
+  --jit-slots <N>      agent linuxSlots (JIT Linux slots, N >= 0), independent of --linux-count
+                       (which sets PERSISTENT runners); default = --linux-count; needs --with-agent;
+                       with --no-linux only 0 is allowed
                        (default: origin of the invoking user's centralServer.apiEndpoint)
   --no-pause-marker    agent.json gets "sendPauseMarker": false (default true): the agent stops sending
                        its XACA-1440 pause marker; for hosts polling an older server that rejects it.
@@ -308,6 +313,7 @@ while [ $# -gt 0 ]; do
     --legacy-names) LEGACY_NAMES=1; shift ;;
     --no-register) NO_REGISTER=1; shift ;;
     --with-agent) WITH_AGENT=1; shift ;;
+    --jit-slots) [ $# -ge 2 ] || { usage >&2; exit 2; }; case "$2" in ''|*[!0-9]*) echo "provision-host.sh: --jit-slots needs a non-negative integer, got '$2'" >&2; usage >&2; exit 2 ;; esac; JIT_SLOTS="$((10#$2))"; shift 2 ;;
     --refuse-if-busy) REFUSE_IF_BUSY=1; shift ;;
     --no-pause-marker) SEND_PAUSE_MARKER=0; shift ;;
     --agent-key-file) [ $# -ge 2 ] || { usage >&2; exit 2; }; [ -n "$2" ] || { echo "provision-host.sh: --agent-key-file needs a path, got ''" >&2; exit 2; }; AGENT_KEY_FILE="$2"; shift 2 ;;
@@ -352,7 +358,9 @@ agent_usage_err() { echo "provision-host.sh: $*" >&2; exit 2; }
 if [ "$WITH_AGENT" != "1" ]; then
   [ -z "$AGENT_KEY_FILE" ] || agent_usage_err "--agent-key-file requires --with-agent"
   [ -z "$SERVER_URL" ] || agent_usage_err "--server-url requires --with-agent"
+  [ -z "$JIT_SLOTS" ] || agent_usage_err "--jit-slots requires --with-agent"
 fi
+[ -z "$JIT_SLOTS" ] || [ "$NO_LINUX" != "1" ] || [ "$JIT_SLOTS" = "0" ] || agent_usage_err "--jit-slots ${JIT_SLOTS} cannot be combined with --no-linux (no VM, no Linux slots)"
 if [ "$WITH_AGENT" = "1" ] && [ "$MODE" = "baseline-only" ]; then
   agent_usage_err "--with-agent cannot be combined with --baseline-only"
 fi
@@ -1379,7 +1387,7 @@ PY
 # the --host regex, VM_NAME by need_name, the URL by agent_url_ok, slots are ints;
 # sendPauseMarker is a bare JSON boolean picked from a fixed pair (true/false), never from input.
 agent_cfg_json() { # serverUrl
-  local mac=1 pm=true lin="$LINUX_RUNNER_COUNT" vm="$VM_NAME"
+  local mac=1 pm=true lin="${JIT_SLOTS:-$LINUX_RUNNER_COUNT}" vm="$VM_NAME"
   if [ "$NO_MACOS" = "1" ]; then mac=0; fi
   if [ "$NO_LINUX" = "1" ]; then lin=0; vm=""; fi
   if [ "$SEND_PAUSE_MARKER" = "0" ]; then pm=false; fi
@@ -1388,7 +1396,7 @@ agent_cfg_json() { # serverUrl
 }
 
 stage_agent() {
-  local url tmp pchanged=0 have_key=0
+  local url tmp pchanged=0 have_key=0 cfgchanged=0
   [ -f "$AGENT_SRC" ] || die "agent source not found: ${AGENT_SRC}"
   url=$(agent_server_url)
   [ -n "$url" ] || die "no agent server URL: pass --server-url https://... (or have centralServer.apiEndpoint in the invoking user's fleet-config)"
@@ -1400,7 +1408,7 @@ stage_agent() {
 
   tmp=$(mktemp /tmp/ci-pool-agent-cfg.XXXXXX)
   agent_cfg_json "$url" >"$tmp"
-  if install_if_changed "$tmp" "$AGENT_CFG" 644 root wheel; then log "wrote ${AGENT_CFG}"; else log "${AGENT_CFG} already current"; fi
+  if install_if_changed "$tmp" "$AGENT_CFG" 644 root wheel; then cfgchanged=1; log "wrote ${AGENT_CFG}"; else log "${AGENT_CFG} already current"; fi
   rm -f "$tmp"
 
   # Key: stdin redirect only (never argv), 0600 root:wheel, umask 077 so even
@@ -1416,6 +1424,12 @@ stage_agent() {
 
   if install_plist "$PLIST_AGENT" plist_agent; then pchanged=1; log "wrote $PLIST_AGENT"; fi
   ensure_daemon_loaded "$LABEL_AGENT" "$PLIST_AGENT" "$pchanged"
+  # XACA-1445-029: the agent reads agent.json once at startup. A changed config under an already
+  # running daemon (not freshly loaded, not just bootout/bootstrapped) needs a restart to take effect.
+  if [ "$cfgchanged" = "1" ] && [ "$LOADED_FRESH" = "0" ]; then
+    log "agent config changed; kickstarting ${LABEL_AGENT} so it re-reads agent.json"
+    launchctl kickstart -k "system/$LABEL_AGENT" || warn "kickstart $LABEL_AGENT returned non-zero"
+  fi
   [ "$have_key" = "1" ] || warn "agent daemon loaded without a key; it cannot poll until ${AGENT_KEY} exists (re-run with --agent-key-file)"
   return 0
 }
@@ -1570,7 +1584,10 @@ do_dry_run() {
     fi
     url=$(agent_server_url)
     plan "agent (XACA-1442): install ${AGENT_SRC##*/} -> ${AGENT_DEST} (root, 755: $([ -f "$AGENT_DEST" ] && echo exists || echo absent)); runs as ROOT (no UserName)"
-    plan "  would: write ${AGENT_CFG} (root:wheel 644): serverUrl ${url:-<UNRESOLVED: pass --server-url>}, machine ${HOST}, vmName $([ "$NO_LINUX" = "1" ] && echo '' || echo "$VM_NAME"), linuxSlots $([ "$NO_LINUX" = "1" ] && echo 0 || echo "$LINUX_RUNNER_COUNT"), macSlots $([ "$NO_MACOS" = "1" ] && echo 0 || echo 1), sendPauseMarker $([ "$SEND_PAUSE_MARKER" = "0" ] && echo false || echo true)"
+    plan "  would: write ${AGENT_CFG} (root:wheel 644): serverUrl ${url:-<UNRESOLVED: pass --server-url>}, machine ${HOST}, vmName $([ "$NO_LINUX" = "1" ] && echo '' || echo "$VM_NAME"), linuxSlots $([ "$NO_LINUX" = "1" ] && echo 0 || echo "${JIT_SLOTS:-$LINUX_RUNNER_COUNT}"), macSlots $([ "$NO_MACOS" = "1" ] && echo 0 || echo 1), sendPauseMarker $([ "$SEND_PAUSE_MARKER" = "0" ] && echo false || echo true)"
+    if [ -n "$JIT_SLOTS" ] && [ "$NO_LINUX" != "1" ] && [ "$JIT_SLOTS" != "$LINUX_RUNNER_COUNT" ]; then
+      plan "  JIT slots ${JIT_SLOTS} independent of ${LINUX_RUNNER_COUNT} persistent runners (--jit-slots sets agent linuxSlots only; runner registration still follows --linux-count)"
+    fi
     plan "  would: key -> ${AGENT_KEY} (root:wheel 600, via stdin, never argv): ${k}"
     plan "  would: $([ "$NO_LINUX" = "1" ] && echo 'guest JIT scripts SKIPPED (--no-linux)' || echo "guest ${GUEST_JIT_DEST} + ${GUEST_JOB_STARTED_DEST}"); $([ "$NO_MACOS" = "1" ] && echo 'macOS JIT scripts SKIPPED (--no-macos)' || echo "host ${MAC_JIT_DEST} + ${MAC_JOB_STARTED_DEST}")"
     plan "  would: write ${PLIST_AGENT} ($([ -f "$PLIST_AGENT" ] && echo exists || echo absent)); daemon $(daemon_state "$LABEL_AGENT"); KeepAlive, state ${AGENT_STATE_DIR}, logs ${AGENT_LOG_DIR}"
