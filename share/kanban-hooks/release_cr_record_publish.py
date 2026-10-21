@@ -21,7 +21,8 @@ under the board lock (shell side, jq).
 
 Body: the team's resolved cr-record template (team > group > default), rendered against
 release_cr_facts.build_cr_fact_set(). The template's first line is the page title ("# <title>"), the
-rest is the body. No page format is invented here.
+rest is the body. No page format is invented here. The board CR/release are adapted first
+(rcf.cr_record_for_facts / release_record_for_facts, as the CR stage does) so a {login,name} approver is flattened.
 
 Test hook: KB_CR_RECORD_CONFIG_DIR points at a <kanban>/config dir (wiki.json + profiles) instead of
 the team registry lookup; it is also forwarded to kb-wiki as --config-dir.
@@ -139,12 +140,20 @@ def render_record(board: Dict[str, Any], cr: Dict[str, Any], team: str, cfg: Pat
 
     tz = ((board.get("teamConfig") or {}).get("crSupport") or {}).get("approval", {}) or {}
     tz = tz.get("tz") if isinstance(tz, dict) else None
-    crv = dict(cr)
-    crv["activity_log"] = _activity_rows(activity_file)
-    kwargs: Dict[str, Any] = {"board": board, "platform_name": str(wiki.get("platformName") or "")}
-    if tz:
-        kwargs["tz"] = tz
-    facts = rcf.build_cr_fact_set(release, crv, **kwargs)
+    pname = str(wiki.get("platformName") or "")
+    # XACA-1577: adapt the raw board CR/release exactly as the CR stage does. A board CR's approver may be a
+    # {login,name} object (and links/timestamps are nested); the template reads flat strings, so passing the
+    # raw record made it fail with TemplateRenderError on cr.approver. The adapters deep-copy.
+    try:
+        crv = rcf.cr_record_for_facts(cr, release=release)
+        crv["activity_log"] = _activity_rows(activity_file)  # our own rows (created/_VERB), not the adapter's
+        relr = rcf.release_record_for_facts(release, cr=cr, platform_name=pname)
+        kwargs: Dict[str, Any] = {"board": board, "platform_name": pname}
+        if tz:
+            kwargs["tz"] = tz
+        facts = rcf.build_cr_fact_set(relr, crv, **kwargs)
+    except ValueError as exc:  # FactSetError: malformed links/timestamps or ambiguous platform
+        raise _Fail("cannot assemble the CR facts: %s" % exc) from None
     rendered = rtr.render(template, facts)
 
     first, _, rest = rendered.partition("\n")
