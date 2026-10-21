@@ -435,6 +435,133 @@ def _skip_engine_managed(team: str, crs: list[dict], state: str, board: dict) ->
     return kept
 
 
+def _is_poller_suppressed(cr: dict) -> bool:
+    """True when a CR carries a lead's revert suppression (XACA-1538).
+
+    `kb-cr revert`/`undo`/`transition` (incl. the LCARS endpoint) write `poller_submit_suppressed: true` when a CR is pulled back below
+    cr-submitted; only a non-poller `kb-cr submit` clears it. FAILS CLOSED on the flag's value:
+    only an ABSENT key, null, or literal false counts as "not suppressed". Any other value
+    (true, "true", "false", 1, garbage) suppresses -- skipping is the safe direction, because the
+    cost of a skip is one manual `kb-cr submit`, while the cost of a miss is re-flipping a CR a
+    lead withdrew.
+    """
+    flag = cr.get("poller_submit_suppressed")
+    return flag is not None and flag is not False
+
+
+def _skip_poller_suppressed(team: str, crs: list[dict], state: str) -> list[dict]:
+    """Drop revert-suppressed CRs from a Pass 1 candidate list (XACA-1538; verbose-logged, never
+    written). The poller NEVER clears the flag -- only a non-poller `kb-cr submit` does."""
+    kept = []
+    for cr in crs:
+        if _is_poller_suppressed(cr):
+            cr_id = cr.get("crId") or cr.get("id", "<unknown>")
+            vlog(
+                f"[{team}][{cr_id}] {state} CR is poller-suppressed "
+                f"(poller_submit_suppressed set at "
+                f"{cr.get('poller_submit_suppressed_at') or 'unknown time'}; a lead reverted it): "
+                f"skipped. A manual `kb-cr submit` re-arms it."
+            )
+            continue
+        kept.append(cr)
+    return kept
+
+
+_CHANGES_PATH_RE = re.compile(r"^(.*?/changes/\d+)(?:/.*)?$")
+
+
+def _normalize_cr_proper_url(url) -> str | None:
+    """Reduce a cr_proper_url to its ticket identity (XACA-1538): lowercase host, no scheme,
+    query string, fragment or trailing slash; a `/changes/<n>` path collapses to exactly that
+    (so `/changes/2227?current_tab=details` == `/changes/2227/`). None when it cannot be
+    normalised (non-string, empty, no host)."""
+    if not isinstance(url, str) or not url.strip():
+        return None
+    try:
+        parts = urllib.parse.urlsplit(url.strip())
+    except ValueError:
+        return None
+    host = (parts.hostname or "").lower()
+    if not host:
+        return None
+    path = parts.path.rstrip("/")
+    m = _CHANGES_PATH_RE.match(path)
+    if m:
+        path = m.group(1)
+    return f"{host}{path}"
+
+
+# Holder states whose IT Connect ticket may be reused by another CR (XACA-1538).
+_TICKET_RELEASING_STATES = frozenset({"cr-closed", "cr-rejected"})
+
+
+def _cr_proper_url_claimed_elsewhere(board, cr_id: str, url: str) -> bool:
+    """True when `url` must NOT be bound to `cr_id` (XACA-1538 Requirement 3).
+
+    Board-local: another CR container in board["crs"] already holds the same normalised
+    `cr_proper_url` (the only place a CR stores it). FAILS CLOSED: an unreadable/malformed board
+    or an un-normalisable url returns True (refuse).
+
+    A holder in cr-closed or cr-rejected has released its ticket, so a re-issued CR may reuse it.
+    Every other holder state, including deployed/completed and unknown strings, still blocks.
+    """
+    want = _normalize_cr_proper_url(url)
+    if want is None or not isinstance(board, dict) or not isinstance(board.get("crs"), list):
+        return True
+    for other in board["crs"]:
+        if not isinstance(other, dict):
+            continue
+        other_id = other.get("crId") or other.get("id")
+        if other_id == cr_id:
+            continue
+        if other.get("crState") in _TICKET_RELEASING_STATES:
+            continue
+        held = other.get("cr_proper_url")
+        if held and _normalize_cr_proper_url(held) == want:
+            return True
+    return False
+
+
+def _refuse_if_claimed(team: str, cr_id: str, url: str) -> bool:
+    """scan_team guard: re-read the board fresh (so a claim made earlier this cycle is seen),
+    True = refuse and log. Nothing is written. Unreadable board => refuse (fail closed)."""
+    board_path = _board_file_for_team(team)
+    board = None
+    if board_path and os.path.isfile(board_path):
+        try:
+            board = json.loads(Path(board_path).read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            board = None
+    if board is None:
+        log(f"[{team}][{cr_id}] REFUSED transition: board unreadable, cannot verify {url!r} is unclaimed (fail closed).")
+        return True
+    if _cr_proper_url_claimed_elsewhere(board, cr_id, url):
+        want = _normalize_cr_proper_url(url)
+        # Same filter as _cr_proper_url_claimed_elsewhere, so the log names only blocking holders.
+        holders = [
+            (o.get("crId") or o.get("id"), o.get("crState"))
+            for o in (board.get("crs") or [])
+            if isinstance(o, dict) and (o.get("crId") or o.get("id")) != cr_id
+            and o.get("crState") not in _TICKET_RELEASING_STATES
+            and o.get("cr_proper_url") and _normalize_cr_proper_url(o.get("cr_proper_url")) == want
+        ]
+        if not holders:
+            log(f"[{team}][{cr_id}] REFUSED transition: {url!r} is not a valid IT Connect ticket URL. Nothing written.")
+            return True
+        named = ", ".join(f"{hid} ({hstate})" for hid, hstate in holders)
+        first = holders[0][0]
+        # XACA-1538-014: a reverted CR keeps its cr_proper_url, so a wrong bind strands the true owner.
+        # Name the recovery so the repeating refusal is actionable.
+        log(
+            f"[{team}][{cr_id}] REFUSED transition: cr_proper_url {url!r} is already held by {named}. "
+            f"Nothing written. If {first} does not own this ticket, release it with "
+            f"`kb-cr close {first}` (closed/rejected holders do not block); otherwise this CR's page links "
+            f"the wrong ticket. To submit {cr_id} by hand: `kb-cr submit {cr_id}`."
+        )
+        return True
+    return False
+
+
 def find_cr_drafted_crs(team: str) -> list[dict]:
     """
     Read the team board and return all CR container records whose crState
@@ -462,6 +589,7 @@ def find_cr_drafted_crs(team: str) -> list[dict]:
             drafted.append(cr)
 
     drafted = _skip_engine_managed(team, drafted, "cr-drafted", board_data)
+    drafted = _skip_poller_suppressed(team, drafted, "cr-drafted")
     vlog(f"[{team}] Found {len(drafted)} cr-drafted CR(s) out of {len(crs)} total.")
     return drafted
 
@@ -498,6 +626,7 @@ def find_cr_published_crs(team: str) -> list[dict]:
             published.append(cr)
 
     published = _skip_engine_managed(team, published, "cr-published", board_data)
+    published = _skip_poller_suppressed(team, published, "cr-published")
     vlog(f"[{team}] Found {len(published)} cr-published CR(s) out of {len(crs)} total.")
     return published
 
@@ -1744,6 +1873,8 @@ def scan_team(
                 continue
 
             log(f"[{team}][{cr_id}] CR-Proper link detected: {cr_proper_url!r}")
+            if _refuse_if_claimed(team, cr_id, cr_proper_url):
+                continue
             ok = transition_cr(
                 team, cr_record, cr_proper_url, dry_run=dry_run, source_state="cr-published"
             )
@@ -1779,6 +1910,8 @@ def scan_team(
                         recovered = extract_cr_proper_link(fallback_html)
                         if recovered:
                             log(f"[{team}][{cr_id}] [one-stage] recovered cr_proper_url={recovered}")
+                            if _refuse_if_claimed(team, cr_id, recovered):
+                                continue
                             ok = transition_cr(team, cr_record, recovered, dry_run=dry_run)
                             if ok:
                                 transitioned += 1
@@ -1797,6 +1930,8 @@ def scan_team(
                 continue
 
             log(f"[{team}][{cr_id}] CR-Proper link detected: {cr_proper_url!r}")
+            if _refuse_if_claimed(team, cr_id, cr_proper_url):
+                continue
             ok = transition_cr(team, cr_record, cr_proper_url, dry_run=dry_run)
             if ok:
                 transitioned += 1

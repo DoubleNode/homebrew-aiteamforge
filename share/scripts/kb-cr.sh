@@ -438,6 +438,44 @@ _kb_cr_write_ts_only() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# XACA-1538-012: THE one writer rule for the poller-submit suppression trio.
+#
+#   pre-write crState rank >= rank(cr-submitted)  AND  0 <= target rank < rank(cr-submitted)
+#       => set poller_submit_suppressed{,_at,_url}  (url = pre-write cr_proper_url or null)
+#
+# The IT Connect anchor is still on the request page after a downward move, so
+# without the flag cr-confluence-poller Pass 1 re-submits the CR next cycle. Every
+# downward write path (revert, undo, kb-cr transition, the LCARS endpoint) applies
+# this rule INSIDE its existing _kb_jq_update filter (atomic, no second write):
+#   _kb_cr_poller_suppress_decide  -> "<true|false>\t<url>" from the PRE-write board
+#   _KB_CR_POLLER_SUPPRESS_JQ      -> jq snippet consuming $psuppress / $purl / $now / $cidx
+# cr-closed is unranked (-1) and deliberately never suppresses. Forward moves and
+# `submit` never trigger; the actor-gated clear stays in _kb_cr_container_submit.
+# ─────────────────────────────────────────────────────────────────────────────
+_KB_CR_POLLER_SUPPRESS_JQ='
+        (if $psuppress == "true"
+         then .crs[$cidx].poller_submit_suppressed = true
+              | .crs[$cidx].poller_submit_suppressed_at = $now
+              | .crs[$cidx].poller_submit_suppressed_url = (if $purl == "" then null else $purl end)
+         else . end)'
+
+# Usage: _kb_cr_poller_suppress_decide <board_file> <cr_idx> <target_state>
+_kb_cr_poller_suppress_decide() {
+    local board_file="$1" cr_idx="$2" target_state="$3"
+    local pre_state pre_rank target_rank sub_rank url=""
+    pre_state=$(_kb_cr_container_get_state "$board_file" "$cr_idx" 2>/dev/null || echo "")
+    pre_rank=$(_kb_cr_state_rank "$pre_state")
+    target_rank=$(_kb_cr_state_rank "$target_state")
+    sub_rank=$(_kb_cr_state_rank "cr-submitted")
+    if (( pre_rank >= sub_rank && target_rank >= 0 && target_rank < sub_rank )); then
+        url=$(_kb_jq_read "$board_file" '.crs[$i].cr_proper_url // ""' -r --argjson i "$cr_idx" 2>/dev/null || true)
+        printf 'true\t%s\n' "$url"
+    else
+        printf 'false\t\n'
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # _kb_cr_lifecycle_advance — core container lifecycle helper (v2.0)
 #
 # Atomically writes a new crState + a timestamp key to the CR container record.
@@ -460,6 +498,9 @@ _kb_cr_lifecycle_advance() {
     local new_state="$4"
     local ts_key="$5"
     local ts_value="${6:-}"
+    # XACA-1538-002: optional 7th arg "clear-poller-suppression" deletes the
+    # poller_submit_suppressed* trio in the SAME atomic write as the state change.
+    local clear_suppression="${7:-}"
 
     if [[ -z "$ts_value" ]]; then
         ts_value=$(_kb_cr_timestamp)
@@ -472,17 +513,28 @@ _kb_cr_lifecycle_advance() {
     local old_state
     old_state=$(_kb_cr_container_get_state "$board_file" "$cr_idx" 2>/dev/null || echo "")
 
+    # XACA-1538-012: shared downward-move suppression rule (PRE-write board state).
+    local _ps _ps_flag _ps_url
+    _ps=$(_kb_cr_poller_suppress_decide "$board_file" "$cr_idx" "$new_state")
+    _ps_flag="${_ps%%$'\t'*}"; _ps_url="${_ps#*$'\t'}"
+
     _kb_jq_update "$board_file" '
         .crs[$cidx].crState      = $state |
         .crs[$cidx].timestamps[$tskey] = $tsval |
         .crs[$cidx].updatedAt    = $now |
+        (if $clr == "clear-poller-suppression"
+         then del(.crs[$cidx].poller_submit_suppressed, .crs[$cidx].poller_submit_suppressed_at, .crs[$cidx].poller_submit_suppressed_url)
+         else . end) |'"$_KB_CR_POLLER_SUPPRESS_JQ"' |
         .lastUpdated             = $now
     ' \
+    --arg     psuppress "$_ps_flag" \
+    --arg     purl      "$_ps_url" \
     --argjson cidx   "$cr_idx" \
     --arg     state  "$new_state" \
     --arg     tskey  "$ts_key" \
     --arg     tsval  "$ts_value" \
     --arg     now    "$now" \
+    --arg     clr    "$clear_suppression" \
     || return 1
     # ^ XACA-0297 (review round 2): this `|| return 1` did not exist. Without
     # it the function's exit status came from the trailing `|| true` on the
@@ -1059,14 +1111,22 @@ _kb_cr_stamp_state_entry() {
         local old_state_nots
         old_state_nots=$(_kb_cr_container_get_state "$board_file" "$cr_idx" 2>/dev/null || echo "")
 
+        # XACA-1538-012: same shared suppression rule as revert/undo/lifecycle_advance.
+        local _ps _ps_flag _ps_url
+        _ps=$(_kb_cr_poller_suppress_decide "$board_file" "$cr_idx" "$new_state")
+        _ps_flag="${_ps%%$'\t'*}"; _ps_url="${_ps#*$'\t'}"
+
         _kb_jq_update "$board_file" '
             .crs[$cidx].crState   = $state |
-            .crs[$cidx].updatedAt = $ts |
+            .crs[$cidx].updatedAt = $ts |'"$_KB_CR_POLLER_SUPPRESS_JQ"' |
             .lastUpdated          = $ts
         ' \
         --argjson cidx  "$cr_idx" \
         --arg     state "$new_state" \
         --arg     ts    "$now" \
+        --arg     now   "$now" \
+        --arg     psuppress "$_ps_flag" \
+        --arg     purl      "$_ps_url" \
         || return 1
 
         local evt_nots
@@ -1578,7 +1638,12 @@ _kb_cr_container_submit() {
 
     local ts
     ts=$(_kb_cr_timestamp)
-    _kb_cr_lifecycle_advance "$_cr_board" "$cr_idx" "$cr_id" "cr-submitted" "cr_submitted_at" "$ts" || return 1
+    # XACA-1538-002: a HUMAN submit re-arms the poller after a revert (clears
+    # poller_submit_suppressed*, atomically with the state change). The poller's own
+    # call (KB_CR_ACTOR=poller) must NOT clear it, or it would erase the guard it honors.
+    local _clear_suppr=""
+    [[ "${KB_CR_ACTOR:-kb-cr}" != "poller" ]] && _clear_suppr="clear-poller-suppression"
+    _kb_cr_lifecycle_advance "$_cr_board" "$cr_idx" "$cr_id" "cr-submitted" "cr_submitted_at" "$ts" "$_clear_suppr" || return 1
     echo "kb-cr submit: [$cr_id] $current_state -> cr-submitted (cr_submitted_at=$ts)"
 
     # XACA-1348-005: v2 CRs get cr_approval_expected_at from the team's approval
@@ -3331,6 +3396,14 @@ _kb_cr_container_revert() {
         suppress_assumption="true"
     fi
 
+    # XACA-1538-001/-012: a revert/undo crossing DOWN through cr-submitted is binding on
+    # cr-confluence-poller. The rule is shared with kb-cr transition (see
+    # _kb_cr_poller_suppress_decide); decided from the PRE-write board, applied in the same
+    # atomic _kb_jq_update below. Cleared only by a non-poller `kb-cr submit`.
+    local _ps suppress_poller poller_url
+    _ps=$(_kb_cr_poller_suppress_decide "$_cr_board" "$cr_idx" "$target_state")
+    suppress_poller="${_ps%%$'\t'*}"; poller_url="${_ps#*$'\t'}"
+
     _kb_jq_update "$_cr_board" '
         .crs[$cidx].crState = $target |
         .crs[$cidx].updatedAt = $now |
@@ -3339,12 +3412,15 @@ _kb_cr_container_revert() {
          then .crs[$cidx].approval_assumption_suppressed = true
               | .crs[$cidx].approval_assumption_suppressed_at = $now
          else . end) |
+        '"$_KB_CR_POLLER_SUPPRESS_JQ"' |
         .lastUpdated = $now
     ' \
     --argjson cidx "$cr_idx" \
     --arg target "$target_state" \
     --arg now "$now" \
     --arg suppress "$suppress_assumption" \
+    --arg psuppress "$suppress_poller" \
+    --arg purl "$poller_url" \
     --argjson entry "$revert_entry" \
     || return 1
 
@@ -7338,6 +7414,10 @@ _kb_cr_help() {
     echo "              needs cr_submitted_at + cr_approved_at."
     echo "              --force overrides the refusal and records a"
     echo "              cr_evidence_override event in the CR activity log."
+    echo "              A transition from cr-submitted (or later) DOWN to cr-drafted/"
+    echo "              cr-published sets poller_submit_suppressed (as revert/undo do)."
+    echo "              A force-write TO cr-submitted does NOT clear it: only"
+    echo "              'kb-cr submit' by a non-poller actor re-arms the poller."
     echo "  reschedule <CR-ID> <date>"
     echo "              Post-hoc setter for deploy_window_planned (UTC-normalized)."
     echo "              Valid at any crState — no state transition occurs."
@@ -7394,6 +7474,8 @@ _kb_cr_help() {
     echo "              appended to the bottom of the CR request page (cr_proper_url set)."
     echo "              In automated workflow the Confluence poller (XACA-0328-003) triggers"
     echo "              this transition; this CLI path exists for manual/back-compat use."
+    echo "              A human submit re-arms the poller after a revert (clears"
+    echo "              poller_submit_suppressed*); the poller's own submit does not."
     echo "  approve <CR-ID> [--by <login>] [--name \"<name>\"] [--assumed]"
     echo "              (--approver / --approver-name are accepted aliases for --by / --name)"
     echo "              cr-submitted → cr-approved"
@@ -7465,6 +7547,9 @@ _kb_cr_help() {
     echo "              Forward walks (target rank ≥ current) are refused."
     echo "              Multi-item CRs propagate atomically (state lives on .crs[i])."
     echo "              pushback_count and pushback_notes are PRESERVED."
+    echo "              A revert from cr-submitted (or later) to below cr-submitted sets"
+    echo "              poller_submit_suppressed so the Confluence poller will not re-submit"
+    echo "              the CR; a human 'kb-cr submit' clears it (XACA-1538)."
     echo "              v2 CRs: --to cr-held / cr-rejected are refused (use hold / reject),"
     echo "              and so are implementing / deployed-dev (not v2 stages)."
     echo "  undo   <CR-ID|item-id> [--reason \"<text>\"]"
