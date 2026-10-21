@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1580 retire per-clone tap ordering guard, fix human-push docs, harden test watchdog
+- Tap files updated in this publish: `.githooks/pre-push`,`docs/LOCKSTEP-CHECK.md` `share/scripts/kb-tap-release`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1577 kb-cr publish-record fails on {login,name} CR approver
 - Tap files updated in this publish: `share/kanban-hooks/release_cr_record_publish.py`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1583 Correct CI/CD pool 'reserved' hint wording

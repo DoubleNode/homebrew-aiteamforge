@@ -20,11 +20,10 @@
 - [Blocked right now? Start here](#blocked-right-now-start-here)
 - [The one thing worth knowing: INHERITED is not a block](#the-one-thing-worth-knowing-inherited-is-not-a-block)
 - [FAULT is not DIRECTION](#fault-is-not-direction-xaca-1112)
-- [The five enforcement points](#the-five-enforcement-points)
+- [The enforcement points](#the-enforcement-points)
 - [Bypasses — the complete list](#bypasses--the-complete-list)
-- [The ordering rule: mirroring ahead of canonical](#the-ordering-rule-mirroring-ahead-of-canonical)
+- [The `Tap-Mirror-Ahead:` declaration](#the-tap-mirror-ahead-declaration)
 - [Why `tap-lockstep-check` was retired](#why-tap-lockstep-check-was-retired)
-- [Why "matching canonical" is byte equality](#why-matching-canonical-is-byte-equality)
 - [Known gaps — do not assume coverage](#known-gaps--do-not-assume-coverage)
 - [What has a canonical source](#what-has-a-canonical-source)
 - [Running the gates locally](#running-the-gates-locally)
@@ -46,7 +45,6 @@ Find the line in your CI log that matches, then do the thing in the last column.
 | `gitlink <sha> is NOT reachable from the tap's origin/main` | Your `homebrew-tap` pointer is on an unmerged side branch. Merging would pin `develop` to a commit consumers cannot fetch. | Merge that tap branch into tap `main` and push, re-run `./sync-tap.sh`, bump the gitlink to the merged SHA. The error names the containing branches for you. |
 | `gitlink <sha> does not exist in the tap remote` | An inner tap commit was never pushed. Post-XACA-1122 this should not arise from a feature PR — if it does, you have a hand-made gitlink bump that does not belong on the branch; drop it. For a release cut or a deliberate hand push, step 1 was skipped. | Feature PR: remove the gitlink bump from your branch. Release/hand push: `cd homebrew-tap && git push origin main`, then re-push the outer pointer commit. |
 | `tap-changelog-completeness` exited 2, "Cannot resolve the inner-tap commit range" | The gate could not see the commits it validates. It refuses to report "nothing to check". | Re-run the job. If it persists, the tap checkout is shallow or the fetch is stale. |
-| `[tap-pre-push] ... REFUSED` on `git push` inside `homebrew-tap/` | You are pushing mirrored content to tap `main` whose canonical is not yet on `develop`, and you did not declare it. | Add the trailer: `git commit --amend --trailer 'Tap-Mirror-Ahead: XACA-NNNN (PR #N)'`. See [the ordering rule](#the-ordering-rule-mirroring-ahead-of-canonical). |
 | `sync-tap drift on the mainline (CANONICAL-AHEAD / DIVERGED / unmirrored)` on a `push: [develop]` | A push landed drift where canonical moved and the tap did not, a file is unmirrored, or the two sides share no derivable history. | Run `./sync-tap.sh`, commit **inside** `homebrew-tap/` and push it, then commit the outer gitlink bump — correct/safe for these three shapes specifically. |
 | `sync-tap drift gate PASSED (tap is ahead of canonical, not behind)` on `push: [develop]` | Drift on the mainline is all `TAP-AHEAD` — a sibling's sanctioned mirror-ahead push whose canonical half has not merged yet. **You are not blocked; this is a `::notice`, not an error.** | Nothing. Self-heals when the named PR merges. **Do not run `./sync-tap.sh`** — see below. |
 | `homebrew-tap gitlink is ... BEHIND the latest release` (`tap-gitlink-recency`) | Your gitlink pins a tap commit that predates a release consumers already received. Merging would roll `develop`'s own pointer backward. | `cd homebrew-tap && git checkout main && git pull origin main`, then re-commit the outer gitlink bump at the new tip. |
@@ -103,9 +101,9 @@ Unlike the OWNED/INHERITED mode, `--classify-direction` needs **no PR ticket id 
 
 ---
 
-## The five enforcement points
+## The enforcement points
 
-Four CI jobs in `.github/workflows/sync-tap-check.yml`, plus one local hook.
+Four CI jobs in `.github/workflows/sync-tap-check.yml`, plus the server-side ruleset on tap `main`.
 
 ### 1. `sync-tap-drift` (CI) — is the mirror consistent, and whose fault (or direction) is it?
 
@@ -145,9 +143,9 @@ Every inner-tap commit in the PR's submodule-pointer range must have a matching 
 
 This matters beyond its own job: `attribute-tap-drift.sh` rule (b) *consumes* the ticket-id-on-every-tap-commit invariant that this gate enforces. A silently-disabled changelog gate degrades drift attribution into `UNATTRIBUTED`.
 
-### 5. `.githooks/tap-pre-push` (LOCAL hook) — the ordering guard
+### 5. Tap `main` single-writer ruleset (SERVER-SIDE)
 
-Refuses a push to tap `main` carrying mirrored content that has no byte-matching canonical on `dev-team/develop`, unless the ahead-mirroring is declared. See [the ordering rule](#the-ordering-rule-mirroring-ahead-of-canonical) for the full contract, and [known gaps](#known-gaps--do-not-assume-coverage) for its coverage limits.
+Repository ruleset 25441142 on `DoubleNode/homebrew-aiteamforge` lets only the publisher App and the release App update tap `main`. A human push, admins included, is refused (`GH013`). There is no per-clone hook to install. Tap-only edits go through `kb-tap-release --push-tap-edit`. Read the live state with `gh api repos/DoubleNode/homebrew-aiteamforge/rules/branches/main` (not `.../protection`).
 
 ### Also worth knowing about, but not a gate on your PR's own changes
 
@@ -166,7 +164,6 @@ Each gate has its own bypass vocabulary. **They are not interchangeable** — th
 | `tap-gitlink-reachable` | `Tap-Gitlink-Skip: <reason>` | `tap-gitlink-skip` | Requires a **written reason**, not a bare "intentional" — bypassing this gate is exactly how the originating incident happened. |
 | `tap-gitlink-recency` | `Tap-Gitlink-Behind: <reason>` | `tap-gitlink-behind-intentional` | XACA-1112. Written reason required, same discipline as `tap-gitlink-reachable`'s trailer. |
 | `tap-changelog-completeness` | `Changelog-Skip: <reason>` | `changelog-skip` | For genuine no-op tap edits. |
-| `tap-pre-push` (local) | `Tap-Mirror-Ahead: XACA-NNNN (PR #N)` | — | Not strictly a bypass; see below. Emergency override: `TAP_MIRROR_ALLOW_AHEAD=1 git push`. |
 | `kb-tap-release` preflight #9, TAP-AHEAD only (local, release-time) | N/A — CLI flag, not a commit trailer | — | `--tap-ahead-release="<reason>"`. Recorded as a `Tap-Ahead-Release: <reason>` trailer on both release commits (audit trail), not applied as a bypass to the drift check itself. Does NOT waive CANONICAL-AHEAD or DIVERGED. |
 
 **Trailer matching is exact by design.** Markers are anchored at start-of-line and shape-validated. A misspelling (`Tap-Only-Edits:`, `Tap-Mirror-Aheads:`) does **not** bypass, and a bare `Tap-Mirror-Ahead:` with no ticket and no PR number does not either. A bypass that matches loosely is a universal bypass.
@@ -189,29 +186,19 @@ The **label** paths work only inside GitHub Actions (they read `GITHUB_EVENT_PAT
 
 ---
 
-## The ordering rule: mirroring ahead of canonical
+## The `Tap-Mirror-Ahead:` declaration
 
-**Mirroring tap content ahead of its canonical source is permitted. It must be declared.**
-
-### The rule
-
-If you push mirrored content to tap `main` before the matching canonical change has merged to `dev-team/develop`, put this trailer on the **inner tap commit**:
+A tap commit that mirrors content ahead of its canonical source on `dev-team/develop` may carry this trailer on the **inner tap commit**:
 
 ```
 Tap-Mirror-Ahead: XACA-0838 (PR #716)
 ```
 
-Both parts are required and both are validated: an `XACA-NNNN` ticket id **and** a `#NNN` PR number, on a line anchored at start-of-line.
+Both parts are required and both are validated: an `XACA-NNNN` ticket id **and** a `#NNN` PR number, on a line anchored at start-of-line. Nothing enforces it. It is optional, machine-readable input to `attribute-tap-drift.sh`.
 
-```bash
-# inside homebrew-tap/
-git commit --amend --trailer 'Tap-Mirror-Ahead: XACA-0838 (PR #716)'
-git push origin main
-```
+### What the trailer buys
 
-### What the trailer buys — and who it buys it for
-
-It is **not** a bypass and it does not change any classification. It is machine-readable input to `attribute-tap-drift.sh`.
+It is **not** a bypass and it does not change any classification.
 
 Without it, a sibling author blocked by your mirror sees:
 
@@ -225,41 +212,7 @@ With it, they see:
 INHERITED    scripts/kb-port-reconcile    XACA-0838 declared mirror-ahead, canonical in PR #716 (tap 233a3320c) — share/scripts/kb-port-reconcile
 ```
 
-The second version tells them **exactly which PR to wait on** instead of leaving them to go find it at 2am. That is the entire reason declared-ahead mode was chosen: the trailer turns the guard from pure friction into the thing that makes the drift report actionable.
-
-The declaration is strictly additive. Absent or malformed, the report reads exactly as it did before; it can never turn an `OWNED` or `UNATTRIBUTED` file into a pass.
-
-### The override, and when it is legitimate
-
-```bash
-TAP_MIRROR_ALLOW_AHEAD=1 git push
-```
-
-(The outer hook's `SKIP_SYNC_TAP_CHECK=1` used to be the precedent here. **XACA-1122 removed it** — the outer guard it bypassed no longer blocks, so the variable is inert; do not reach for it.) `TAP_MIRROR_ALLOW_AHEAD=1` prints a loud warning.
-
-Legitimate uses are narrow:
-
-- The guard cannot verify rather than having found a violation — you are offline, the outer repo is not locatable from this clone, or `develop` is unfetchable. The guard refuses in these cases (exit 2) on purpose, because a guard that allows on "I could not check" is not a guard.
-- A genuine emergency where amending the commit is not available.
-
-**Do not use `--no-verify`** — it disables every hook, including unrelated ones.
-
-### The honest cost of declared-ahead mode
-
-Declared-ahead is a **convention enforced at push time**. It prevents *undeclared* ahead-mirroring. **It does not prevent ahead-mirroring itself**, and it is not designed to.
-
-That residual is acceptable for exactly one reason: **attribution already makes ahead-mirroring non-blocking for siblings.** The guard's job is therefore reduced from "prevent the hazard" to "label it". If attribution did not exist, this reduction would be unsafe, and the mode choice would have to be revisited.
-
-Do not read this guard as a guarantee that the tap is never ahead of canonical. It guarantees only that when the tap *is* ahead, a compliant author left a note saying so.
-
-### Why strict mode was rejected as the default
-
-Strict mode — refuse the inner push outright until canonical is already on `develop` — was considered and deliberately not made the default:
-
-1. **It inverts the documented workflow and doubles the PR count.** Today: edit canonical → `sync-tap.sh` → commit and push inner → commit outer pointer → one PR → merge. Under strict, the inner push is refused until canonical merges, forcing: open a canonical PR → merge it → *then* sync and push inner → *then* a **second** outer PR to bump the pointer. That is **two PRs for every tap-touching ticket**.
-2. **It turns `develop`'s own CI red.** Strict creates a transient window where `develop` has canonical *ahead of* the tap mirror. During that window `sync-tap-drift`'s `push: develop` trigger fails **on `develop` itself**. Strict trades a cross-PR block for a red mainline, which is not obviously a better trade.
-
-Strict remains available as an opt-in, but enabling it is a separate decision, not a default to drift into.
+The second version tells them **exactly which PR to wait on**. The declaration is strictly additive. Absent or malformed, the report reads exactly as it did before; it can never turn an `OWNED` or `UNATTRIBUTED` file into a pass.
 
 ---
 
@@ -301,41 +254,7 @@ The retirement was gated on proving this: a fixture that hand-edits a mirrored t
 
 ---
 
-## Why "matching canonical" is byte equality
-
-The ordering guard compares git blob object ids — hashes of content alone, so equal ids mean byte-identical files.
-
-**This deliberately contradicts the guidance that a co-change guard beats body-equality for long-diverged mirrors.** Recorded here so a future reviewer does not "correct" it back:
-
-That guidance concerns **long-diverged** mirrors, where equality is permanently false and therefore useless as a signal. These mirrors are **equality-maintained by construction** — `sync-tap.sh` copies bytes, and `sync-tap-drift` already gates on byte equality. Using anything weaker here (co-change presence) would let a mirror push through whose content does not match what `sync-tap-drift` will later *demand*, i.e. the guard and the gate would disagree with each other.
-
-**Equality makes the guard and the gate agree by construction. Co-change would not.**
-
----
-
 ## Known gaps — do not assume coverage
-
-### The ordering guard is per-clone and opt-in
-
-A submodule's hooks live in its own git directory, which **git never transports as content**. There is no commit that installs a hook into someone else's clone. `homebrew-tap/.git` is a gitfile pointing into `.git/modules/homebrew-tap/`, and hooks placed there ship nowhere.
-
-**A machine that has never run `scripts/install-tap-hooks.sh` has no guard, and its pushes look identical to guarded ones.** This is a real coverage gap, not a rounding error.
-
-```bash
-bash ~/dev-team/scripts/install-tap-hooks.sh            # install / update
-bash ~/dev-team/scripts/install-tap-hooks.sh --check    # report only, writes nothing
-```
-
-It is wired into `docs/install-on-new-mac.sh` beside the existing `core.hooksPath` bootstrap, so new machines get it by default. Existing machines must be done by hand.
-
-*(Note: the tap clone sets `core.hooksPath = .githooks`, a git-tracked directory in the tap's own working tree. The installer honours that and adds the installed file to the tap clone's `.git/info/exclude` before writing, so it cannot be swept into a commit by a stray `git add -A`.)*
-
-**Two required follow-ups after XACA-0848 merges:**
-
-1. **Commit the hook into the tap's own tracked `.githooks/`** — where the tap's `core.hooksPath` already points. This is the durable fix: it would ship the guard to every clone and close the gap properly.
-2. **Add a report-only CI job in the tap repo on `push: main`** as the backstop for clones that never ran the installer.
-
-Neither was built inside XACA-0848 itself, and the reason is not laziness: creating them means committing into tap `main` while their canonical is still unmerged — precisely the defect this ticket exists to prevent. They land after the PR merges.
 
 ### The workflow YAML lint was not run
 
@@ -397,13 +316,13 @@ REMOTE_NAME=dev-team TAP_DIR=~/dev-team/homebrew-tap \
 
 ## Related documentation
 
-- **`CONTRIBUTING.md` § "Shared scripts and the canonical source"** — the canonical-source rule (unchanged and still load-bearing), the post-XACA-1122 contributor workflow, and the ordering rule
+- **`CONTRIBUTING.md` § "Shared scripts and the canonical source"** — the canonical-source rule (unchanged and still load-bearing), the post-XACA-1122 contributor workflow, and the `Tap-Mirror-Ahead:` declaration
 - **`docs/homebrew-tap/EDIT-SHARED-WORKFLOW.md`** — `kb-edit-shared`, which makes the correct workflow the easy one
 - **`sync-tap.sh`** — the authoritative mirror map and the differ
-- **`scripts/attribute-tap-drift.sh`**, **`scripts/check-tap-gitlink-reachable.sh`**, **`scripts/check-tap-gitlink-recency.sh`**, **`.githooks/tap-pre-push`** — each carries a long header explaining its own reasoning and failure modes
+- **`scripts/attribute-tap-drift.sh`**, **`scripts/check-tap-gitlink-reachable.sh`**, **`scripts/check-tap-gitlink-recency.sh`** — each carries a long header explaining its own reasoning and failure modes
 - **XACA-0340** — the original lockstep-drift regression class
 - **XACA-0300** — the submodule migration that made `tap-lockstep-check` vacuous
-- **XACA-0848** — attribution, the reachability gate, the changelog-gate hardening, the retirement, and the ordering guard
+- **XACA-0848** — attribution, the reachability gate, the changelog-gate hardening, the retirement, and the (since-retired) per-clone ordering guard
 - **XACA-1112** — direction classification, the direction-aware push gate and release preflight, and the gitlink-recency gate
 
 ---

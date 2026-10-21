@@ -136,7 +136,7 @@ Release identity (XACA-1170-003) — one-time setup, per machine:
   environment variables — never argv, never disk, never git config. The
   credential headers are scoped to the tap's own URL (git's http.<url>.* /
   credential.<url>.* keys), so a git command that reaches another repo — e.g. the
-  tap pre-push hook's fetch of the outer dev-team remote — never receives the
+  outer dev-team remote — never receives the
   token and keeps its normal credential helper. The token is minted LAST: after
   the config/URL checks, the tap-writer lock wait and preflight, immediately
   before the first push, so a long KB_TAP_RELEASE_LOCK_WAIT cannot age it. It is
@@ -147,11 +147,10 @@ Release identity (XACA-1170-003) — one-time setup, per machine:
   protocol.*, include*, or core.sshCommand/askPass/gitProxy/hooksPath: git applies those
   AFTER the URL-scoped credential reset, so a 401 on the App token could otherwise fall
   through to the human's credential helper (XACA-1170-047). Unrelated -c settings pass.
-  The App push also pins GIT_ALLOW_PROTOCOL=https. That is inherited by the tap's
-  pre-push hook, whose outer fetch therefore needs an https outer remote (the
-  repo's `dev-team` remote is); with an ssh outer remote the hook refuses with
-  "transport 'ssh' not allowed" — point TAP_MIRROR_OUTER_REMOTE at an https
-  remote, or use --as-human.
+  The App push also pins GIT_ALLOW_PROTOCOL=https. The tap's pre-push hook is a pure
+  single-writer identity check and never fetches the outer remote, so the pin does not
+  constrain the outer remote's transport (XACA-1580); the develop fetch that reads the
+  publisher-owned map is the human's own, via KB_TAP_RELEASE_OUTER_REMOTE.
 
 Environment:
   KB_TAP_RELEASE_LOCK_WAIT      Seconds to wait for the tap-writer lock before
@@ -795,8 +794,8 @@ tap_app_refuse_inherited_git_params() {
 # token was minted. Env-prefixed callers (TAP_SINGLE_WRITER_RELEASE=1) keep their
 # variable: it is inherited through the subshell into git.
 #   - http.<tap-url>.extraheader carries the credential, URL-scoped to EXACTLY the tap
-#     repo (XACA-1170-043). The env is inherited by the tap's pre-push hook, whose
-#     0848 guard fetches the OUTER dev-team remote: an unscoped github.com header
+#     repo (XACA-1170-043). The env is inherited by the tap's pre-push hook (which, before
+#     XACA-1580, ran a 0848 guard that fetched the OUTER dev-team remote): an unscoped github.com header
 #     would hand it a token that cannot read dev-team, and an unscoped
 #     credential.helper reset would strip its keychain, so a --push-only over
 #     mirrored paths was refused. git's urlmatch is a path-SEGMENT prefix match and
