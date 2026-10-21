@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+
+## [0.21.5] - 2026-10-21
 - XACA-1578 close-out accepts docs-only commits after the gated build
 - Tap files updated in this publish: `share/kanban-hooks/release_closeout.py`,`share/lcars-ui/server.py` `share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1512 — walkthrough evidence attachments on the Testing Log
@@ -8031,7 +8033,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.4...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.5...HEAD
+[0.21.5]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.4...v0.21.5
 [0.21.4]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.3...v0.21.4
 [0.21.3]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.2...v0.21.3
 [0.21.2]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.1...v0.21.2
