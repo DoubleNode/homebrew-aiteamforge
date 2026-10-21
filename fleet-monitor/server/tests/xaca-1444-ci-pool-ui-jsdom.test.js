@@ -484,12 +484,23 @@ test('slots legend is visible text and its rows carry the classes the stylesheet
     const r = slotRowsFor([sl('Linux', 1, 'busy', 'a1'), sl('macOS', 1, 'idle')], [asg('a1', 'started')]);
     const cap = card(r.view, 'm1mini').querySelector('[data-cicd-pool-capacity]');
     // "reserved" must be explained on screen, not only in a title= tooltip (keyboard/touch/AT never see those).
-    assert.match(cap.querySelector('.cicd-pool-hint').textContent, /Reserved = runner registered, waiting for a job\./);
+    assert.match(cap.querySelector('.cicd-pool-hint').textContent, /Reserved = runner launched, not yet running a job\./);
     assert.equal(cap.querySelectorAll('.cicd-pool-slots-head').length, 1);
     assert.equal(cap.querySelectorAll('.cicd-pool-slot-os').length, 2, 'one nested row per OS');
     const css = fs.readFileSync(POOL_CSS, 'utf8');
     ['.cicd-pool-hint {', '.cicd-pool-slots-head dd {', '.cicd-pool-slot-os dt {'].forEach((sel) =>
         assert.ok(css.includes(sel), 'lcars-ci-pool.css defines ' + sel));
+});
+
+test('1583-009: the reserved tooltip matches the hint (runner launched, never "registered")', () => {
+    const r = slotRowsFor([sl('Linux', 1, 'busy', 'a1')], [asg('a1', 'delivered')]);
+    const tips = Array.from(card(r.view, 'm1mini').querySelectorAll('[data-cicd-pool-capacity] span[title]'))
+        .filter((s) => /\breserved\b/.test(s.textContent));
+    assert.equal(tips.length, 1, 'one tooltip span wraps the reserved count');
+    const tip = tips[0].getAttribute('title');
+    assert.equal(tip, 'reserved: runner launched for this slot, no job running on it yet');
+    // A delivered assignment's runner has not registered yet, so "registered" would be false here.
+    assert.ok(!/registered/i.test(tip), tip);
 });
 
 test('all five slot states are accounted for and the printed counts sum to the OS total', () => {

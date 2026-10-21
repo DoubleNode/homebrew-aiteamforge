@@ -65,7 +65,7 @@
     // exactly ONE bucket so the printed counts always sum to the per-OS total.
     var SLOT_BUCKETS = [
         { k: 'idle', t: 'idle', always: true },
-        { k: 'reserved', t: 'reserved', always: true, tip: 'reserved (waiting for job): runner registered, no job assigned yet' },
+        { k: 'reserved', t: 'reserved', always: true, tip: 'reserved: runner launched for this slot, no job running on it yet' },
         { k: 'running', t: 'running', always: true },
         { k: 'starting', t: 'starting' },
         { k: 'cleaning', t: 'cleaning' },
@@ -133,7 +133,7 @@
         var sr = slotRows(m.slots, assignments);
         // The legend is visible text, not a tooltip: title= never reaches keyboard, touch or most screen readers.
         rows.push(['Dispatcher slots (JIT)', sr.length ? '<span class="cicd-pool-hint">One-job runners the dispatcher starts on demand. ' +
-            'Reserved = runner registered, waiting for a job. Persistent runners are listed under PERSISTENT RUNNERS.</span>' : dash(),
+            'Reserved = runner launched, not yet running a job. Persistent runners are listed under PERSISTENT RUNNERS.</span>' : dash(),
             sr.length ? 'cicd-pool-slots-head' : '']);
         sr.forEach(function(r) { rows.push(r); });
         var ageText = DASH;

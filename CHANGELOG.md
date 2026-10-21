@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1583 Correct CI/CD pool 'reserved' hint wording
+- Tap files updated in this publish: `fleet-monitor/server/public/lcars/lcars-dashboard.html`,`fleet-monitor/server/public/shared/js/lcars-ci-pool.js` `fleet-monitor/server/tests/xaca-1444-ci-pool-ui-jsdom.test.js`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1538 poller honors lead reverts; refuse IT Connect URL held by another CR
 - Tap files updated in this publish: `share/scripts/cr-confluence-poller.py`,`share/scripts/kb-cr.sh`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1579 Disambiguate CI/CD pool slots vs persistent runners
