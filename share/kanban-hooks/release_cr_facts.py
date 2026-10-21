@@ -180,6 +180,45 @@ def build_testing_log_stage_views(release: Dict[str, Any], *, tz: str = DEFAULT_
     return [fd.build_stage_facts(release, n, tz=tz) for n in names]
 
 
+def testing_log_attachments(release: Dict[str, Any], evidence_dir: str, *, tz: str = DEFAULT_TZ,
+                            stages: Optional[Iterable[str]] = None) -> List[Dict[str, Any]]:
+    """The attachment manifest for the Testing Log (XACA-1512-003): one {name, path, sha256, context} per
+    evidence image the rendered page will reference, i.e. the evidence of the CURRENT rows of the stages
+    ``build_testing_log_stage_views`` renders. Every record's evidence is re-verified on disk with
+    ``release_evidence.verify_record_evidence`` (present, contained in ``evidence_dir``, sha matches the
+    record). Raises ``release_evidence.EvidenceError`` naming the row, the record and the file; returns
+    ``[]`` for a release whose current rows carry no evidence."""
+    import release_evidence as _ev  # noqa: PLC0415  (kanban-hooks sibling; heavy imports only when used)
+    by_id = {str(t.get("id")): t for t in (release.get("tests") or []) if isinstance(t, dict)}
+    out: List[Dict[str, Any]] = []
+    _lazy = None
+    if callable(evidence_dir):  # lazy: an evidence-free release must not depend on the dir (or the id) being valid
+        _lazy, evidence_dir = evidence_dir, None
+    for view in build_testing_log_stage_views(release, tz=tz, stages=stages):
+        images = view.get("evidenceImages") or []
+        for rid in dict.fromkeys(i["recordId"] for i in images):
+            if evidence_dir is None and _lazy is not None:
+                evidence_dir = _lazy()
+            rec = by_id.get(rid)
+            rows = [i for i in images if i["recordId"] == rid]
+            where = "%s row %d (record %s)" % (view["name"], rows[0]["n"], rid)
+            if rec is None:
+                raise _ev.EvidenceError("%s: record not found for its evidence" % where)
+            try:
+                verified = _ev.verify_record_evidence(evidence_dir, rec)
+            except _ev.EvidenceError as exc:
+                raise _ev.EvidenceError("%s: %s" % (where, exc))
+            if len(verified) != len(rows):
+                raise _ev.EvidenceError("%s: evidence changed while publishing" % where)
+            for v, img in zip(verified, rows):
+                if v["file"] != img["file"] or v["sha256"] != img["sha256"]:
+                    raise _ev.EvidenceError("%s: %s does not match the recorded evidence (sha256 differs)"
+                                            % (where, img["file"]))
+                out.append({"name": img["name"], "path": _ev.resolve_evidence_file(evidence_dir, v["file"]),
+                            "sha256": v["sha256"], "context": "%s: %s" % (where, v["file"])})
+    return out
+
+
 def facts_for_stage(facts: Dict[str, Any], stage_view: Dict[str, Any]) -> Dict[str, Any]:
     """Copy of ``facts`` with ``facts["stage"]`` set to ``stage_view`` (render once per stage)."""
     out = dict(facts)

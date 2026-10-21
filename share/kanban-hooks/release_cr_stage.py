@@ -304,13 +304,19 @@ class ShellTools:
         return list(out.get("matches") or [])
 
     def wiki_publish(self, doc: str, key: str, title: str, body: str, *, page_id: Optional[str] = None,
-                     stored_version: Optional[int] = None) -> Dict[str, Any]:
+                     stored_version: Optional[int] = None,
+                     attachments: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
         with tempfile.TemporaryDirectory(prefix="kb-cr-stage-") as tmp:
             bf = os.path.join(tmp, "body.md")
             with open(bf, "w", encoding="utf-8") as fh:
                 fh.write(body)
             args = ["publish", "--doc", doc, "--key", key, "--title", title, "--body-file", bf,
                     "--body-format", "markdown"]
+            if attachments:  # XACA-1512-003: kb-wiki uploads these BEFORE it writes the body
+                af = os.path.join(tmp, "attachments.json")
+                with open(af, "w", encoding="utf-8") as fh:
+                    fh.write(json.dumps(attachments))
+                args += ["--attachments-file", af]
             if page_id:
                 args += ["--page-id", page_id, "--stored-version", str(stored_version)]
             rc, out = self._wiki(args)
@@ -857,8 +863,20 @@ class CrStage:
             RC_NEEDS_APPROVAL, "approval")
 
     # -- wiki helper ------------------------------------------------------------------------------
-    def _publish_page(self, doc: str, key: str, title: str, body: str, stored: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    def _testing_log_attachments(self, rel: Dict[str, Any], tz: str) -> List[Dict[str, Any]]:
+        """XACA-1512-003: the evidence files the rendered Testing Log links, verified on disk. An evidence
+        problem fails the publish loudly (RC_FAILED) BEFORE anything is written to the wiki."""
+        import release_evidence as _ev  # noqa: PLC0415
+        try:
+            return rcf.testing_log_attachments(rel, lambda: _ev.release_evidence_dir(self.kdir, self.rel_id), tz=tz)
+        except _ev.EvidenceError as exc:
+            raise CrStageError("Testing Log evidence is not publishable, nothing was written to the wiki: %s" % exc,
+                               RC_FAILED)
+
+    def _publish_page(self, doc: str, key: str, title: str, body: str, stored: Optional[Dict[str, Any]],
+                      attachments: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
         handle = stored
+        kw: Dict[str, Any] = {"attachments": attachments} if attachments else {}
         if handle is None:  # a crash between kb-wiki and the board write left a labelled page: adopt, don't re-create
             label = "kb-wiki-%s-%s" % (doc, key.lower())
             hits = [m for m in self.tools.wiki_find(doc, key, title) if label in (m.get("labels") or [])]
@@ -869,9 +887,10 @@ class CrStage:
                 handle = {"pageId": str(m["pageId"]), "url": m.get("url", ""), "version": int(m["version"])}
         try:
             if handle:
-                out = self.tools.wiki_publish(doc, key, title, body, page_id=handle["pageId"], stored_version=handle["version"])
+                out = self.tools.wiki_publish(doc, key, title, body, page_id=handle["pageId"],
+                                              stored_version=handle["version"], **kw)
             else:
-                out = self.tools.wiki_publish(doc, key, title, body)
+                out = self.tools.wiki_publish(doc, key, title, body, **kw)
         except ToolError as exc:
             raise CrStageError("%s page publish failed: %s" % (doc, exc), RC_FAILED)
         if not all(k in out for k in ("pageId", "url", "version")):
@@ -922,7 +941,8 @@ class CrStage:
             return "skipped", "Testing Log already published"
         facts = self._facts(board, rel, cr, content=cr.get("draftContent"))
         body, title = self._compose_testing_log(facts, rel, self._tz(board))
-        handle = self._publish_page("testing-log", self.rel_id, title, body, None)
+        atts = self._testing_log_attachments(rel, self._tz(board))
+        handle = self._publish_page("testing-log", self.rel_id, title, body, None, atts)
         url = handle["url"]
 
         def cr_links(r: Dict[str, Any]) -> None:

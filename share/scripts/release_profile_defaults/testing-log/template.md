@@ -25,7 +25,7 @@
 | # | Timestamp (CT) | Type | Env | Test | Result | Run by | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 {{#each stage.testsCurrent}}
-| {{this.n}} | {{this.timestampCT}} | {{this.type}} | {{this.env}} | {{this.test}} | {{this.result}} | {{this.runBy}} | {{this.notesWithShaAndSuperseded}} |
+| {{this.n}} | {{this.timestampCT}} | {{this.type}} | {{this.env}} | {{this.test}} | {{this.result}} | {{this.runBy}} | {{this.notesWithEvidence}} |
 {{/each}}
 
 {{#if stage.omittedCount}}
@@ -34,6 +34,18 @@
 {{/if}}
 **Stage totals:** {{stage.totals.automated}} automated, {{stage.totals.manual}} manual: {{stage.totals.pass}} pass / {{stage.totals.fail}} fail / {{stage.totals.waived}} waived.
 
+{{#if stage.evidenceImages}}
+*This page is regenerated from the board's test records on every publish: a republish replaces the whole page body and keeps no hand-added sections. Add notes as page comments, or put them in the test records or the template.*
+
+{{#each stage.evidenceImages}}
+{{#if this.heading}}
+#### {{this.heading}}
+
+{{/if}}
+![{{this.caption}}](attachments/{{this.name}})
+
+{{/each}}
+{{/if}}
 ## Waivers
 
 {{#each waivers}}

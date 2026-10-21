@@ -56,6 +56,12 @@ WRITE VERBS
       page (after the location check) and refuses when another page already
       carries the label; another key's page is always refused.
       JSON: {"pageId": "<id>", "url": "<url>", "version": <int>}
+      --attachments-file F (XACA-1512): JSON list of {name, path, sha256?, context?}. Every file is
+      pre-flighted (readable, sha matches) before ANY write, then uploaded to the page BEFORE the body is
+      written; the body is never written if one fails (exit 1, the entry's context and name are on stderr).
+      A create makes the page with a placeholder body first (an upload needs a page id), then writes the
+      real body. Re-uploading identical bytes is a no-op ("unchanged"). The JSON gains
+      "attachments": {"created": n, "updated": n, "unchanged": n}; the human output a summary line.
   patch-section --doc D --key K --page-id ID --heading H --body-file F
                 [--body-format {storage,markdown}]
                 (--stored-version V | --expect-version N) [--json]
@@ -197,6 +203,10 @@ def build_parser():
             if name == "publish":
                 s.add_argument("--adopt", action="store_true",
                                help="with --page-id: label an unlabelled legacy page (overwrites it)")
+            if name == "publish":
+                s.add_argument("--attachments-file", metavar="F",
+                               help="JSON list of {name, path, sha256?, context?}: files uploaded to the page "
+                                    "BEFORE the body is written (XACA-1512)")
             s.add_argument("--stored-version", type=_nonneg_int, metavar="V",
                            help="version recorded at last publish; refuse if live differs")
             s.add_argument("--expect-version", type=_nonneg_int, metavar="N",
@@ -575,6 +585,20 @@ def _check_page_id(args):
         raise _Usage("--page-id must be numeric")
 
 
+def _read_attachments(args):
+    """--attachments-file -> the manifest list, or None. A bad file is a usage error (exit 2)."""
+    path = getattr(args, "attachments_file", None)
+    if path is None:
+        return None
+    try:
+        data = json.loads(Path(path).read_bytes().decode("utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        raise _Usage(f"cannot read --attachments-file ({type(exc).__name__})") from None
+    if not isinstance(data, list):
+        raise _Usage("--attachments-file must hold a JSON list")
+    return data
+
+
 def _run(args):
     import release_wiki as rw
     team = _team_of(args)
@@ -595,6 +619,7 @@ def _run(args):
     if not is_patch and args.adopt and args.page_id is None:
         raise _Usage("--adopt only applies with --page-id")
     label = rw.identity_label(args.doc, args.key)
+    manifest = None if is_patch else _read_attachments(args)
     config, space, ptype, pid = _load_wiki_config(team, args.doc, args.config_dir, create=True)
     provider = _make_provider(team, config, args.config_dir)
     if is_patch:
@@ -604,12 +629,19 @@ def _run(args):
     else:
         res = rw.publish(provider, space, ptype, pid, args.title, body, args.page_id,
                          args.stored_version, args.expect_version,
-                         label=label, adopt=args.adopt)
+                         label=label, adopt=args.adopt, attachments=manifest)
     if args.json:
-        print(json.dumps(res.record()))
+        rec = res.record()
+        if getattr(res, "attachments", None) is not None:
+            rec["attachments"] = res.attachments
+        print(json.dumps(rec))
     else:
         verb = "created" if res.created else ("patched" if is_patch else "updated")
         print(f"kb-wiki: {verb} {args.key} pageId={res.page_id} version={res.version} url={res.url}")
+        if getattr(res, "attachments", None) is not None:
+            c = res.attachments
+            print(f"kb-wiki: attachments: {c['created']} created, {c['updated']} updated, "
+                  f"{c['unchanged']} unchanged")
     return EXIT_OK
 
 

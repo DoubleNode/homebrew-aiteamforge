@@ -11,7 +11,9 @@ approval provider (spec section 9) can call `read` without a new API.
 from __future__ import annotations
 
 import abc
+import dataclasses
 import difflib
+import hashlib
 import html
 import re
 from dataclasses import dataclass
@@ -134,6 +136,68 @@ class WikiProvider(abc.ABC):
         Implementations must never create a probe page."""
         return None
 
+    def put_attachment(self, page_id: str, local_path: str, filename: str,
+                       sha256: Optional[str] = None) -> dict:
+        """Idempotently attach the file at `local_path` to page `page_id` under
+        `filename` (XACA-1512-002). Returns
+        {"status": "created"|"updated"|"unchanged", "filename", "sha256", "id",
+        "page_id"}. Non-abstract so older providers keep loading, but a provider
+        that does not override it RAISES rather than pretending to attach."""
+        raise WikiError(f"{type(self).__name__} does not support attachments")
+
+
+# ---------------------------------------------------------------- attachments
+# Shared by every provider. The filename MUST equal what release_wiki_md2storage
+# emits in <ri:attachment ri:filename="..."/> for ![cap](dir/file.png): the last
+# "/"-separated segment of the target, after dropping any #fragment / ?query.
+
+MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024
+
+
+def check_attachment_filename(filename) -> str:
+    """A plain basename or WikiError: no path separators, no '.'/'..', no empty,
+    no control characters."""
+    if not isinstance(filename, str) or not filename.strip():
+        raise WikiError("attachment filename is empty")
+    if filename != filename.strip():
+        raise WikiError("attachment filename has leading/trailing whitespace")
+    if "/" in filename or "\\" in filename or filename in (".", ".."):
+        raise WikiError(f"attachment filename must be a plain basename (got {filename!r})")
+    if any(ord(c) < 32 or ord(c) == 127 for c in filename):
+        raise WikiError("attachment filename contains control characters")
+    if len(filename.encode("utf-8")) > 255:
+        raise WikiError("attachment filename is longer than 255 bytes")
+    return filename
+
+
+def read_attachment_source(local_path, sha256: Optional[str] = None) -> Tuple[bytes, str]:
+    """Read the file to attach -> (bytes, sha256 hex). A supplied `sha256` must
+    match the bytes actually read (a stale hash would make the idempotence
+    check lie); WikiError on a missing/non-regular/oversized file."""
+    import os
+    import stat as _stat
+    path = str(local_path)
+    try:
+        st = os.stat(path)
+        if not _stat.S_ISREG(st.st_mode):
+            raise WikiError(f"attachment source is not a regular file: {path}")
+        if st.st_size > MAX_ATTACHMENT_BYTES:
+            raise WikiError(f"attachment source exceeds {MAX_ATTACHMENT_BYTES} bytes: {path}")
+        with open(path, "rb") as fh:
+            data = fh.read(MAX_ATTACHMENT_BYTES + 1)
+    except OSError as exc:
+        raise WikiError(f"cannot read attachment source {path}: "
+                        f"{exc.strerror or type(exc).__name__}") from exc
+    if len(data) > MAX_ATTACHMENT_BYTES:
+        raise WikiError(f"attachment source exceeds {MAX_ATTACHMENT_BYTES} bytes: {path}")
+    digest = hashlib.sha256(data).hexdigest()
+    if sha256 is not None:
+        if not isinstance(sha256, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", sha256):
+            raise WikiError("sha256 must be 64 hex characters")
+        if sha256.lower() != digest:
+            raise WikiError(f"sha256 does not match attachment source {path}")
+    return data, digest
+
 
 # ---------------------------------------------------------------- PR 2 errors
 
@@ -176,12 +240,70 @@ class WikiGuardError(WikiError):
         self.diff = diff
 
 
+class WikiAttachmentError(WikiError):
+    """An attachment pre-flight or upload failed (XACA-1512-003). The page BODY was not written."""
+
+
+_PLACEHOLDER_BODY = "<p>Publishing in progress: attachments are being uploaded.</p>"
+
+
+def preflight_attachments(attachments) -> list:
+    """Validate an attachment manifest [{name, path, sha256?, context?}] BEFORE any write: the shape,
+    unique plain filenames, and that every source is a readable regular file whose bytes match the
+    recorded sha256. Returns the normalized list; raises WikiAttachmentError naming the entry."""
+    if not isinstance(attachments, (list, tuple)):
+        raise WikiAttachmentError("attachments must be a list")
+    out, seen = [], {}
+    for i, a in enumerate(attachments):
+        if not isinstance(a, dict):
+            raise WikiAttachmentError(f"attachments[{i}] must be an object")
+        for k in a:
+            if k not in ("name", "path", "sha256", "context"):
+                raise WikiAttachmentError(f"attachments[{i}]: unknown field {k}")
+        ctx = str(a.get("context") or a.get("name") or f"attachments[{i}]")
+        try:
+            name = check_attachment_filename(a.get("name"))
+            if not isinstance(a.get("path"), str) or not a["path"]:
+                raise WikiError("path must be a non-empty string")
+            _data, digest = read_attachment_source(a["path"], a.get("sha256"))
+        except WikiError as exc:
+            raise WikiAttachmentError(f"{ctx}: {exc}") from exc
+        # casefold(): a case-insensitive store (APFS; Confluence unconfirmed) would let one overwrite the other.
+        key = name.casefold()
+        if key in seen and seen[key][1] != digest:
+            raise WikiAttachmentError(f"{ctx}: two different files would both be attached as {name!r}"
+                                      f" (vs {seen[key][0]!r}; names compare case-insensitively)")
+        if key in seen:
+            continue  # the same bytes listed twice: one upload
+        seen[key] = (name, digest)
+        out.append({"name": name, "path": a["path"], "sha256": digest, "context": ctx})
+    return out
+
+
+def upload_attachments(provider: WikiProvider, page_id: str, attachments: list) -> dict:
+    """Upload a preflighted manifest, stopping at the first failure (WikiAttachmentError naming the
+    entry). Returns {"created": n, "updated": n, "unchanged": n}."""
+    counts = {"created": 0, "updated": 0, "unchanged": 0}
+    for a in attachments:
+        try:
+            res = provider.put_attachment(page_id, a["path"], a["name"], a["sha256"])
+        except WikiError as exc:
+            raise WikiAttachmentError(f"{a['context']}: upload of {a['name']!r} to page {page_id} failed: "
+                                      f"{exc}") from exc
+        status = res.get("status") if isinstance(res, dict) else None
+        if status not in counts:
+            raise WikiAttachmentError(f"{a['context']}: provider returned no usable status for {a['name']!r}")
+        counts[status] += 1
+    return counts
+
+
 @dataclass(frozen=True)
 class PublishResult:
     page_id: str
     url: str
     version: int
     created: bool = False
+    attachments: Optional[dict] = None  # {"created","updated","unchanged"} counts; None = no manifest given
 
     def record(self) -> dict:
         """The keyed-record fields the engine stores (XACA-1348/1349)."""
@@ -387,7 +509,8 @@ def publish(provider: WikiProvider, space: str, parent_type: str, parent_id,
             title: str, body: str, page_id: Optional[str] = None,
             stored_version: Optional[int] = None,
             expect_version: Optional[int] = None, *,
-            label: str, adopt: bool = False) -> PublishResult:
+            label: str, adopt: bool = False,
+            attachments: Optional[list] = None) -> PublishResult:
     """Create the one page for a (doc, key), or update the stored one.
 
     `label` is the (doc, key) identity (see identity_label). Update path
@@ -396,7 +519,13 @@ def publish(provider: WikiProvider, space: str, parent_type: str, parent_id,
     labels an unlabelled page after those checks (never another key's page).
     Create path: parent must exist with the configured type; no page in the
     space may already carry `label` or the title; the new page is labelled and
-    must read back under the parent WITH the label."""
+    must read back under the parent WITH the label.
+
+    `attachments` (XACA-1512-003, [{name, path, sha256?, context?}]): pre-flighted before ANY write, then
+    every file is uploaded to the page BEFORE the final body write, so a body never references a missing
+    attachment. Update path: checks, upload, write. Create path: create with a placeholder body (a page id
+    is needed to attach), label, upload, then write the real body. Any failure raises WikiAttachmentError
+    and the real body is never written."""
     if not isinstance(title, str) or not title.strip():
         raise WikiUsageError("title must not be empty")
     if parent_type not in ("page", "folder"):
@@ -404,14 +533,20 @@ def publish(provider: WikiProvider, space: str, parent_type: str, parent_id,
     if not isinstance(label, str) or not label.startswith(LABEL_PREFIX):
         raise WikiUsageError("label must be an identity_label()")
     parent_id = str(parent_id)
+    manifest = preflight_attachments(attachments) if attachments else None
     if page_id is not None:
         live = provider.get_page(page_id)  # missing -> WikiNotFoundError, no create
         check_location(live, space, parent_id)
         needs_label = check_identity(live, label, adopt)
         if needs_label:
             _refuse_if_label_owned_elsewhere(provider, space, label, live.id)
-        return _guarded_update(provider, live, title, body, stored_version, expect_version,
-                               label if needs_label else None)
+        counts = None
+        if manifest:
+            check_version_guard(live, body, stored_version, expect_version)  # refuse before uploading anything
+            counts = upload_attachments(provider, live.id, manifest)
+        res = _guarded_update(provider, live, title, body, stored_version, expect_version,
+                              label if needs_label else None)
+        return dataclasses.replace(res, attachments=counts) if manifest else res
 
     if adopt:
         raise WikiUsageError("--adopt only applies with --page-id")
@@ -444,7 +579,8 @@ def publish(provider: WikiProvider, space: str, parent_type: str, parent_id,
     if existing:
         raise _title_refusal(existing, title, label, parent_id)
     try:
-        created = provider.create_page(space, title, body, parent_type, parent_id)
+        created = provider.create_page(space, title, _PLACEHOLDER_BODY if manifest else body,
+                                       parent_type, parent_id)
     except WikiConflictError as exc:  # a 409 on POST is a name clash, not a version guard
         raise WikiDuplicateError(
             f"create refused (HTTP 409): a page titled {title!r} probably exists; nothing was created") from exc
@@ -454,6 +590,18 @@ def publish(provider: WikiProvider, space: str, parent_type: str, parent_id,
         raise WikiLocationError(
             f"page {created.id} was created but does not sit under parent {parent_id}; "
             "not recording it (fix or remove it manually)")
+    if manifest:
+        try:
+            counts = upload_attachments(provider, back.id, manifest)
+        except WikiAttachmentError as exc:
+            raise WikiAttachmentError(f"{exc} (page {back.id} was created with a placeholder body and is "
+                                      "labelled; re-run the publish to finish it)") from exc
+        try:
+            final = provider.update_page(back.id, title, body, back.version)
+        except WikiConflictError as exc:
+            raise WikiGuardError("final body write refused: page changed during publish (HTTP 409 conflict)",
+                                 back.version) from exc
+        return PublishResult(final.id, final.url, final.version, created=True, attachments=counts)
     return PublishResult(back.id, back.url, back.version, created=True)
 
 

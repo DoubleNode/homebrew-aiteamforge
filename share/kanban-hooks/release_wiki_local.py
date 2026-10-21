@@ -48,6 +48,7 @@ Semantics matched to the Confluence provider / the in-memory fake:
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -62,7 +63,7 @@ from typing import Iterator, List, Optional
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from release_wiki import (  # noqa: E402
     WikiAncestor, WikiConflictError, WikiError, WikiNotFoundError, WikiPage,
-    WikiProvider, WikiTransportError,
+    WikiProvider, WikiTransportError, check_attachment_filename, read_attachment_source,
 )
 
 _SPACE_KEY = re.compile(r"[A-Za-z0-9~_-]{1,255}")
@@ -486,6 +487,41 @@ class LocalProvider(WikiProvider):
             if label not in meta.setdefault("labels", []):
                 meta["labels"].append(label)
                 self._write_meta(meta)
+
+    def _read_bytes(self, path: Path) -> Optional[bytes]:
+        """Symlink-refusing binary read; None when absent."""
+        if not self._check(path, "file"):
+            return None
+        try:
+            fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise WikiError(f"cannot open local wiki file {self._rel(path)}: "
+                            f"{exc.strerror or type(exc).__name__}") from exc
+        with os.fdopen(fd, "rb") as fh:
+            if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+                raise WikiError(f"not a regular file in the local wiki: {self._rel(path)}")
+            return fh.read()
+
+    def put_attachment(self, page_id, local_path, filename, sha256=None):
+        """Copy a file to pages/<id>/attachments/<filename>; skipped when the
+        stored bytes already hash the same (XACA-1512-002)."""
+        name = check_attachment_filename(filename)
+        data, digest = read_attachment_source(local_path, sha256)
+        with self._locked(True, True):
+            meta = self._get(page_id, "page", "page")
+            adir = self._dir(meta["id"]) / "attachments"
+            dest = adir / name
+            self._mkdirs(adir)
+            existing = self._read_bytes(dest)
+            if existing is not None and hashlib.sha256(existing).hexdigest() == digest:
+                status = "unchanged"
+            else:
+                status = "created" if existing is None else "updated"
+                self._write(dest, data)
+        return {"status": status, "filename": name, "sha256": digest,
+                "id": name, "page_id": meta["id"]}
 
     def list_children(self, parent_type, parent_id):
         if parent_type not in ("page", "folder"):

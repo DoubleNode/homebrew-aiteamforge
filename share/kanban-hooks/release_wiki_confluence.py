@@ -12,6 +12,7 @@ import http.client
 import os
 import re
 import sys
+import uuid
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -23,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from release_wiki import (  # noqa: E402
     WikiAncestor, WikiConflictError, WikiError, WikiCredentialError, WikiNotFoundError,
     WikiPage, WikiProvider, WikiResolverUnavailableError, WikiTransportError,
+    check_attachment_filename, read_attachment_source,
 )
 
 CREDS_FILE_ENV = "KB_CR_POLLER_CREDS_FILE"  # same override as the poller
@@ -257,6 +259,29 @@ def _id(value, what: str) -> str:
     raise WikiError(f"invalid {what} id (must be numeric)")
 
 
+def _att_id(value) -> str:
+    """Attachment ids look like `att12345`; accept that or bare digits only."""
+    if isinstance(value, str) and re.fullmatch(r"(att)?[0-9]+", value):
+        return value
+    raise WikiTransportError("Confluence returned an attachment without a usable id")
+
+
+def _multipart(boundary: str, filename: str, data: bytes, fields: Dict[str, str]) -> bytes:
+    """Hand-built multipart/form-data: text fields, then the `file` part."""
+    crlf = b"\r\n"
+    parts = []
+    for key, val in fields.items():
+        parts += [b"--" + boundary.encode(),
+                  f'Content-Disposition: form-data; name="{key}"'.encode(), b"",
+                  val.encode("utf-8")]
+    quoted = filename.replace("\\", "\\\\").replace('"', '\\"')
+    parts += [b"--" + boundary.encode(),
+              f'Content-Disposition: form-data; name="file"; filename="{quoted}"'.encode("utf-8"),
+              b"Content-Type: application/octet-stream", b"", data,
+              b"--" + boundary.encode() + b"--", b""]
+    return crlf.join(parts)
+
+
 # ---------------------------------------------------------------- provider
 
 
@@ -265,10 +290,16 @@ class ConfluenceProvider(WikiProvider):
         self.cred = cred
         self._transport = transport or urllib_transport
 
-    def _call(self, method: str, path: str, payload: Any = None) -> Any:
+    def _call(self, method: str, path: str, payload: Any = None,
+              raw_body: Optional[bytes] = None, content_type: Optional[str] = None,
+              extra_headers: Optional[Dict[str, str]] = None) -> Any:
         headers = {"Authorization": self.cred.auth_header(),
                    "Accept": "application/json", "Content-Type": "application/json"}
         body = json.dumps(payload).encode("utf-8") if payload is not None else None
+        if raw_body is not None:  # multipart upload (attachments)
+            body = raw_body
+            headers["Content-Type"] = content_type or "application/octet-stream"
+        headers.update(extra_headers or {})
         status, raw = self._transport(method, self.cred.base_url + path, headers, body)
         route = path.split("?")[0]
         if status in (401, 403):
@@ -407,6 +438,52 @@ class ConfluenceProvider(WikiProvider):
                     for r in rows]
         return [self._page(r) for r in
                 self._collect(f"/rest/api/content/{pid}/child/page?expand=version")]
+
+    # attachments (XACA-1512-002)
+    def put_attachment(self, page_id, local_path, filename, sha256=None):
+        """Create/update/skip an attachment on a page. Idempotent by sha256,
+        which is stored in the attachment `comment` as `sha256:<hex>` and read
+        back from there. A present attachment whose comment carries no hash is
+        re-uploaded (and stamped) rather than downloaded and hashed: the
+        download endpoint redirects off-host and the redirect would carry the
+        Basic-auth header. UNCONFIRMED against live Confluence (verify in
+        XACA-1512-008): the exact REST shapes below."""
+        pid = _id(page_id, "page")
+        name = check_attachment_filename(filename)
+        data, digest = read_attachment_source(local_path, sha256)
+        q = urllib.parse.urlencode({"filename": name, "expand": "version,metadata"})
+        found = self._call("GET", f"/rest/api/content/{pid}/child/attachment?{q}")
+        results = found.get("results", []) if isinstance(found, dict) else None
+        if not isinstance(results, list):
+            raise WikiTransportError("Confluence returned an unexpected attachment list shape")
+        # Do not trust the server-side filter: exact title only.
+        match = [r for r in results if isinstance(r, dict) and r.get("title") == name]
+        if len(match) > 1:
+            raise WikiError(f"{len(match)} attachments named {name!r} on page {pid}; refusing to guess")
+        stamp = "sha256:" + digest
+        if match:
+            att_id = _att_id(match[0].get("id"))
+            comment = ((match[0].get("metadata") or {}).get("comment") or "")
+            if isinstance(comment, str) and comment.strip() == stamp:
+                return self._att_result("unchanged", pid, name, digest, att_id)
+            path, status = f"/rest/api/content/{pid}/child/attachment/{att_id}/data", "updated"
+        else:
+            path, status = f"/rest/api/content/{pid}/child/attachment", "created"
+        boundary = "kbwiki" + uuid.uuid4().hex
+        body = _multipart(boundary, name, data, {"comment": stamp, "minorEdit": "true"})
+        resp = self._call("POST", path, raw_body=body,
+                          content_type=f"multipart/form-data; boundary={boundary}",
+                          extra_headers={"X-Atlassian-Token": "no-check"})
+        out = resp
+        if isinstance(resp.get("results"), list) and resp["results"]:
+            out = resp["results"][0]  # create returns a result list; update returns the object
+        if not isinstance(out, dict):
+            raise WikiTransportError("Confluence returned an unexpected attachment shape")
+        return self._att_result(status, pid, name, digest, _att_id(out.get("id")))
+
+    def _att_result(self, status, pid, name, digest, att_id):
+        return {"status": status, "filename": name, "sha256": digest,
+                "id": att_id, "page_id": pid}
 
     def page_url(self, page_id):
         return f"{self.cred.base_url}/pages/viewpage.action?pageId={page_id}"

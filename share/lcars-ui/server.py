@@ -10383,7 +10383,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             self.send_error(500, f"Error granting waiver: {e}")
 
     _TEST_PROTO_FIELDS = ('ref', 'parentRef', 'stage', 'type', 'ts', 'env', 'sha', 'test',
-                          'result', 'runBy', 'notes')
+                          'result', 'runBy', 'notes', 'evidence')
 
     @staticmethod
     def _expected_not_superset(old, new):
@@ -10559,6 +10559,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     # post below, so a child pointing at it is never saved.
                     if r.get('ref'):
                         refmap[r['ref']] = rid
+                    if 'evidence' in r:   # XACA-1512: optional; validated (fail closed) by append_test_records
+                        full['evidence'] = r['evidence']
                     fulls.append(full)
                 # one batch: append_test_record per record re-scanned + re-copied tests[] (O(N^2) under
                 # the board lock, PR #1010 round 1)

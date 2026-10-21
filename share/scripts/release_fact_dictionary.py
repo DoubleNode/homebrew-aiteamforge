@@ -43,6 +43,7 @@ Stdlib only; runs under /usr/bin/python3 3.9.
 from __future__ import annotations
 
 import copy
+import os
 import re
 import sys
 from datetime import datetime, timezone
@@ -169,6 +170,13 @@ CANONICAL_FACTS: Dict[str, Dict[str, Any]] = {
                                      "recorded at the graded SHA (`stageSha[<stage>]`, else `stages[<stage>].sha`, case-insensitive); "
                                      "`n` is the row's number in `stage.tests`. If neither is recorded, every top-level non-superseded row",
                            "example": "[{\"n\": 4, \"result\": \"PASS\", ...}]", "kinds": ["testing-log"]},
+    "stage.evidenceImages": {"type": "array of {n, recordId, heading, caption, name, file, sha256}",
+                             "source": "XACA-1512: one row per evidence entry of each `stage.testsCurrent` record (none for a record without `evidence`), "
+                                       "in record order. A row with evidence also gets ` (evidence: N below)` appended in `notesWithEvidence` (identical to `notesWithShaAndSuperseded` otherwise). `heading` is `Row <n> evidence - <test>` on the FIRST image of a record and empty on the rest; "
+                                       "`caption` is markdown-safe; `name` is the deterministic attachment filename (`<record-id>-<basename>`, sanitized) the page links as "
+                                       "`attachments/<name>`; `file`/`sha256` are the recorded evidence entry. Empty when no current record has evidence",
+                             "example": "[{\"n\": 4, \"heading\": \"Row 4 evidence - walk\", \"name\": \"t4-login.png\", ...}]",
+                             "kinds": ["testing-log"]},
     "stage.childCount": {"type": "integer",
                          "source": "stage records omitted from `stage.testsCurrent` because they have a `parent` (jsonl child cases); counted first",
                          "example": "6400", "kinds": ["testing-log"]},
@@ -239,9 +247,10 @@ ROW_SHAPES: Dict[str, List[str]] = {
     "release.stages": ["name", "enteredAt", "completedAt", "status"],
     "cr.stateHistory": ["state", "verb", "actor", "timestampCT", "note"],
     "stage.tests": ["n", "timestampCT", "type", "env", "test", "result", "runBy", "notes",
-                    "notesWithShaAndSuperseded"],
+                    "notesWithShaAndSuperseded", "notesWithEvidence"],
     "stage.testsCurrent": ["n", "timestampCT", "type", "env", "test", "result", "runBy", "notes",
-                           "notesWithShaAndSuperseded"],
+                           "notesWithShaAndSuperseded", "notesWithEvidence"],
+    "stage.evidenceImages": ["n", "recordId", "heading", "caption", "name", "file", "sha256"],
     "tests.byStage": ["stage", "automated", "manual", "pass", "fail", "waived"],
     "tests.failuresAndReruns": ["failedRow", "supersededByRow", "stage", "notes"],
     "waivers": ["by", "reason", "ts", "tests"],
@@ -541,6 +550,87 @@ def _waived_ids(release: Dict[str, Any]) -> set:
     return ids
 
 
+# ------------------------------------------------------------ evidence (XACA-1512-003)
+_UNSAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _safe_name_part(text: str, limit: int) -> str:
+    out = _UNSAFE_NAME_RE.sub("_", str(text)).strip("._-")
+    return out[:limit].strip("._-")
+
+
+def _safe_basename(basename: str) -> str:
+    """A filename-safe basename that KEEPS the extension. The stem is squashed and truncated on its own so a
+    non-ASCII stem (``screenshot.png`` in another script) or an over-long one cannot swallow the dot and leave
+    ``t1-png`` (an attachment with no extension is not rendered as an image)."""
+    stem, dot, ext = basename.rpartition(".")
+    ext = re.sub(r"[^A-Za-z0-9]+", "", ext)[:10] if dot and stem else ""
+    if not ext:
+        return _safe_name_part(basename, 120) or "file"
+    return "%s.%s" % (_UNSAFE_NAME_RE.sub("_", stem).lstrip("._-")[:100] or "file", ext)
+
+
+def evidence_caption(caption: Any, fallback: str = "") -> str:
+    """A caption that cannot break ``![caption](target)`` or a table: whitespace/newlines collapse to a
+    space; ``[`` ``]`` become ``(`` ``)`` (md2storage has no backslash escape in alt text, so a ``]`` would end
+    the image early); ``|`` and ``\\`` become ``/``. Empty after cleaning -> ``fallback``."""
+    text = " ".join(str(caption if caption is not None else "").split())
+    text = (text.replace("[", "(").replace("]", ")").replace("|", "/").replace("\\", "/"))
+    return text.strip() or fallback
+
+
+def evidence_attachment_names(case_id: str, entries: List[Dict[str, Any]]) -> List[str]:
+    """Deterministic, unique attachment filenames for one record's evidence entries.
+
+    ``<case-id>-<basename>`` with every character outside ``[A-Za-z0-9._-]`` squashed to ``_``. Two entries
+    of the SAME record that land on one name -- compared case-insensitively -- but are different files
+    (``a/x.png`` vs ``b/x.png``, ``Login.png`` vs ``login.png``, or names that only differ in squashed
+    characters) all get the first 8 hex of their sha256 before the extension; the same ``file`` listed
+    twice -- or identical bytes under case-variant names -- shares one name (the first spelling). The result is a pure function of the record
+    (id + entries), so a republish names the files identically. Valid for ``check_attachment_filename``."""
+    cid = _safe_name_part(case_id, 60) or "case"
+    base = []
+    for e in entries:
+        base.append("%s-%s" % (cid, _safe_basename(str(e["file"]).split("/")[-1])))
+    # Keyed on casefold(): APFS (the local provider's default) is case-insensitive and Confluence title
+    # matching is unconfirmed, so `Login.png` / `login.png` must not share a slot (PR #1189 review).
+    owners: Dict[str, set] = {}
+    for n, e in zip(base, entries):
+        owners.setdefault(n.casefold(), set()).add(str(e["file"]))
+    names = []
+    for n, e in zip(base, entries):
+        if len(owners[n.casefold()]) > 1:
+            stem, dot, ext = n.rpartition(".")
+            tag = str(e.get("sha256") or "")[:8] or "x"
+            n = ("%s-%s.%s" % (stem, tag, ext)) if dot and stem else "%s-%s" % (n, tag)
+        names.append(n)
+    # One spelling per case-insensitive name: identical bytes under `x.png` / `X.png` upload once, so
+    # every embed must use the spelling that was uploaded (the first) -- PR #1189 round-2 advisory.
+    first: Dict[str, str] = {}
+    return [first.setdefault(n.casefold(), n) for n in names]
+
+
+def _evidence_images(cur_pairs: List[Any]) -> List[Dict[str, Any]]:
+    out = []
+    for n, rec in cur_pairs:
+        ev = rec.get("evidence")
+        if ev is None or ev == []:
+            continue
+        if not isinstance(ev, list) or any(
+                not isinstance(e, dict) or not isinstance(e.get("file"), str) or not e.get("file")
+                for e in ev):
+            raise FactSetError("test record %r: evidence must be a list of {file, sha256, caption} objects"
+                               % (rec.get("id"),))
+        rid = str(rec.get("id") or "row%d" % n)
+        label = " ".join(str(rec.get("test") or "").split())[:80]
+        heading = "Row %d evidence" % n + (" - %s" % evidence_caption(label) if evidence_caption(label) else "")
+        for k, (e, nm) in enumerate(zip(ev, evidence_attachment_names(rid, ev))):
+            out.append({"n": n, "recordId": rid, "heading": heading if k == 0 else "",
+                        "caption": evidence_caption(e.get("caption"), os.path.basename(e["file"])),
+                        "name": nm, "file": e["file"], "sha256": str(e.get("sha256") or "")})
+    return out
+
+
 def build_stage_facts(release_record: Dict[str, Any], stage_name: str, *, tz: str = DEFAULT_TZ) -> Dict[str, Any]:
     """The ``stage`` view for one stage: name, test rows, totals.
 
@@ -558,7 +648,7 @@ def build_stage_facts(release_record: Dict[str, Any], stage_name: str, *, tz: st
     stage_rec = (release_record.get("stages") or {}).get(stage_name) if isinstance(release_record.get("stages"), dict) else None
     cur_sha = str(_obj(release_record.get("stageSha"), "release.stageSha").get(stage_name)
                   or (stage_rec.get("sha") if isinstance(stage_rec, dict) else "") or "").lower()
-    cur_rows, omitted = [], {"child": 0, "superseded": 0, "otherSha": 0}
+    cur_rows, cur_pairs, omitted = [], [], {"child": 0, "superseded": 0, "otherSha": 0}
     rows, totals = [], {"automated": 0, "manual": 0, "pass": 0, "fail": 0, "waived": 0}
     for i, t in enumerate(recs, start=1):
         sup = t.get("supersededBy")
@@ -572,6 +662,7 @@ def build_stage_facts(release_record: Dict[str, Any], stage_name: str, *, tz: st
             "runBy": t.get("runBy", ""), "notes": note,
             "notesWithShaAndSuperseded": (note + (" (" + extra + ")" if extra else "")).strip(),
         }
+        row["notesWithEvidence"] = row["notesWithShaAndSuperseded"]   # XACA-1512-014: marker added below
         rows.append(row)
         if t.get("parent"):  # precedence child > superseded > other SHA: each omitted record counts once
             omitted["child"] += 1
@@ -581,6 +672,7 @@ def build_stage_facts(release_record: Dict[str, Any], stage_name: str, *, tz: st
             omitted["otherSha"] += 1
         else:
             cur_rows.append(row)
+            cur_pairs.append((i, t))
         if sup:
             continue  # superseded rows are shown but never counted
         totals["automated" if t.get("type") == "Automated" else "manual"] += 1
@@ -590,7 +682,15 @@ def build_stage_facts(release_record: Dict[str, Any], stage_name: str, *, tz: st
             totals["waived"] += 1
         else:
             totals["fail"] += 1
+    images = _evidence_images(cur_pairs)
+    counts: Dict[int, int] = {}
+    for im in images:
+        counts[im["n"]] = counts.get(im["n"], 0) + 1
+    for n, k in counts.items():   # only a CURRENT record with evidence gets the cue; table-safe, one line
+        row = rows[n - 1]
+        row["notesWithEvidence"] = (row["notesWithShaAndSuperseded"] + " (evidence: %d below)" % k).strip()
     return {"name": stage_name, "tests": rows, "totals": totals, "testsCurrent": cur_rows,
+            "evidenceImages": images,
             "childCount": omitted["child"], "supersededCount": omitted["superseded"],
             "otherShaCount": omitted["otherSha"], "omittedCount": sum(omitted.values())}
 

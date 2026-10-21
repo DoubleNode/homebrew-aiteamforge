@@ -15,6 +15,12 @@ TEST_RESULTS = ("PASS", "FAIL", "SKIP")
 # Test-record fields (spec 6.2), in canonical order.
 TEST_FIELDS = ("id", "stage", "type", "ts", "env", "sha", "test", "result",
                "runBy", "notes", "parent", "supersededBy")
+# Optional fields: absent on every pre-XACA-1512 record, which must keep validating unchanged.
+OPTIONAL_TEST_FIELDS = ("evidence",)
+EVIDENCE_MAX_ENTRIES = 50
+EVIDENCE_MAX_FILE = 512
+EVIDENCE_MAX_CAPTION = 300
+_SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 _STR_FIELDS = ("id", "ts", "env", "sha", "test", "runBy")
 _NULLABLE_STR = ("parent", "supersededBy")
 
@@ -32,6 +38,55 @@ def release_defaults():
     }
 
 
+def evidence_file_problem(f):
+    """Pure STRING-level check of an evidence `file` (path relative to the release evidence dir).
+    Returns a problem string or None. The filesystem half (realpath containment, existence) lives in
+    release_evidence.py -- this module does no I/O."""
+    if not isinstance(f, str) or not f.strip():
+        return "file must be a non-empty string"
+    if len(f) > EVIDENCE_MAX_FILE:
+        return "file longer than %d characters" % EVIDENCE_MAX_FILE
+    if "\x00" in f:
+        return "file contains a NUL byte"
+    if "\\" in f:
+        return "file must not contain a backslash"
+    if f.startswith("/") or re.match(r"[A-Za-z]:", f):
+        return "file must be relative to the evidence directory (absolute path given)"
+    if any(seg in ("", ".", "..") for seg in f.split("/")):
+        return "file must not contain empty, '.' or '..' path segments"
+    return None
+
+
+def validate_evidence(ev):
+    """Return a list of problems with a record's `evidence` value ([] = valid). Fail closed: any
+    malformed entry is a problem, none is dropped. Entry: {file, sha256, caption}, all required here
+    (the walkthrough fills sha256 and the default caption BEFORE a record is built)."""
+    if not isinstance(ev, list):
+        return ["evidence must be a list"]
+    if len(ev) > EVIDENCE_MAX_ENTRIES:
+        return ["evidence has %d entries (max %d)" % (len(ev), EVIDENCE_MAX_ENTRIES)]
+    errs = []
+    for i, e in enumerate(ev):
+        if not isinstance(e, dict):
+            errs.append("evidence[%d] must be an object" % i)
+            continue
+        for k in e:
+            if k not in ("file", "sha256", "caption"):
+                errs.append("evidence[%d]: unknown field %s" % (i, k))
+        p = evidence_file_problem(e.get("file"))
+        if p:
+            errs.append("evidence[%d]: %s" % (i, p))
+        sha = e.get("sha256")
+        if not isinstance(sha, str) or not _SHA256_RE.match(sha):
+            errs.append("evidence[%d]: sha256 must be 64 lowercase hex characters" % i)
+        cap = e.get("caption")
+        if not isinstance(cap, str) or not cap.strip():
+            errs.append("evidence[%d]: caption must be a non-empty string" % i)
+        elif len(cap) > EVIDENCE_MAX_CAPTION:
+            errs.append("evidence[%d]: caption longer than %d characters" % (i, EVIDENCE_MAX_CAPTION))
+    return errs
+
+
 def validate_test_record(rec):
     """Return a list of problems with a spec 6.2 test record ([] = valid)."""
     if not isinstance(rec, dict):
@@ -41,10 +96,14 @@ def validate_test_record(rec):
         if f not in rec:
             errs.append("missing field: %s" % f)
     for f in rec:
-        if f not in TEST_FIELDS:
+        if f not in TEST_FIELDS and f not in OPTIONAL_TEST_FIELDS:
             errs.append("unknown field: %s" % f)
     if errs:
         return errs
+    if "evidence" in rec:
+        if rec["type"] != "Manual":
+            errs.append("evidence is only allowed on Manual records")
+        errs.extend(validate_evidence(rec["evidence"]))
     for f in _STR_FIELDS:
         if not isinstance(rec[f], str) or not rec[f].strip():
             errs.append("%s must be a non-empty string" % f)

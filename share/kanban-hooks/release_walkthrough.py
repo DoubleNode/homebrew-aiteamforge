@@ -48,7 +48,10 @@ import urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from release_gate import _current_index  # noqa: E402
+from release_evidence import (EvidenceError, build_evidence, default_caption, parse_evidence_input,  # noqa: E402
+                              release_evidence_dir, split_evidence_item)
 from release_runner import RunnerError, _iso, _under, build_expected, load_cases  # noqa: E402
+from release_schema import validate_evidence  # noqa: E402
 
 MAX_ASKS = 3
 PASS, FAIL, SKIP = "PASS", "FAIL", "SKIP"
@@ -83,8 +86,11 @@ def format_case(case, provider):
     return "\n".join(lines)
 
 
-def answer_record(case, stage, sha, env_label, lead, result, note, now=None):
-    """Build the proto `Manual` record for one answer. Raises RunnerError on an invalid answer."""
+def answer_record(case, stage, sha, env_label, lead, result, note, now=None, evidence=None):
+    """Build the proto `Manual` record for one answer. Raises RunnerError on an invalid answer.
+    `evidence` (XACA-1512): optional list of {file, sha256, caption}, ALREADY verified by
+    release_evidence.build_evidence; only the pure shape is re-checked here. None/[] -> no field,
+    so a record without evidence is identical to the pre-XACA-1512 one."""
     if not isinstance(lead, str) or not lead.strip():
         raise RunnerError("lead name is required (runBy of a manual record must be non-empty)")
     result = (result or "").upper()
@@ -95,9 +101,15 @@ def answer_record(case, stage, sha, env_label, lead, result, note, now=None):
         raise RunnerError("a %s answer requires a note%s" % (result, " (the reason)" if result == SKIP else ""))
     if not env_label or not str(env_label).strip():
         raise RunnerError("env label is required (provider envLabel)")
-    return {"ref": "m1", "parentRef": None, "stage": stage, "type": "Manual", "ts": _iso(now),
-            "env": env_label, "sha": sha, "test": case_test_name(case), "result": result,
-            "runBy": lead.strip(), "notes": note}
+    rec = {"ref": "m1", "parentRef": None, "stage": stage, "type": "Manual", "ts": _iso(now),
+           "env": env_label, "sha": sha, "test": case_test_name(case), "result": result,
+           "runBy": lead.strip(), "notes": note}
+    if evidence:
+        problems = validate_evidence(evidence)
+        if problems:
+            raise EvidenceError("invalid evidence: " + "; ".join(problems))
+        rec["evidence"] = [dict(e) for e in evidence]
+    return rec
 
 
 class _Invalid(object):
@@ -170,7 +182,62 @@ def _summary(status, answered, remaining, hook_errors, detail=None):
     return s
 
 
-def run_walkthrough(provider, cases, release, stage, *, lead, prompt, post, now=None, after_record=None):
+def _ask_evidence(prompt, case, evidence_dir, load):
+    """Optional evidence question. -> list (possibly empty; EOF = []) | None on Ctrl-C | INVALID after
+    MAX_ASKS rejected answers. A rejected answer is re-asked WITH the reason; a blank answer = none.
+    Each item is `file` or `file=caption` (XACA-1512-013); an item without a caption gets
+    '<test name> - screenshot k of n' rather than the file name, which would be the published alt text."""
+    base = ("Evidence files for %s (comma-separated, relative to %s; blank for none).\n"
+            "Add a caption with file=caption, e.g. login.png=Login screen after SSO; without one the caption is\n"
+            "'%s'. Captions cannot contain commas, and a file name containing '=' cannot be attached."
+            % (case["id"], evidence_dir, default_caption(case_test_name(case), 1, 2)))
+    q = base
+    for _ in range(MAX_ASKS):
+        try:
+            raw = prompt(q, None)
+        except EOFError:
+            # End of input = "no evidence", NOT a stop: the case result was already answered, and a
+            # script piping only results (pre-XACA-1512 callers) must still record it.
+            return []
+        except KeyboardInterrupt:
+            return None
+        items = parse_evidence_input(raw)
+        if not items:
+            return []
+        entries = []
+        for k, item in enumerate(items, 1):
+            name, cap = split_evidence_item(item)
+            entries.append({"file": name, "caption": cap or default_caption(case_test_name(case), k, len(items))})
+        try:
+            return load(evidence_dir, entries)
+        except EvidenceError as e:
+            q = "Evidence rejected: %s\n%s" % (e, base)
+    return INVALID
+
+
+def prepare_evidence_dir(kanban_dir, release_id, *, makedirs=os.makedirs, exists=os.path.isdir, out=print):
+    """Announce (and create) the release evidence folder at walkthrough START (XACA-1512-015).
+    Returns the path, or None when the release id cannot name one -- then a note is printed and the
+    walkthrough runs without the evidence question, instead of failing a run that never attaches proof.
+    I/O is injected so the pure walkthrough logic stays untouched."""
+    try:
+        path = release_evidence_dir(kanban_dir, release_id)
+    except EvidenceError as e:
+        out("Evidence folder: unavailable (%s); evidence attachments are disabled for this run." % (e,))
+        return None
+    if exists(path):
+        out("Evidence folder: %s" % path)
+        return path
+    try:
+        makedirs(path, exist_ok=True)
+        out("Evidence folder: %s\n  (did not exist yet; created it. Put screenshots here before you answer each case.)" % path)
+    except OSError as e:
+        out("Evidence folder: %s\n  (does not exist and could not be created: %s)" % (path, e))
+    return path
+
+
+def run_walkthrough(provider, cases, release, stage, *, lead, prompt, post, now=None, after_record=None,
+                    evidence_dir=None, load_evidence=build_evidence):
     """Drive the walkthrough. `release` supplies stageSha[stage] and tests[] (read once, at start).
     Returns {status: complete|stopped|device-not-confirmed|post-failed, answered, remaining, ...}.
     Raises RunnerError for a refusal before anything is shown (empty lead, GAMMA without prodSafe)."""
@@ -212,7 +279,13 @@ def run_walkthrough(provider, cases, release, stage, *, lead, prompt, post, now=
             if note is None or note is INVALID:
                 return _summary("stopped", answered, len(todo) - i, hook_errors,
                                 _INVALID_DETAIL if note is INVALID else "no note given")
-        rec = answer_record(case, stage, sha, env_label, lead, ans.upper(), note, now)
+        evidence = []
+        if evidence_dir is not None:   # XACA-1512: opt-in; None keeps the pre-existing prompt flow exactly
+            evidence = _ask_evidence(prompt, case, evidence_dir, load_evidence)
+            if evidence is None or evidence is INVALID:
+                return _summary("stopped", answered, len(todo) - i, hook_errors,
+                                _INVALID_DETAIL if evidence is INVALID else "no evidence answer given")
+        rec = answer_record(case, stage, sha, env_label, lead, ans.upper(), note, now, evidence)
         try:
             ids = post([rec])
         except Exception as e:  # noqa: BLE001 -- ANY post failure must stop before the next case
@@ -361,9 +434,13 @@ def main(argv=None):
         post = make_poster("http://localhost:%d" % a.port, a.release, a.stage, sha, manual_expected=manual,
                            read_release=lambda: _load_release(a.kanban_dir, a.release))
 
+        # stderr, not stdout: stdout stays the summary / the one JSON line that scripts parse
+        evidence_dir = prepare_evidence_dir(a.kanban_dir, a.release, out=lambda m: print(m, file=sys.stderr))
+
         def prompt(q, choices):
             return input("\n%s%s\n> " % (q, " [%s]" % "/".join(choices) if choices else ""))
-        s = run_walkthrough(prov[0], cases, release, a.stage, lead=a.lead, prompt=prompt, post=post)
+        s = run_walkthrough(prov[0], cases, release, a.stage, lead=a.lead, prompt=prompt, post=post,
+                           evidence_dir=evidence_dir)
     except Exception as e:  # noqa: BLE001 -- CLI boundary: one-line named error, nonzero exit
         print("release_walkthrough: %s" % (e,), file=sys.stderr)
         return 2
