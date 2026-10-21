@@ -537,6 +537,15 @@ def _refuse_if_claimed(team: str, cr_id: str, url: str) -> bool:
         return True
     if _cr_proper_url_claimed_elsewhere(board, cr_id, url):
         want = _normalize_cr_proper_url(url)
+        # XACA-1538-015: give the exact reason before matching holders. An un-normalisable url
+        # would otherwise match every CR whose stored url is also un-normalisable (None == None),
+        # and a non-dict board would raise below.
+        if not isinstance(board, dict) or not isinstance(board.get("crs"), list):
+            log(f"[{team}][{cr_id}] REFUSED transition: board is malformed (no .crs list), cannot verify {url!r} is unclaimed (fail closed).")
+            return True
+        if want is None:
+            log(f"[{team}][{cr_id}] REFUSED transition: {url!r} is not a valid IT Connect ticket URL. Nothing written.")
+            return True
         # Same filter as _cr_proper_url_claimed_elsewhere, so the log names only blocking holders.
         holders = [
             (o.get("crId") or o.get("id"), o.get("crState"))
@@ -545,8 +554,8 @@ def _refuse_if_claimed(team: str, cr_id: str, url: str) -> bool:
             and o.get("crState") not in _TICKET_RELEASING_STATES
             and o.get("cr_proper_url") and _normalize_cr_proper_url(o.get("cr_proper_url")) == want
         ]
-        if not holders:
-            log(f"[{team}][{cr_id}] REFUSED transition: {url!r} is not a valid IT Connect ticket URL. Nothing written.")
+        if not holders:  # guard and log disagree; refuse anyway (fail closed)
+            log(f"[{team}][{cr_id}] REFUSED transition: {url!r} reported claimed but no holder found. Nothing written.")
             return True
         named = ", ".join(f"{hid} ({hstate})" for hid, hstate in holders)
         first = holders[0][0]
