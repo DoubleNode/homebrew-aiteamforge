@@ -10801,7 +10801,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         """POST /api/releases/<id>/close-out (XACA-1353-001, spec 13.4) - the sanctioned writer of
         release.closeOut, the ordered resumable PROD close-out step-state. Body is one of
         {"op":"init","crTeam":bool,"targets":[branch,..]} | {"op":"set","step":S,"status":X,"error":str?} |
-        {"op":"target","target":branch,"status":X}; release_closeout.apply_op decides (ordering, sticky
+        {"op":"target","target":branch,"status":X} | {"op":"accepted","step":"tag|mergeProduction|mergeIntegration|verifyClientMerge","commits":[..]} (XACA-1578);
+        release_closeout.apply_op decides (ordering, sticky
         `done`, deleteBranch gate). XACA-1446: the record binds to S = release_gate.closeout_stage(enabled
         stages), the last enabled stage before PROD (GAMMA when the team has it); init only at S, set/target at
         the record's own stage or PROD. 400 bad body, 404 unknown release, 409 refused (or release not at S/PROD:
@@ -10814,8 +10815,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             body, err = self._read_release_json_body()
             if err:
                 return self._send_json_response({"error": err}, status=400)
-            if not isinstance(body, dict) or body.get('op') not in ('init', 'set', 'target'):
-                return self._send_json_response({"error": "'op' must be one of init|set|target"}, status=400)
+            if not isinstance(body, dict) or body.get('op') not in ('init', 'set', 'target', 'accepted'):
+                return self._send_json_response({"error": "'op' must be one of init|set|target|accepted"}, status=400)
             with self._board_write_transaction():
                 data = self._load_releases_config(_lock_held=True)
                 release = self._find_release_by_id(data, release_id)

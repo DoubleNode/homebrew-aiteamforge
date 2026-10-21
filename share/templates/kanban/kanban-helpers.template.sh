@@ -1506,22 +1506,250 @@ _kb_co_gh_slug() {
     printf '%s/%s\n' "$owner" "$repo"
 }
 
+# ---------------------------------------------------------------------------
+# XACA-1578: POST-GATE DOCS-ONLY ALLOWANCE. The RELNOTES workflow promotes notes AFTER gating, so a release branch tip is
+# often stageSha[S] + a commit or two that touch only RELNOTES*. The close-out accepts that (the tag still lands on
+# stageSha[S], never on the tip); ANY other post-gate change still refuses exactly as before.
+#
+# _kb_co_postgate_docs_only <work> <stage_sha> <tip_sha> [pattern... | --none]
+#   <work>      a git work tree / clone (run as `git -C <work>`, via _kb_co_git); it must hold both commits.
+#   <stage_sha> stageSha[S], <tip_sha> the candidate tip: full lower-case hex (40-64) -- abbreviations are refused.
+#   pattern...  the allowlist: shell globs matched against the full repo-relative path. NO pattern = the default
+#               (RELNOTES*). `--none` (alone) = an explicitly EMPTY allowlist = accept nothing (tip must == stage).
+#               Matched PER SEGMENT: path and pattern must have the same number of "/"-separated segments and each
+#               segment must glob-match, so `*` never crosses "/" (RELNOTES* is root-level only; `docs/*` is one level).
+#   rc 0 accepted | 1 refused (reason in $_KB_CO_ERR). Globals set (reset on every call):
+#     _KB_CO_ACCEPTED       newline-separated full SHAs of stage..tip, oldest first ("" when tip == stage)
+#     _KB_CO_ACCEPTED_JSON  [{"sha","subject","files":[...]}] built with jq ("" when tip == stage)
+#   Rules: tip must DESCEND from stage; EVERY commit in stage..tip (merge commits included) and the overall
+#   stage..tip diff must touch only allowlisted paths; renames/copies need BOTH paths allowed; only A/M/D/R/C changes
+#   are accepted (a type change, symlink or submodule entry refuses). Fail closed on anything unreadable.
+# ---------------------------------------------------------------------------
+# _kb_co_postgate_scan <raw -z output>: appends every path to the array _KB_CO_SCAN_PATHS; rc 1 + $_KB_CO_ERR when an entry
+# is not a plain A/M/D/R/C change of regular files or the output is malformed.
+_kb_co_postgate_scan() {
+    local raw="${1-}" tok st nm
+    local -a toks f
+    toks=("${(@0)raw}")
+    local i=1 n=${#toks}
+    while (( i <= n )); do
+        tok="${toks[i]}"
+        if [[ -z "$tok" ]]; then (( i++ )); continue; fi
+        # `:<oldmode> <newmode> <oldsha> <newsha> <status>` then the path(s)
+        [[ "$tok" == :* ]] || { _KB_CO_ERR="unreadable git diff output (unexpected entry); refusing"; return 1; }
+        f=(${=tok})
+        (( ${#f} == 5 )) || { _KB_CO_ERR="unreadable git diff output (malformed entry); refusing"; return 1; }
+        st="${f[5]}"; nm="${f[2]}"
+        [[ "$nm" == 120000 || "$nm" == 160000 ]] && { _KB_CO_ERR="a post-gate change adds a symlink or submodule entry (mode ${nm}); refusing"; return 1; }
+        case "$st" in
+            [AMD]) (( i + 1 <= n )) || { _KB_CO_ERR="unreadable git diff output (missing path); refusing"; return 1; }
+                   _KB_CO_SCAN_PATHS+=("${toks[i+1]}"); (( i += 2 )) ;;
+            [RC]*) (( i + 2 <= n )) || { _KB_CO_ERR="unreadable git diff output (missing rename path); refusing"; return 1; }
+                   _KB_CO_SCAN_PATHS+=("${toks[i+1]}" "${toks[i+2]}"); (( i += 3 )) ;;
+            *) _KB_CO_ERR="a post-gate commit changes a file with status '${st}' (type change or unknown); refusing"; return 1 ;;
+        esac
+    done
+    return 0
+}
+
+# _kb_co_postgate_docs_only: see the header above.
+_kb_co_postgate_docs_only() {
+    local work="${1-}" stage="${2-}" tip="${3-}" c fp raw rc subj files_json acc_json="[]"
+    local -a pargs commits
+    _KB_CO_ERR=""; _KB_CO_ACCEPTED=""; _KB_CO_ACCEPTED_JSON=""
+    shift 3 2>/dev/null || shift $#
+    # pargs is handed to the path matcher: EMPTY = its default (RELNOTES*), (--none) = accept nothing
+    if (( $# == 0 )); then pargs=()
+    elif [[ $# -eq 1 && "$1" == "--none" ]]; then pargs=(--none)
+    else pargs=("$@"); fi
+    # XACA-1578-020: allowlist entries are plain per-segment globs -- literal characters plus `*` / `?` only, no empty
+    # segment. Anything else (groups, classes, `|`, `~`, `#` ...) would be a zsh `bad pattern` abort or a cross-`/` group
+    # mid-close-out, so it is refused up front with a reason instead. No `=` either: a segment starting with `=` is zsh
+    # EQUALS (command-path) expansion and aborts the match (XACA-1578-021).
+    local _seg_re='^[A-Za-z0-9._*?+@,% -]+(/[A-Za-z0-9._*?+@,% -]+)*$' _pat
+    if [[ "${pargs[1]-}" != "--none" ]]; then
+        for _pat in "${pargs[@]}"; do
+            [[ "$_pat" =~ $_seg_re ]] || { _KB_CO_ERR="post-gate check: allowlist pattern '${_pat}' (releaseConfig.closeOut.postGateDocsAllowlist) is not a plain per-segment glob (letters, digits, . _ - + @ , % space, * and ? only, no empty segment); refusing"; return 1; }
+        done
+    fi
+    [[ -n "$work" ]] || { _KB_CO_ERR="post-gate check: no repository given"; return 1; }
+    [[ "$stage" =~ ^[0-9a-f]{40,64}$ ]] || { _KB_CO_ERR="post-gate check: stageSha '${stage:0:12}' is not a full SHA"; return 1; }
+    [[ "$tip" =~ ^[0-9a-f]{40,64}$ ]] || { _KB_CO_ERR="post-gate check: tip '${tip:0:12}' is not a full SHA"; return 1; }
+    [[ "$tip" == "$stage" ]] && return 0
+    _kb_co_git -C "$work" cat-file -e "${stage}^{commit}" 2>/dev/null \
+        || { _KB_CO_ERR="post-gate check: stageSha ${stage:0:12} is not available as a commit in the repository; refusing"; return 1; }
+    _kb_co_git -C "$work" cat-file -e "${tip}^{commit}" 2>/dev/null \
+        || { _KB_CO_ERR="post-gate check: tip ${tip:0:12} is not available as a commit in the repository; refusing"; return 1; }
+    _kb_co_git -C "$work" merge-base --is-ancestor "$stage" "$tip" 2>/dev/null \
+        || { _KB_CO_ERR="tip ${tip:0:12} is not a descendant of stageSha ${stage:0:12}; not a post-gate addition"; return 1; }
+    raw=$(_kb_co_git -C "$work" rev-list --reverse --topo-order "${stage}..${tip}"); rc=$?
+    [[ $rc -eq 0 && -n "$raw" ]] || { _KB_CO_ERR="post-gate check: cannot list the commits ${stage:0:12}..${tip:0:12} (git exited ${rc})"; return 1; }
+    commits=(${(f)raw})
+    # every commit on its own first (so a refusal can name the commit), then the overall diff as a backstop
+    for c in "${commits[@]}"; do
+        [[ "$c" =~ ^[0-9a-f]{40,64}$ ]] || { _KB_CO_ERR="post-gate check: malformed commit id from git"; return 1; }
+        raw=$(_kb_co_git -C "$work" diff-tree -r --raw -z -M -m --no-abbrev --no-commit-id "$c"); rc=$?
+        [[ $rc -eq 0 ]] || { _KB_CO_ERR="post-gate check: cannot read commit ${c:0:12} (git exited ${rc}); refusing"; return 1; }
+        _KB_CO_SCAN_PATHS=()
+        _kb_co_postgate_scan "$raw" || { _KB_CO_ERR="commit ${c:0:12}: ${_KB_CO_ERR}"; return 1; }
+        for fp in "${_KB_CO_SCAN_PATHS[@]}"; do
+            _kb_co_postgate_path_ok "$fp" "${pargs[@]}" || { _KB_CO_ERR="post-gate commit ${c:0:12} changes '${fp}', which is not allowlisted (docs-only commits after the gated build are accepted; anything else needs a re-gate)"; return 1; }
+        done
+        subj=$(_kb_co_git -C "$work" log -1 --format=%s "$c"); rc=$?
+        [[ $rc -eq 0 ]] || { _KB_CO_ERR="post-gate check: cannot read the subject of ${c:0:12}"; return 1; }
+        files_json=$(printf '%s\0' "${(@u)_KB_CO_SCAN_PATHS}" | jq -Rs 'split("\u0000") | map(select(length > 0))') \
+            || { _KB_CO_ERR="post-gate check: cannot encode the file list of ${c:0:12}"; return 1; }
+        acc_json=$(jq -nc --argjson acc "$acc_json" --arg sha "$c" --arg subj "$subj" --argjson files "$files_json" \
+            '$acc + [{sha:$sha, subject:$subj, files:$files}]') \
+            || { _KB_CO_ERR="post-gate check: cannot encode commit ${c:0:12}"; return 1; }
+    done
+    # backstop: the overall stage..tip diff (a merge commit cannot hide a change from it either)
+    raw=$(_kb_co_git -C "$work" diff --raw -z -M --no-abbrev "$stage" "$tip"); rc=$?
+    [[ $rc -eq 0 ]] || { _KB_CO_ERR="post-gate check: cannot diff ${stage:0:12}..${tip:0:12} (git exited ${rc})"; return 1; }
+    # NB an EMPTY overall diff is legitimate (only empty commits, e.g. `ci: trigger`): git exited 0 and printed nothing,
+    # which is not the same as a failure (the exit status above is the failure signal). Such commits are recorded with files [].
+    _KB_CO_SCAN_PATHS=()
+    _kb_co_postgate_scan "$raw" || return 1
+    for fp in "${_KB_CO_SCAN_PATHS[@]}"; do
+        _kb_co_postgate_path_ok "$fp" "${pargs[@]}" || { _KB_CO_ERR="post-gate change to '${fp}' is not allowlisted (docs-only commits after the gated build are accepted; anything else needs a re-gate)"; return 1; }
+    done
+    _KB_CO_ACCEPTED="${(F)commits}"
+    _KB_CO_ACCEPTED_JSON="$acc_json"
+    return 0
+}
+
+# _kb_co_postgate_path_ok <path> [pattern... | --none]: rc 0 when the repo-relative <path> matches an allowlist glob.
+# No pattern = the default (RELNOTES*); `--none` = nothing matches. Matching is per path segment (see below).
+_kb_co_postgate_path_ok() {
+    local fp="${1-}" p
+    local -a pats
+    shift 2>/dev/null || shift $#
+    if (( $# == 0 )); then pats=('RELNOTES*')
+    elif [[ $# -eq 1 && "$1" == "--none" ]]; then return 1
+    else pats=("$@"); fi
+    [[ -n "$fp" ]] || return 1
+    # XACA-1578-016: PER-SEGMENT match. Path and pattern split on "/" must have the same number of segments and every segment
+    # must glob-match, so `*` / `?` never cross a "/" (`docs/*` does not match docs/a/b.sh; `RELNOTES*` is root-level only).
+    local -a ps gs; local i ok
+    ps=("${(@s:/:)fp}")
+    for p in "${pats[@]}"; do
+        [[ -n "$p" ]] || continue
+        gs=("${(@s:/:)p}")
+        (( ${#gs} == ${#ps} )) || continue
+        ok=1
+        for (( i = 1; i <= ${#ps}; i++ )); do
+            [[ "${ps[i]}" == ${~gs[i]} ]] || { ok=0; break; }
+        done
+        (( ok )) && return 0
+    done
+    return 1
+}
+
+# _kb_co_docs_allowlist <board_file>: sets the array _KB_CO_ALLOW_ARGS for _kb_co_postgate_docs_only from
+# releaseConfig.closeOut.postGateDocsAllowlist: absent = () (the default RELNOTES*), [] = (--none), else the patterns.
+# Not an array of non-empty strings = rc 1 + $_KB_CO_ERR (fail closed). No board file = the default.
+_kb_co_docs_allowlist() {
+    local board_file="${1-}" out
+    _KB_CO_ALLOW_ARGS=()
+    [[ -n "$board_file" ]] || return 0
+    out=$(_kb_jq_read "$board_file" '(.releaseConfig.closeOut.postGateDocsAllowlist) as $a
+        | if $a == null then {mode:"default"}
+          elif ($a | type) == "array" and all($a[]; type == "string" and length > 0 and (test("\n") | not)) then {mode:"set", list:$a}
+          else error("postGateDocsAllowlist is not an array of non-empty single-line strings") end' -c) \
+        || { _KB_CO_ERR="releaseConfig.closeOut.postGateDocsAllowlist is unreadable or not an array of non-empty strings; refusing"; return 1; }
+    [[ "$(printf '%s' "$out" | jq -r '.mode')" == "set" ]] || return 0
+    if [[ "$(printf '%s' "$out" | jq -r '.list | length')" == 0 ]]; then
+        _KB_CO_ALLOW_ARGS=(--none)
+    else
+        _KB_CO_ALLOW_ARGS=("${(@f)$(printf '%s' "$out" | jq -r '.list[]')}")
+    fi
+    return 0
+}
+
+# _kb_co_postgate_accept <board_file> <work> <stage_sha> <tip_sha>: the allowlist-aware entry the close-out calls.
+# tip == stage short-circuits (no config read). Same rc / globals as _kb_co_postgate_docs_only.
+_kb_co_postgate_accept() {
+    local board_file="${1-}" work="${2-}" stage="${3-}" tip="${4-}"
+    _KB_CO_ERR=""; _KB_CO_ACCEPTED=""; _KB_CO_ACCEPTED_JSON=""
+    # validate BEFORE the tip == stage shortcut: two equal but malformed strings must not pass
+    [[ "$stage" =~ ^[0-9a-f]{40,64}$ ]] || { _KB_CO_ERR="post-gate check: stageSha '${stage:0:12}' is not a full SHA"; return 1; }
+    [[ "$tip" =~ ^[0-9a-f]{40,64}$ ]] || { _KB_CO_ERR="post-gate check: tip '${tip:0:12}' is not a full SHA"; return 1; }
+    [[ "$tip" == "$stage" ]] && return 0
+    _kb_co_docs_allowlist "$board_file" || return 1
+    _kb_co_postgate_docs_only "$work" "$stage" "$tip" "${_KB_CO_ALLOW_ARGS[@]}"
+}
+
+# _kb_co_merge_target <board_file> <work> <branch> <stage_sha> <mode>: release-mode merge source (XACA-1578; any other mode = stageSha). Sets $_KB_CO_MSHA to the
+# commit the production / integration merges must carry. Unchanged case: the scratch clone's tip of <branch> == stageSha, or
+# it is not on the remote -> stageSha (byte-for-byte the old behaviour). Otherwise the tag step accepted a docs-only tip, so
+# the merges must carry it (else the docs commits strand on the release branch and deleteBranch refuses). To leave no TOCTOU
+# window the branch is RE-FETCHED here and the helper re-run on whatever the tip is NOW; a failed fetch or a tip that no longer
+# passes refuses (rc 1, reason in $_KB_CO_ERR). Re-records the accepted commits when the accepted tip changed.
+_kb_co_merge_target() {
+    local board_file="${1-}" work="${2-}" branch="${3-}" sha="${4-}" mode="${5-}" tip
+    _KB_CO_MSHA="$sha"; _KB_CO_ERR=""
+    [[ "$mode" == "release" ]] || return 0   # trunk: the branch IS integration (arbitrary tip); client-merge never merges
+    tip=$(_kb_co_git -C "$work" rev-parse --verify "refs/remotes/origin/${branch}^{commit}" 2>/dev/null) || return 0
+    [[ "$tip" != "$sha" ]] || return 0
+    _kb_co_git -C "$work" fetch -q origin "+refs/heads/${branch}:refs/remotes/origin/${branch}" >/dev/null 2>&1 \
+        || { _KB_CO_ERR="could not re-fetch ${branch} to confirm its tip before merging"; return 1; }
+    tip=$(_kb_co_git -C "$work" rev-parse --verify "refs/remotes/origin/${branch}^{commit}" 2>/dev/null) \
+        || { _KB_CO_ERR="release branch '${branch}' vanished from the remote before the merge"; return 1; }
+    if [[ "$tip" != "$sha" ]]; then
+        _kb_co_postgate_accept "$board_file" "$work" "$sha" "$tip" \
+            || { _KB_CO_ERR="${branch} tip ${tip:0:12} != stageSha ${sha:0:12} at merge time and is not docs-only: ${_KB_CO_ERR}"; return 1; }
+        _KB_CO_MSHA="$tip"
+    fi
+    return 0
+}
+
+# _kb_co_accepted_summary: "short-sha subject; ..." of the commits in $_KB_CO_ACCEPTED_JSON, for messages.
+_kb_co_accepted_summary() {
+    printf '%s' "${_KB_CO_ACCEPTED_JSON:-[]}" | jq -r '[.[] | "\(.sha[0:8]) \(.subject)"] | join("; ")' 2>/dev/null
+}
+
+# NB the dry-run runs _kb_co_postgate_accept against the caller's <repo> (no scratch clone, no fetch): a tip whose objects are
+# not already local refuses with that reason, which the WARNING names.
+# _kb_co_record_accepted <release_id> <step>: persist $_KB_CO_ACCEPTED_JSON under closeOut.acceptedPostGateCommits[<step>]
+# (step: tag | mergeProduction | mergeIntegration | verifyClientMerge) through the close-out endpoint (op "accepted"; the
+# server is the only writer). Each step records exactly the tip IT used; writing one step never touches another.
+# Nothing accepted = no write, rc 0. On failure rc 1 and $_KB_CO_ERR carries the server's reason.
+_kb_co_record_accepted() {
+    local release_id="${1-}" step="${2-}" payload
+    [[ -n "${_KB_CO_ACCEPTED_JSON:-}" && "$_KB_CO_ACCEPTED_JSON" != "[]" ]] || return 0
+    payload=$(jq -nc --argjson c "$_KB_CO_ACCEPTED_JSON" --arg s "$step" --arg a "$(_kb_release_default_actor)" '{op:"accepted", actor:$a, step:$s, commits:$c}') \
+        || { _KB_CO_ERR="could not build the accepted-commits payload"; return 1; }
+    if ! _kb_release_close_out_post "$release_id" "$payload" 2>/dev/null; then
+        _KB_CO_ERR=$(printf '%s' "${_KB_REL_BODY-}" | jq -r '.error // empty' 2>/dev/null)
+        [[ -n "$_KB_CO_ERR" ]] || _KB_CO_ERR="close-out endpoint refused or unreachable (HTTP ${_KB_REL_CODE:-none})"
+        return 1
+    fi
+    return 0
+}
+
 # XACA-1521 client-merge: verify (READ-ONLY, never pushes) that the bound build <sha> was merged into integration <integ>
 # by the client. rc 0 verified | 1 not merged / cannot tell (reason in $_KB_CO_ERR). Fails closed on everything unclear.
 #   1. ancestry: <sha> is an ancestor of origin/<integ> in the scratch clone (merge commit / fast-forward)
 #   2. squash merge: a MERGED PR <branch> -> <integ> whose headRefOid == <sha> (gh; owner/repo from the clone's origin URL)
 # A merged PR for an OLDER head does not count: the build that passed the gates must be the build the client merged.
+# XACA-1578: a branch tip / merged-PR head that is stageSha + DOCS-ONLY commits (_kb_co_postgate_accept; allowlist from
+# the optional 5th arg <board_file>, default RELNOTES*) counts as the gated build too; the accepted commits are left in
+# $_KB_CO_ACCEPTED_JSON for the caller to record. Anything else still refuses.
 _kb_co_verify_client_merged() {
-    local work="${1-}" branch="${2-}" integ="${3-}" sha="${4-}" itip url slug out grc n merged
-    local btip="" present=no why
-    _KB_CO_ERR=""
+    local work="${1-}" branch="${2-}" integ="${3-}" sha="${4-}" board_file="${5-}" itip url slug out grc n merged
+    local btip="" present=no why prs pn poid fetched
+    _KB_CO_ERR=""; _KB_CO_ACCEPTED=""; _KB_CO_ACCEPTED_JSON=""
     itip=$(_kb_co_git -C "$work" rev-parse --verify "refs/remotes/origin/${integ}^{commit}" 2>/dev/null) \
         || { _KB_CO_ERR="integration branch '$integ' not found on the remote"; return 1; }
     # branch-tip rule: a present release branch must still be the gated build
     if btip=$(_kb_co_git -C "$work" rev-parse --verify "refs/remotes/origin/${branch}^{commit}" 2>/dev/null); then
         present=yes
         if [[ "$btip" != "$sha" ]]; then
-            _KB_CO_ERR="release branch ${branch} tip ${btip:0:12} != stageSha ${sha:0:12}: commits were pushed after gating; re-gate the release"; return 1
+            if _kb_co_postgate_accept "$board_file" "$work" "$sha" "$btip"; then
+                echo "  mergeIntegration: ${branch} tip ${btip:0:12} is stageSha ${sha:0:12} plus docs-only commit(s) after gating: $(_kb_co_accepted_summary)"
+            else
+                _KB_CO_ERR="release branch ${branch} tip ${btip:0:12} != stageSha ${sha:0:12}: commits were pushed after gating; re-gate the release (${_KB_CO_ERR})"; return 1
+            fi
         fi
         if _kb_co_git -C "$work" merge-base --is-ancestor "$sha" "$itip" 2>/dev/null; then
             echo "  mergeIntegration: ${sha:0:12} is an ancestor of ${integ} (${itip:0:12}); client merge verified"
@@ -1548,9 +1776,26 @@ _kb_co_verify_client_merged() {
     n=$(printf '%s' "$out" | jq -er --arg s "$sha" 'if type == "array" then [.[] | select(.headRefOid == $s)] | length else error("not an array") end' 2>/dev/null) \
         || { _KB_CO_ERR="client has not merged ${branch} into ${integ} yet: the merged-PR (squash) check returned an unreadable answer; failing closed"; return 1; }
     if [[ "$n" =~ ^[0-9]+$ && "$n" -gt 0 ]]; then
+        _KB_CO_ACCEPTED=""; _KB_CO_ACCEPTED_JSON=""   # the evidence is the gated build itself: nothing post-gate to record
         echo "  mergeIntegration: merged PR ${branch} -> ${integ} has head ${sha:0:12} (squash merge); client merge verified"
         return 0
     fi
+    # XACA-1578: no head == stageSha. A merged PR whose head is stageSha + docs-only commits also counts (the objects must be
+    # local: fetch the PR head ref; if they cannot be had, that PR is not accepted -- fail closed).
+    prs=$(printf '%s' "$out" | jq -r '.[] | select((.headRefOid | type) == "string" and (.number | type) == "number") | "\(.number) \(.headRefOid)"' 2>/dev/null)
+    while read -r pn poid; do
+        [[ "$pn" =~ ^[0-9]+$ && "$poid" =~ ^[0-9a-f]{40,64}$ ]] || continue
+        if ! _kb_co_git -C "$work" cat-file -e "${poid}^{commit}" 2>/dev/null; then
+            _kb_co_git -C "$work" fetch -q origin "+refs/pull/${pn}/head:refs/remotes/origin/pr-head/${pn}" >/dev/null 2>&1 \
+                || _kb_co_git -C "$work" fetch -q origin "$poid" >/dev/null 2>&1
+            _kb_co_git -C "$work" cat-file -e "${poid}^{commit}" 2>/dev/null || continue
+        fi
+        if _kb_co_postgate_accept "$board_file" "$work" "$sha" "$poid"; then
+            echo "  mergeIntegration: merged PR #${pn} ${branch} -> ${integ} has head ${poid:0:12} = stageSha ${sha:0:12} plus docs-only commit(s) after gating: $(_kb_co_accepted_summary); client merge verified"
+            return 0
+        fi
+    done <<< "$prs"
+    _KB_CO_ACCEPTED=""; _KB_CO_ACCEPTED_JSON=""
     merged=$(printf '%s' "$out" | jq -r '[.[] | "#\(.number) \(.headRefOid[0:12])"] | join(", ")' 2>/dev/null)
     if [[ -n "$merged" ]]; then
         _KB_CO_ERR="client merged ${branch} into ${integ} at a DIFFERENT build: merged PR(s) ${merged} != stageSha ${sha:0:12} (the build that passed the gates); not verified"
@@ -2028,13 +2273,23 @@ print(r.release_version(json.load(sys.stdin)))' "$(dirname "$(_kb_release_branch
             if [[ -z "$ex_tip" ]]; then
                 echo "[dry-run] NOTE: ${branch} is not on the remote; only merged-PR evidence (head == stageSha.${bstage} ${bsha:0:12}) will count"
             elif [[ "$ex_tip" != "$bsha" ]]; then
-                echo "[dry-run] WARNING: ${branch} tip '${ex_tip:0:12}' != stageSha.${bstage} ${bsha:0:12}; the mergeIntegration verification would refuse (commits pushed after gating)"
+                if _kb_co_postgate_accept "$board_file" "$repo" "$bsha" "$ex_tip"; then
+                    echo "[dry-run] NOTE: ${branch} tip '${ex_tip:0:12}' != stageSha.${bstage} ${bsha:0:12}, but only docs-only commit(s) follow the gated build; the mergeIntegration verification would accept: $(_kb_co_accepted_summary)"
+                else
+                    echo "[dry-run] WARNING: ${branch} tip '${ex_tip:0:12}' != stageSha.${bstage} ${bsha:0:12}; the mergeIntegration verification would refuse (commits pushed after gating)${_KB_CO_ERR:+; ${_KB_CO_ERR}}"
+                fi
             fi
             echo "[dry-run] would: skip tag/mergeProduction/mergeOtherReleases/deleteBranch (client-merge); verify stageSha.${bstage} ${bsha:0:12} is merged into ${integ} by the client (ancestry, else a merged PR with that head)"
             return 0
         fi
         if [[ "$mode" != "trunk" ]]; then
-            [[ "$ex_tip" == "$bsha" ]] || echo "[dry-run] WARNING: ${branch} tip '${ex_tip:-absent}' != stageSha.${bstage} ${bsha:0:12}; the tag step would refuse"
+            if [[ "$ex_tip" != "$bsha" ]]; then
+                if [[ -n "$ex_tip" ]] && _kb_co_postgate_accept "$board_file" "$repo" "$bsha" "$ex_tip"; then
+                    echo "[dry-run] NOTE: ${branch} tip '${ex_tip:0:12}' != stageSha.${bstage} ${bsha:0:12}, but only docs-only commit(s) follow the gated build; the tag step would accept and tag stageSha: $(_kb_co_accepted_summary)"
+                else
+                    echo "[dry-run] WARNING: ${branch} tip '${ex_tip:-absent}' != stageSha.${bstage} ${bsha:0:12}; the tag step would refuse${_KB_CO_ERR:+ (${_KB_CO_ERR})}"
+                fi
+            fi
         fi
         echo "[dry-run] would: tag ${tag_name} at ${bsha:0:12} (${bstage}); merge ${branch} -> ${prod}; merge ${branch} -> ${integ}"
         return 0
@@ -2082,8 +2337,15 @@ print(r.release_version(json.load(sys.stdin)))' "$(dirname "$(_kb_release_branch
                     _kb_co_git -C "$work" merge-base --is-ancestor "$bsha" "$rel_tip" 2>/dev/null \
                         || { _kb_co_fail "$release_id" tag "stageSha.${bstage} ${bsha:0:12} is not an ancestor of ${integ} (${rel_tip:0:12}); the tested build is not on the trunk"; return 1; }
                 else
-                    [[ "$rel_tip" == "$bsha" ]] \
-                        || { _kb_co_fail "$release_id" tag "${branch} tip ${rel_tip:0:12} != stageSha.${bstage} ${bsha:0:12}; the tested build is not the branch tip (spec 4.2)"; return 1; }
+                    # XACA-1578: tip == stageSha, or stageSha + docs-only commits (RELNOTES promotion after gating); the tag
+                    # lands on stageSha either way. Anything else refuses as before.
+                    if [[ "$rel_tip" != "$bsha" ]]; then
+                        _kb_co_postgate_accept "$board_file" "$work" "$bsha" "$rel_tip" \
+                            || { _kb_co_fail "$release_id" tag "${branch} tip ${rel_tip:0:12} != stageSha.${bstage} ${bsha:0:12}; the tested build is not the branch tip (spec 4.2): ${_KB_CO_ERR}"; return 1; }
+                        echo "  tag: ${branch} tip ${rel_tip:0:12} is stageSha.${bstage} ${bsha:0:12} plus docs-only commit(s) after gating: $(_kb_co_accepted_summary); tagging stageSha"
+                        _kb_co_record_accepted "$release_id" tag \
+                            || { _kb_co_fail "$release_id" tag "could not record the accepted post-gate commits on the close-out: ${_KB_CO_ERR}"; return 1; }
+                    fi
                 fi
                 _kb_co_git -C "$work" tag -a -m "Release ${version}" "$tag_name" "$bsha" >/dev/null 2>&1 \
                     || { _kb_co_fail "$release_id" tag "could not create tag ${tag_name}"; return 1; }
@@ -2096,16 +2358,24 @@ print(r.release_version(json.load(sys.stdin)))' "$(dirname "$(_kb_release_branch
             if [[ "$mode" == "trunk" && "$prod" == "$integ" ]]; then
                 echo "  mergeProduction: trunk mode and production == integration ($integ); nothing to merge (done)"
             else
-                _kb_co_merge_into "$work" "$prod" "$bsha" "$branch" || { _kb_co_fail "$release_id" "$step" "$_KB_CO_ERR"; return 1; }
+                _kb_co_merge_target "$board_file" "$work" "$branch" "$bsha" "$mode" || { _kb_co_fail "$release_id" "$step" "$_KB_CO_ERR"; return 1; }
+                [[ "$_KB_CO_MSHA" == "$bsha" ]] || { echo "  ${step}: merging ${branch} tip ${_KB_CO_MSHA:0:12} (stageSha plus docs-only commits: $(_kb_co_accepted_summary))"
+                    _kb_co_record_accepted "$release_id" "$step" || { _kb_co_fail "$release_id" "$step" "could not record the accepted post-gate commits: ${_KB_CO_ERR}"; return 1; }; }
+                _kb_co_merge_into "$work" "$prod" "$_KB_CO_MSHA" "$branch" || { _kb_co_fail "$release_id" "$step" "$_KB_CO_ERR"; return 1; }
             fi
             ;;
         mergeIntegration)
             if [[ "$mode" == "trunk" ]]; then
                 echo "  mergeIntegration: trunk mode; the release branch IS $integ (no-op, done)"
             elif [[ "$mode" == "client-merge" ]]; then
-                _kb_co_verify_client_merged "$work" "$branch" "$integ" "$bsha" || { _kb_co_fail "$release_id" "$step" "$_KB_CO_ERR"; return 1; }
+                _kb_co_verify_client_merged "$work" "$branch" "$integ" "$bsha" "$board_file" || { _kb_co_fail "$release_id" "$step" "$_KB_CO_ERR"; return 1; }
+                _kb_co_record_accepted "$release_id" verifyClientMerge \
+                    || { _kb_co_fail "$release_id" "$step" "verified, but could not record the accepted post-gate commits on the close-out: ${_KB_CO_ERR}"; return 1; }
             else
-                _kb_co_merge_into "$work" "$integ" "$bsha" "$branch" || { _kb_co_fail "$release_id" "$step" "$_KB_CO_ERR"; return 1; }
+                _kb_co_merge_target "$board_file" "$work" "$branch" "$bsha" "$mode" || { _kb_co_fail "$release_id" "$step" "$_KB_CO_ERR"; return 1; }
+                [[ "$_KB_CO_MSHA" == "$bsha" ]] || { echo "  ${step}: merging ${branch} tip ${_KB_CO_MSHA:0:12} (stageSha plus docs-only commits: $(_kb_co_accepted_summary))"
+                    _kb_co_record_accepted "$release_id" "$step" || { _kb_co_fail "$release_id" "$step" "could not record the accepted post-gate commits: ${_KB_CO_ERR}"; return 1; }; }
+                _kb_co_merge_into "$work" "$integ" "$_KB_CO_MSHA" "$branch" || { _kb_co_fail "$release_id" "$step" "$_KB_CO_ERR"; return 1; }
             fi
             ;;
         mergeOtherReleases)

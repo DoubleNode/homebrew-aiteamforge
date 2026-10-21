@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1578 close-out accepts docs-only commits after the gated build
+- Tap files updated in this publish: `share/kanban-hooks/release_closeout.py`,`share/lcars-ui/server.py` `share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1512 — walkthrough evidence attachments on the Testing Log
 - Tap files updated in this publish: `share/kanban-hooks/release_cr_facts.py`,`share/kanban-hooks/release_cr_stage.py` `share/kanban-hooks/release_evidence.py`,`share/kanban-hooks/release_gamma_failure.py` `share/kanban-hooks/release_schema.py`,`share/kanban-hooks/release_walkthrough.py` `share/kanban-hooks/release_wiki.py`,`share/kanban-hooks/release_wiki_confluence.py` (+5 more). Run `brew upgrade aiteamforge` to receive them.
 - XACA-1580 retire per-clone tap ordering guard, fix human-push docs, harden test watchdog

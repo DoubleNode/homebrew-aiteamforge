@@ -321,6 +321,34 @@ def set_target(close_out, target, status, now=None):
     return close_out
 
 
+ACCEPTED_STEPS = ("tag", "mergeProduction", "mergeIntegration", "verifyClientMerge")
+
+
+def set_accepted_post_gate(close_out, step, commits):
+    """XACA-1578: record the docs-only commits a close-out step accepted after the gated build (stageSha[S]..tip) as
+    closeOut.acceptedPostGateCommits[step] = [{"sha","subject","files":[..]}]. `step` must be one of ACCEPTED_STEPS;
+    writing one step never touches another, and rewriting the same step REPLACES it (idempotent on resume). A commit
+    that changes no files (e.g. an empty `ci: trigger` commit) is valid with files [], but the list of commits itself
+    must be non-empty. Shape is validated: this is an audit trail, not free-form data."""
+    if step not in ACCEPTED_STEPS:
+        raise CloseOutError("'step' must be one of %s, got %r" % (list(ACCEPTED_STEPS), step))
+    if not isinstance(commits, list) or not commits:
+        raise CloseOutError("'commits' must be a non-empty list of {sha, subject, files}")
+    out = []
+    for c in commits:
+        if (not isinstance(c, dict) or _valid_sha(c.get("sha")) is None or not isinstance(c.get("subject"), str)
+                or not isinstance(c.get("files"), list)
+                or not all(isinstance(f, str) and f for f in c["files"])):
+            raise CloseOutError("each accepted commit must be {sha: full hex, subject: str, files: [non-empty paths] (may be empty)}")
+        out.append({"sha": _valid_sha(c["sha"]), "subject": c["subject"], "files": list(c["files"])})
+    rec = close_out.get("acceptedPostGateCommits")
+    if not isinstance(rec, dict):
+        rec = {}
+    rec[step] = out
+    close_out["acceptedPostGateCommits"] = rec
+    return close_out
+
+
 def apply_op(release, op, now=None, stage=None, sha=None):
     """The server's single entry point. `op` is the POST body:
          {"op": "init", "crTeam": bool, "targets": [..], "mode": str?}   (XACA-1521-019: pins the branch mode; idempotent: refused if a record exists)
@@ -329,6 +357,7 @@ def apply_op(release, op, now=None, stage=None, sha=None):
        `stage`/`sha`/`gammaSha` in the body is ignored). `sha`, when given, must equal stageSha[S].
          {"op": "set", "step": S, "status": X, "error": str?}
          {"op": "target", "target": branch, "status": X}
+         {"op": "accepted", "step": S, "commits": [{"sha","subject","files"}]}   (XACA-1578: audit of docs-only post-gate commits)
        Mutates release["closeOut"]; returns it. Raises CloseOutError when refused."""
     kind = op.get("op") if isinstance(op, dict) else None
     if kind == "init":
@@ -350,9 +379,9 @@ def apply_op(release, op, now=None, stage=None, sha=None):
         release["closeOut"] = init_close_out(cr, tg, now, stage=stage, sha=bsha, mode=op.get("mode"))
         return release["closeOut"]
     co = release.get("closeOut")
-    if kind in ("set", "target") and not isinstance(co, dict):
+    if kind in ("set", "target", "accepted") and not isinstance(co, dict):
         raise CloseOutError("close-out not started for this release (op=init first)")
-    if kind in ("set", "target"):
+    if kind in ("set", "target", "accepted"):
         gap = binding_gap(release)
         if gap:
             raise CloseOutError("%s; archive it (regress out of its stage) and start a new close-out" % gap)
@@ -360,8 +389,10 @@ def apply_op(release, op, now=None, stage=None, sha=None):
         set_step(co, op.get("step"), op.get("status"), op.get("error"), now)
     elif kind == "target":
         set_target(co, op.get("target"), op.get("status"), now)
+    elif kind == "accepted":
+        set_accepted_post_gate(co, op.get("step"), op.get("commits"))
     else:
-        raise CloseOutError("op must be one of init|set|target")
+        raise CloseOutError("op must be one of init|set|target|accepted")
     return co
 
 
