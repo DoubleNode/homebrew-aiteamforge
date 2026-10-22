@@ -5497,6 +5497,167 @@ _kb_branch_protected() {
     esac
 }
 
+# _kb_required_checks_status <pr> <repo> [<base>] [<sha>]  (XACA-1569-002/-013/-014/-016)
+# Compare the base branch's REQUIRED status checks against the PR head's check results.
+# Required set = the UNION of (a) every required_status_checks rule of the branch RULESET
+# (`rules/branches/<base>`) and (b) CLASSIC protection (`protection/required_status_checks`):
+# GitHub enforces both. A ruleset that cannot be read refuses (rc 2); classic 404 / "Branch not
+# protected" / "Required status checks not enabled" contributes nothing, any other classic error
+# refuses (rc 2). Each required entry is (context, app-id-or-any): ruleset `integration_id` and
+# classic `checks[].app_id` pin the app (null / -1 / absent = any source); classic `contexts[]`
+# carry no app. Pairs are de-duplicated.
+# Results are read for <sha> (kb-merge passes the head it pins with --match-head-commit; omitted =
+# read the PR's headRefOid, unreadable = rc 2): check runs (`commits/<sha>/check-runs`, default
+# filter=latest, paginated) and commit statuses (`commits/<sha>/statuses`, paginated, newest first
+# so the first row per context is the current one; the combined /status endpoint is capped at 100
+# rows and would silently drop the rest). Concatenated pages are parsed with a JSON stream
+# decoder, so no gh --slurp is needed.
+# Per required entry the candidate rows are the check runs named <context> (and, when pinned,
+# with app.id == the pinned app) plus - ONLY for an unpinned entry - the latest commit status of
+# that context (statuses carry no reliable app id, so they cannot satisfy an app-pinned check).
+# Pass = at least one candidate and EVERY candidate passing. Check run: completed with conclusion
+# success / neutral / skipped (GitHub counts successful, skipped and neutral as passing for
+# required checks); queued / in_progress / any other status = pending; any other conclusion
+# (failure, cancelled, timed_out, action_required, stale, startup_failure) is non-pass. Status:
+# success passes, pending / failure / error do not. No candidate = `missing`.
+# Exit: 0 all required checks pass (or none required) / 1 some non-pass (offenders on stderr,
+#       one `  <context>: <state|missing ...>` per line) / 2 unreadable - callers fail closed.
+_kb_required_checks_status() {
+    local pr="${1-}" repo="${2-}" base="${3-}" sha="${4-}"
+    [[ -n "$pr" && -n "$repo" ]] || { echo "  required-checks guard: missing PR or repo argument" >&2; return 2; }
+    command -v gh >/dev/null 2>&1 || { echo "  required-checks guard: gh not available" >&2; return 2; }
+    command -v python3 >/dev/null 2>&1 || { echo "  required-checks guard: python3 not available" >&2; return 2; }
+    local rules_json cls_out ruleset_req classic_req required runs_json stat_json report rc
+    if [[ -z "$base" ]]; then
+        base=$(gh pr view "$pr" --repo "$repo" --json baseRefName --jq '.baseRefName' 2>/dev/null) || base=""
+        [[ -n "$base" ]] || { echo "  required-checks guard: could not read PR #$pr base branch" >&2; return 2; }
+    fi
+    rules_json=$(gh api "repos/$repo/rules/branches/$base" 2>/dev/null) \
+        || { echo "  required-checks guard: could not read branch rules for $repo@$base" >&2; return 2; }
+    # Lines of `<context><TAB><integration_id or empty>`. Exit 3 = unparseable.
+    ruleset_req=$(printf '%s' "$rules_json" | python3 -I -c '
+import json, sys
+try:
+    rules = json.load(sys.stdin)
+    if not isinstance(rules, list):
+        raise ValueError("not a list")
+    for r in rules:
+        if isinstance(r, dict) and r.get("type") == "required_status_checks":
+            for c in ((r.get("parameters") or {}).get("required_status_checks") or []):
+                n = c.get("context") if isinstance(c, dict) else None
+                i = c.get("integration_id") if isinstance(c, dict) else None
+                if n:
+                    print("%s\t%s" % (n, i if isinstance(i, int) and i > 0 else ""))
+except Exception:
+    sys.exit(3)
+') || { echo "  required-checks guard: unreadable branch rules answer for $repo@$base" >&2; return 2; }
+    # Classic protection is ALWAYS read (GitHub enforces ruleset + classic together).
+    classic_req=""
+    if cls_out=$(gh api "repos/$repo/branches/$base/protection/required_status_checks" 2>&1); then
+        classic_req=$(printf '%s' "$cls_out" | python3 -I -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    if not isinstance(d, dict):
+        raise ValueError("not an object")
+    for n in (d.get("contexts") or []):
+        if n:
+            print("%s\t" % n)
+    for c in (d.get("checks") or []):
+        n = c.get("context") if isinstance(c, dict) else None
+        a = c.get("app_id") if isinstance(c, dict) else None
+        if n:
+            print("%s\t%s" % (n, a if isinstance(a, int) and a > 0 else ""))
+except Exception:
+    sys.exit(3)
+') || { echo "  required-checks guard: unreadable classic protection answer for $repo@$base" >&2; return 2; }
+    elif ! printf '%s' "$cls_out" | grep -qiE 'HTTP 404|Not Found|not protected|Required status checks not enabled'; then
+        echo "  required-checks guard: could not read classic protection for $repo@$base" >&2
+        return 2
+    fi
+    required=$(printf '%s\n%s\n' "$ruleset_req" "$classic_req" | sed '/^$/d' | LC_ALL=C sort -u)
+    [[ -n "$required" ]] || return 0
+    if [[ -z "$sha" ]]; then
+        sha=$(gh pr view "$pr" --repo "$repo" --json headRefOid --jq '.headRefOid' 2>/dev/null) || sha=""
+    fi
+    [[ "$sha" =~ ^[0-9a-fA-F]{40,64}$ ]] || { echo "  required-checks guard: could not read the head commit of PR #$pr" >&2; return 2; }
+    runs_json=$(gh api --paginate "repos/$repo/commits/$sha/check-runs?per_page=100" 2>/dev/null) \
+        || { echo "  required-checks guard: could not read check runs of $sha" >&2; return 2; }
+    stat_json=$(gh api --paginate "repos/$repo/commits/$sha/statuses?per_page=100" 2>/dev/null) \
+        || { echo "  required-checks guard: could not read commit statuses of $sha" >&2; return 2; }
+    report=$(python3 -I -c '
+import json, sys
+def docs(path):
+    s, i, out, dec = open(path).read(), 0, [], json.JSONDecoder()
+    while True:
+        while i < len(s) and s[i].isspace():
+            i += 1
+        if i >= len(s):
+            break
+        o, i = dec.raw_decode(s, i)
+        out.append(o)
+    if not out:
+        raise ValueError("empty answer")
+    return out
+try:
+    runs, stats = [], []
+    for d in docs(sys.argv[1]):
+        if not isinstance(d, dict) or not isinstance(d.get("check_runs"), list):
+            raise ValueError("bad check-runs page")
+        runs += [r for r in d["check_runs"] if isinstance(r, dict)]
+    for d in docs(sys.argv[2]):
+        if not isinstance(d, list):
+            raise ValueError("bad statuses page")
+        stats += [s for s in d if isinstance(s, dict)]
+    req = []
+    for ln in open(sys.argv[3]).read().split("\n"):
+        if ln:
+            c, _, a = ln.partition("\t")
+            req.append((c, a))
+except Exception:
+    sys.exit(2)
+latest = {}
+for s in stats:                      # newest first: keep the first row per context
+    latest.setdefault(s.get("context"), s)
+def run_label(r):
+    if r.get("status") != "completed":
+        return str(r.get("status") or "pending")
+    c = r.get("conclusion")
+    return "pass" if c in ("success", "neutral", "skipped") else str(c or "unknown")
+def stat_label(s):
+    return "pass" if s.get("state") == "success" else str(s.get("state") or "unknown")
+bad = []
+for ctx, app in req:
+    named = [r for r in runs if r.get("name") == ctx]
+    rows = [run_label(r) for r in named
+            if not app or str((r.get("app") or {}).get("id")) == app]
+    if not app and ctx in latest:    # statuses carry no reliable app id: unpinned only
+        rows.append(stat_label(latest[ctx]))
+    if not rows:
+        why = "missing"
+        others = sorted(set(str((r.get("app") or {}).get("id")) for r in named))
+        if others:
+            why += " (only from other app: %s)" % ",".join(others)
+        elif ctx in latest:
+            why += " (only a commit status exists; it cannot satisfy an app-pinned check)"
+        bad.append("  %s: %s" % (ctx, why))
+        continue
+    for b in rows:
+        if b != "pass":
+            bad.append("  %s: %s" % (ctx, b))
+            break
+if bad:
+    print("\n".join(dict.fromkeys(bad)))
+    sys.exit(1)
+' <(printf '%s\n' "$runs_json") <(printf '%s\n' "$stat_json") <(printf '%s\n' "$required"))
+    rc=$?
+    case "$rc" in
+        0) return 0 ;;
+        1) printf '%s\n' "$report" >&2; return 1 ;;
+        *) echo "  required-checks guard: could not read PR #$pr check results" >&2; return 2 ;;
+    esac
+}
+
 # kb-merge — wrap `gh pr merge` with worktree-lock fallback handling.
 # When the auto-merge loop runs from inside a worktree, `gh pr merge --delete-branch`
 # fails locally because the develop branch is checked out elsewhere. The API merge
@@ -5504,17 +5665,25 @@ _kb_branch_protected() {
 # that specific failure mode, falls back to remote-branch cleanup via direct push,
 # and returns success.
 #
-# Usage: kb-merge <PR#> [--squash|--merge|--rebase] [--item <ID>]  (strategy defaults to --squash)
+# Usage: kb-merge <PR#> [--squash|--merge|--rebase] [--item <ID>] [--allow-red <reason>]  (strategy defaults to --squash)
 #   --item <ID> / --item=<ID> (any position, XACA-1503): record prMerged on <ID> instead of the
 #   ID derived from the PR head branch/title (which is wrong when branch and title disagree).
 #   <ID> (or its parent, for a subitem) must be on the team board BEFORE the merge: if it is
 #   not, or the board cannot be read, kb-merge refuses (rc 1) and merges nothing.
+#   Required-checks guard (XACA-1569): `--admin` bypasses branch protection, so before merging
+#   kb-merge checks every REQUIRED status check of the base branch is green on the PR
+#   (_kb_required_checks_status). A red, pending or missing required check - or an unreadable
+#   answer - refuses (rc 1) and merges nothing.
+#   --allow-red <reason> / --allow-red=<reason> (any position): USER-ONLY override. Agents must
+#   NOT use it. Merges despite a red/unreadable required check and records the reason as a
+#   `Red-Check-Override: <reason>` trailer in the merge commit body. Refused with --rebase (no
+#   merge commit to carry the record). Not needed (and not recorded) when the guard passes.
 #
 # Exit:
 #   0 — PR merged (and branch cleanup completed or was already done)
-#   1 — merge failed for any other reason (gh's stderr is preserved)
+#   1 — merge refused (required-checks guard, bad flags) or failed (gh's stderr is preserved)
 kb-merge() {
-    local pr="" strategy="" item="" _npos=0
+    local pr="" strategy="" item="" _npos=0 allow_red="" allow_red_set=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --item)
@@ -5525,14 +5694,31 @@ kb-merge() {
                 item="${1#--item=}"
                 [[ -n "$item" && "$item" != -* ]] || { echo "Error: kb-merge --item requires an ID" >&2; return 1; }
                 shift ;;
+            --allow-red)
+                # Flag-shaped / blank value is a missing reason, not a reason.
+                [[ -n "${2-}" && "${2}" != -* && -n "${2//[[:space:]]/}" ]] || { echo "Error: kb-merge --allow-red requires a reason" >&2; return 1; }
+                allow_red="$2"; allow_red_set=1; shift 2 ;;
+            --allow-red=*)
+                allow_red="${1#--allow-red=}"
+                [[ -n "$allow_red" && "$allow_red" != -* && -n "${allow_red//[[:space:]]/}" ]] || { echo "Error: kb-merge --allow-red requires a reason" >&2; return 1; }
+                allow_red_set=1; shift ;;
             *)
                 _npos=$((_npos + 1))
                 if [[ "$_npos" -eq 1 ]]; then pr="$1"; elif [[ "$_npos" -eq 2 ]]; then strategy="$1"; fi
                 shift ;;
         esac
     done
-    [[ -z "$pr" ]] && { echo "Usage: kb-merge <PR#> [--squash|--merge|--rebase] [--item <ID>]" >&2; return 1; }
+    [[ -z "$pr" ]] && { echo "Usage: kb-merge <PR#> [--squash|--merge|--rebase] [--item <ID>] [--allow-red <reason>]" >&2; return 1; }
     [[ -n "$strategy" ]] || strategy="--squash"
+    if [[ "$allow_red_set" -eq 1 ]]; then
+        # Single-line reason: it becomes one git trailer line.
+        allow_red=$(printf '%s' "$allow_red" | tr '\n\r' '  ' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')
+        [[ -n "$allow_red" ]] || { echo "Error: kb-merge --allow-red requires a reason" >&2; return 1; }
+        if [[ "$strategy" == "--rebase" ]]; then
+            echo "Error: kb-merge --allow-red cannot be used with --rebase: a rebase merge creates no merge commit to carry the Red-Check-Override record - PR #$pr NOT merged" >&2
+            return 1
+        fi
+    fi
     # Board ids are upper-case; a lowercase --item would pass the mismatch compare yet miss the board.
     [[ -n "$item" ]] && item=$(printf '%s' "$item" | tr '[:lower:]' '[:upper:]')
     # --item must exist BEFORE merging (XACA-1503-016): a typo would otherwise merge the PR and
@@ -5549,6 +5735,46 @@ kb-merge() {
             echo "Error: kb-merge --item $item: $_top is not on the $_team board - PR #$pr NOT merged" >&2
             return 1
         fi
+    fi
+
+    # Required-checks guard (XACA-1569): `gh pr merge --admin` bypasses branch protection, so a
+    # red REQUIRED check would merge silently. Fail closed: an unresolvable repo or an unreadable
+    # check state refuses too. Only the user's --allow-red overrides, and it is recorded.
+    # TOCTOU pin (XACA-1569-011): read the head SHA ONCE, before the guard, and hand it to
+    # `gh pr merge --match-head-commit` below. A push after this read changes the head, so GitHub
+    # refuses the merge instead of merging a head the guard never saw. Unreadable SHA => refuse,
+    # even with --allow-red: that flag overrides check STATE, not the lack of a pinned head.
+    local head_sha=""
+    head_sha=$(gh pr view "$pr" --json headRefOid --jq '.headRefOid' 2>/dev/null) || head_sha=""
+    if [[ ! "$head_sha" =~ ^[0-9a-fA-F]{40,64}$ ]]; then
+        echo "Error: kb-merge: could not read the head commit of PR #$pr to pin the merge to (failing closed; --allow-red does not override this) - NOT merged" >&2
+        return 1
+    fi
+    local _gr_url _gr_repo="" _gr_out _gr_rc=0 override_trailer=""
+    _gr_url=$(gh pr view "$pr" --json url --jq '.url' 2>/dev/null) || _gr_url=""
+    _gr_repo=$(printf '%s' "$_gr_url" | sed -nE 's#^https?://[^/]+/([^/]+/[^/]+)/pull/[0-9]+.*$#\1#p')
+    if [[ -n "$_gr_repo" ]]; then
+        _gr_out=$(_kb_required_checks_status "$pr" "$_gr_repo" "" "$head_sha" 2>&1) || _gr_rc=$?
+    else
+        _gr_rc=2; _gr_out="  required-checks guard: could not resolve the repository for PR #$pr"
+    fi
+    if [[ "$_gr_rc" -eq 0 ]]; then
+        [[ "$allow_red_set" -eq 1 ]] && echo "ℹ️  kb-merge: --allow-red was not needed (all required checks pass on PR #$pr); no override recorded." >&2
+    elif [[ "$allow_red_set" -eq 0 ]]; then
+        if [[ "$_gr_rc" -eq 1 ]]; then
+            echo "Error: kb-merge: PR #$pr has REQUIRED status checks that are not passing - NOT merged:" >&2
+        else
+            echo "Error: kb-merge: could not verify the REQUIRED status checks of PR #$pr (failing closed) - NOT merged:" >&2
+        fi
+        [[ -n "$_gr_out" ]] && echo "$_gr_out" >&2
+        echo "   Fix or wait for the checks. --allow-red <reason> overrides this, but it is USER-ONLY (agents must NOT use it)." >&2
+        return 1
+    else
+        echo "⚠️  kb-merge --allow-red: merging PR #$pr past required checks that are not passing:" >&2
+        [[ -n "$_gr_out" ]] && echo "$_gr_out" >&2
+        echo "⚠️  --allow-red is reserved for the user only. Agents must NOT use --allow-red." >&2
+        echo "   The override is recorded in the merge commit as 'Red-Check-Override: $allow_red'." >&2
+        override_trailer="Red-Check-Override: $allow_red"
     fi
 
     # Capture combined output so we can pattern-match on the worktree-lock error.
@@ -5575,10 +5801,14 @@ kb-merge() {
     if [[ "$strategy" == "--squash" ]]; then
         squash_body=$(_kb_squash_body "$pr" 2>/dev/null) || squash_body=""
     fi
+    if [[ -n "$override_trailer" ]]; then
+        # Same trailer block as the Kanban-* trailers when a squash body exists, else its own body.
+        if [[ -n "$squash_body" ]]; then squash_body="$squash_body"$'\n'"$override_trailer"; else squash_body="$override_trailer"; fi
+    fi
     if [[ -n "$squash_body" ]]; then
-        out=$(gh pr merge "$pr" "$strategy" ${del_flag[@]+"${del_flag[@]}"} --admin --body "$squash_body" 2>&1) && merged=0
+        out=$(gh pr merge "$pr" "$strategy" ${del_flag[@]+"${del_flag[@]}"} --admin --match-head-commit "$head_sha" --body "$squash_body" 2>&1) && merged=0
     else
-        out=$(gh pr merge "$pr" "$strategy" ${del_flag[@]+"${del_flag[@]}"} --admin 2>&1) && merged=0
+        out=$(gh pr merge "$pr" "$strategy" ${del_flag[@]+"${del_flag[@]}"} --admin --match-head-commit "$head_sha" 2>&1) && merged=0
     fi
     if [[ "$merged" -eq 0 ]]; then
         echo "$out"

@@ -793,6 +793,9 @@ After completing:
 - Flag potential risks or concerns
 - Suggest testing approaches
 
+### **User-Only Flags:**
+`--force` on `kb-done` and `--allow-red` on `kb-merge` are user-only; agents never use them.
+
 ---
 
 ## 📚 Resources

@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1569 kb-merge refuses red required checks; user-only --allow-red override
+- Tap files updated in this publish: `share/templates/claude/claude-md-global.template`,`share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 
 ## [0.21.5] - 2026-10-21
 - XACA-1578 close-out accepts docs-only commits after the gated build
