@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1132 kb-tap-release preflight #6 never prescribes a stale 'git checkout main'
+- Tap files updated in this publish: `docs/LOCKSTEP-CHECK.md`,`share/scripts/kb-tap-release`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1569 kb-merge refuses red required checks; user-only --allow-red override
 - Tap files updated in this publish: `share/templates/claude/claude-md-global.template`,`share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 

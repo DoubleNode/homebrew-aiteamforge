@@ -1543,7 +1543,8 @@ OUTER_STATUS="$(git status --porcelain 2>/dev/null || true)"
 if [ -z "$OUTER_STATUS" ]; then
   check_pass "Outer working tree is clean."
 else
-  check_fail "Outer working tree has uncommitted changes. Commit or stash first."
+  # XACA-1132-015: the stash stack is shared by every worktree and session of this repo.
+  check_fail "Outer working tree has uncommitted changes. Inspect with: git status. Commit your own changes; do not stash - the stash stack is shared by every worktree and session of this repo."
 fi
 
 # 4. Outer up-to-date with <outer-remote>/develop
@@ -1584,11 +1585,46 @@ if [ "$TAP_OK" -eq 1 ]; then
   TAP_BRANCH="$(git -C "${TAP_DIR}" branch --show-current 2>/dev/null || true)"
   if [ "$TAP_BRANCH" = "main" ]; then
     check_pass "Tap inner branch is main."
-  elif [ -z "$TAP_BRANCH" ]; then
-    check_fail "Tap is in detached HEAD. Check it out to main: cd homebrew-tap && git checkout main"
-    TAP_OK=0
   else
-    check_fail "Tap inner branch must be 'main'. Current: ${TAP_BRANCH}. Run: cd homebrew-tap && git checkout main"
+    # XACA-1132: detached HEAD is the NORMAL state after
+    # `git submodule update`, and a bare `git checkout main` there moves the SHARED tap checkout to
+    # LOCAL main, which can be stale (measured: 4 commits, 11 files / -1779 lines of rollback).
+    # So compare HEAD with a FRESH origin/main before prescribing anything. #8 never fetches on
+    # this path (TAP_OK is cleared here), so this block fetches itself. READ-ONLY: it prescribes
+    # but never attaches - the checkout is shared by many live sessions.
+    if [ -z "$TAP_BRANCH" ]; then TAP_WHERE="detached HEAD"; else TAP_WHERE="branch '${TAP_BRANCH}'"; fi
+    if ! git -C "${TAP_DIR}" fetch origin main 2>/dev/null; then
+      check_fail "Tap is on ${TAP_WHERE}, not main, and 'git fetch origin main' FAILED - HEAD cannot be compared with a fresh origin/main, so no checkout is prescribed (a stale ref could prescribe a rollback). Fix the tap's network/remote access and re-run."
+    else
+      TAP_HEAD_SHA="$(git -C "${TAP_DIR}" rev-parse HEAD 2>/dev/null || true)"
+      TAP_ORIGIN_SHA="$(git -C "${TAP_DIR}" rev-parse origin/main 2>/dev/null || true)"
+      TAP_MAIN_SHA="$(git -C "${TAP_DIR}" rev-parse --verify -q refs/heads/main 2>/dev/null || true)"
+      if [ -z "$TAP_MAIN_SHA" ]; then TAP_MAIN_REL="no local main branch"
+      elif [ "$TAP_MAIN_SHA" = "$TAP_ORIGIN_SHA" ]; then TAP_MAIN_REL="local main ${TAP_MAIN_SHA:0:10} == origin/main"
+      elif [ "$TAP_MAIN_SHA" = "$TAP_HEAD_SHA" ]; then TAP_MAIN_REL="local main ${TAP_MAIN_SHA:0:10} == HEAD"
+      elif git -C "${TAP_DIR}" merge-base --is-ancestor "$TAP_MAIN_SHA" "$TAP_ORIGIN_SHA" 2>/dev/null; then TAP_MAIN_REL="local main ${TAP_MAIN_SHA:0:10} is BEHIND origin/main"
+      elif git -C "${TAP_DIR}" merge-base --is-ancestor "$TAP_ORIGIN_SHA" "$TAP_MAIN_SHA" 2>/dev/null; then TAP_MAIN_REL="local main ${TAP_MAIN_SHA:0:10} is AHEAD of origin/main"
+      else TAP_MAIN_REL="local main ${TAP_MAIN_SHA:0:10} DIVERGED from origin/main"; fi
+      if [ -z "$TAP_HEAD_SHA" ] || [ -z "$TAP_ORIGIN_SHA" ]; then
+        check_fail "Tap is on ${TAP_WHERE}, not main, and HEAD / origin/main could not be resolved, so no checkout is prescribed. Inspect homebrew-tap by hand."
+      elif [ "$TAP_HEAD_SHA" = "$TAP_ORIGIN_SHA" ] && { [ -z "$TAP_MAIN_SHA" ] || git -C "${TAP_DIR}" merge-base --is-ancestor "$TAP_MAIN_SHA" "$TAP_ORIGIN_SHA" 2>/dev/null; }; then
+        check_fail "Tap is on ${TAP_WHERE} at origin/main (${TAP_HEAD_SHA:0:10}). Attach it to main with: cd homebrew-tap && git checkout -B main origin/main"
+        echo "         (content-neutral: HEAD already equals origin/main, so no file changes; checking out plain local main is NOT equivalent - local main may be stale. Not run for you: this checkout is shared.)"
+      elif [ "$TAP_HEAD_SHA" = "$TAP_ORIGIN_SHA" ]; then
+        # -B resets local main, so it is only safe when main holds nothing origin/main lacks.
+        check_fail "Tap is on ${TAP_WHERE} at origin/main (${TAP_HEAD_SHA:0:10}), but ${TAP_MAIN_REL}: it holds commits origin/main does not. Refusing - no checkout is prescribed (-B would orphan them). Push or reconcile local main by hand, then re-run."
+      else
+        TAP_DELTA="$(git -C "${TAP_DIR}" diff --shortstat HEAD origin/main 2>/dev/null || true)"
+        TAP_MB="$(git -C "${TAP_DIR}" merge-base HEAD origin/main 2>/dev/null || true)"
+        if [ "$TAP_MB" = "$TAP_HEAD_SHA" ]; then TAP_REL="BEHIND origin/main"
+        elif [ "$TAP_MB" = "$TAP_ORIGIN_SHA" ]; then TAP_REL="AHEAD of origin/main (unpushed commits)"
+        else TAP_REL="DIVERGED from origin/main"; fi
+        check_fail "Tap is on ${TAP_WHERE}, not main, and HEAD (${TAP_HEAD_SHA:0:10}) != origin/main (${TAP_ORIGIN_SHA:0:10}): HEAD is ${TAP_REL}. Refusing - no checkout is prescribed."
+        echo "         Delta HEAD -> origin/main (git diff --shortstat): ${TAP_DELTA:-no file changes}"
+        echo "         Local main: ${TAP_MAIN_REL}."
+        echo "         Moving this shared checkout could roll content back or orphan unpushed commits. Reconcile homebrew-tap by hand, then re-run."
+      fi
+    fi
     TAP_OK=0
   fi
 else
@@ -1601,7 +1637,9 @@ if [ "$TAP_OK" -eq 1 ]; then
   if [ -z "$TAP_STATUS" ]; then
     check_pass "Tap inner working tree is clean."
   else
-    check_fail "Tap working tree has uncommitted changes. Commit or stash first."
+    # XACA-1132-004: the tap checkout is shared by many live sessions; the dirt may be another
+    # session's in-flight work, and stashing it would pull the files out from under them.
+    check_fail "Tap working tree has uncommitted changes. Inspect with: git -C homebrew-tap status. This checkout is shared - do not stash, reset or discard changes you did not make; commit your own, or wait for the owner."
     TAP_OK=0
   fi
 else
@@ -1621,7 +1659,7 @@ if [ "$TAP_OK" -eq 1 ]; then
   else
     TAP_MERGE_BASE="$(git -C "${TAP_DIR}" merge-base HEAD origin/main 2>/dev/null || true)"
     if [ "$TAP_MERGE_BASE" = "$TAP_LOCAL" ]; then
-      check_fail "Tap is BEHIND origin/main. Run: cd homebrew-tap && git pull origin main"
+      check_fail "Tap is BEHIND origin/main. Run: cd homebrew-tap && git merge --ff-only origin/main"
       TAP_OK=0
     else
       check_fail "Tap has diverged from origin/main. Reconcile before releasing."
