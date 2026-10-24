@@ -1,0 +1,1262 @@
+#!/usr/bin/env python3
+"""kb-sync-plugins -- fleet-standard Claude Code plugin delivery (XACA-1599).
+
+Usage: kb-sync-plugins <subcommand> [args]
+Subcommands: list, check, sync, diff, sync-worktrees, binaries, help
+
+Source of truth: .claude/plugins-manifest.json (per-team enabledPlugins).
+Writes:          <session dir>/.claude/settings.json, keys `enabledPlugins` and
+                 `extraKnownMarketplaces` ONLY. Every other key is preserved.
+
+Why this exists (XACA-1599 design record, sections 2.1-2.3): Claude Code reads
+project settings from the primary working directory only (it does not walk up),
+and user-scope settings cannot vary by team. So the team plugin list has to be
+delivered to every directory a session can start in, without clobbering what a
+human put in the same file.
+
+Hard guards (each is covered by a mutation-sentinel test):
+  * Never opens settings.local.json. Any target whose basename is not exactly
+    `settings.json` is refused. `settings.local.json` is the documented per-person
+    opt-out; this tool must never read or write it.
+  * Removes a key only when this tool provably put it there (local state file,
+    or a manifest tombstone in `retiredPlugins`). A human's key is never removed.
+  * An unparseable target is a FAILURE, never overwritten.
+  * A key a human changed is reported CONFLICT and left alone.
+
+Exit codes (check): 0 clean, 1 drift, 2 usage/environment error,
+3 unverifiable (manifest/plugin list unreadable, or claude below the floor).
+3 is never folded into 0.
+
+Runs on python3 >= 3.8, stdlib only (tap hosts have only the system python).
+"""
+import argparse
+import contextlib
+import difflib
+import fcntl
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+
+PROG = "kb-sync-plugins"
+SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
+DEV_TEAM = os.path.dirname(SCRIPT_DIR)
+
+MANIFEST = os.environ.get("KBSPL_MANIFEST") or os.path.join(DEV_TEAM, ".claude", "plugins-manifest.json")
+PERSONAS_MANIFEST = os.environ.get("KBSPL_PERSONAS_MANIFEST") or os.path.join(DEV_TEAM, ".claude", "personas-manifest.json")
+TEAM_PATHS_JSON = os.environ.get("TEAM_PATHS_JSON") or os.path.expanduser("~/.aiteamforge/team-paths.json")
+STATE_FILE = os.environ.get("KBSPL_STATE") or os.path.expanduser("~/.aiteamforge/state/kb-sync-plugins.json")
+CATALOG_JSON = os.environ.get("KBSPL_CATALOG") or os.path.expanduser(
+    "~/.claude/plugins/marketplaces/claude-plugins-official/.claude-plugin/marketplace.json")
+CLAUDE_BIN = os.environ.get("KBSPL_CLAUDE") or "claude"
+MANAGED_DIR = os.environ.get("CLAUDE_MANAGED_DIR") or "/Library/Application Support/ClaudeCode/managed-settings.d"
+# Test-only seam so the settings.local.json guard can be exercised. The guard
+# itself rejects any value other than "settings.json", so this can never be
+# used to write anything else.
+TARGET_BASENAME = os.environ.get("KBSPL_TARGET_BASENAME") or "settings.json"
+
+SECTIONS = ("enabledPlugins", "extraKnownMarketplaces")
+PLUGIN_ID_RE = re.compile(r"^[A-Za-z0-9._-]+@[A-Za-z0-9._-]+$")
+VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
+EXCLUDE_LINE_TAIL = ".claude/settings.json"
+
+
+class ToolError(Exception):
+    """Environment/usage failure. `code` is the process exit code."""
+
+    def __init__(self, msg, code=2):
+        Exception.__init__(self, msg)
+        self.code = code
+
+
+def err(msg):
+    sys.stderr.write("%s: ERROR: %s\n" % (PROG, msg))
+
+
+def warn(msg):
+    sys.stderr.write("%s: WARN: %s\n" % (PROG, msg))
+
+
+def out(msg=""):
+    sys.stdout.write(msg + "\n")
+
+
+# ---------------------------------------------------------------------------
+# JSON / filesystem helpers
+# ---------------------------------------------------------------------------
+
+def load_json(path, what, code=2):
+    try:
+        with open(path, "r") as fh:
+            return json.load(fh)
+    except (OSError, ValueError) as exc:
+        raise ToolError("%s unreadable or not valid JSON: %s (%s)" % (what, path, exc), code)
+
+
+def sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def atomic_write_json(path, obj):
+    # Write THROUGH a symlink: os.replace on the link itself would swap it for a
+    # regular file and silently sever a dotfile-managed settings.json.
+    path = os.path.realpath(path)  # GUARD:symlink
+    parent = os.path.dirname(path)
+    os.makedirs(parent, exist_ok=True)
+    mode = 0o644
+    try:
+        mode = os.stat(path).st_mode & 0o777
+    except OSError:
+        pass
+    fd, tmp = tempfile.mkstemp(dir=parent, prefix=".kbspl-tmp-")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            json.dump(obj, fh, indent=2, ensure_ascii=False)
+            fh.write("\n")
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def expand(p):
+    return os.path.expanduser(p)
+
+
+def run(argv, cwd=None, timeout=60):
+    """Run a command; return (rc, stdout, stderr). rc 127 if missing, 124 on timeout."""
+    try:
+        cp = subprocess.run(argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            universal_newlines=True, timeout=timeout)
+        return cp.returncode, cp.stdout, cp.stderr
+    except FileNotFoundError:
+        return 127, "", "command not found: %s" % argv[0]
+    except subprocess.TimeoutExpired:
+        return 124, "", "timed out after %ss: %s" % (timeout, " ".join(argv))
+
+
+def git(args, cwd=None):
+    return run(["git"] + args, cwd=cwd)
+
+
+# ---------------------------------------------------------------------------
+# Manifest + registry
+# ---------------------------------------------------------------------------
+
+def load_manifest():
+    # An unreadable manifest is exit 3, never a pass.
+    return load_json(MANIFEST, "plugins manifest", code=3)  # GUARD:unverifiable
+
+
+def team_paths():
+    """Return the parsed registry, or None when the file does not exist."""
+    if not os.path.exists(TEAM_PATHS_JSON):
+        return None
+    tp = load_json(TEAM_PATHS_JSON, "team-paths registry", code=3)
+    # A registry of the wrong shape verifies nothing: exit 3, never a traceback
+    # (rc 1 reads as drift) and never a quiet "no teams here".
+    if not isinstance(tp, dict) or not isinstance(tp.get("teams"), dict):  # GUARD:registry-shape
+        raise ToolError("team-paths registry %s: expected an object with a `teams` object "
+                        "(NO_HOSTED_TEAMS: nothing can be verified)" % TEAM_PATHS_JSON, 3)
+    return tp
+
+
+def working_dir(team):
+    """Resolve ${working_dir}. None = this host does not host the team."""
+    tp = team_paths()
+    if tp is not None:
+        ent = tp["teams"].get(team)
+        if ent is None:
+            return None
+        if not isinstance(ent, dict) or not isinstance(ent.get("working_dir", ""), str):
+            raise ToolError("team-paths registry %s: teams.%s must be an object whose working_dir "
+                            "is a string (NO_HOSTED_TEAMS: nothing can be verified)" % (TEAM_PATHS_JSON, team), 3)
+        if ent.get("working_dir"):
+            return expand(ent["working_dir"])
+        return None
+    # No registry (pure dev layout): fall back to the personas manifest target.
+    if os.path.exists(PERSONAS_MANIFEST):
+        pm = load_json(PERSONAS_MANIFEST, "personas manifest", code=3)
+        deps = pm.get("deployments", []) if isinstance(pm, dict) else None
+        if not isinstance(deps, list):
+            raise ToolError("personas manifest %s: expected an object with a `deployments` list "
+                            "(NO_HOSTED_TEAMS: nothing can be verified)" % PERSONAS_MANIFEST, 3)
+        for dep in deps:
+            if isinstance(dep, dict) and dep.get("team") == team and isinstance(dep.get("targetRepo"), str) \
+                    and dep["targetRepo"]:
+                return expand(dep["targetRepo"])
+    return None
+
+
+def no_hosted_teams(what):
+    """Zero live targets means nothing was verified. Exit 3 (unverifiable), never 0."""
+    err("NO_HOSTED_TEAMS: %s -- no manifest team resolves to an existing directory on this host; "
+        "nothing was verified (check %s and the personas manifest)" % (what, TEAM_PATHS_JSON))
+    return 3
+
+
+def any_live(dirs):
+    return any(os.path.isdir(d) for d in dirs)
+
+
+def resolve_dirs(team, cfg, key="sessionDirs"):
+    """Resolve a team's dirs. Returns None when the team is not hosted here."""
+    raw = cfg.get(key) or []
+    uses_token = any("${working_dir}" in d for d in raw)
+    wd = None
+    if uses_token:
+        wd = working_dir(team)
+        if wd is None:
+            return None
+    dirs = []
+    for d in raw:
+        if "${working_dir}" in d:
+            d = d.replace("${working_dir}", wd)
+        dirs.append(os.path.abspath(expand(d)))
+    if not uses_token and key == "sessionDirs" and not any(os.path.isdir(d) for d in dirs):
+        return None
+    return dirs
+
+
+def list_worktrees(repo):
+    """Linked worktrees of `repo` (the main worktree is excluded)."""
+    if not os.path.isdir(repo):
+        return []
+    rc, so, _se = git(["-C", repo, "worktree", "list", "--porcelain"])
+    if rc != 0:
+        return []
+    paths = [ln[len("worktree "):] for ln in so.splitlines() if ln.startswith("worktree ")]
+    return [os.path.abspath(p) for p in paths[1:]]
+
+
+def target_path(directory):
+    return os.path.join(directory, ".claude", TARGET_BASENAME)
+
+
+def guard_target(path):
+    """Refuse anything that is not exactly <dir>/.claude/settings.json."""
+    # Writes go through symlinks, so judge the file the path resolves to:
+    # settings.json -> settings.local.json must not reach the opt-out file, and
+    # no link may reach the user-scope ~/.claude/settings.json.
+    real = os.path.realpath(path)
+    # Never CREATE anything through a symlink. A link's target can be spelled any
+    # number of ways (case, firmlinks such as /System/Volumes/Data, ..), so rather
+    # than recognise every spelling of ~/.claude, a linked .claude or settings.json
+    # must already resolve to an existing file; the sync only ever updates it.
+    linked = os.path.islink(path) or os.path.islink(os.path.dirname(path))
+    if linked and not os.path.isfile(real):  # GUARD:dangling-link
+        raise ToolError("refusing target %s: it is a symlink (or sits in a symlinked .claude) "
+                        "whose target %s does not exist; the sync never creates files "
+                        "through a link" % (path, real))
+    if os.path.basename(real) != "settings.json":  # GUARD:local-json
+        raise ToolError("refusing target %s (resolves to %s): only settings.json is ever "
+                        "touched (settings.local.json is the user's opt-out)" % (path, real))
+    # Do not trust spellings. APFS is case-insensitive, so ~/.CLAUDE/settings.json is
+    # the user-scope file under another string, and it may not exist yet (so there is
+    # no file to compare): match case-folded paths, the file, or its parent dir.
+    user_dir = os.path.realpath(os.path.join(os.path.expanduser("~"), ".claude"))
+    user_scope = os.path.join(user_dir, "settings.json")
+    is_user_scope = (real.casefold() == user_scope.casefold() or _same_file(real, user_scope)
+                     or _same_file(os.path.dirname(real), user_dir))
+    if is_user_scope:  # GUARD:user-scope-link
+        raise ToolError("refusing target %s: it resolves to the user-scope %s" % (path, user_scope))
+    # Anchor on $HOME, which always exists, not on ~/.claude, which may not yet: a
+    # session dir spelled or linked as /System/Volumes/Data/<home> lands in
+    # <home>/.claude without any link inside the session dir to notice.
+    parent = os.path.dirname(real)
+    in_home_claude = (os.path.basename(parent).casefold() == ".claude"
+                      and _same_file(os.path.dirname(parent), os.path.expanduser("~")))
+    if in_home_claude:  # GUARD:home-anchored
+        raise ToolError("refusing target %s: it resolves into the user-scope %s/.claude" % (
+            path, os.path.expanduser("~")))
+    # A hard link has no symlink to resolve and could be any other file, including a
+    # settings.local.json anywhere; a settings.json the sync owns has exactly one name.
+    try:
+        nlink = os.stat(real).st_nlink
+    except OSError:
+        nlink = 1
+    if nlink > 1:  # GUARD:hardlink
+        raise ToolError("refusing target %s: it is hard-linked (%d names), so it may be "
+                        "another file such as a settings.local.json" % (path, nlink))
+
+
+def _same_file(a, b):
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Manifest validation (check --manifest)
+# ---------------------------------------------------------------------------
+
+TEAM_KEYS = {"mode", "sessionDirs", "worktreeRepos", "deliver", "enabledPlugins",
+             "retiredPlugins", "extraKnownMarketplaces", "requiredBinaries"}
+TOP_KEYS = {"schemaVersion", "lastUpdated", "minClaudeVersion", "baseline", "binaries", "teams"}
+
+
+def baseline_path(m):
+    b = m.get("baseline")
+    if not b:
+        return None
+    return b if os.path.isabs(b) else os.path.join(DEV_TEAM, b)
+
+
+def blocked_plugins(m):
+    """Plugin ids the L1 baseline forces to false. [] when no baseline declared."""
+    bp = baseline_path(m)
+    if bp is None:
+        return []
+    doc = load_json(bp, "baseline policy", code=3)
+    ep = doc.get("enabledPlugins") or {}
+    return sorted(k for k, v in ep.items() if v is False)
+
+
+def load_catalog():
+    """{plugin_id: entry} from the official marketplace, or None when absent."""
+    if not os.path.exists(CATALOG_JSON):
+        return None
+    doc = load_json(CATALOG_JSON, "marketplace catalog", code=3)
+    cat = {}
+    for p in doc.get("plugins", []):
+        if isinstance(p, dict) and p.get("name"):
+            cat["%s@claude-plugins-official" % p["name"]] = p
+    return cat
+
+
+def lsp_commands(entry):
+    ls = entry.get("lspServers")
+    if isinstance(ls, dict):
+        return sorted(v.get("command") for v in ls.values() if isinstance(v, dict) and v.get("command"))
+    return []
+
+
+def validate_manifest(m, catalog=None):
+    errs = []
+    if not isinstance(m, dict):
+        return ["manifest root is not an object"]
+    if m.get("schemaVersion") != 1:
+        errs.append("schemaVersion must be 1")
+    for k in m:
+        if k not in TOP_KEYS and not k.startswith("_"):
+            errs.append("unknown top-level key: %s" % k)
+    mv = m.get("minClaudeVersion")
+    if mv is not None and not (isinstance(mv, str) and re.match(r"^\d+\.\d+\.\d+$", mv)):
+        errs.append("minClaudeVersion must look like 2.1.205")
+    binaries = m.get("binaries", {})
+    if not isinstance(binaries, dict):
+        errs.append("binaries must be an object")
+        binaries = {}
+    for pid, b in binaries.items():
+        if not PLUGIN_ID_RE.match(pid):
+            errs.append("binaries: bad plugin id %r" % pid)
+        if not isinstance(b, dict) or not isinstance(b.get("command"), str) or not b.get("command"):
+            errs.append("binaries[%s].command must be a non-empty string" % pid)
+            continue
+        for lk in ("probe", "installCmd"):
+            if lk in b and not (isinstance(b[lk], list) and b[lk] and all(isinstance(x, str) for x in b[lk])):
+                errs.append("binaries[%s].%s must be a non-empty string list" % (pid, lk))
+    try:
+        blocked = blocked_plugins(m)
+    except ToolError as exc:
+        errs.append(str(exc))
+        blocked = []
+    teams = m.get("teams")
+    if not isinstance(teams, dict) or not teams:
+        errs.append("teams must be a non-empty object")
+        return errs
+    for name, t in teams.items():
+        where = "teams.%s" % name
+        if not isinstance(t, dict):
+            errs.append("%s must be an object" % where)
+            continue
+        for k in t:
+            if k not in TEAM_KEYS and not k.startswith("_"):
+                errs.append("%s: unknown key %s" % (where, k))
+        if t.get("mode") not in ("tracked", "deployed"):
+            errs.append("%s.mode must be tracked|deployed" % where)
+        sd = t.get("sessionDirs")
+        if not (isinstance(sd, list) and sd and all(isinstance(x, str) and x for x in sd)):
+            errs.append("%s.sessionDirs must be a non-empty string list" % where)
+        wr = t.get("worktreeRepos", [])
+        if not (isinstance(wr, list) and all(isinstance(x, str) for x in wr)):
+            errs.append("%s.worktreeRepos must be a string list" % where)
+        elif wr and t.get("mode") == "tracked":
+            errs.append("%s.worktreeRepos is deployed-mode only (tracked worktrees inherit by checkout)" % where)
+        if not isinstance(t.get("deliver"), bool):
+            errs.append("%s.deliver must be a boolean" % where)
+        for sec in ("enabledPlugins", "retiredPlugins", "extraKnownMarketplaces"):
+            if not isinstance(t.get(sec, {}), dict):
+                errs.append("%s.%s must be an object" % (where, sec))
+        ep = t.get("enabledPlugins", {}) if isinstance(t.get("enabledPlugins", {}), dict) else {}
+        rp = t.get("retiredPlugins", {}) if isinstance(t.get("retiredPlugins", {}), dict) else {}
+        if t.get("deliver") is False and ep:
+            errs.append("%s: deliver=false but enabledPlugins is not empty" % where)
+        for pid, v in ep.items():
+            if not PLUGIN_ID_RE.match(pid):
+                errs.append("%s.enabledPlugins: bad plugin id %r" % (where, pid))
+            if v is not True:
+                errs.append("%s.enabledPlugins[%s] must be true (opt-outs live in settings.local.json)" % (where, pid))
+            if pid in rp:
+                errs.append("%s: %s is both enabled and retired" % (where, pid))
+            if pid in blocked:
+                errs.append("%s enables %s, which the L1 baseline blocks" % (where, pid))
+            if pid.split("@")[0].endswith("-lsp") and pid not in binaries:
+                errs.append("%s enables LSP plugin %s with no `binaries` entry" % (where, pid))
+            if catalog is not None:
+                ent = catalog.get(pid)
+                if ent is None and pid.endswith("@claude-plugins-official"):
+                    errs.append("%s enables %s, which is not in the official catalog (unresolvable id)" % (where, pid))
+                elif ent is not None and lsp_commands(ent) and pid not in binaries:
+                    errs.append("%s enables LSP plugin %s (catalog lspServers) with no `binaries` entry" % (where, pid))
+        for pid in rp:
+            if not PLUGIN_ID_RE.match(pid):
+                errs.append("%s.retiredPlugins: bad plugin id %r" % (where, pid))
+    if catalog is not None:
+        for pid, b in binaries.items():
+            ent = catalog.get(pid)
+            if ent is None:
+                continue
+            cmds = lsp_commands(ent)
+            if cmds and isinstance(b, dict) and b.get("command") not in cmds:
+                errs.append("binaries[%s].command %r != catalog lspServers command(s) %s" % (pid, b.get("command"), cmds))
+    return errs
+
+
+# ---------------------------------------------------------------------------
+# State (provenance) -- what THIS host's sync wrote, per absolute target path
+# ---------------------------------------------------------------------------
+
+def load_state():
+    if not os.path.exists(STATE_FILE):
+        return {}
+    st = load_json(STATE_FILE, "state file")  # GUARD:state
+    if not isinstance(st, dict):
+        raise ToolError("state file is not an object: %s (move it aside to start fresh)" % STATE_FILE)
+    return st
+
+
+def save_state(st):
+    atomic_write_json(STATE_FILE, st)
+
+
+@contextlib.contextmanager
+def state_lock():
+    """Serialize state read-modify-write across concurrent syncs (worktree creation
+    runs `sync-worktrees` while other sessions sync). Without it two runs load the
+    same state and the later save drops the earlier run's provenance records."""
+    lock_path = STATE_FILE + ".lock"
+    os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+    timeout = float(os.environ.get("KBSPL_LOCK_TIMEOUT") or 60)
+    fh = open(lock_path, "a")
+    try:
+        deadline = time.time() + timeout
+        while True:
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)  # GUARD:lock
+                break
+            except (IOError, OSError):
+                if time.time() >= deadline:
+                    raise ToolError("could not acquire %s within %ss (another kb-sync-plugins running?)"
+                                    % (lock_path, timeout))
+                time.sleep(0.1)
+        yield
+    finally:
+        fh.close()
+
+
+def manifest_commit():
+    rc, so, _se = git(["-C", DEV_TEAM, "rev-parse", "HEAD"])
+    return so.strip() if rc == 0 else "unknown"
+
+
+# ---------------------------------------------------------------------------
+# The merge
+# ---------------------------------------------------------------------------
+
+def plan_merge(cur, cfg, written, force_owned=False):
+    """Pure merge. Returns (new_obj, actions, new_written).
+
+    cur      parsed target (dict) or None when the file is absent
+    cfg      the team's manifest block
+    written  {section: {key: value}} this host's sync wrote previously
+    actions  [(section, key, ACTION)] ACTION in ADDED UPDATED ADOPTED REMOVED CONFLICT
+    """
+    obj = dict(cur) if cur is not None else {}  # GUARD:preserve (unrelated keys survive)
+    actions = []
+    new_written = {}
+    deliver = cfg.get("deliver", True)
+    for sec in SECTIONS:
+        desired = dict(cfg.get(sec) or {}) if deliver else {}  # GUARD:deliver
+        retired = cfg.get("retiredPlugins") or {} if sec == "enabledPlugins" else {}
+        prior = (written or {}).get(sec) or {}
+        cur_sec = obj.get(sec)
+        if cur_sec is None:
+            cur_sec = {}
+        if not isinstance(cur_sec, dict):
+            raise ToolError("target %s is not an object; refusing to overwrite" % sec)
+        cur_sec = dict(cur_sec)
+        keep_written = {}
+        for k in list(cur_sec.keys()):
+            if k in desired:
+                continue
+            owned = (k in prior) or (k in retired)  # GUARD:provenance
+            if not owned:
+                continue
+            expected = prior[k] if k in prior else True
+            if cur_sec[k] == expected or (k in retired and cur_sec[k] is True):  # GUARD:value-check
+                del cur_sec[k]
+                actions.append((sec, k, "REMOVED"))
+            else:
+                actions.append((sec, k, "CONFLICT"))
+                if k in prior:
+                    keep_written[k] = prior[k]
+        for k, dv in desired.items():
+            if k not in cur_sec:
+                cur_sec[k] = dv
+                actions.append((sec, k, "ADDED"))
+                keep_written[k] = dv
+            elif cur_sec[k] == dv:
+                if k not in prior:
+                    actions.append((sec, k, "ADOPTED"))
+                keep_written[k] = dv
+            elif k in prior and cur_sec[k] == prior[k]:  # GUARD:update
+                cur_sec[k] = dv
+                actions.append((sec, k, "UPDATED"))
+                keep_written[k] = dv
+            elif force_owned:
+                cur_sec[k] = dv
+                actions.append((sec, k, "UPDATED"))
+                keep_written[k] = dv
+            else:
+                actions.append((sec, k, "CONFLICT"))
+        if cur_sec or sec in obj:
+            obj[sec] = cur_sec
+        if keep_written:
+            new_written[sec] = keep_written
+    return obj, actions, new_written
+
+
+DRIFT_ACTIONS = ("ADDED", "UPDATED", "REMOVED", "CONFLICT")
+
+
+def read_target(path):
+    """Return the parsed target dict, None if absent. Raises ToolError if unparseable."""
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError) as exc:
+        raise ToolError("target unreadable or not valid JSON, refusing to overwrite: %s (%s)" % (path, exc), 1)
+    if not isinstance(doc, dict):  # GUARD:notobject
+        raise ToolError("target is not a JSON object, refusing to overwrite: %s" % path, 1)
+    return doc
+
+
+def ensure_git_exclude(directory):
+    """Deployed-mode targets inside a git repo go into .git/info/exclude (common dir)."""
+    rc, so, _se = git(["-C", directory, "rev-parse", "--git-common-dir"])
+    if rc != 0:
+        return None
+    common = so.strip()
+    if not os.path.isabs(common):
+        common = os.path.join(directory, common)
+    rc, so, _se = git(["-C", directory, "rev-parse", "--show-prefix"])
+    prefix = so.strip() if rc == 0 else ""
+    line = prefix + EXCLUDE_LINE_TAIL
+    exclude = os.path.join(common, "info", "exclude")
+    existing = ""
+    if os.path.exists(exclude):
+        with open(exclude, "r") as fh:
+            existing = fh.read()
+    if line in existing.splitlines():
+        return None
+    os.makedirs(os.path.dirname(exclude), exist_ok=True)
+    with open(exclude, "a") as fh:
+        if existing and not existing.endswith("\n"):
+            fh.write("\n")
+        fh.write(line + "\n")
+    return exclude
+
+
+def process_target(team, cfg, directory, state, dry_run=False, force_owned=False):
+    """Plan (and unless dry_run, apply) one target. Returns a result dict."""
+    path = target_path(directory)
+    res = {"team": team, "dir": directory, "path": path, "mode": cfg.get("mode"),
+           "actions": [], "changed": False, "status": "OK", "error": None}
+    if not os.path.isdir(directory):
+        res["status"] = "DIR_ABSENT"
+        return res
+    try:
+        guard_target(path)
+        cur = read_target(path)
+        entry = state.get(path) or {}
+        new_obj, actions, new_written = plan_merge(cur, cfg, entry.get("written"), force_owned)
+    except ToolError as exc:
+        res["status"] = "ERROR"
+        res["error"] = str(exc)
+        return res
+    res["actions"] = [{"section": s, "key": k, "action": a} for s, k, a in actions]
+    if any(a == "CONFLICT" for _s, _k, a in actions):
+        res["status"] = "CONFLICT"
+    changed_file = (cur is None and bool(new_obj)) or (cur is not None and new_obj != cur)
+    if cur is None and not any(a in ("ADDED", "UPDATED") for _s, _k, a in actions):
+        changed_file = False  # never create an empty file
+    res["changed"] = changed_file
+    if any(a in ("ADDED", "UPDATED", "REMOVED") for _s, _k, a in actions) and res["status"] == "OK":
+        res["status"] = "DRIFT" if dry_run else "SYNCED"
+    if dry_run:
+        res["_new_obj"] = new_obj
+        return res
+    try:
+        if changed_file:
+            atomic_write_json(path, new_obj)
+        if cfg.get("mode") == "deployed" and (changed_file or os.path.exists(path)) and cfg.get("deliver", True):
+            ex = ensure_git_exclude(directory)
+            if ex:
+                res["exclude"] = ex
+        if new_written or entry:
+            if new_written:
+                state[path] = {
+                    "team": team,
+                    "written": new_written,
+                    "manifestCommit": manifest_commit(),
+                    "fileSha256": sha256_file(path) if os.path.exists(path) else None,
+                    "syncedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                }
+            else:
+                state.pop(path, None)
+    except (OSError, ToolError) as exc:
+        res["status"] = "ERROR"
+        res["error"] = str(exc)
+    return res
+
+
+# ---------------------------------------------------------------------------
+# Target enumeration
+# ---------------------------------------------------------------------------
+
+def select_teams(m, team, all_flag):
+    teams = m["teams"]
+    if team:
+        if team not in teams:
+            raise ToolError("unknown team %r (manifest teams: %s)" % (team, ", ".join(sorted(teams))))
+        return [team]
+    if all_flag:
+        return sorted(teams)
+    raise ToolError("specify a team or --all")
+
+
+def session_targets(m, names):
+    """[(team, cfg, dir)] for hosted teams' session dirs."""
+    res = []
+    for n in names:
+        cfg = m["teams"][n]
+        dirs = resolve_dirs(n, cfg)
+        if dirs is None:
+            continue
+        for d in dirs:
+            res.append((n, cfg, d))
+    return res
+
+
+def worktree_targets(m, names):
+    """[(team, cfg, dir)] for linked worktrees of deployed teams' worktreeRepos."""
+    res = []
+    for n in names:
+        cfg = m["teams"][n]
+        if cfg.get("mode") != "deployed":
+            continue
+        repos = resolve_dirs(n, cfg, key="worktreeRepos") or []
+        for r in repos:
+            for wt in list_worktrees(r):
+                res.append((n, cfg, wt))
+    return res
+
+
+def guard_not_worktree(directory):
+    if "/worktrees/" in directory + "/":
+        raise ToolError("refusing to sync a session dir inside /worktrees/ (%s); "
+                        "use `sync-worktrees` for linked worktrees" % directory)
+
+
+# ---------------------------------------------------------------------------
+# Subcommands
+# ---------------------------------------------------------------------------
+
+def fmt_action_line(r):
+    acts = ", ".join("%s %s:%s" % (a["action"], a["section"], a["key"]) for a in r["actions"]) or "no change"
+    extra = " [%s]" % r["error"] if r.get("error") else ""
+    return "  %-9s %s -- %s%s" % (r["status"], r["path"], acts, extra)
+
+
+def do_list(args):
+    m = load_manifest()
+    rows = []
+    for n in sorted(m["teams"]):
+        cfg = m["teams"][n]
+        dirs = resolve_dirs(n, cfg)
+        rows.append({"team": n, "mode": cfg.get("mode"), "deliver": cfg.get("deliver", True),
+                     "plugins": sorted((cfg.get("enabledPlugins") or {}).keys()),
+                     "hosted": dirs is not None, "dirs": dirs or []})
+    if args.json:
+        out(json.dumps({"manifest": MANIFEST, "teams": rows}, indent=2))
+        return 0
+    out("%-10s %-9s %-8s %-7s %s" % ("TEAM", "MODE", "DELIVER", "HOSTED", "PLUGINS"))
+    for r in rows:
+        out("%-10s %-9s %-8s %-7s %s" % (r["team"], r["mode"], str(r["deliver"]).lower(),
+                                         "yes" if r["hosted"] else "no", len(r["plugins"])))
+        for d in r["dirs"]:
+            out("             %s%s" % (d, "" if os.path.isdir(d) else "  (absent)"))
+    return 0
+
+
+def do_check(args):
+    if args.manifest:
+        return check_manifest(args)
+    if args.host:
+        return check_host(args)
+    m = load_manifest()
+    names = select_teams(m, args.team, args.all)
+    state = load_state()
+    targets = session_targets(m, names) + worktree_targets(m, names)
+    results = [process_target(t, c, d, state, dry_run=True) for t, c, d in targets]
+    return report_check(results, args.json)
+
+
+def report_check(results, as_json):
+    drift = [r for r in results if r["status"] in ("DRIFT", "CONFLICT", "ERROR")]
+    if as_json:
+        for r in results:
+            r.pop("_new_obj", None)
+        out(json.dumps({"results": results, "drift": len(drift)}, indent=2))
+    else:
+        for r in results:
+            if r["status"] not in ("OK",):
+                out("[%s]" % r["team"])
+                out(fmt_action_line(r))
+        out("checked=%d drift=%d" % (len(results), len(drift)))
+    if drift:
+        return 1
+    if not any(r["status"] != "DIR_ABSENT" for r in results):  # GUARD:zero-targets
+        return no_hosted_teams("check")
+    return 0
+
+
+def check_manifest(args):
+    m = load_manifest()
+    catalog = load_catalog()
+    errs = validate_manifest(m, catalog)
+    for e in errs:
+        out("MANIFEST-FAIL: %s" % e)
+    if catalog is None:
+        out("catalog checks: SKIPPED (no marketplace catalog at %s)" % CATALOG_JSON)
+        if args.require_catalog:
+            out("--require-catalog set: unverifiable")
+            return 3
+    if errs:
+        out("manifest: %d problem(s)" % len(errs))
+        return 1
+    out("manifest: OK (%d teams)" % len(m["teams"]))
+    return 0
+
+
+def do_sync(args):
+    if args.dry_run:
+        return _do_sync(args)
+    with state_lock():
+        return _do_sync(args)
+
+
+def _do_sync(args):
+    m = load_manifest()
+    names = select_teams(m, args.team, args.all)
+    state = load_state()
+    results = []
+    targets = session_targets(m, names)
+    for t, c, d in targets:
+        try:
+            guard_not_worktree(d)
+        except ToolError as exc:
+            results.append({"team": t, "dir": d, "path": target_path(d), "actions": [], "changed": False,
+                            "status": "ERROR", "error": str(exc)})
+            continue
+        results.append(process_target(t, c, d, state, args.dry_run, args.force_owned))
+    if args.all:
+        for t, c, d in worktree_targets(m, names):
+            results.append(process_target(t, c, d, state, args.dry_run, args.force_owned))
+    return finish_sync(results, state, args)
+
+
+def do_sync_worktrees(args):
+    if args.dry_run:
+        return _do_sync_worktrees(args)
+    with state_lock():
+        return _do_sync_worktrees(args)
+
+
+def _do_sync_worktrees(args):
+    m = load_manifest()
+    names = select_teams(m, args.team, args.all)
+    state = load_state()
+    results = []
+    for n in names:
+        if m["teams"][n].get("mode") == "tracked" and not args.json:
+            out("%s: tracked mode -- worktrees inherit the committed file by checkout" % n)
+    for t, c, d in worktree_targets(m, names):
+        results.append(process_target(t, c, d, state, args.dry_run, args.force_owned))
+    return finish_sync(results, state, args)
+
+
+def untracked_tracked_notes(results):
+    """A tracked-mode team is meant to commit its settings.json. Until that file is
+    committed, a sync leaves it untracked in the repo (read-only git probe; advisory)."""
+    notes = []
+    for r in results:
+        if r.get("mode") != "tracked" or not r.get("changed") or not os.path.isfile(r["path"]):
+            continue
+        rc, _so, _se = git(["ls-files", "--error-unmatch", "--", r["path"]], cwd=r["dir"])
+        if rc == 1:  # GUARD:untracked-note (1 = untracked; 128 = not a git repo)
+            notes.append("%s is a tracked-mode target but %s is not committed in its repo; "
+                         "it stays an untracked file until you commit it" % (r["team"], r["path"]))
+    return notes
+
+
+def finish_sync(results, state, args):
+    if not args.dry_run:
+        try:
+            save_state(state)
+        except OSError as exc:
+            err("could not save state %s: %s" % (STATE_FILE, exc))
+            return 2
+    bad = [r for r in results if r["status"] in ("ERROR", "CONFLICT")]
+    for r in results:
+        r.pop("_new_obj", None)
+    notes = [] if args.dry_run else untracked_tracked_notes(results)
+    if args.json:
+        out(json.dumps({"results": results, "failed": len(bad), "dryRun": bool(args.dry_run),
+                        "notes": notes}, indent=2))
+    else:
+        for r in results:
+            if r["status"] == "DIR_ABSENT":
+                continue
+            out("[%s]" % r["team"])
+            out(fmt_action_line(r))
+        for n in notes:
+            out("NOTE: %s" % n)
+        out("%d target(s), %d need attention%s" % (len(results), len(bad), " (dry run)" if args.dry_run else ""))
+    return 1 if bad else 0
+
+
+def do_diff(args):
+    m = load_manifest()
+    names = select_teams(m, args.team, False)
+    state = load_state()
+    rc = 0
+    for t, c, d in session_targets(m, names):
+        r = process_target(t, c, d, state, dry_run=True)
+        path = r["path"]
+        if r["status"] == "ERROR":
+            out("# %s: ERROR %s" % (path, r["error"]))
+            rc = 1
+            continue
+        try:
+            cur = read_target(path)
+        except ToolError as exc:
+            out("# %s: ERROR %s" % (path, exc))
+            rc = 1
+            continue
+        before = json.dumps(cur, indent=2, ensure_ascii=False).splitlines() if cur is not None else []
+        after = json.dumps(r["_new_obj"], indent=2, ensure_ascii=False).splitlines() if r["changed"] else before
+        diff = list(difflib.unified_diff(before, after, "a/" + path, "b/" + path, lineterm=""))
+        if diff:
+            rc = 1
+            for ln in diff:
+                out(ln)
+        else:
+            out("# %s: no difference" % path)
+    return rc
+
+
+DRIFT_STATUSES = ("MISSING", "NOT_INSTALLED", "BLOCKED_LOADED", "FILE_DRIFT", "CONFLICT",
+                  "POLICY_ABSENT", "POLICY_STALE", "POLICY_SKIPPED")
+WARN_STATUSES = ("EXTRA",)
+UNVERIFIABLE_STATUSES = ("VERSION_UNVERIFIED", "LIST_UNREADABLE", "CLAUDE_UNRUNNABLE")
+
+
+def parse_version(text):
+    mt = VERSION_RE.search(text or "")
+    return tuple(int(x) for x in mt.groups()) if mt else None
+
+
+def claude_version():
+    rc, so, _se = run([CLAUDE_BIN, "--version"], timeout=30)
+    return parse_version(so) if rc == 0 else None
+
+
+def live_plugin_list(directory):
+    """`claude plugin list --json` from `directory`: list of dicts, or None when unreadable."""
+    rc, so, _se = run([CLAUDE_BIN, "plugin", "list", "--json"], cwd=directory, timeout=120)
+    if rc != 0:
+        return None
+    try:
+        doc = json.loads(so)
+    except ValueError:
+        return None
+    if not isinstance(doc, list) or not all(isinstance(e, dict) for e in doc):
+        return None
+    return doc
+
+
+def host_policy(m, deep):
+    """L1 policy status. Returns (row_or_None, info dict). Read-only."""
+    bp = baseline_path(m)
+    info = {"status": "NOT_DECLARED", "installedSha": None, "canonicalSha": None}
+    if bp is None:
+        return None, info
+    if not os.path.exists(bp):
+        raise ToolError("manifest declares baseline %s but the file is missing" % bp, 3)
+    info["canonicalSha"] = sha256_file(bp)
+    installed = os.path.join(MANAGED_DIR, os.path.basename(bp))
+    status = "OK"
+    if not os.path.exists(installed):
+        status = "POLICY_ABSENT"
+    else:
+        info["installedSha"] = sha256_file(installed)
+        if info["installedSha"] != info["canonicalSha"]:
+            status = "POLICY_STALE"
+    if deep and status == "OK":
+        # The one probe that does not depend on claude's version: the marker env var.
+        want = (load_json(bp, "baseline policy", code=3).get("env") or {}).get("AITEAMFORGE_MANAGED_POLICY")
+        rc, so, _se = run([CLAUDE_BIN, "-p", "printenv AITEAMFORGE_MANAGED_POLICY"], timeout=180)
+        if rc != 0 or not want:
+            info["status"] = "LIST_UNREADABLE"
+            return {"team": "-", "dir": MANAGED_DIR, "plugin": "policy-probe", "expected": want or "?",
+                    "actual": "claude -p failed", "status": "LIST_UNREADABLE"}, info
+        if want not in so:
+            status = "POLICY_ABSENT"
+    info["status"] = status
+    return {"team": "-", "dir": MANAGED_DIR, "plugin": os.path.basename(bp), "expected": "installed==canonical",
+            "actual": status, "status": status}, info
+
+
+def host_rows_for_dir(team, cfg, directory, blocked, state):
+    rows = []
+
+    def add(plugin, expected, actual, status):
+        rows.append({"team": team, "dir": directory, "plugin": plugin, "expected": expected,
+                     "actual": actual, "status": status})
+
+    if not os.path.isdir(directory):
+        add("-", "dir", "absent", "DIR_ABSENT")
+        return rows
+    # File level: what the sync owns in <dir>/.claude/settings.json.
+    res = process_target(team, cfg, directory, state, dry_run=True)
+    if res["status"] == "ERROR":
+        add("-", "readable settings.json", res["error"], "FILE_DRIFT")
+    for a in res["actions"]:
+        if a["action"] == "ADOPTED":
+            continue
+        add(a["key"], "per manifest", a["action"], "CONFLICT" if a["action"] == "CONFLICT" else "FILE_DRIFT")
+    # Live level: what claude actually loads from this cwd.
+    expected = dict(cfg.get("enabledPlugins") or {}) if cfg.get("deliver", True) else {}
+    plist = live_plugin_list(directory)
+    if plist is None:
+        add("-", "plugin list", "unreadable", "LIST_UNREADABLE")
+        return rows
+    by_id = {}
+    for e in plist:
+        by_id[e.get("id")] = e
+    for pid in sorted(expected):
+        ent = by_id.get(pid)
+        if ent is None:
+            # `plugin list` omits enabled-but-uninstalled ids (also catches unresolvable ids).
+            add(pid, "enabled", "not installed", "NOT_INSTALLED")  # GUARD:not-installed
+        elif ent.get("enabled") is True:
+            add(pid, "enabled", "enabled", "OK")
+        else:
+            add(pid, "enabled", "disabled", "MISSING")
+    for pid in blocked:
+        ent = by_id.get(pid)
+        if ent is not None and ent.get("enabled") is True:
+            add(pid, "blocked", "enabled", "BLOCKED_LOADED")
+    for pid, ent in sorted(by_id.items(), key=lambda kv: str(kv[0])):
+        if ent.get("enabled") is True and pid not in expected and pid not in blocked:
+            add(str(pid), "not expected", "enabled", "EXTRA")
+    return rows
+
+
+def check_host(args):
+    """Read-only per-host drift check (design section 6). Exit 0/1/2/3."""
+    m = load_manifest()
+    problems = validate_manifest(m, None)
+    if problems:
+        for p in problems:
+            err("manifest invalid: %s" % p)
+        return 3
+    blocked = blocked_plugins(m)
+    state = load_state()
+    version = claude_version()
+    floor = parse_version(m.get("minClaudeVersion") or "")
+    rows = []
+    if version is None:
+        rows.append({"team": "-", "dir": "-", "plugin": "claude", "expected": "runnable",
+                     "actual": "claude --version failed", "status": "CLAUDE_UNRUNNABLE"})
+    elif floor is not None and version < floor:  # GUARD:version-floor
+        rows.append({"team": "-", "dir": "-", "plugin": "claude", "expected": ">=%s" % m["minClaudeVersion"],
+                     "actual": ".".join(str(x) for x in version), "status": "VERSION_UNVERIFIED"})
+    teams_seen = 0
+    dirs_seen = 0
+    dirs_live = 0
+    if version is not None:
+        for name in sorted(m["teams"]):
+            cfg = m["teams"][name]
+            dirs = resolve_dirs(name, cfg)
+            if dirs is None:
+                continue
+            teams_seen += 1
+            targets = list(dirs)
+            if cfg.get("mode") == "deployed":
+                targets += [d for (_t, _c, d) in worktree_targets(m, [name])]
+            for d in targets:
+                dirs_seen += 1
+                dirs_live += 1 if os.path.isdir(d) else 0
+                rows.extend(host_rows_for_dir(name, cfg, d, blocked, state))
+    prow, pinfo = host_policy(m, args.deep)
+    if prow is not None:
+        rows.append(prow)
+    n_drift = sum(1 for r in rows if r["status"] in DRIFT_STATUSES)
+    n_warn = sum(1 for r in rows if r["status"] in WARN_STATUSES)
+    n_unv = sum(1 for r in rows if r["status"] in UNVERIFIABLE_STATUSES)
+    host = os.environ.get("KBSPL_HOST") or os.uname()[1]
+    summary = {"teams": teams_seen, "dirs": dirs_seen, "drift": n_drift, "warn": n_warn, "unverifiable": n_unv}
+    # Drift is a definite finding and wins; unverifiable is never folded into 0.
+    rc = 1 if n_drift else (3 if n_unv else 0)
+    if rc == 0 and dirs_live == 0:  # GUARD:host-zero-targets
+        rc = no_hosted_teams("check --host")
+        summary["status"] = "NO_HOSTED_TEAMS"
+    if args.json:
+        out(json.dumps({"host": host,
+                        "claudeVersion": ".".join(str(x) for x in version) if version else None,
+                        "minClaudeVersion": m.get("minClaudeVersion"), "policy": pinfo,
+                        "rows": rows, "summary": summary, "exit": rc}, indent=2))
+        return rc
+    cur_team = None
+    for r in rows:
+        if r["status"] == "OK":
+            continue
+        if r["team"] != cur_team:
+            cur_team = r["team"]
+            out("[%s]" % cur_team)
+            out("  %-44s %-34s %-14s %-18s %s" % ("DIR", "PLUGIN", "EXPECTED", "ACTUAL", "STATUS"))
+        out("  %-44s %-34s %-14s %-18s %s" % (r["dir"][-44:], r["plugin"][:34], r["expected"][:14],
+                                              str(r["actual"])[:18], r["status"]))
+    out("HOST %s teams=%d dirs=%d drift=%d warn=%d unverifiable=%d" % (
+        host, teams_seen, dirs_seen, n_drift, n_warn, n_unv))
+    return rc
+
+
+def probe_binary(b):
+    """Is this plugin's binary usable? A declared probe is the ONLY authority:
+    /usr/bin/sourcekit-lsp is a shim that exists with no toolchain behind it
+    (001 implication 7), so a PATH hit must not count when a probe is declared."""
+    probe = b.get("probe")
+    if probe:  # GUARD:probe-authority
+        rc, _so, _se = run(probe, timeout=30)
+        return rc == 0
+    return shutil.which(b["command"]) is not None
+
+
+def binary_rows(m, args):
+    binaries = m.get("binaries") or {}
+    if args.team and args.team not in m["teams"]:
+        raise ToolError("unknown team %r (manifest teams: %s)" % (args.team, ", ".join(sorted(m["teams"]))))
+    names = [args.team] if args.team else sorted(m["teams"])
+    wanted = {}
+    required = {}
+    hosted = 0
+    for n in names:
+        cfg = m["teams"][n]
+        if not args.team:
+            dirs = resolve_dirs(n, cfg)
+            if dirs is None or not any_live(dirs):
+                continue  # this host does not host the team
+        hosted += 1
+        if not cfg.get("deliver", True):
+            continue
+        for pid in cfg.get("enabledPlugins") or {}:
+            wanted.setdefault(pid, []).append(n)
+        for cmd in cfg.get("requiredBinaries") or []:
+            required.setdefault(cmd, []).append(n)
+    rows = []
+    for pid in sorted(wanted):
+        b = binaries.get(pid)
+        if b is None:
+            continue  # non-LSP plugin: needs no binary (an unmapped LSP plugin fails validation upstream)
+        rows.append({"plugin": pid, "command": b["command"], "teams": wanted[pid],
+                     "status": "PRESENT" if probe_binary(b) else "MISSING",
+                     "install": b.get("install"), "installCmd": b.get("installCmd"), "_b": b})
+    for cmd in sorted(required):
+        rows.append({"plugin": "(requiredBinaries)", "command": cmd, "teams": required[cmd],
+                     "status": "PRESENT" if shutil.which(cmd) else "MISSING",
+                     "install": None, "installCmd": None, "_b": {"command": cmd}})
+    return rows, hosted
+
+
+def claude_row(m):
+    version = claude_version()
+    floor = m.get("minClaudeVersion")
+    if version is None:
+        return {"version": None, "floor": floor, "status": "UNRUNNABLE"}
+    fv = parse_version(floor or "")
+    status = "BELOW_FLOOR" if (fv is not None and version < fv) else "OK"
+    return {"version": ".".join(str(x) for x in version), "floor": floor, "status": status}
+
+
+def do_binaries(args):
+    """Which LSP binaries do this host's enabled plugins need, and are they usable?
+    Exit 0 all present / 1 missing / 3 unverifiable (bad manifest, unmapped LSP plugin,
+    claude unrunnable or below the floor). --install never runs silently."""
+    m = load_manifest()
+    problems = validate_manifest(m, load_catalog())
+    if problems:  # GUARD:binaries-validate
+        for p in problems:
+            err("manifest invalid: %s" % p)
+        return 3
+    team_paths()  # a malformed registry is exit 3 here, whatever --team says
+    rows, hosted = binary_rows(m, args)
+    claude = claude_row(m)
+    missing = [r for r in rows if r["status"] == "MISSING"]
+    notes = []
+    if args.install and missing:
+        interactive = sys.stdin.isatty() and sys.stdout.isatty()
+        seam = os.environ.get("KBSPL_TEST_INSTALL_ANSWER")  # test seam: stands in for the prompt answer
+        seen = set()
+        for r in missing:
+            cmd = r.get("installCmd")
+            if not cmd:
+                notes.append("%s: no automatic install; manual: %s" % (r["command"], r.get("install") or "see docs"))
+                continue
+            if tuple(cmd) in seen:
+                continue
+            seen.add(tuple(cmd))
+            line = " ".join(cmd)
+            if not interactive and seam is None:  # GUARD:no-silent-install
+                notes.append("would run (non-interactive, NOT executing): %s" % line)
+                continue
+            if seam is not None:
+                ans = seam
+            else:
+                sys.stdout.write("Run `%s` to install %s? [y/N] " % (line, r["command"]))
+                sys.stdout.flush()
+                ans = sys.stdin.readline()
+            if ans.strip().lower() not in ("y", "yes"):
+                notes.append("skipped: %s" % line)
+                continue
+            notes.append("running: %s" % line)
+            rc = subprocess.call(cmd)
+            notes.append("%s exited %d" % (cmd[0], rc))
+            for r2 in rows:
+                if r2.get("installCmd") == cmd:
+                    r2["status"] = "PRESENT" if probe_binary(r2["_b"]) else "MISSING"
+        missing = [r for r in rows if r["status"] == "MISSING"]
+    # "0 needed" is a legitimate 0 only when teams DID resolve and enable no LSP plugin.
+    no_hosted = hosted == 0  # GUARD:binaries-zero-teams
+    if no_hosted:
+        no_hosted_teams("binaries")
+    rc = 1 if missing else (3 if (claude["status"] != "OK" or no_hosted) else 0)
+    for r in rows:
+        r.pop("_b", None)
+    if args.json:
+        out(json.dumps({"rows": rows, "claude": claude, "notes": notes, "exit": rc}, indent=2))
+        return rc
+    for r in rows:
+        out("%-8s %-28s %-40s teams=%s" % (r["status"], r["command"], r["plugin"], ",".join(r["teams"])))
+        if r["status"] == "MISSING" and r.get("install"):
+            out("         install: %s" % r["install"])
+    out("claude %s (floor %s): %s" % (claude["version"] or "?", claude["floor"] or "none", claude["status"]))
+    for n in notes:
+        out(n)
+    out("binaries: %d needed, %d missing" % (len(rows), len(missing)))
+    return rc
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def build_parser():
+    ap = argparse.ArgumentParser(prog=PROG, description="Fleet-standard Claude Code plugin delivery (XACA-1599)")
+    sub = ap.add_subparsers(dest="cmd")
+
+    p = sub.add_parser("list", help="teams, modes and resolved session dirs")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=do_list)
+
+    p = sub.add_parser("check", help="drift check (exit 0 clean / 1 drift / 2 usage / 3 unverifiable)")
+    p.add_argument("team", nargs="?")
+    p.add_argument("--all", action="store_true")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--manifest", action="store_true", help="validate the manifest itself")
+    p.add_argument("--require-catalog", action="store_true", help="--manifest: exit 3 if no marketplace catalog")
+    p.add_argument("--host", action="store_true", help="live check of this host via `claude plugin list`")
+    p.add_argument("--deep", action="store_true", help="--host: also run one `claude -p` policy probe")
+    p.set_defaults(fn=do_check)
+
+    for name, fn, helptxt in (("sync", do_sync, "write session dirs (and, with --all, linked worktrees)"),
+                              ("sync-worktrees", do_sync_worktrees, "write linked worktrees of deployed teams")):
+        p = sub.add_parser(name, help=helptxt)
+        p.add_argument("team", nargs="?")
+        p.add_argument("--all", action="store_true")
+        p.add_argument("--dry-run", action="store_true")
+        p.add_argument("--force-owned", action="store_true", help="overwrite a key a human changed")
+        p.add_argument("--json", action="store_true")
+        p.set_defaults(fn=fn)
+
+    p = sub.add_parser("diff", help="unified diff of what sync would change")
+    p.add_argument("team")
+    p.set_defaults(fn=do_diff)
+
+    p = sub.add_parser("binaries", help="LSP binaries the enabled plugins need")
+    p.add_argument("--team")
+    p.add_argument("--install", action="store_true")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=do_binaries)
+
+    p = sub.add_parser("help")
+    p.set_defaults(fn=lambda a: (build_parser().print_help(), 0)[1])
+    return ap
+
+
+def main(argv):
+    ap = build_parser()
+    args = ap.parse_args(argv)
+    if not getattr(args, "fn", None):
+        ap.print_help()
+        return 2
+    try:
+        return args.fn(args)
+    except ToolError as exc:
+        err(str(exc))
+        return exc.code
+    except BrokenPipeError:
+        return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

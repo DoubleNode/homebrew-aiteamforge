@@ -1,0 +1,157 @@
+{
+  "schemaVersion": 1,
+  "lastUpdated": "2026-10-23",
+  "minClaudeVersion": "2.1.205",
+  "_minClaudeVersionNote": "Candidate floor, NOT yet probe-verified. XACA-1599-006 (PR-B) runs the behavioral probe per host and writes the verified value back here. Do not edit by hand.",
+  "binaries": {
+    "swift-lsp@claude-plugins-official": {
+      "command": "sourcekit-lsp",
+      "probe": ["xcrun", "--find", "sourcekit-lsp"],
+      "install": "Xcode or Command Line Tools (manual): xcode-select --install"
+    },
+    "pyright-lsp@claude-plugins-official": {
+      "command": "pyright-langserver",
+      "installCmd": ["npm", "install", "-g", "pyright"],
+      "install": "npm install -g pyright"
+    },
+    "typescript-lsp@claude-plugins-official": {
+      "command": "typescript-language-server",
+      "installCmd": ["npm", "install", "-g", "typescript-language-server", "typescript"],
+      "install": "npm install -g typescript-language-server typescript"
+    },
+    "kotlin-lsp@claude-plugins-official": {
+      "command": "kotlin-lsp",
+      "installCmd": ["brew", "install", "--cask", "kotlin-lsp"],
+      "install": "brew install --cask kotlin-lsp"
+    }
+  },
+  "teams": {
+    "academy": {
+      "mode": "tracked",
+      "sessionDirs": ["${working_dir}"],
+      "deliver": true,
+      "enabledPlugins": {
+        "frontend-design@claude-plugins-official": true,
+        "atlassian@claude-plugins-official": true,
+        "firebase@claude-plugins-official": true,
+        "swift-lsp@claude-plugins-official": true
+      },
+      "retiredPlugins": {},
+      "extraKnownMarketplaces": {}
+    },
+    "command": {
+      "mode": "tracked",
+      "sessionDirs": ["${working_dir}"],
+      "deliver": true,
+      "enabledPlugins": {
+        "frontend-design@claude-plugins-official": true,
+        "atlassian@claude-plugins-official": true,
+        "firebase@claude-plugins-official": true,
+        "swift-lsp@claude-plugins-official": true
+      },
+      "retiredPlugins": {},
+      "extraKnownMarketplaces": {}
+    },
+    "ios": {
+      "mode": "deployed",
+      "sessionDirs": ["${working_dir}"],
+      "worktreeRepos": ["${working_dir}/DEV"],
+      "deliver": true,
+      "enabledPlugins": {
+        "frontend-design@claude-plugins-official": true,
+        "atlassian@claude-plugins-official": true,
+        "firebase@claude-plugins-official": true,
+        "swift-lsp@claude-plugins-official": true
+      },
+      "retiredPlugins": {},
+      "extraKnownMarketplaces": {}
+    },
+    "android": {
+      "mode": "deployed",
+      "sessionDirs": ["${working_dir}"],
+      "worktreeRepos": ["${working_dir}/develop"],
+      "deliver": true,
+      "enabledPlugins": {
+        "frontend-design@claude-plugins-official": true,
+        "atlassian@claude-plugins-official": true,
+        "firebase@claude-plugins-official": true,
+        "swift-lsp@claude-plugins-official": true
+      },
+      "retiredPlugins": {},
+      "extraKnownMarketplaces": {}
+    },
+    "firebase": {
+      "mode": "deployed",
+      "sessionDirs": ["${working_dir}"],
+      "worktreeRepos": ["${working_dir}/develop"],
+      "deliver": true,
+      "enabledPlugins": {
+        "frontend-design@claude-plugins-official": true,
+        "atlassian@claude-plugins-official": true,
+        "firebase@claude-plugins-official": true,
+        "swift-lsp@claude-plugins-official": true
+      },
+      "retiredPlugins": {},
+      "extraKnownMarketplaces": {}
+    },
+    "dns": {
+      "mode": "deployed",
+      "sessionDirs": [
+        "${working_dir}",
+        "${working_dir}/DNSFramework-iOS",
+        "${working_dir}/DNSFramework-Android"
+      ],
+      "worktreeRepos": [],
+      "deliver": true,
+      "enabledPlugins": {
+        "frontend-design@claude-plugins-official": true,
+        "atlassian@claude-plugins-official": true,
+        "firebase@claude-plugins-official": true,
+        "swift-lsp@claude-plugins-official": true
+      },
+      "retiredPlugins": {},
+      "extraKnownMarketplaces": {}
+    },
+    "spacedock": {
+      "mode": "deployed",
+      "sessionDirs": ["${working_dir}"],
+      "worktreeRepos": [],
+      "deliver": true,
+      "enabledPlugins": {
+        "frontend-design@claude-plugins-official": true,
+        "atlassian@claude-plugins-official": true,
+        "firebase@claude-plugins-official": true,
+        "swift-lsp@claude-plugins-official": true
+      },
+      "retiredPlugins": {},
+      "extraKnownMarketplaces": {}
+    },
+    "finance": {
+      "mode": "deployed",
+      "sessionDirs": ["~/finance/personal"],
+      "worktreeRepos": [],
+      "deliver": false,
+      "enabledPlugins": {},
+      "retiredPlugins": {},
+      "extraKnownMarketplaces": {}
+    },
+    "legal": {
+      "mode": "deployed",
+      "sessionDirs": ["~/legal/coparenting"],
+      "worktreeRepos": [],
+      "deliver": false,
+      "enabledPlugins": {},
+      "retiredPlugins": {},
+      "extraKnownMarketplaces": {}
+    },
+    "medical": {
+      "mode": "deployed",
+      "sessionDirs": ["~/medical/general"],
+      "worktreeRepos": [],
+      "deliver": false,
+      "enabledPlugins": {},
+      "retiredPlugins": {},
+      "extraKnownMarketplaces": {}
+    }
+  }
+}

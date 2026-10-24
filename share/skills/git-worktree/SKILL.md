@@ -838,6 +838,16 @@ All Fun Card widget worktrees cleaned up!
 
    The deployed files are intentionally UNTRACKED — they vanish when the worktree is removed. Do NOT `git add` them; seeing them in `.claude/agents/` after creation is expected, not drift.
 
+1b. **Deliver the team's Claude Code plugin list into the new worktree** (XACA-1599)
+
+   Claude Code reads project settings from the working directory only (it does not walk up), so a container-team worktree (`<container>/worktrees/<name>`) has no `enabledPlugins` unless the sync copies them in. Tracked-mode teams (Academy, Command) inherit the committed file by checkout and this is a no-op for them. Run it right after the persona step:
+
+   ```bash
+   kb-sync-plugins sync-worktrees <team> || echo "WARN: kb-sync-plugins sync-worktrees <team> failed for the new worktree; plugins may be missing (run: kb-sync-plugins check <team>)" >&2
+   ```
+
+   **Do not append `2>/dev/null || true` here, unlike the persona hook above.** A silent failure means a session that quietly loads the wrong plugins, which nothing else would flag. The WARN is non-fatal to worktree creation but visible, and `kb-sync-plugins check` reports the gap afterwards. The file is intentionally UNTRACKED (it is listed in the repo's `.git/info/exclude`), so do not `git add` it. A per-person opt-out belongs in `<dir>/.claude/settings.local.json`, which the sync never touches.
+
 2. **Record worktree metadata** (optional)
    - Terminal that created it
    - Creation timestamp

@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1599 per-team Claude Code plugins — manifest, kb-sync-plugins, drift check, binaries (PR-A)
+- Tap files updated in this publish: `share/scripts/kb-sync-plugins`,`share/scripts/plugins-manifest.json` `share/skills/git-worktree/SKILL.md`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1168 kb-edit-shared is publisher-aware and maps via sync-tap.sh --manifest
 - Tap files updated in this publish: `docs/EDIT-SHARED-WORKFLOW.md`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1374 sync-tap.sh never silently targets the main checkout from a worktree; local write mode refused
