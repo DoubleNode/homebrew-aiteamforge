@@ -1,8 +1,22 @@
 {
   "schemaVersion": 1,
-  "lastUpdated": "2026-10-23",
-  "minClaudeVersion": "2.1.205",
-  "_minClaudeVersionNote": "Candidate floor, NOT yet probe-verified. XACA-1599-006 (PR-B) runs the behavioral probe per host and writes the verified value back here. Do not edit by hand.",
+  "lastUpdated": "2026-10-24",
+  "minClaudeVersion": "2.1.267",
+  "_minClaudeVersionNote": "Floor = the lowest claude version measured on a fleet host in XACA-1599-001 (M1Mini 2.1.267; M1Pro was upgraded to 2.1.310). `kb-sync-plugins check --host --probe` is the per-host behavioural probe: it asks a `claude -p` session for the L1 marker and exits 3 when it cannot verify. Record each host's probe result (host, claude version, date, verdict) in kanban/plans/XACA-1599/XACA-1599_006_probe_results.md at rollout. Raise the floor only if a host at the floor fails the probe.",
+  "baseline": {
+    "_note": "L1 managed policy, rendered by `kb-sync-plugins managed-policy --print` into managed-settings.d/50-aiteamforge.json. Bump `revision` with every change: it is the AITEAMFORGE_MANAGED_POLICY marker the probe looks for. L1 only blocks (false); it never force-enables a plugin.",
+    "revision": "1599.1",
+    "extraKnownMarketplaces": {
+      "claude-plugins-official": {
+        "source": { "source": "github", "repo": "anthropics/claude-plugins-official" }
+      }
+    },
+    "blockedPlugins": [
+      "superpowers@claude-plugins-official",
+      "commit-commands@claude-plugins-official",
+      "ralph-loop@claude-plugins-official"
+    ]
+  },
   "binaries": {
     "swift-lsp@claude-plugins-official": {
       "command": "sourcekit-lsp",

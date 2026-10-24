@@ -2,7 +2,7 @@
 """kb-sync-plugins -- fleet-standard Claude Code plugin delivery (XACA-1599).
 
 Usage: kb-sync-plugins <subcommand> [args]
-Subcommands: list, check, sync, diff, sync-worktrees, binaries, help
+Subcommands: list, check, sync, diff, sync-worktrees, binaries, managed-policy, help
 
 Source of truth: .claude/plugins-manifest.json (per-team enabledPlugins).
 Writes:          <session dir>/.claude/settings.json, keys `enabledPlugins` and
@@ -23,9 +23,19 @@ Hard guards (each is covered by a mutation-sentinel test):
   * An unparseable target is a FAILURE, never overwritten.
   * A key a human changed is reported CONFLICT and left alone.
 
+  * managed-policy never touches the system managed dir silently: the privileged
+    swap runs only after an explicit [y/N] on a real terminal, through `sudo` (never
+    `sudo -n`), as validate -> stage -> atomic `mv` -> read-back -> rollback. It
+    removes or replaces ONLY its own drop-in file (50-aiteamforge.json).
+  * `sync --install-missing` installs with `--scope project` only, never user or local.
+
 Exit codes (check): 0 clean, 1 drift, 2 usage/environment error,
-3 unverifiable (manifest/plugin list unreadable, or claude below the floor).
-3 is never folded into 0.
+3 unverifiable (manifest/plugin list unreadable, claude below the floor, or the
+--probe could not run). 3 is never folded into 0.
+Exit code 70: an unexpected Python exception, so a caller can tell a crash of this
+tool from "binary missing" (1) or drift (1).
+Exit codes (managed-policy): 0 done or already current, 1 failed, 2 usage,
+3 invalid policy, 4 not performed (non-interactive or declined: PENDING).
 
 Runs on python3 >= 3.8, stdlib only (tap hosts have only the system python).
 """
@@ -37,6 +47,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -54,7 +65,15 @@ STATE_FILE = os.environ.get("KBSPL_STATE") or os.path.expanduser("~/.aiteamforge
 CATALOG_JSON = os.environ.get("KBSPL_CATALOG") or os.path.expanduser(
     "~/.claude/plugins/marketplaces/claude-plugins-official/.claude-plugin/marketplace.json")
 CLAUDE_BIN = os.environ.get("KBSPL_CLAUDE") or "claude"
-MANAGED_DIR = os.environ.get("CLAUDE_MANAGED_DIR") or "/Library/Application Support/ClaudeCode/managed-settings.d"
+# CLAUDE_MANAGED_DIR is the managed-settings BASE dir: the one that holds managed-settings.json
+# and the managed-settings.d/ drop-in dir. Tests always override it; the default is the real
+# system path and is refused under TEST_TMP_DIR (guard_default_managed_dir).
+DEFAULT_MANAGED_BASE = "/Library/Application Support/ClaudeCode"
+MANAGED_BASE = os.environ.get("CLAUDE_MANAGED_DIR") or DEFAULT_MANAGED_BASE
+DROPIN_NAME = "managed-settings.d"
+POLICY_FILE = "50-aiteamforge.json"  # the ONLY file managed-policy ever writes or removes
+POLICY_ENV = "AITEAMFORGE_MANAGED_POLICY"
+EXIT_CRASH = 70
 # Test-only seam so the settings.local.json guard can be exercised. The guard
 # itself rejects any value other than "settings.json", so this can never be
 # used to write anything else.
@@ -136,10 +155,11 @@ def expand(p):
     return os.path.expanduser(p)
 
 
-def run(argv, cwd=None, timeout=60):
-    """Run a command; return (rc, stdout, stderr). rc 127 if missing, 124 on timeout."""
+def run(argv, cwd=None, timeout=60, env=None):
+    """Run a command; return (rc, stdout, stderr). rc 127 if missing, 124 on timeout.
+    env=None inherits the caller's environment."""
     try:
-        cp = subprocess.run(argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        cp = subprocess.run(argv, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             universal_newlines=True, timeout=timeout)
         return cp.returncode, cp.stdout, cp.stderr
     except FileNotFoundError:
@@ -309,21 +329,65 @@ TEAM_KEYS = {"mode", "sessionDirs", "worktreeRepos", "deliver", "enabledPlugins"
 TOP_KEYS = {"schemaVersion", "lastUpdated", "minClaudeVersion", "baseline", "binaries", "teams"}
 
 
-def baseline_path(m):
-    b = m.get("baseline")
-    if not b:
-        return None
-    return b if os.path.isabs(b) else os.path.join(DEV_TEAM, b)
+BASELINE_KEYS = {"revision", "extraKnownMarketplaces", "blockedPlugins"}
+REVISION_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def baseline_problems(bl):
+    """Problems with a manifest `baseline` object (None = not declared = no problems)."""
+    if bl is None:
+        return []
+    if not isinstance(bl, dict):
+        return ["baseline must be an object {revision, extraKnownMarketplaces, blockedPlugins}"]
+    errs = []
+    for k in bl:
+        if k not in BASELINE_KEYS and not k.startswith("_"):
+            errs.append("baseline: unknown key %s" % k)
+    rev = bl.get("revision")
+    if not (isinstance(rev, str) and REVISION_RE.match(rev)):
+        errs.append("baseline.revision must be a non-empty string of [A-Za-z0-9._-] (it is the policy marker)")
+    mk = bl.get("extraKnownMarketplaces", {})
+    if not (isinstance(mk, dict) and all(isinstance(v, dict) for v in mk.values())):
+        errs.append("baseline.extraKnownMarketplaces must be an object of objects")
+    bp = bl.get("blockedPlugins", [])
+    if not isinstance(bp, list):
+        errs.append("baseline.blockedPlugins must be a list of plugin ids")
+    else:
+        for pid in bp:
+            if not (isinstance(pid, str) and PLUGIN_ID_RE.match(pid) and not pid.startswith("-")):
+                errs.append("baseline.blockedPlugins: bad plugin id %r" % (pid,))
+    return errs
 
 
 def blocked_plugins(m):
     """Plugin ids the L1 baseline forces to false. [] when no baseline declared."""
-    bp = baseline_path(m)
-    if bp is None:
+    bl = m.get("baseline")
+    if not isinstance(bl, dict) or not isinstance(bl.get("blockedPlugins"), list):
         return []
-    doc = load_json(bp, "baseline policy", code=3)
-    ep = doc.get("enabledPlugins") or {}
-    return sorted(k for k, v in ep.items() if v is False)
+    return sorted(p for p in bl["blockedPlugins"] if isinstance(p, str))
+
+
+def render_policy(m):
+    """The exact bytes of the L1 drop-in, generated from the manifest `baseline`.
+    FAIL-CLOSED: a malformed Claude Code drop-in stops claude starting on every session of
+    the host, so the text is validated here and nothing downstream sees an unvalidated one.
+    Raises ToolError(3) when the baseline is absent or invalid."""
+    bl = m.get("baseline")
+    if bl is None:
+        raise ToolError("manifest declares no `baseline`: there is no managed policy to render", 3)
+    problems = baseline_problems(bl)
+    if problems:  # GUARD:policy-validate
+        raise ToolError("baseline invalid, refusing to render a managed policy: " + "; ".join(problems), 3)
+    doc = {
+        "extraKnownMarketplaces": bl.get("extraKnownMarketplaces") or {},
+        "enabledPlugins": {pid: False for pid in bl.get("blockedPlugins") or []},
+        "env": {POLICY_ENV: bl["revision"]},
+    }
+    text = json.dumps(doc, indent=2, ensure_ascii=False) + "\n"
+    back = json.loads(text)
+    if not isinstance(back, dict) or back.get("env", {}).get(POLICY_ENV) != bl["revision"]:
+        raise ToolError("rendered policy failed its own round-trip check; refusing", 3)
+    return text
 
 
 def load_catalog():
@@ -370,11 +434,8 @@ def validate_manifest(m, catalog=None):
         for lk in ("probe", "installCmd"):
             if lk in b and not (isinstance(b[lk], list) and b[lk] and all(isinstance(x, str) for x in b[lk])):
                 errs.append("binaries[%s].%s must be a non-empty string list" % (pid, lk))
-    try:
-        blocked = blocked_plugins(m)
-    except ToolError as exc:
-        errs.append(str(exc))
-        blocked = []
+    errs.extend(baseline_problems(m.get("baseline")))
+    blocked = blocked_plugins(m)
     teams = m.get("teams")
     if not isinstance(teams, dict) or not teams:
         errs.append("teams must be a non-empty object")
@@ -727,6 +788,8 @@ def do_list(args):
 
 
 def do_check(args):
+    if args.probe and not args.host:
+        raise ToolError("--probe is only valid with --host")
     if args.manifest:
         return check_manifest(args)
     if args.host:
@@ -796,7 +859,14 @@ def _do_sync(args):
             results.append({"team": t, "dir": d, "path": target_path(d), "actions": [], "changed": False,
                             "status": "ERROR", "error": str(exc)})
             continue
-        results.append(process_target(t, c, d, state, args.dry_run, args.force_owned))
+        r = process_target(t, c, d, state, args.dry_run, args.force_owned)
+        results.append(r)
+        if args.install_missing and r["status"] not in ("ERROR", "CONFLICT", "DIR_ABSENT"):
+            rows, problem = ensure_installed(c, d, args.dry_run)
+            r["installs"] = rows
+            if problem:
+                r["status"] = "ERROR"
+                r["error"] = problem
     if args.all:
         for t, c, d in worktree_targets(m, names):
             results.append(process_target(t, c, d, state, args.dry_run, args.force_owned))
@@ -857,6 +927,9 @@ def finish_sync(results, state, args):
                 continue
             out("[%s]" % r["team"])
             out(fmt_action_line(r))
+            for ins in r.get("installs", []):
+                out("  %-13s %s -- %s%s" % (ins["result"], ins["plugin"], r["dir"],
+                                            " (%s)" % ins["detail"] if ins["detail"] else ""))
         for n in notes:
             out("NOTE: %s" % n)
         out("%d target(s), %d need attention%s" % (len(results), len(bad), " (dry run)" if args.dry_run else ""))
@@ -896,7 +969,7 @@ def do_diff(args):
 DRIFT_STATUSES = ("MISSING", "NOT_INSTALLED", "BLOCKED_LOADED", "FILE_DRIFT", "CONFLICT",
                   "POLICY_ABSENT", "POLICY_STALE", "POLICY_SKIPPED")
 WARN_STATUSES = ("EXTRA",)
-UNVERIFIABLE_STATUSES = ("VERSION_UNVERIFIED", "LIST_UNREADABLE", "CLAUDE_UNRUNNABLE")
+UNVERIFIABLE_STATUSES = ("VERSION_UNVERIFIED", "LIST_UNREADABLE", "CLAUDE_UNRUNNABLE", "PROBE_UNVERIFIABLE")
 
 
 def parse_version(text):
@@ -923,16 +996,72 @@ def live_plugin_list(directory):
     return doc
 
 
-def host_policy(m, deep):
-    """L1 policy status. Returns (row_or_None, info dict). Read-only."""
-    bp = baseline_path(m)
-    info = {"status": "NOT_DECLARED", "installedSha": None, "canonicalSha": None}
-    if bp is None:
+def policy_paths():
+    """(base dir, drop-in dir, our file). The file name is the POLICY_FILE constant, never
+    anything read from the manifest or the environment."""
+    dropin = os.path.join(MANAGED_BASE, DROPIN_NAME)
+    return MANAGED_BASE, dropin, os.path.join(dropin, POLICY_FILE)
+
+
+PROBE_NOT_SET = "NOT_SET"
+
+
+def policy_env_keys(m):
+    """Every env key the L1 baseline sets (read back from the rendered drop-in, so a key added
+    to render_policy() later is covered). The probe must strip all of them from the child."""
+    keys = {POLICY_ENV}
+    keys.update(json.loads(render_policy(m)).get("env", {}))
+    return keys
+
+
+def probe_marker(want, strip_keys=None):
+    """Behavioural probe: did claude actually load the L1 drop-in? One `claude -p` model call
+    reading the marker env var (the one probe that does not depend on claude's version).
+    Returns ("LOADED"|"NOT_LOADED"|"UNVERIFIABLE", detail).
+
+    Isolation: the child gets NONE of the keys the baseline sets (an inherited marker would be
+    printed by printenv and read as LOADED), runs from a fresh temp cwd (no project hooks or
+    settings), loads no MCP server and no user/project/local settings, answers no permission
+    prompt (dontAsk denies anything not allowed) and has exactly one tool, Bash(printenv:*)."""
+    strip = set(strip_keys or ()) | {POLICY_ENV}
+    child_env = {k: v for k, v in os.environ.items() if k not in strip}  # GUARD:probe-env
+    prompt = ("Run exactly this and reply with only its output: printenv %s . If it prints nothing, "
+              "reply with exactly %s." % (POLICY_ENV, PROBE_NOT_SET))
+    argv = [CLAUDE_BIN, "-p", prompt,
+            "--tools", "Bash", "--allowedTools", "Bash(printenv:*)", "--permission-mode", "dontAsk",
+            "--strict-mcp-config", "--setting-sources", "", "--disable-slash-commands",
+            "--no-session-persistence"]
+    with tempfile.TemporaryDirectory(prefix="kbspl-probe-") as cwd:
+        rc, so, se = run(argv, cwd=cwd, timeout=180, env=child_env)
+    if rc != 0:  # GUARD:probe-unverifiable
+        return "UNVERIFIABLE", "claude -p exited %d: %s" % (rc, (se or so).strip()[:120])
+    out_text = so.strip()
+    if not out_text:
+        return "UNVERIFIABLE", "claude -p printed nothing"
+    if re.search(r"(?<![A-Za-z0-9._-])%s(?![A-Za-z0-9._-])" % re.escape(want), out_text):
+        return "LOADED", out_text[:80]
+    # Only a bare revision-shaped token (another revision) or the explicit NOT_SET answer proves
+    # claude ran printenv and the marker was not ours. A denied tool, a refusal or any prose does not.
+    if out_text == PROBE_NOT_SET or REVISION_RE.match(out_text):  # GUARD:probe-verdict
+        return "NOT_LOADED", out_text[:80]
+    return "UNVERIFIABLE", "claude -p answered neither the marker nor %s: %s" % (PROBE_NOT_SET, out_text[:100])
+
+
+def host_policy(m, probe):
+    """L1 policy status. Returns (row_or_None, info dict). Read-only (the probe costs one
+    model call). Statuses: OK, POLICY_ABSENT, POLICY_STALE, POLICY_SKIPPED (file current but
+    claude did not load it), PROBE_UNVERIFIABLE."""
+    bl = m.get("baseline")
+    info = {"status": "NOT_DECLARED", "installedSha": None, "canonicalSha": None, "probe": None}
+    if bl is None:
+        if probe:
+            info["status"] = "PROBE_UNVERIFIABLE"
+            return {"team": "-", "dir": MANAGED_BASE, "plugin": "policy-probe", "expected": "baseline declared",
+                    "actual": "manifest has no baseline: nothing to verify", "status": "PROBE_UNVERIFIABLE"}, info
         return None, info
-    if not os.path.exists(bp):
-        raise ToolError("manifest declares baseline %s but the file is missing" % bp, 3)
-    info["canonicalSha"] = sha256_file(bp)
-    installed = os.path.join(MANAGED_DIR, os.path.basename(bp))
+    text = render_policy(m)
+    info["canonicalSha"] = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    _base, _dropin, installed = policy_paths()
     status = "OK"
     if not os.path.exists(installed):
         status = "POLICY_ABSENT"
@@ -940,19 +1069,20 @@ def host_policy(m, deep):
         info["installedSha"] = sha256_file(installed)
         if info["installedSha"] != info["canonicalSha"]:
             status = "POLICY_STALE"
-    if deep and status == "OK":
-        # The one probe that does not depend on claude's version: the marker env var.
-        want = (load_json(bp, "baseline policy", code=3).get("env") or {}).get("AITEAMFORGE_MANAGED_POLICY")
-        rc, so, _se = run([CLAUDE_BIN, "-p", "printenv AITEAMFORGE_MANAGED_POLICY"], timeout=180)
-        if rc != 0 or not want:
-            info["status"] = "LIST_UNREADABLE"
-            return {"team": "-", "dir": MANAGED_DIR, "plugin": "policy-probe", "expected": want or "?",
-                    "actual": "claude -p failed", "status": "LIST_UNREADABLE"}, info
-        if want not in so:
-            status = "POLICY_ABSENT"
+    row = {"team": "-", "dir": MANAGED_BASE, "plugin": POLICY_FILE, "expected": "installed==canonical",
+           "actual": status, "status": status}
+    if probe and status == "OK":
+        verdict, detail = probe_marker(bl["revision"], policy_env_keys(m))
+        info["probe"] = verdict
+        if verdict == "UNVERIFIABLE":
+            status = "PROBE_UNVERIFIABLE"
+            row.update({"plugin": "policy-probe", "expected": bl["revision"], "actual": detail, "status": status})
+        elif verdict == "NOT_LOADED":
+            status = "POLICY_SKIPPED"
+            row.update({"plugin": "policy-probe", "expected": bl["revision"],
+                        "actual": "file current, marker not seen by claude", "status": status})
     info["status"] = status
-    return {"team": "-", "dir": MANAGED_DIR, "plugin": os.path.basename(bp), "expected": "installed==canonical",
-            "actual": status, "status": status}, info
+    return row, info
 
 
 def host_rows_for_dir(team, cfg, directory, blocked, state):
@@ -1037,7 +1167,8 @@ def check_host(args):
                 dirs_seen += 1
                 dirs_live += 1 if os.path.isdir(d) else 0
                 rows.extend(host_rows_for_dir(name, cfg, d, blocked, state))
-    prow, pinfo = host_policy(m, args.deep)
+    can_probe = version is not None and not (floor is not None and version < floor)
+    prow, pinfo = host_policy(m, bool(args.probe) and can_probe)
     if prow is not None:
         rows.append(prow)
     n_drift = sum(1 for r in rows if r["status"] in DRIFT_STATUSES)
@@ -1145,7 +1276,7 @@ def do_binaries(args):
     notes = []
     if args.install and missing:
         interactive = sys.stdin.isatty() and sys.stdout.isatty()
-        seam = os.environ.get("KBSPL_TEST_INSTALL_ANSWER")  # test seam: stands in for the prompt answer
+        seam = test_seam()  # test-only, sandbox-gated stand-in for the prompt answer
         seen = set()
         for r in missing:
             cmd = r.get("installCmd")
@@ -1197,6 +1328,252 @@ def do_binaries(args):
 
 
 # ---------------------------------------------------------------------------
+# managed-policy (L1): install / remove / print the fleet drop-in
+# ---------------------------------------------------------------------------
+
+def test_seam():
+    """KBSPL_TEST_INSTALL_ANSWER stands in for the typed prompt answer, for tests only. It is
+    honoured ONLY in a sandboxed run: TEST_TMP_DIR names an existing dir AND the managed dir is
+    under it (the same gate family as the default-dir refusal below). Anywhere else it is ignored, so
+    it can never skip the terminal requirement or the [y/N] prompt in production."""
+    ans = os.environ.get("KBSPL_TEST_INSTALL_ANSWER")
+    if ans is None:
+        return None
+    tmp = os.environ.get("TEST_TMP_DIR") or ""
+    root, base = os.path.realpath(tmp), os.path.realpath(MANAGED_BASE)
+    sandboxed = os.path.isdir(tmp) and (base == root or base.startswith(root.rstrip(os.sep) + os.sep))
+    if not sandboxed:  # GUARD:seam-gate
+        return None
+    return ans
+
+
+def guard_default_managed_dir():
+    """A test run must never reach the real system path (the dev machine is a source, not a
+    consumer of the managed policy). Tests set TEST_TMP_DIR and CLAUDE_MANAGED_DIR."""
+    if os.environ.get("TEST_TMP_DIR") and MANAGED_BASE == DEFAULT_MANAGED_BASE:  # GUARD:test-default-dir
+        raise ToolError("refusing: TEST_TMP_DIR is set (a test run) but CLAUDE_MANAGED_DIR is not, so this "
+                        "would touch the real %s" % DEFAULT_MANAGED_BASE)
+
+
+def shq(argv):
+    return " ".join(shlex.quote(a) for a in argv)
+
+
+def interactive():
+    return sys.stdin.isatty() and sys.stdout.isatty()  # GUARD:interactive
+
+
+def priv_run(argv):
+    """Run one command as root. ALWAYS visible (echoed first) and always plain `sudo`, which
+    prompts for the password itself: never `sudo -n`, never a cached-credential trick."""
+    full = list(argv) if os.geteuid() == 0 else ["sudo"] + list(argv)  # GUARD:sudo-interactive
+    sys.stdout.write("  + %s\n" % shq(full))
+    sys.stdout.flush()
+    return subprocess.call(full)
+
+
+def policy_confirm(question, args):
+    """(ok, why). Needs a real terminal even with --yes: sudo asks for a password on it, so
+    a run with no terminal is a PENDING install, not a silent one."""
+    seam = test_seam()  # test-only, sandbox-gated stand-in for the typed answer
+    if seam is None and not interactive():  # GUARD:policy-tty
+        return False, "non-interactive (no terminal)"
+    if args.yes:
+        return True, ""
+    if seam is not None:
+        ans = seam
+    else:
+        sys.stdout.write("%s [y/N] " % question)
+        sys.stdout.flush()
+        ans = sys.stdin.readline()
+    if ans.strip().lower() not in ("y", "yes"):  # GUARD:policy-confirm
+        return False, "declined"
+    return True, ""
+
+
+def backup_policy_file(src):
+    """Copy the installed file under ~/aiteamforge-backups/claude-managed-YYYYMMDD/ before it
+    is replaced or removed. Raises (aborting the change) when the backup cannot be made."""
+    d = os.path.join(os.path.expanduser("~"), "aiteamforge-backups", "claude-managed-" + time.strftime("%Y%m%d"))
+    os.makedirs(d, exist_ok=True)
+    dst = os.path.join(d, "%s.%s" % (POLICY_FILE, time.strftime("%H%M%S")))
+    shutil.copy2(src, dst)
+    return dst
+
+
+def read_bytes(path):
+    try:
+        with open(path, "rb") as fh:
+            return fh.read()
+    except OSError:
+        return None
+
+
+def show_policy_diff(cur, text, dest):
+    before = cur.decode("utf-8", "replace").splitlines() if cur is not None else []
+    after = text.splitlines()
+    for ln in difflib.unified_diff(before, after, "installed:" + dest if cur is not None else "(absent)",
+                                   "canonical:" + dest, lineterm=""):
+        out(ln)
+
+
+def policy_install(text, args):
+    _base, dropin, dest = policy_paths()
+    want = text.encode("utf-8")
+    cur = read_bytes(dest)
+    if cur == want:  # GUARD:policy-uptodate
+        out("managed policy: up to date (%s), nothing to do" % dest)
+        return 0
+    show_policy_diff(cur, text, dest)
+    tmpdest = os.path.join(dropin, "." + POLICY_FILE + ".kbspl-new")  # no .json suffix: never read as a drop-in
+    if args.dry_run:
+        out("DRY RUN: nothing written. With sudo this would run:")
+        for argv in ([["mkdir", "-p", dropin], ["cp", "<staged policy file>", tmpdest],
+                      ["chown", "root:wheel", tmpdest], ["chmod", "0644", tmpdest],
+                      ["mv", "-f", tmpdest, dest]]):
+            out("  + sudo " + shq(argv))
+        return 0
+    ok, why = policy_confirm("Install the Claude Code managed policy to %s (requires sudo)?" % dest, args)
+    if not ok:
+        out("managed policy: PENDING (%s). Not installed. Run `%s managed-policy --install` from a terminal." % (why, PROG))
+        return 4
+    fd, stage = tempfile.mkstemp(prefix="kbspl-policy-")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(want)
+        out("About to run these as root (sudo will ask for your password):")
+        for argv in ([["mkdir", "-p", dropin], ["cp", stage, tmpdest], ["chown", "root:wheel", tmpdest],
+                      ["chmod", "0644", tmpdest]]):
+            if priv_run(argv) != 0:
+                priv_run(["rm", "-f", tmpdest])
+                err("%s failed; managed policy NOT installed (the existing file is untouched)" % argv[0])
+                return 1
+        backup = None
+        if cur is not None:
+            try:
+                backup = backup_policy_file(dest)
+            except OSError as exc:
+                priv_run(["rm", "-f", tmpdest])
+                err("could not back up the installed policy (%s); managed policy NOT replaced" % exc)
+                return 1
+        if priv_run(["mv", "-f", tmpdest, dest]) != 0:  # GUARD:atomic-swap
+            priv_run(["rm", "-f", tmpdest])
+            err("could not move the policy into place; the existing file is untouched")
+            return 1
+        got = read_bytes(dest)
+        if got != want:  # GUARD:policy-readback
+            err("read-back of %s does not match the canonical policy; rolling back" % dest)
+            if backup is not None:
+                rolled = priv_run(["cp", backup, tmpdest]) == 0 and priv_run(["chown", "root:wheel", tmpdest]) == 0 \
+                    and priv_run(["chmod", "0644", tmpdest]) == 0 and priv_run(["mv", "-f", tmpdest, dest]) == 0
+            else:
+                rolled = priv_run(["rm", "-f", dest]) == 0
+            err("rollback %s" % ("complete" if rolled else "FAILED: inspect %s by hand" % dest))
+            return 1
+        out("managed policy: installed %s%s" % (dest, " (previous copy backed up to %s)" % backup if backup else ""))
+        out("verify: %s check --host --probe" % PROG)
+        return 0
+    finally:
+        try:
+            os.unlink(stage)
+        except OSError:
+            pass
+
+
+def policy_remove(args):
+    base, dropin, dest = policy_paths()
+    if not os.path.lexists(dest):
+        out("managed policy: %s is not installed, nothing to remove" % dest)
+        return 0
+    rm_argv = ["rm", dest]  # GUARD:remove-only-ours
+    if args.dry_run:
+        out("DRY RUN: nothing removed. With sudo this would run:")
+        out("  + sudo " + shq(rm_argv))
+        out("  + sudo rmdir %s   (only if empty)" % shlex.quote(dropin))
+        return 0
+    ok, why = policy_confirm("Remove the Claude Code managed policy %s (requires sudo)?" % dest, args)
+    if not ok:
+        out("managed policy: NOT removed (%s)" % why)
+        return 4
+    try:
+        backup = backup_policy_file(dest)
+    except OSError as exc:
+        err("could not back up %s (%s); NOT removed" % (dest, exc))
+        return 1
+    out("About to run this as root (sudo will ask for your password):")
+    if priv_run(rm_argv) != 0:
+        err("could not remove %s" % dest)
+        return 1
+    # Leave the directories alone unless they are now empty: other drop-ins and
+    # managed-settings.json belong to someone else.
+    if os.path.isdir(dropin) and not os.listdir(dropin):  # GUARD:rmdir-empty
+        priv_run(["rmdir", dropin])
+        if os.path.basename(base) == "ClaudeCode" and os.path.isdir(base) and not os.listdir(base):
+            priv_run(["rmdir", base])
+    out("managed policy: removed %s (backup: %s)" % (dest, backup))
+    return 0
+
+
+def do_managed_policy(args):
+    chosen = [n for n, v in (("--print", args.print_policy), ("--install", args.install), ("--remove", args.remove)) if v]
+    if len(chosen) != 1:
+        raise ToolError("managed-policy needs exactly one of --print, --install, --remove")
+    if args.remove:
+        guard_default_managed_dir()
+        return policy_remove(args)
+    text = render_policy(load_manifest())
+    if args.print_policy:
+        sys.stdout.write(text)
+        return 0
+    guard_default_managed_dir()
+    return policy_install(text, args)
+
+
+# ---------------------------------------------------------------------------
+# sync --install-missing (project-scoped installs only)
+# ---------------------------------------------------------------------------
+
+def install_argv(pid):
+    # --scope project, always: the default (user) writes user-scope enabledPlugins, which
+    # XACA-1227 is removing, and `local` would write settings.local.json, which is never ours.
+    return [CLAUDE_BIN, "plugin", "install", pid, "--scope", "project"]  # GUARD:install-scope
+
+
+def ensure_installed(cfg, directory, dry_run):
+    """Install, from `directory`, every enabled plugin that `plugin list --json` does not show.
+    Returns (rows, problem). A plugin that is installed but disabled needs nothing: the project
+    `true` enables it (XACA-1599-008)."""
+    rows = []
+    if not cfg.get("deliver", True) or not os.path.isdir(directory):
+        return rows, None
+    want = sorted(pid for pid, v in (cfg.get("enabledPlugins") or {}).items() if v is True)
+    if not want:
+        return rows, None
+    plist = live_plugin_list(directory)
+    if plist is None:
+        return rows, "plugin list unreadable from %s; installed nothing" % directory
+    have = set(e.get("id") for e in plist)
+    problem = None
+    for pid in want:
+        if pid in have:
+            continue
+        if not PLUGIN_ID_RE.match(pid) or pid.startswith("-"):
+            rows.append({"plugin": pid, "result": "FAILED", "detail": "not a valid plugin id"})
+            problem = "refused to install an invalid plugin id"
+            continue
+        if dry_run:
+            rows.append({"plugin": pid, "result": "WOULD_INSTALL", "detail": " ".join(install_argv(pid))})
+            continue
+        rc, so, se = run(install_argv(pid), cwd=directory, timeout=300)
+        if rc == 0:
+            rows.append({"plugin": pid, "result": "INSTALLED", "detail": ""})
+        else:
+            rows.append({"plugin": pid, "result": "FAILED", "detail": ((se or so).strip()[:160] or "rc=%d" % rc)})
+            problem = "claude plugin install failed for %s" % pid
+    return rows, problem
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -1215,7 +1592,9 @@ def build_parser():
     p.add_argument("--manifest", action="store_true", help="validate the manifest itself")
     p.add_argument("--require-catalog", action="store_true", help="--manifest: exit 3 if no marketplace catalog")
     p.add_argument("--host", action="store_true", help="live check of this host via `claude plugin list`")
-    p.add_argument("--deep", action="store_true", help="--host: also run one `claude -p` policy probe")
+    p.add_argument("--probe", "--deep", dest="probe", action="store_true",
+                   help="--host: behavioural probe, one `claude -p` model call reading the policy marker "
+                        "(exit 3 when it cannot be verified)")
     p.set_defaults(fn=do_check)
 
     for name, fn, helptxt in (("sync", do_sync, "write session dirs (and, with --all, linked worktrees)"),
@@ -1226,7 +1605,11 @@ def build_parser():
         p.add_argument("--dry-run", action="store_true")
         p.add_argument("--force-owned", action="store_true", help="overwrite a key a human changed")
         p.add_argument("--json", action="store_true")
-        p.set_defaults(fn=fn)
+        if name == "sync":
+            p.add_argument("--install-missing", action="store_true",
+                           help="also run `claude plugin install <id> --scope project` (never user/local) from "
+                                "each session dir for enabled plugins that `plugin list` does not show")
+        p.set_defaults(fn=fn, install_missing=False)
 
     p = sub.add_parser("diff", help="unified diff of what sync would change")
     p.add_argument("team")
@@ -1237,6 +1620,14 @@ def build_parser():
     p.add_argument("--install", action="store_true")
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=do_binaries)
+
+    p = sub.add_parser("managed-policy", help="L1 fleet policy: print, install or remove the managed drop-in")
+    p.add_argument("--print", dest="print_policy", action="store_true", help="print the generated policy and exit")
+    p.add_argument("--install", action="store_true", help="install %s (sudo, explicit confirm, terminal only)" % POLICY_FILE)
+    p.add_argument("--remove", action="store_true", help="remove ONLY %s (and the dirs, if left empty)" % POLICY_FILE)
+    p.add_argument("--yes", action="store_true", help="skip the typed [y/N]; a terminal is still required")
+    p.add_argument("--dry-run", action="store_true", help="show the diff and the exact sudo commands, change nothing")
+    p.set_defaults(fn=do_managed_policy)
 
     p = sub.add_parser("help")
     p.set_defaults(fn=lambda a: (build_parser().print_help(), 0)[1])
@@ -1256,6 +1647,11 @@ def main(argv):
         return exc.code
     except BrokenPipeError:
         return 0
+    except Exception:  # noqa: BLE001 -- a distinct code, so callers never read a crash as "binary missing"/drift
+        import traceback
+        traceback.print_exc()
+        err("unexpected exception (a bug in %s, not a finding); exiting %d" % (PROG, EXIT_CRASH))
+        return EXIT_CRASH
 
 
 if __name__ == "__main__":
