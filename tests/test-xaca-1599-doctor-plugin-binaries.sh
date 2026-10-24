@@ -23,6 +23,10 @@
 # shellcheck disable=SC2016  # the driver is generated source text: single quotes are intentional
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TAP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# The negative control reads the doctor as it was BEFORE XACA-1599 tap-delivery (80e2dced), a
+# pinned commit rather than HEAD: once the fix is committed, HEAD carries it and the control
+# would skip forever.
+PRE_CHANGE_REV="${PRE_CHANGE_REV:-da33f60d}"
 BIN_DOCTOR="$TAP_ROOT/bin/aiteamforge-doctor.sh"
 LIBEXEC_DOCTOR="$TAP_ROOT/libexec/commands/aiteamforge-doctor.sh"
 
@@ -108,13 +112,32 @@ check_flavor() {
   run_doctor "$flavor" "$file" true
   eq "$flavor rc1 --verbose: report STILL shown once (XACA-1599-017)" "1" "$(count_lines REPORT-MARKER)"
 
-  write_stub 3 "kb-sync-plugins: ERROR: NO_HOSTED_TEAMS: check --host -- nothing was verified REPORT-MARKER"
+  write_stub 3 "kb-sync-plugins: ERROR: NO_HOSTED_TEAMS: binaries -- no manifest team resolves to an existing directory on this host; nothing was verified REPORT-MARKER
+claude 2.1.310 (floor 2.1.267): OK
+binaries: 0 needed, 0 missing"
   run_doctor "$flavor" "$file" false
   eq "$flavor rc3 NO_HOSTED_TEAMS: a warning, not a failure" "1 0 0 1" "$COUNTS"
   eq "$flavor rc3 NO_HOSTED_TEAMS: worded 'nothing to verify'" "1" "$(count_lines 'nothing to verify')"
   eq "$flavor rc3 NO_HOSTED_TEAMS: not worded as unverifiable-failure" "0" "$(count_lines 'not a pass')"
   run_doctor "$flavor" "$file" true
   eq "$flavor rc3 NO_HOSTED_TEAMS --verbose: report once" "1" "$(count_lines REPORT-MARKER)"
+
+  # Exit-3 reports that ALSO carry the NO_HOSTED_TEAMS text but are real failures
+  # (output shapes captured from the real tool): a malformed registry, and a claude below
+  # the floor or not runnable. None of them may be downgraded to a warning.
+  write_stub 3 "kb-sync-plugins: ERROR: team-paths registry /x/tp.json: expected an object with a teams object (NO_HOSTED_TEAMS: nothing can be verified) REPORT-MARKER"
+  run_doctor "$flavor" "$file" false
+  eq "$flavor rc3 malformed registry: a failure, not a warning" "1 0 1 0" "$COUNTS"
+  write_stub 3 "kb-sync-plugins: ERROR: NO_HOSTED_TEAMS: binaries -- no manifest team resolves to an existing directory on this host; nothing was verified REPORT-MARKER
+claude 2.1.100 (floor 2.1.267): BELOW_FLOOR
+binaries: 0 needed, 0 missing"
+  run_doctor "$flavor" "$file" false
+  eq "$flavor rc3 NO_HOSTED_TEAMS + claude BELOW_FLOOR: a failure" "1 0 1 0" "$COUNTS"
+  write_stub 3 "kb-sync-plugins: ERROR: NO_HOSTED_TEAMS: binaries -- no manifest team resolves to an existing directory on this host; nothing was verified REPORT-MARKER
+claude ? (floor 2.1.267): UNRUNNABLE
+binaries: 0 needed, 0 missing"
+  run_doctor "$flavor" "$file" false
+  eq "$flavor rc3 NO_HOSTED_TEAMS + claude UNRUNNABLE: a failure" "1 0 1 0" "$COUNTS"
 
   write_stub 3 "kb-sync-plugins: ERROR: manifest invalid REPORT-MARKER"
   run_doctor "$flavor" "$file" false
@@ -154,8 +177,8 @@ negative_control() {
   local flavor="$1" rel="$2" old
   echo "=== negative control ($flavor, pre-change function) ==="
   old="$WORK/old-$flavor.sh"
-  if ! git -C "$TAP_ROOT" show "HEAD:$rel" >"$old" 2>/dev/null || [ ! -s "$old" ]; then
-    echo "  SKIP: no HEAD copy of $rel (not a git checkout); the mutation half is not run"
+  if ! git -C "$TAP_ROOT" show "${PRE_CHANGE_REV}:$rel" >"$old" 2>/dev/null || [ ! -s "$old" ]; then
+    echo "  SKIP: no $PRE_CHANGE_REV copy of $rel (not in this clone); the mutation half is not run"
     return
   fi
   if ! grep -q 'XACA-1599-017' "$old"; then

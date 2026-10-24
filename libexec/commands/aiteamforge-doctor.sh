@@ -1265,7 +1265,10 @@ check_plugin_binaries() {
     1) check_result fail "Required plugin binary missing (fix: kb-sync-plugins binaries --install)" ;;
     3)
       case "$report" in
-        *NO_HOSTED_TEAMS*)
+        # Warn only for the clean case: the tool's own "binaries" no-hosted line AND a claude
+        # that meets the floor. A malformed registry ("nothing can be verified") or a claude
+        # that is BELOW_FLOOR/UNRUNNABLE also prints NO_HOSTED_TEAMS and must stay a failure.
+        *"NO_HOSTED_TEAMS: binaries --"*"(floor "*"): OK"*)
           # Nothing resolved on this machine, so nothing was checked: neither a pass nor a failure.
           check_result warn "Plugin binaries: nothing to verify -- no team on this machine resolves to an existing session directory" ;;
         *)
