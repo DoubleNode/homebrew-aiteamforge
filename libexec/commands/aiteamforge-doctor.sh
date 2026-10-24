@@ -89,6 +89,7 @@ Components:
   helpers-drift   Installed kanban-helpers.sh function inventory vs shipped template (XACA-1095)
   vault-drift     vault-fetch.js / vault-keygen.js vs shipped copy byte drift (XACA-1322)
   vault-readiness node + libsodium-wrappers + vault-fetch smoke for routed teams (XACA-1225-021)
+  plugin-binaries LSP binaries for enabled Claude Code plugins + claude version floor; opt-in, not in "all" yet (XACA-1599-007)
   config          Configuration files and validity
   board           Kanban board resolution + template/stub-collision detection (XACA-0655)
   connect         Cockpit connect scripts vs installed team instances (XACA-0845)
@@ -1226,6 +1227,42 @@ check_vault_readiness() {
   done <<VREOF
 $report
 VREOF
+}
+
+# XACA-1599-007: Claude Code plugin LSP binaries. FAIL-CLOSED: renders
+# `kb-sync-plugins binaries`, which requires every enabled LSP plugin's binary to be
+# present (a declared probe is authoritative: /usr/bin/sourcekit-lsp alone proves
+# nothing), the plugin->binary map to cover every enabled LSP plugin (and match the
+# plugin's own lspServers command), and claude to meet minClaudeVersion. A missing
+# tool, a missing manifest or any unexpected exit status is a FAIL, never a pass.
+# Mirrored in bin/aiteamforge-doctor.sh (XACA-0807).
+check_plugin_binaries() {
+  print_section "Checking Claude Code Plugin Binaries"
+
+  local working_dir tool manifest report rc
+  working_dir=$(get_working_dir)
+  tool="${working_dir}/scripts/kb-sync-plugins"
+  manifest="${working_dir}/.claude/plugins-manifest.json"
+
+  if [ ! -x "$tool" ]; then
+    check_result fail "kb-sync-plugins not installed -- cannot verify plugin binaries" "Expected: $tool"
+    return
+  fi
+  if [ ! -f "$manifest" ]; then
+    check_result fail "plugins-manifest.json missing -- cannot verify plugin binaries" "Expected: $manifest"
+    return
+  fi
+
+  report="$(KBSPL_MANIFEST="$manifest" "$tool" binaries 2>&1)" && rc=0 || rc=$?
+  case "$rc" in
+    0) check_result pass "Plugin binaries present; claude meets the version floor" "$report" ;;
+    1) check_result fail "Required plugin binary missing (fix: kb-sync-plugins binaries --install)" "$report" ;;
+    3) check_result fail "Plugin binaries unverifiable (manifest, binary map or claude problem) -- not a pass" "$report" ;;
+    *) check_result fail "kb-sync-plugins binaries failed unexpectedly (rc=$rc)" "$report" ;;
+  esac
+  if [ "$rc" -ne 0 ]; then
+    printf '%s\n' "$report" | sed 's/^/    /'
+  fi
 }
 
 # Check: Configuration
@@ -2581,6 +2618,9 @@ case "$CHECK_COMPONENT" in
   vault-readiness)
     check_vault_readiness
     ;;
+  plugin-binaries)
+    check_plugin_binaries
+    ;;
   config)
     check_config
     ;;
@@ -2626,6 +2666,7 @@ case "$CHECK_COMPONENT" in
     check_kanban_helpers_inventory
     check_vault_keygen_drift
     check_vault_readiness
+    # plugin-binaries is opt-in until XACA-1599 PR-B ships kb-sync-plugins + the manifest to tap hosts
     check_config
     check_board_resolution
     check_connect_scripts

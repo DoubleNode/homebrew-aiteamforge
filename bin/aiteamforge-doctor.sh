@@ -116,6 +116,7 @@ Components:
   install         Validate post-install structure (teams, scripts, LCARS, venv)
   mandatory-teams Missing/unprovisioned mandatory team fleet install (XACA-1070)
   vault-readiness node + libsodium-wrappers + vault-fetch smoke for routed teams (XACA-1225-021)
+  plugin-binaries LSP binaries for enabled Claude Code plugins + claude version floor; opt-in, not in "all" yet (XACA-1599-007)
   all             Run all checks (default)
 
 Examples:
@@ -1175,6 +1176,46 @@ VREOF
   echo ""
 }
 
+# XACA-1599-007: Claude Code plugin LSP binaries. FAIL-CLOSED: renders
+# `kb-sync-plugins binaries`, which requires every enabled LSP plugin's binary to be
+# present (a declared probe is authoritative: /usr/bin/sourcekit-lsp alone proves
+# nothing), the plugin->binary map to cover every enabled LSP plugin (and match the
+# plugin's own lspServers command), and claude to meet minClaudeVersion. A missing
+# tool, a missing manifest or any unexpected exit status is a FAIL, never a pass.
+# Mirrored in libexec/commands/aiteamforge-doctor.sh (XACA-0807).
+check_plugin_binaries() {
+  echo -e "${CYAN}Checking Claude Code plugin binaries...${NC}"
+  echo ""
+
+  local tool manifest report rc
+  tool="${AITEAMFORGE_DIR}/scripts/kb-sync-plugins"
+  manifest="${AITEAMFORGE_DIR}/.claude/plugins-manifest.json"
+
+  if [ ! -x "$tool" ]; then
+    check_result fail "kb-sync-plugins not installed -- cannot verify plugin binaries" "Expected: $tool"
+    echo ""
+    return
+  fi
+  if [ ! -f "$manifest" ]; then
+    check_result fail "plugins-manifest.json missing -- cannot verify plugin binaries" "Expected: $manifest"
+    echo ""
+    return
+  fi
+
+  report="$(KBSPL_MANIFEST="$manifest" "$tool" binaries 2>&1)" && rc=0 || rc=$?
+  case "$rc" in
+    0) check_result pass "Plugin binaries present; claude meets the version floor" "$report" ;;
+    1) check_result fail "Required plugin binary missing (fix: kb-sync-plugins binaries --install)" "$report" ;;
+    3) check_result fail "Plugin binaries unverifiable (manifest, binary map or claude problem) -- not a pass" "$report" ;;
+    *) check_result fail "kb-sync-plugins binaries failed unexpectedly (rc=$rc)" "$report" ;;
+  esac
+  if [ "$rc" -ne 0 ]; then
+    printf '%s\n' "$report" | sed 's/^/    /'
+  fi
+
+  echo ""
+}
+
 # Check post-install structure via validate-install library
 check_install() {
   echo -e "${CYAN}Checking post-install structure...${NC}"
@@ -1242,6 +1283,9 @@ case "$CHECK_COMPONENT" in
   vault-readiness)
     check_vault_readiness
     ;;
+  plugin-binaries)
+    check_plugin_binaries
+    ;;
   all)
     check_dependencies
     check_framework
@@ -1252,6 +1296,7 @@ case "$CHECK_COMPONENT" in
     check_install
     check_mandatory_teams
     check_vault_readiness
+    # plugin-binaries is opt-in until XACA-1599 PR-B ships kb-sync-plugins + the manifest to tap hosts
     ;;
   *)
     echo -e "${RED}ERROR: Unknown component: ${CHECK_COMPONENT}${NC}" >&2
