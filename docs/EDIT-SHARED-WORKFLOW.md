@@ -136,7 +136,7 @@ Using `kb-edit-shared` avoids this friction.
 
 ## Worktree note
 
-`kb-edit-shared` runs `./sync-tap.sh` in-place, which requires the `homebrew-tap/` submodule to be initialized. In feature worktrees the submodule is intentionally uninitialized (XACA-0455) — `kb-edit-shared` will abort with a clear error from sync-tap. Run the helper from the **main repo** (`~/dev-team`) on a feature branch instead, or use the worktree-aware sync flags directly: `./sync-tap.sh --source-dir <worktree> --reference-dir ~/dev-team --check`.
+`kb-edit-shared` runs `./sync-tap.sh` in-place, which requires the `homebrew-tap/` submodule to be initialized. In feature worktrees the submodule is intentionally uninitialized (XACA-0455) — `kb-edit-shared` will abort with a clear error from sync-tap. Run the helper from the **main repo** (`~/dev-team`) on a feature branch instead, or, for a read-only comparison, run `./sync-tap.sh --check` from the worktree (XACA-1374: it defaults to the invoking checkout when that worktree's tap is initialized, and refuses otherwise; `--source-dir <worktree> --reference-dir ~/dev-team` still overrides). Plain `./sync-tap.sh` now also requires `--allow-local-write "<reason>"`; the armed publisher is the routine writer.
 
 ---
 

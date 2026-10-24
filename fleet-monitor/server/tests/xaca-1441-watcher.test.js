@@ -17,9 +17,12 @@ const { createWatcher, BUSY_INTERVAL_MS, IDLE_INTERVAL_MS } = require('../lib/ci
 const T0 = Date.UTC(2026, 9, 6, 12, 0, 0);
 const REPO = 'acme/widgets';
 
-/** Fake github: world = { queued:[run], in_progress:[run], jobs:{runId:[job]} }; a 304 when the body is unchanged. */
+/**
+ * Fake github: world = { queued/in_progress/pending/requested:[run], recent:[run], jobs:{runId:[job]} }; a 304
+ * when the body is unchanged. `recent` is the unfiltered newest-runs page (XACA-1445-037 backstop).
+ */
 function makeWorld() {
-    const world = { queued: [], in_progress: [], jobs: {}, calls: [], rate: { mode: 'normal', resumeAt: null }, seen: new Map(), throwNext: null, failJobs: {} };
+    const world = { queued: [], in_progress: [], pending: [], requested: [], recent: [], jobs: {}, calls: [], rate: { mode: 'normal', resumeAt: null }, seen: new Map(), throwNext: null, failJobs: {} };
     world.github = {
         getRateState: () => ({ ...world.rate }),
         async conditionalGet({ owner, repo, path, purpose }) {
@@ -30,6 +33,7 @@ function makeWorld() {
             // Per-run job-fetch failure (e.g. a deleted run answers 404/410), persistent until cleared.
             if ((m = /\/actions\/runs\/(\d+)\/jobs/.exec(path)) && world.failJobs[m[1]]) throw world.failJobs[m[1]];
             if ((m = /\/actions\/runs\?status=(\w+)/.exec(path))) data = { workflow_runs: world[m[1]] };
+            else if (/\/actions\/runs\?per_page=\d+$/.test(path)) data = { workflow_runs: world.recent };
             else if ((m = /\/actions\/runs\/(\d+)\/jobs/.exec(path))) data = { jobs: world.jobs[m[1]] || [] };
             else throw new Error(`unexpected path ${path}`);
             const body = JSON.stringify(data);
@@ -130,12 +134,16 @@ describe('cadence', () => {
 });
 
 describe('call budget', () => {
-    test('lists queued + in_progress per repo with the watcher purpose', async () => {
+    // XACA-1445-037: + pending + requested lists and one unfiltered page of the 50 newest runs (list-lag backstop).
+    test('lists queued + in_progress + pending + requested, then the recent-runs page, per repo with the watcher purpose', async () => {
         const { world, w } = setup();
         await w.runCycle();
         assert.deepEqual(world.calls.map((c) => c.path), [
             `/repos/${REPO}/actions/runs?status=queued&per_page=100`,
             `/repos/${REPO}/actions/runs?status=in_progress&per_page=100`,
+            `/repos/${REPO}/actions/runs?status=pending&per_page=100`,
+            `/repos/${REPO}/actions/runs?status=requested&per_page=100`,
+            `/repos/${REPO}/actions/runs?per_page=50`,
         ]);
         assert.ok(world.calls.every((c) => c.purpose === 'watcher'));
     });
@@ -166,24 +174,24 @@ describe('call budget', () => {
         assert.equal(jobCalls(world).length, 3);
     });
 
-    test('a steady cycle spends the two list calls plus one conditional jobs call per queued run', async () => {
+    test('a steady cycle spends the five list calls plus one conditional jobs call per queued run', async () => {
         const { world, w } = setup();
         world.queued = [run(1)]; world.jobs[1] = [job(11)];
         await w.runCycle();
         const before = world.calls.length;
         await w.runCycle();
-        assert.equal(world.calls.length - before, 3);
-        assert.equal(w.snapshot().lastCycle.calls, 3);
+        assert.equal(world.calls.length - before, 6);
+        assert.equal(w.snapshot().lastCycle.calls, 6);
     });
 
-    test('a steady in_progress-only cycle spends exactly the two list calls', async () => {
+    test('a steady in_progress-only cycle spends exactly the five list calls', async () => {
         const { world, w } = setup();
         world.in_progress = [run(1)]; world.jobs[1] = [job(11, { status: 'in_progress', runner_name: 'r' })];
         await w.runCycle();
         const before = world.calls.length;
         await w.runCycle();
-        assert.equal(world.calls.length - before, 2);
-        assert.equal(w.snapshot().lastCycle.calls, 2);
+        assert.equal(world.calls.length - before, 5);
+        assert.equal(w.snapshot().lastCycle.calls, 5);
     });
 
     test('a client error on one repo is logged, not thrown, and the cycle still reschedules', async () => {
@@ -522,7 +530,7 @@ describe('vanished jobs end in a terminal event (PR #1083)', () => {
  * world.jobs[runId] = [...]. A page whose body equals the previous body for the same path answers 304.
  */
 function makePagedWorld() {
-    const world = { queued: [], in_progress: [], jobs: {}, calls: [], seen: new Map(), rate: { mode: 'normal', resumeAt: null } };
+    const world = { queued: [], in_progress: [], pending: [], requested: [], recent: [], jobs: {}, calls: [], seen: new Map(), rate: { mode: 'normal', resumeAt: null } };
     world.github = {
         getRateState: () => ({ ...world.rate }),
         async conditionalGet({ owner, repo, path }) {
@@ -531,6 +539,7 @@ function makePagedWorld() {
             const per = Number((/per_page=(\d+)/.exec(path) || [null, 30])[1]);
             let all; let key; let m;
             if ((m = /\/actions\/runs\?status=(\w+)/.exec(path))) { all = world[m[1]]; key = 'workflow_runs'; }
+            else if (/\/actions\/runs\?per_page=\d+$/.test(path)) { all = world.recent; key = 'workflow_runs'; }
             else if ((m = /\/actions\/runs\/(\d+)\/jobs/.exec(path))) { all = world.jobs[m[1]] || []; key = 'jobs'; }
             else throw new Error(`unexpected path ${path}`);
             const data = { [key]: all.slice((page - 1) * per, page * per) };

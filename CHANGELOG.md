@@ -6,6 +6,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1374 sync-tap.sh never silently targets the main checkout from a worktree; local write mode refused
+- XACA-1445 watcher sees runs held pending by concurrency hand-off
+- Tap files updated in this publish: `docs/EDIT-SHARED-WORKFLOW.md`,`fleet-monitor/server/lib/ci-dispatch-watcher.js` `fleet-monitor/server/tests/xaca-1441-watcher.test.js`,`fleet-monitor/server/tests/xaca-1445-watcher-reread.test.js`. Run `brew upgrade aiteamforge` to receive them.
 
 ## [0.21.6] - 2026-10-23
 - XACA-1132 kb-tap-release preflight #6 never prescribes a stale 'git checkout main'

@@ -31,9 +31,12 @@ const T0 = Date.UTC(2026, 9, 19, 23, 0, 0);
 const REPO = 'acme/widgets';
 const U = '2026-10-19T23:00:00Z'; // the one updated_at every run keeps
 
-/** Same fake as xaca-1441-watcher.test.js: a 304 when a path's body is unchanged; failJobs[runId] throws. */
+/**
+ * Same fake as xaca-1441-watcher.test.js: a 304 when a path's body is unchanged; failJobs[runId] throws.
+ * world.<status> answers `?status=<status>`; world.recent answers the unfiltered `?per_page=N` page.
+ */
 function makeWorld() {
-    const world = { queued: [], in_progress: [], jobs: {}, calls: [], rate: { mode: 'normal', resumeAt: null }, seen: new Map(), failJobs: {} };
+    const world = { queued: [], in_progress: [], pending: [], requested: [], recent: [], jobs: {}, calls: [], rate: { mode: 'normal', resumeAt: null }, seen: new Map(), failJobs: {} };
     world.github = {
         getRateState: () => ({ ...world.rate }),
         async conditionalGet({ owner, repo, path, purpose }) {
@@ -42,6 +45,7 @@ function makeWorld() {
             let m;
             if ((m = /\/actions\/runs\/(\d+)\/jobs/.exec(path)) && world.failJobs[m[1]]) throw world.failJobs[m[1]];
             if ((m = /\/actions\/runs\?status=(\w+)/.exec(path))) data = { workflow_runs: world[m[1]] };
+            else if (/\/actions\/runs\?per_page=\d+$/.test(path)) data = { workflow_runs: world.recent }; // XACA-1445-037 backstop
             else if ((m = /\/actions\/runs\/(\d+)\/jobs/.exec(path))) data = { jobs: world.jobs[m[1]] || [] };
             else throw new Error(`unexpected path ${path}`);
             const body = JSON.stringify(data);
@@ -304,5 +308,143 @@ describe('XACA-1445-034: a failed repo poll does not lose a run before its grace
         world.jobs[9] = [job(90)];
         await cycle();
         assert.deepEqual(changesFor(events, 90), ['queued'], 'the gate must be seen via the grace re-read');
+    });
+});
+
+describe('XACA-1445-037: pending/requested runs and the recent-runs backstop', () => {
+    const changes = (events, jobId, ch) => events.filter((e) => e.rec.jobId === jobId && e.change === ch).length;
+
+    test('1. a run only in the status=pending list: its queued job is emitted in cycle 1', async () => {
+        const { world, events, w } = setup();
+        world.pending = [run(31, { status: 'pending' })];
+        world.jobs[31] = [job(310)];
+        await w.runCycle();
+        assert.deepEqual(changesFor(events, 310), ['queued']);
+        assert.equal(world.calls.filter((c) => /runs\?status=pending&per_page=100$/.test(c.path)).length, 1);
+    });
+
+    test('2. a pending run read empty in cycle 1 is re-read with updated_at fixed; its job is emitted in cycle 2', async () => {
+        const { world, events, w, cycle } = setup();
+        world.pending = [run(32, { status: 'pending' })];
+        world.jobs[32] = [];
+        await w.runCycle();
+        assert.equal(events.length, 0);
+        world.jobs[32] = [job(320)];
+        await cycle();
+        assert.deepEqual(changesFor(events, 320), ['queued']);
+        assert.equal(jobCalls(world, 32), 2, 're-read every cycle, not gated on updated_at');
+    });
+
+    test('3. the same for status=requested (cycle 1 and a cycle-2 re-read)', async () => {
+        const { world, events, w, cycle } = setup();
+        world.requested = [run(33, { status: 'requested' }), run(34, { status: 'requested' })];
+        world.jobs[33] = [job(330)];
+        world.jobs[34] = [];
+        await w.runCycle();
+        assert.deepEqual(changesFor(events, 330), ['queued']);
+        world.jobs[34] = [job(340)];
+        await cycle();
+        assert.deepEqual(changesFor(events, 340), ['queued']);
+        assert.equal(changes(events, 330, 'queued'), 1, 'the re-read does not repeat the cycle-1 event');
+    });
+
+    test('4. list lag: a queued run only on the unfiltered recent page is emitted; no duplicate when the list catches up', async () => {
+        const { world, events, w, cycle } = setup();
+        world.recent = [run(35, { status: 'queued' }), run(36, { status: 'completed' })];
+        world.jobs[35] = [job(350)];
+        world.jobs[36] = [done(360)];
+        await w.runCycle();
+        assert.deepEqual(changesFor(events, 350), ['queued']);
+        assert.equal(w.snapshot().lastCycle.backstopAdded, 1);
+        assert.equal(jobCalls(world, 36), 0, 'a completed run on the recent page costs no jobs fetch');
+        world.queued = [run(35, { status: 'queued' })];   // the list caught up
+        await cycle();
+        assert.equal(w.snapshot().lastCycle.backstopAdded, 0, 'already listed => not counted as a backstop add');
+        assert.equal(changes(events, 350, 'queued'), 1);
+        assert.equal(w.snapshot().runsInGrace, 0, 'moving between sources is not leaving the lists');
+    });
+
+    test('4b. a backstop-only run read empty in cycle 1 is re-read every cycle (updated_at fixed); its job is emitted', async () => {
+        const { world, events, w, cycle } = setup();
+        world.recent = [run(39, { status: 'queued' })];
+        world.jobs[39] = [];
+        await w.runCycle();
+        world.jobs[39] = [job(390)];
+        await cycle();
+        assert.deepEqual(changesFor(events, 390), ['queued']);
+        assert.equal(jobCalls(world, 39), 2);
+    });
+
+    test('5. a `waiting` run (environment approval) is never demand: no event, no jobs fetch, from any source', async () => {
+        const { world, events, w, cycle } = setup();
+        world.recent = [run(37, { status: 'waiting' })];
+        world.pending = [run(38, { status: 'waiting' })];       // defensive: waiting is ignored wherever listed
+        world.jobs[37] = [job(370, { status: 'waiting' })];
+        world.jobs[38] = [job(380, { status: 'waiting' })];
+        await w.runCycle();
+        await cycle();
+        assert.equal(events.length, 0);
+        assert.equal(jobCalls(world, 37), 0);
+        assert.equal(jobCalls(world, 38), 0);
+        assert.equal(w.snapshot().runsTracked, 0);
+    });
+
+    test('6. concurrency replacement: A cancelled, B pending -> queued -> in_progress; B queued exactly once, no duplicates', async () => {
+        const { world, events, w, cycle } = setup();
+        world.in_progress = [run(40, { status: 'in_progress' })];
+        world.jobs[40] = [job(400, { status: 'in_progress', runner_name: 'r1' })];
+        await w.runCycle();
+        // A is cancelling and leaves the lists; B (same workflow + PR) is pending during the hand-off, jobs not created yet.
+        world.in_progress = [];
+        world.jobs[40] = [done(400, 'cancelled', { runner_name: 'r1' })];
+        world.pending = [run(41, { status: 'pending' })];
+        world.jobs[41] = [];
+        await cycle();
+        world.jobs[41] = [job(410, { status: 'pending' })];       // still pending, job created, updated_at fixed
+        await cycle();
+        assert.deepEqual(changesFor(events, 410), ['queued'], 'demand seen while B is still pending');
+        world.pending = [];
+        world.queued = [run(41, { status: 'queued' })];
+        world.jobs[41] = [job(410)];
+        await cycle(); await cycle();
+        world.queued = [];
+        world.in_progress = [run(41, { status: 'in_progress', updated_at: '2026-10-19T23:01:00Z' })];
+        world.jobs[41] = [job(410, { status: 'in_progress', runner_name: 'jit-1' })];
+        await cycle();
+        world.in_progress = [];
+        world.jobs[41] = [done(410, 'success', { runner_name: 'jit-1' })];
+        for (let i = 0; i < 6; i++) await cycle();
+        assert.deepEqual(changesFor(events, 410), ['queued', 'pickup', 'in_progress', 'completed']);
+        assert.deepEqual(changesFor(events, 400), ['seen', 'pickup', 'in_progress', 'completed']);
+        assert.equal(events.find((e) => e.rec.jobId === 400 && e.change === 'completed').rec.conclusion, 'cancelled');
+        assert.equal(w.snapshot().jobs.queued, 0);
+    });
+
+    test('a backstop failure is logged and counted, and the filtered lists still produce demand', async () => {
+        const { world, events, logs, w } = setup();
+        world.queued = [run(42, { status: 'queued' })];
+        world.jobs[42] = [job(420)];
+        const realGet = world.github.conditionalGet;
+        world.github.conditionalGet = async (req) => {
+            if (/\/actions\/runs\?per_page=/.test(req.path)) throw new GithubError('HTTP', 'GET runs failed: HTTP 502', { status: 502 });
+            return realGet(req);
+        };
+        await w.runCycle();
+        assert.deepEqual(changesFor(events, 420), ['queued']);
+        assert.equal(w.snapshot().lastCycle.backstopFailed, 1);
+        assert.ok(logs.some(([l, m]) => l === 'warn' && /recent-runs backstop failed/.test(m)));
+    });
+
+    test('a rate-limited backstop propagates like any list call (the poll fails, the cycle backs off)', async () => {
+        const { world, w } = setup();
+        const realGet = world.github.conditionalGet;
+        world.github.conditionalGet = async (req) => {
+            if (/\/actions\/runs\?per_page=/.test(req.path)) throw new GithubError('RATE_LIMITED', 'rate limited', { status: 403 });
+            return realGet(req);
+        };
+        await w.runCycle();
+        assert.equal(w.snapshot().lastCycle.ok, false);
+        assert.match(w.snapshot().lastCycle.error, /RATE_LIMITED/);
+        assert.equal(w.snapshot().lastCycle.backstopFailed, 0);
     });
 });

@@ -19,7 +19,7 @@
  *   - every call is a conditional GET, and a 304 does not spend rate limit;
  *   - run jobs are fetched for a run first seen or whose updated_at moved, plus runs that left the
  *     run lists while still holding open jobs (so a completion is observed, cheaply), plus the
- *     XACA-1445-031 re-reads below;
+ *     XACA-1445-031 re-reads and the XACA-1445-037 run sources below;
  *   - cadence is 15 s while anything is queued/in_progress, else 60 s; the
  *     client's rate mode overrides: slow => 60 s, suspended/blocked => no calls
  *     until the reset / retry-after.
@@ -42,7 +42,8 @@
  * (measured live 2026-10-19). Gating job reads on it alone hid queued jobs for minutes and kept
  * already-finished jobs "queued" (ghost JIT mints). So:
  *   F1 every run in the `status=queued` LIST has its jobs re-read EVERY cycle (GitHub keeps a run
- *      queued while any job is queued, so these are exactly the runs holding demand). A run listed
+ *      queued while any job is queued, so these are exactly the runs holding demand). XACA-1445-037
+ *      widens this to every listed run whose source is not the in_progress list (see Run sources). A run listed
  *      only as in_progress is re-read every IN_PROGRESS_REREAD_CYCLES cycles (~60 s busy), so a
  *      persistent-runner pickup / completion is seen within a minute, not at the next status flip.
  *   F2 a run that leaves the lists, or whose last open job closes, enters a GRACE set and is re-read
@@ -52,6 +53,21 @@
  *   F3 a run's read marker (updated_at / run_attempt) is recorded only after a successful jobs
  *      fetch, so a throwing fetch is retried next cycle instead of marking the run as read.
  * All of these are conditional GETs; an unchanged body is a 304 and costs no rate limit.
+ *
+ * Run sources (XACA-1445-037). A run that REPLACES a still-cancelling run of the same
+ * `concurrency: group` (cancel-in-progress) was absent from BOTH the queued and in_progress lists for
+ * 5-20 cycles in the 2026-10 re-test (5 of 983 jobs never seen while queued, every one the first job
+ * of such a replacement). GitHub most likely reports it `pending` (or `requested`) during the
+ * hand-off; a lag in the queued list leaves the same footprint. So each cycle, per repo:
+ *   - the `status=` lists queued, in_progress, pending and requested (RUN_LIST_STATUSES), paged;
+ *   - one unfiltered page of the RECENT_RUNS_PAGE newest runs (the list-lag backstop). A run there
+ *     that is not `completed`, not `waiting` and in none of the lists is treated as listed;
+ *   - every listed run whose source status is NOT in_progress gets the F1 every-cycle jobs re-read.
+ * A run whose status is `waiting` (environment approval) is never listed from any source: it is not
+ * demand and costs no jobs fetch. Cost per repo is +3 calls a cycle (+720/h busy, +180/h idle); the
+ * pending/requested lists are almost always empty, so unchanged => 304, and the recent page is a 304
+ * whenever none of its runs changed (idle), a counted 200 when busy (<= 240/h). A backstop failure
+ * other than a rate limit is logged and counted (lastCycle.backstopFailed), never fatal to the poll.
  *
  * Errors are logged by code/message only. The client's errors are already
  * secret-free; this module never touches a token.
@@ -69,6 +85,14 @@ const IN_PROGRESS_REREAD_CYCLES = 4;             // XACA-1445-031 F1: in_progres
 const GRACE_MIN_MS = 60 * 1000;                  // XACA-1445-031 F2: >= GitHub's jobs-list max-age=60
 const GRACE_MAX_MS = 15 * 60 * 1000;             // XACA-1445-031 F2: a grace entry never outlives this
 const MAX_GRACE_RUNS = 200;                      // XACA-1445-031 F2: grace set cap (oldest evicted)
+// XACA-1445-037: every status=<s> runs list polled. Non-in_progress ones carry demand that run.updated_at
+// does not announce (a concurrency replacement waits as pending/requested), so they get the F1 re-read.
+const RUN_LIST_STATUSES = ['queued', 'in_progress', 'pending', 'requested'];
+// XACA-1445-037 list-lag backstop: one unfiltered page of the newest runs (GitHub lists newest first).
+// A replacement run is by construction among the newest, and a lag of 5-20 cycles (<= 5 min) would need
+// 50+ runs created in that window to push it off one page (a push to dev-team creates ~10-15). One page,
+// never paged, so the cost is fixed at one conditional GET per repo per cycle.
+const RECENT_RUNS_PAGE = 50;
 
 const PRIORITY_LOOKUP_CONCURRENCY = 8;             // XACA-1479: max resolver calls in flight (rate-budget bound)
 const FIELD_CAP = 200;                           // XACA-1444: cap on branch / workflow / url strings
@@ -79,6 +103,9 @@ function capStr(v, max = FIELD_CAP) {
     const t = v.replace(/[\u0000-\u001f\u007f]/g, ' ').trim();
     return t === '' ? null : t.slice(0, max);
 }
+
+// Run statuses that hold not-yet-started demand (XACA-1445-037). `waiting` is deliberately absent.
+const DEMAND_RUN_STATUSES = new Set(['queued', 'pending', 'requested']);
 
 const SLUG_RE = /^([A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))\/([A-Za-z0-9._-]{1,100})$/;
 
@@ -151,7 +178,7 @@ function createWatcher(opts = {}) {
     let running = false;
     let started = false;
     let inFlight = null;
-    const last = { at: null, ok: null, error: null, calls: 0, nextDelayMs: null, mode: 'normal' };
+    const last = { at: null, ok: null, error: null, calls: 0, nextDelayMs: null, mode: 'normal', backstopAdded: 0, backstopFailed: 0 };
 
     const iso = (ms) => new Date(ms).toISOString();
 
@@ -208,7 +235,7 @@ function createWatcher(opts = {}) {
         if (!resolvePriority) return;
         const work = [];
         for (const wr of listed.values()) {
-            if (wr && wr.status === 'queued' && typeof wr.head_branch === 'string') {
+            if (wr && DEMAND_RUN_STATUSES.has(wr.status) && typeof wr.head_branch === 'string') {
                 work.push(priorityFor(r.owner, r.repo, capStr(wr.head_branch), (wr.head_repository && wr.head_repository.full_name) ?? null));
             }
         }
@@ -339,7 +366,7 @@ function createWatcher(opts = {}) {
 
     /**
      * Fetch one run's latest-attempt jobs and fold them in.
-     * `gone` = the run has left the queued/in_progress lists, so its job list is final: an open
+     * `gone` = the run has left every run source (lists + backstop, XACA-1445-037), so its job list is final: an open
      * job of ours that a fresh response does not contain has vanished. Fresh means EVERY page was a
      * 200 and the page cap was not hit (XACA-1441-032). For a still-listed run a missing job may just
      * be past the pages we read, so it is left alone. A 304 page replays a cached body, so it never
@@ -413,27 +440,61 @@ function createWatcher(opts = {}) {
         log('warn', `watcher: ${r.slug} run ${id} jobs fetch failed (${(e && (e.code || e.message)) || 'error'}); retrying next cycle`);
     }
 
+    /**
+     * XACA-1445-037 list-lag backstop: one conditional page of the newest runs, unfiltered. Returns []
+     * on any failure but a rate limit (which propagates like every other list call): the filtered
+     * lists already read this cycle must not be thrown away because the supplementary read failed.
+     */
+    async function getRecentRuns(r) {
+        try {
+            const res = await github.conditionalGet({
+                owner: r.owner, repo: r.repo, purpose: 'watcher',
+                path: `/repos/${r.owner}/${r.repo}/actions/runs?per_page=${RECENT_RUNS_PAGE}`,
+            });
+            last.calls++;
+            return res && res.data && Array.isArray(res.data.workflow_runs) ? res.data.workflow_runs : [];
+        } catch (e) {
+            if (e && e.code === 'RATE_LIMITED') throw e;
+            last.backstopFailed++;
+            log('warn', `watcher: ${r.slug} recent-runs backstop failed (${(e && (e.code || e.message)) || 'error'}); lists only this cycle`);
+            return [];
+        }
+    }
+
     async function pollRepo(r, nowMs) {
         const listed = new Map();
-        const queuedIds = new Set(); // F1: membership of the status=queued LIST (wr.status may be absent or lag)
-        for (const status of ['queued', 'in_progress']) {
+        // F1 (generalised by XACA-1445-037): ids of listed runs whose SOURCE status is not in_progress,
+        // i.e. a status=queued/pending/requested list or the backstop page. These are re-read every
+        // cycle. Membership is by source, not wr.status, which may be absent or lag the list.
+        const rereadIds = new Set();
+        for (const status of RUN_LIST_STATUSES) {
             const { items } = await getPaged(r, `/repos/${r.owner}/${r.repo}/actions/runs?status=${status}&per_page=${PAGE_SIZE}`, 'workflow_runs');
             for (const wr of items) {
                 if (!(wr && Number.isInteger(wr.id))) continue;
+                if (wr.status === 'waiting') continue; // environment approval: not demand, wherever listed
                 listed.set(wr.id, wr);
-                if (status === 'queued') queuedIds.add(wr.id);
+                if (status !== 'in_progress') rereadIds.add(wr.id);
             }
+        }
+        // Backstop: a not-yet-finished run that no filtered list shows (list lag) is treated as listed
+        // non-in_progress, so it gets presence (grace on leaving, prune guard) and the every-cycle re-read.
+        for (const wr of await getRecentRuns(r)) {
+            if (!(wr && Number.isInteger(wr.id)) || listed.has(wr.id)) continue;
+            if (typeof wr.status !== 'string' || wr.status === 'completed' || wr.status === 'waiting') continue;
+            listed.set(wr.id, wr);
+            rereadIds.add(wr.id);
+            last.backstopAdded++;
         }
 
         try {
             await prefetchPriorities(r, listed);
-            return await pollListed(r, nowMs, listed, queuedIds);
+            return await pollListed(r, nowMs, listed, rereadIds);
         } finally {
             prioMemo.clear();
         }
     }
 
-    async function pollListed(r, nowMs, listed, queuedIds = new Set()) {
+    async function pollListed(r, nowMs, listed, rereadIds = new Set()) {
         let active = listed.size > 0;
         for (const [id, wr] of listed) {
             const rk = `${r.slug}#${id}`;
@@ -451,10 +512,10 @@ function createWatcher(opts = {}) {
             runs.set(rk, entry);
             // A still-listed run is still visible: its open jobs are not "unseen" (prune bound).
             for (const e of openEntriesFor(r.owner, r.repo, id)) e.lastSeenMs = nowMs;
-            const queuedListed = queuedIds.has(id);                                                            // F1
-            const inProgressDue = !queuedListed && cycle - entry.lastReadCycle >= IN_PROGRESS_REREAD_CYCLES;   // F1 backstop
+            const rereadEveryCycle = rereadIds.has(id);                                                        // F1 (037)
+            const inProgressDue = !rereadEveryCycle && cycle - entry.lastReadCycle >= IN_PROGRESS_REREAD_CYCLES; // F1 backstop
             const inGrace = grace.has(rk);                                                                     // F2
-            if (!(changed || queuedListed || inProgressDue || inGrace)) continue;
+            if (!(changed || rereadEveryCycle || inProgressDue || inGrace)) continue;
             const res = await fetchJobs(r, meta, nowMs);
             entry.readOk = true; entry.updatedAt = wr.updated_at; entry.runAttempt = wr.run_attempt; entry.lastReadCycle = cycle;
             if (inGrace) settleGrace(rk, res, nowMs);
@@ -602,7 +663,7 @@ function createWatcher(opts = {}) {
         const nowMs = now();
         cycle++;
         refreshRepos(nowMs);
-        last.at = iso(nowMs); last.calls = 0; last.error = null;
+        last.at = iso(nowMs); last.calls = 0; last.error = null; last.backstopAdded = 0; last.backstopFailed = 0;
         const rate = github.getRateState();
         last.mode = rate.mode;
         if (rate.mode === 'suspended' || rate.mode === 'blocked') {
@@ -682,7 +743,10 @@ function createWatcher(opts = {}) {
             jobs: { queued, inProgress, completed, tracked: jobs.size },
             runsTracked: runs.size,
             runsInGrace: grace.size,
-            lastCycle: { at: last.at, ok: last.ok, error: last.error, calls: last.calls, nextDelayMs: last.nextDelayMs },
+            lastCycle: {
+                at: last.at, ok: last.ok, error: last.error, calls: last.calls, nextDelayMs: last.nextDelayMs,
+                backstopAdded: last.backstopAdded, backstopFailed: last.backstopFailed, // XACA-1445-037
+            },
             rateMode: last.mode,
         };
     }
@@ -693,4 +757,5 @@ function createWatcher(opts = {}) {
 module.exports = {
     createWatcher, BUSY_INTERVAL_MS, IDLE_INTERVAL_MS, COMPLETED_RETENTION_MS, MAX_TRACKED_JOBS,
     PRIORITY_LOOKUP_CONCURRENCY, IN_PROGRESS_REREAD_CYCLES, GRACE_MIN_MS, GRACE_MAX_MS, MAX_GRACE_RUNS,
+    RUN_LIST_STATUSES, RECENT_RUNS_PAGE,
 };
