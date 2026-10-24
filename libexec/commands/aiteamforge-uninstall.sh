@@ -434,11 +434,49 @@ restore_claude_config() {
   fi
 }
 
+# XACA-1599-006: remove the Claude Code L1 managed policy. It is a root-owned file OUTSIDE
+# ${WORKING_DIR}, so the wholesale removal in remove_files() would never touch it and it would outlive
+# the uninstall, blocking plugins on a machine that no longer runs aiteamforge. Runs BEFORE
+# remove_files() because the tool lives in ${WORKING_DIR}/scripts. The tool prompts for itself
+# (explicit [y/N], then a sudo password), removes ONLY 50-aiteamforge.json and backs it up first.
+# With no terminal it removes nothing and prints the manual command. Never fatal to the uninstall.
+remove_managed_policy() {
+  print_section "Removing Claude Code Managed Policy"
+
+  local base="${CLAUDE_MANAGED_DIR:-/Library/Application Support/ClaudeCode}"
+  local dest="${base}/managed-settings.d/50-aiteamforge.json"
+  local tool="${WORKING_DIR}/scripts/kb-sync-plugins"
+
+  if [ ! -e "$dest" ]; then
+    print_info "No managed policy installed (${dest})"
+    return 0
+  fi
+  if [ ! -f "$tool" ]; then
+    print_warning "Managed policy is installed but kb-sync-plugins is missing; delete this one file as root:"
+    echo "  ${dest}"
+    return 0
+  fi
+  if [ ! -t 0 ] || [ ! -t 1 ]; then
+    print_warning "No terminal: the managed policy was NOT removed. Run: python3 ${tool} managed-policy --remove"
+    return 0
+  fi
+
+  local rc=0
+  python3 "$tool" managed-policy --remove || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    print_success "Managed policy removed"
+  else
+    print_warning "Managed policy NOT removed (rc=${rc}). Run: python3 ${tool} managed-policy --remove"
+  fi
+  return 0
+}
+
 # Run uninstall steps
 stop_services
 remove_launchagents
 remove_zshrc_integration
 restore_claude_config
+remove_managed_policy
 remove_files
 
 # Summary

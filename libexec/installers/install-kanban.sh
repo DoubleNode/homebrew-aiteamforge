@@ -721,6 +721,56 @@ install_kb_sync_personas_script() {
     success "Installed: $manifest_dest"
 }
 
+# XACA-1599-006: Install kb-sync-plugins + its plugins-manifest.json to AITEAMFORGE_DIR so tap
+# machines can run `kb-sync-plugins check --host|managed-policy|binaries|...` and the opt-in
+# `aiteamforge doctor --check plugin-binaries` has something to run. Before this, sync-tap.sh
+# mirrored both files into share/scripts/ (the publisher does that) but NOTHING copied them from
+# there to $AITEAMFORGE_DIR -- measured: no install/upgrade reference to kb-sync-plugins in this
+# tree, so the doctor check FAILED on every consumer. Same shape as install_kb_sync_personas_script
+# above (a plain cp, no rendering: the manifest is JSON data and the tool carries no ~/dev-team
+# literals). The manifest lands at $AITEAMFORGE_DIR/.claude/plugins-manifest.json, the exact path the
+# tool's own $DEV_TEAM/.claude/plugins-manifest.json resolution expects when DEV_TEAM is
+# $AITEAMFORGE_DIR (the script sits in $AITEAMFORGE_DIR/scripts/).
+#
+# DELIBERATELY NOT DONE HERE: no `kb-sync-plugins sync --all`. That would write
+# <session dir>/.claude/settings.json into every registered team dir on a consumer, including
+# client-owned freelance repos -- the exact write XACA-1261 refused to introduce for personas.
+# Team plugin lists reach consumers on demand (`kb-sync-plugins sync <team>`), and the L1 managed
+# policy is offered with an explicit prompt by install-claude-config.sh.
+#
+# SIBLING-DRIFT NOTE: paired with (a) the kb-sync-plugins entry in _xaca0608_aux_script_map and
+# _xaca1143_aux_mandatory_materialize_basenames, plus update_plugins_manifest(), in
+# aiteamforge-upgrade.sh; (b) no per-file removal in aiteamforge-uninstall.sh: scripts/ and .claude/
+# are removed wholesale there.
+install_kb_sync_plugins_script() {
+    local scripts_src="$INSTALL_ROOT/share/scripts"
+    local src="${scripts_src}/kb-sync-plugins"
+    local dest="$AITEAMFORGE_DIR/scripts/kb-sync-plugins"
+    local manifest_src="${scripts_src}/plugins-manifest.json"
+    local manifest_dest="$AITEAMFORGE_DIR/.claude/plugins-manifest.json"
+
+    if [ ! -f "$src" ]; then
+        warning "kb-sync-plugins not found at: ${src} (skipping)"
+        return 0
+    fi
+
+    mkdir -p "$AITEAMFORGE_DIR/scripts"
+    info "Installing kb-sync-plugins (Claude Code plugin delivery/drift tool)"
+    cp "$src" "$dest"
+    chmod +x "$dest"
+    success "Installed: $dest"
+
+    if [ ! -f "$manifest_src" ]; then
+        warning "plugins-manifest.json not found at: ${manifest_src} (skipping manifest)"
+        return 0
+    fi
+
+    mkdir -p "$AITEAMFORGE_DIR/.claude"
+    info "Installing plugins-manifest.json"
+    cp "$manifest_src" "$manifest_dest"
+    success "Installed: $manifest_dest"
+}
+
 # XACA-0774: Install remote-tmux-attach.sh to AITEAMFORGE_DIR/scripts/ so freshly
 # rendered *-connect.sh scripts (which reference it as
 # ${AITEAMFORGE_DIR}/scripts/remote-tmux-attach.sh, a LOCAL client-side path) find
@@ -3027,6 +3077,7 @@ EOF
     install_worktree_personas_script
     install_kb_port_reconcile_script
     install_kb_sync_personas_script
+    install_kb_sync_plugins_script
     install_remote_tmux_attach_script
     install_lcars_remote_atf_resolve_script
     install_kb_init_team_scripts

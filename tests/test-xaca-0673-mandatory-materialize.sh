@@ -284,7 +284,16 @@ MISSING="$(python3 "$_SCAN_PY" "$GUARD_SHARE" "$MANDATORY_SET")"
 #   kb-spacedock probes $HOME/dev-team/ and $AITEAMFORGE_DIR[/scripts]/ for it and
 #   reports 'unknown' when absent. Surfaced by the XACA-1460-012 shell-sibling
 #   widening; pre-existing, follow-up: decide whether it should be aux-mandatory.
-PARITY_KNOWN_EXCEPTIONS=$'kb-cr.sh\nregister-claude-hook.py\nlcars-health-check.sh'
+#   personas-manifest.json / plugins-manifest.json - data files named by kb-sync-personas /
+#   kb-sync-plugins (dynamic reference). They are NOT delivered by the scripts/-destined
+#   sweep: update_personas_manifest() / update_plugins_manifest() (aiteamforge-upgrade.sh) and
+#   install_kb_sync_personas_script() / install_kb_sync_plugins_script() (install-kanban.sh)
+#   copy them, unmodified, to $WORKING_DIR/.claude/ and materialize them when absent. Adding
+#   them to the scripts/-destined mandatory set would lay down a second, unused copy in
+#   scripts/. personas-manifest.json was already red here before XACA-1599; the plugins pair
+#   is new in XACA-1599 PR-B and uses the same path. The stale-exception check below still
+#   demands each stays referenced and uncovered.
+PARITY_KNOWN_EXCEPTIONS=$'kb-cr.sh\nregister-claude-hook.py\nlcars-health-check.sh\npersonas-manifest.json\nplugins-manifest.json'
 # Consumer datafiles (msg-client.js, vault-keygen.js, ...) have their own refresh
 # path (_aitf_consumer_datafiles in libexec/lib/msg-client-deps.sh); extract by text.
 _DATAFILES="$(awk '/^_aitf_consumer_datafiles\(\) \{/{f=1;next} f&&/^EOF$/{exit} f&&!/cat <</{print}' "$TAP_ROOT/libexec/lib/msg-client-deps.sh")"

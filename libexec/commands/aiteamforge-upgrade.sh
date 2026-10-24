@@ -1012,6 +1012,7 @@ cellar-watch-trigger.sh|${WORKING_DIR}/scripts/cellar-watch-trigger.sh
 deploy-worktree-personas.sh|${WORKING_DIR}/scripts/deploy-worktree-personas.sh
 kb-port-reconcile|${WORKING_DIR}/scripts/kb-port-reconcile
 kb-sync-personas|${WORKING_DIR}/scripts/kb-sync-personas
+kb-sync-plugins|${WORKING_DIR}/scripts/kb-sync-plugins
 worktree-helpers.sh|${WORKING_DIR}/worktree-helpers.sh
 iterm2_badge_helper.sh|${WORKING_DIR}/iterm2_badge_helper.sh
 EOF
@@ -1097,11 +1098,19 @@ _xaca0608_aux_scriptdir_basenames() {
 # config) is NOT listed here — it must ship unmodified with no rendering
 # step, so it does not go through this scripts/-destined, render+chmod+x aux
 # map/mandatory-list pair at all; see update_personas_manifest() instead.
+#
+# XACA-1599-006: kb-sync-plugins -- same reasoning as kb-sync-personas above, measured rather than
+# inferred: no install or upgrade step referenced it before this ticket (sync-tap.sh mirrored it
+# into share/scripts/ only), so EVERY existing consumer is missing it and the update_aux_scripts()
+# "[ ! -f $target ] && continue" guard would skip every already-installed box forever. Extensionless
+# and scripts/-destined, so this is the list it belongs in. plugins-manifest.json is data and goes
+# through update_plugins_manifest(), not this pair.
 _xaca1143_aux_mandatory_materialize_basenames() {
   cat <<'EOF'
 worktree-helpers.sh
 iterm2_badge_helper.sh
 kb-sync-personas
+kb-sync-plugins
 EOF
 }
 
@@ -1232,6 +1241,37 @@ update_personas_manifest() {
     fi
   else
     print_success "personas-manifest.json up to date"
+  fi
+}
+
+# XACA-1599-006: Refresh plugins-manifest.json -- kb-sync-plugins' own config, colocated with the
+# script in share/scripts/ (see sync-tap.sh) but delivered to
+# $AITEAMFORGE_DIR/.claude/plugins-manifest.json, the path the tool resolves as
+# $DEV_TEAM/.claude/plugins-manifest.json in consumer mode. A plain cp, no rendering and no exec
+# bit, for the same reasons as update_personas_manifest() above (a data file, not a shell script).
+# Mandatory-materialize: every existing consumer is missing it.
+update_plugins_manifest() {
+  print_section "Updating Claude Plugins Manifest"
+
+  local source="${FRAMEWORK_DIR}/share/scripts/plugins-manifest.json"
+  local target="${WORKING_DIR}/.claude/plugins-manifest.json"
+
+  if [ ! -f "$source" ]; then
+    print_warning "plugins-manifest.json not found at ${source} — skipping"
+    return 0
+  fi
+
+  if [ ! -f "$target" ] || [ "$source" -nt "$target" ] || [ "$FORCE" = true ]; then
+    print_info "Updating plugins-manifest.json..."
+    if [ "$DRY_RUN" = false ]; then
+      mkdir -p "$(dirname "$target")"
+      cp "$source" "$target"
+      print_success "Updated plugins-manifest.json"
+    else
+      echo "Would update: plugins-manifest.json"
+    fi
+  else
+    print_success "plugins-manifest.json up to date"
   fi
 }
 
@@ -6855,6 +6895,7 @@ update_knowledge_repo
 update_knowledge_sync
 update_aux_scripts
 update_personas_manifest
+update_plugins_manifest
 update_team_scripts
 # XACA-1215-005c: regenerate per-agent startup scripts (SESSION_DIRECTORY
 # fix) on already-provisioned teams — see update_generated_agent_scripts'

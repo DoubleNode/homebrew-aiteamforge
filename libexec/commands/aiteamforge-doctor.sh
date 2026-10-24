@@ -89,7 +89,7 @@ Components:
   helpers-drift   Installed kanban-helpers.sh function inventory vs shipped template (XACA-1095)
   vault-drift     vault-fetch.js / vault-keygen.js vs shipped copy byte drift (XACA-1322)
   vault-readiness node + libsodium-wrappers + vault-fetch smoke for routed teams (XACA-1225-021)
-  plugin-binaries LSP binaries for enabled Claude Code plugins + claude version floor; opt-in, not in "all" yet (XACA-1599-007)
+  plugin-binaries LSP binaries for enabled Claude Code plugins + claude version floor (XACA-1599-007; in the default run since PR-B)
   config          Configuration files and validity
   board           Kanban board resolution + template/stub-collision detection (XACA-0655)
   connect         Cockpit connect scripts vs installed team instances (XACA-0845)
@@ -1254,11 +1254,26 @@ check_plugin_binaries() {
   fi
 
   report="$(KBSPL_MANIFEST="$manifest" "$tool" binaries 2>&1)" && rc=0 || rc=$?
+  # Every arm names its OWN cause, and the report is shown exactly once: the pass arm hands it to
+  # check_result (shown only with --verbose); each other arm passes no detail and prints it below,
+  # so --verbose cannot print a failing report twice (XACA-1599-017).
+  #   0  all present            1  a binary is missing        3  cannot verify
+  #   70 kb-sync-plugins itself crashed (a bug, not a missing binary: XACA-1599-016; a Python
+  #      traceback used to exit 1 and read as "binary missing")
   case "$rc" in
     0) check_result pass "Plugin binaries present; claude meets the version floor" "$report" ;;
-    1) check_result fail "Required plugin binary missing (fix: kb-sync-plugins binaries --install)" "$report" ;;
-    3) check_result fail "Plugin binaries unverifiable (manifest, binary map or claude problem) -- not a pass" "$report" ;;
-    *) check_result fail "kb-sync-plugins binaries failed unexpectedly (rc=$rc)" "$report" ;;
+    1) check_result fail "Required plugin binary missing (fix: kb-sync-plugins binaries --install)" ;;
+    3)
+      case "$report" in
+        *NO_HOSTED_TEAMS*)
+          # Nothing resolved on this machine, so nothing was checked: neither a pass nor a failure.
+          check_result warn "Plugin binaries: nothing to verify -- no team on this machine resolves to an existing session directory" ;;
+        *)
+          check_result fail "Plugin binaries unverifiable (manifest, binary map or claude problem) -- not a pass" ;;
+      esac
+      ;;
+    70) check_result fail "kb-sync-plugins crashed (a bug in the tool, not a missing binary; rc=70)" ;;
+    *) check_result fail "kb-sync-plugins binaries failed unexpectedly (rc=$rc)" ;;
   esac
   if [ "$rc" -ne 0 ]; then
     printf '%s\n' "$report" | sed 's/^/    /'
@@ -2666,7 +2681,7 @@ case "$CHECK_COMPONENT" in
     check_kanban_helpers_inventory
     check_vault_keygen_drift
     check_vault_readiness
-    # plugin-binaries is opt-in until XACA-1599 PR-B ships kb-sync-plugins + the manifest to tap hosts
+    check_plugin_binaries
     check_config
     check_board_resolution
     check_connect_scripts

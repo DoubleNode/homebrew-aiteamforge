@@ -745,6 +745,52 @@ invoke_persona_sync() {
     fi
 }
 
+# XACA-1599-006: offer the Claude Code L1 managed policy (blocks superpowers, commit-commands and
+# ralph-loop fleet-wide, registers the official catalog, carries the AITEAMFORGE_MANAGED_POLICY
+# marker). It is a ROOT-OWNED file under /Library/Application Support/ClaudeCode, so:
+#   * it is only ever OFFERED, with the tool's own explicit [y/N] and a sudo password prompt; it is
+#     never installed silently, and never from a non-interactive run (a brew post_install or CI run
+#     has no terminal; the tool exits 4 and this prints how to run it later);
+#   * it is skipped on the dev machine (the persona-master anchor, as in invoke_persona_sync) and for
+#     sandbox / staged installs (CLAUDE_CONFIG_DIR is not the real ~/.claude), so no test or agent
+#     run can reach the real managed dir;
+#   * a failure is never fatal to the rest of the installer.
+# kb-sync-plugins is delivered by install-kanban.sh (install_kb_sync_plugins_script). If this runs
+# first on a fresh machine the tool is absent and the offer is deferred, not failed.
+invoke_managed_policy_offer() {
+    local tool="${AITEAMFORGE_DIR}/scripts/kb-sync-plugins"
+    local manual="python3 ${tool} managed-policy --install"
+
+    if [[ -d "${HOME}/dev-team/.claude/agents-master" ]]; then
+        log_info "Skipping managed-policy offer: this is the dev machine (policy ships via deploy-to-production.sh)."
+        return 0
+    fi
+    if [[ "${CLAUDE_CONFIG_DIR}" != "${HOME}/.claude" ]]; then
+        log_info "Skipping managed-policy offer: staged/sandbox install (CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR})."
+        return 0
+    fi
+    if [[ ! -f "$tool" ]]; then
+        log_warning "kb-sync-plugins not installed yet; the managed-policy offer is deferred."
+        log_warning "After the kanban install step, run: ${manual}"
+        return 0
+    fi
+    if [[ ! -t 0 || ! -t 1 ]]; then
+        log_warning "Claude Code managed policy: PENDING (no terminal, so sudo cannot be offered)."
+        log_warning "Install it later, from a terminal: ${manual}"
+        return 0
+    fi
+
+    log_info "Claude Code managed policy (optional; needs sudo; blocks superpowers, commit-commands, ralph-loop)"
+    local rc=0
+    python3 "$tool" managed-policy --install || rc=$?
+    case "$rc" in
+        0) log_success "Claude Code managed policy is current" ;;
+        4) log_warning "Claude Code managed policy: PENDING (declined). Install later: ${manual}" ;;
+        *) log_warning "Claude Code managed policy install failed (rc=${rc}); nothing was left half-written. Retry: ${manual}" ;;
+    esac
+    return 0
+}
+
 # Install statusline command
 install_statusline() {
     log_info "Installing statusline command..."
@@ -1128,6 +1174,10 @@ install_claude_config() {
     # personas-manifest.json are available to kb-sync-personas.
     echo ""
     invoke_persona_sync
+
+    # Offer the L1 managed policy (explicit prompt, never silent; XACA-1599-006).
+    echo ""
+    invoke_managed_policy_offer
 
     # Final summary
     echo ""
