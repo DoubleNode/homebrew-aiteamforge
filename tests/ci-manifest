@@ -168,3 +168,4 @@ test-xaca-1225-msg-inbox-check-shipping.sh      plain-shell
 test-xaca-1225-022-vault-smoke-parity.sh        plain-shell
 test-xaca-1599-doctor-plugin-binaries.sh        plain-shell
 test-xaca-1599-plugin-tool-delivery.sh          plain-shell
+test-xaca-1625-extensionless-upgrade-coverage.sh  plain-shell
