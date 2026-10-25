@@ -11751,6 +11751,13 @@ async function loadReleases() {
                 flowConfigState.stages = flowConfig.stages;
             }
             flowConfigState.projectEnvironments = projectEnvironments;
+            // XACA-1623: cache the team's declared platform labels so
+            // getPlatformName() can render releaseConfig.platforms[key].name
+            // (e.g. "iPadOS") instead of title-casing the raw key. Only a plain
+            // object is accepted; anything else resets to {} (fallback labels).
+            releasePlatformConfig = (configData.platforms &&
+                typeof configData.platforms === 'object' &&
+                !Array.isArray(configData.platforms)) ? configData.platforms : {};
         }
 
         // Update the current flow display in header
@@ -11988,11 +11995,16 @@ function renderReleaseCard(release, flowConfig = null, projectEnvironments = {})
             gateHtml = `<span class="platform-gate-badge ${gsClass}" title="${tooltipAttr}">${gsResult.toUpperCase()}${staleMarker}</span>`;
         }
 
+        // XACA-1623: .platform-name is text-transform:uppercase (lcars.css), so the
+        // configured name only changes this label visibly when it differs from
+        // the key by more than case; the case-correct name ("iPadOS") reaches the
+        // archive tooltip and screen readers. Keep the LCARS uppercase.
         // XACA-1005-001 (7th round, PR #795 gate, BLOCKING, reviewer-verified):
         // both spans below were RAW ELEMENT CONTENT, no escaper at all.
-        // getPlatformName(key) (~11779) maps a small known set of platform
+        // getPlatformName(key) returns the team's releaseConfig.platforms[key].name
+        // when declared (XACA-1623), else maps a small known set of platform
         // keys ('ios'/'android'/'firebase'/'web'/'other') to display labels,
-        // but falls through for any UNMAPPED key to
+        // but falls through for any UNMAPPED, undeclared key to
         // `safeKey.charAt(0).toUpperCase() + safeKey.slice(1)` -- a
         // TITLE-CASED PASSTHROUGH of the raw key, not a safe default. `key`
         // and `platform.version` both come from `release.platforms`, reached
@@ -12336,6 +12348,21 @@ async function removeItemFromRelease(releaseId, itemId) {
  * Get display name for platform
  */
 function getPlatformName(key) {
+    const safeKey = String(key == null ? '' : key);
+    // XACA-1623: the team's own releaseConfig.platforms[key].name wins over the
+    // built-in labels below, so teams with platforms outside the hardcoded set
+    // (ipados, watchos, ...) render their declared name, not "Ipados". hasOwn
+    // guards stop keys like "constructor"/"__proto__" resolving to
+    // Object.prototype members; non-string/blank names fall through. The name
+    // is returned RAW -- callers escape at the sink (see renderReleaseCard).
+    for (const k of [safeKey, safeKey.toLowerCase()]) {
+        if (Object.prototype.hasOwnProperty.call(releasePlatformConfig, k)) {
+            const entry = releasePlatformConfig[k];
+            if (entry && typeof entry === 'object' && typeof entry.name === 'string' && entry.name.trim()) {
+                return entry.name.trim();
+            }
+        }
+    }
     const names = {
         'ios': 'iOS',
         'android': 'Android',
@@ -12348,10 +12375,11 @@ function getPlatformName(key) {
         // and was rendering as a bare lowercase 'other' beside 'iOS'/'Android'.
         'other': 'Other'
     };
-    const safeKey = String(key == null ? '' : key);
     // Title-case the fallback so an unmapped key never renders lowercase next
-    // to the Title-Case labels above.
-    return names[safeKey.toLowerCase()] ||
+    // to the Title-Case labels above. XACA-1623: own-property lookup here too,
+    // or 'constructor' returned the Object function instead of 'Constructor'.
+    const lowerKey = safeKey.toLowerCase();
+    return (Object.prototype.hasOwnProperty.call(names, lowerKey) && names[lowerKey]) ||
         (safeKey ? safeKey.charAt(0).toUpperCase() + safeKey.slice(1) : safeKey);
 }
 
@@ -14952,6 +14980,13 @@ function switchDocTab(itemId, tabType) {
 // =========================================================================
 // FLOW CONFIG MODAL (XACA-0027)
 // =========================================================================
+
+/**
+ * XACA-1623: team platform definitions from /api/release-config
+ * (`platforms`, keyed by platform key -> {name, store, icon}). Populated by the
+ * Releases loader; consumed by getPlatformName(). Empty until that fetch lands.
+ */
+let releasePlatformConfig = {};
 
 /**
  * Current flow config state

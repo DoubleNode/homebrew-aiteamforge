@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1623 LCARS release platform labels from releaseConfig.platforms
+- Tap files updated in this publish: `share/lcars-ui/index.html`,`share/lcars-ui/js/lcars.js` `share/lcars-ui/tests/test-xaca-1000-release-archive-platform-set.js`,`share/lcars-ui/tests/test-xaca-1005-001-escaper-breakouts.js` `share/lcars-ui/tests/test-xaca-1623-platform-labels.js`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1445 cover pending/requested prefetch; fakes serve backstop
 - Tap files updated in this publish: `fleet-monitor/server/tests/xaca-1441-dispatcher.test.js`,`fleet-monitor/server/tests/xaca-1479-ci-priority-dispatch.test.js`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1625 kb-where absolute-only kanban_utils import + tap guard for extensionless upgrade coverage

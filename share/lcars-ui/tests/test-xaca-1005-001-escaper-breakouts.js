@@ -347,7 +347,9 @@ try {
     // a ReferenceError the moment any fixture sets a truthy targetDate — the
     // exact same missing-extraction bug already caught once for escapeAttr
     // in the SITE-2 factory.
-    const preamble = 'function escapeHtml(t) { if (!t) return ""; return String(t)' +
+    // XACA-1623: getPlatformName() reads this module-level map; declare it empty.
+    const preamble = 'var releasePlatformConfig = {};\n' +
+        'function escapeHtml(t) { if (!t) return ""; return String(t)' +
         '.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }\n' +
         'var CANONICAL_STAGES = ["DEV", "QA", "ALPHA", "BETA", "GAMMA", "PROD"];\n' +
         'var releasesState = { expandedReleases: new Set() };\n';

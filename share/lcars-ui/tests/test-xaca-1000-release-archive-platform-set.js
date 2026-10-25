@@ -163,7 +163,9 @@ try {
     // minimal — just enough to observe what the function DOES (element created,
     // attributes set, appended once, text written on a timer) rather than
     // simulating a browser.
-    const preamble = 'function escapeHtml(t) { return String(t == null ? "" : t)' +
+    // XACA-1623: getPlatformName() reads this module-level map; declare it empty.
+    const preamble = 'var releasePlatformConfig = {};\n' +
+        'function escapeHtml(t) { return String(t == null ? "" : t)' +
         '.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }\n' +
         'var __els = {}; var __appended = []; var __timers = []; var __nextTimer = 1;\n' +
         'var document = {\n' +
