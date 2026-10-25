@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+
+## [0.21.7] - 2026-10-24
 - XACA-1599 per-team Claude Code plugins — manifest, kb-sync-plugins, drift check, binaries (PR-A)
 - Tap files updated in this publish: `share/scripts/kb-sync-plugins`,`share/scripts/plugins-manifest.json` `share/skills/git-worktree/SKILL.md`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1168 kb-edit-shared is publisher-aware and maps via sync-tap.sh --manifest
@@ -8046,7 +8048,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.6...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.7...HEAD
+[0.21.7]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.6...v0.21.7
 [0.21.6]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.5...v0.21.6
 [0.21.5]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.4...v0.21.5
 [0.21.4]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.3...v0.21.4
