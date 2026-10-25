@@ -3323,6 +3323,8 @@ PYEOF
 # aiteamforge-team-paths-wizard.py (XACA-1460-012): aiteamforge-paths execs it from
 # its own dir (WIZARD_PY="${SCRIPT_DIR}/..."), so materialising the wrapper without
 # it makes `aiteamforge-paths init` exit 1. It is *.py, so the glob reaches it.
+# XACA-1607: kb-where is extensionless too, so it needs the same pair of entries
+# (this list + the sweep loop) or an upgraded consumer never receives it.
 _xaca0673_mandatory_materialize_basenames() {
   cat <<'EOF'
 iterm2_venv_bootstrap.py
@@ -3367,6 +3369,7 @@ kb-release-push-promote
 kb-release-version-bump
 kb-release-version-gate
 kb-wiki
+kb-where
 aiteamforge-team-paths-wizard.py
 EOF
 }
@@ -3402,7 +3405,7 @@ update_runtime_helpers() {
   # an extensionless name; kb-msg-provision added under XACA-1078-004).
   # kb-tap-release is deliberately NOT swept (dev-only: needs an outer dev-team
   # checkout + kb-tap-lock.sh); the XACA-0673 guard allowlists it.
-  for src in "$scripts_source"/*.sh "$scripts_source"/*.py "$scripts_source"/kb-init-team "$scripts_source"/kb-api-key "$scripts_source"/kb-msg-provision "$scripts_source"/kb-spacedock "$scripts_source"/kb-pr-monitor "$scripts_source"/kb-pr-base "$scripts_source"/kb-token-report "$scripts_source"/aiteamforge-paths "$scripts_source"/kb-notify "$scripts_source"/kb-release-push-promote "$scripts_source"/kb-release-version-bump "$scripts_source"/kb-release-version-gate "$scripts_source"/kb-wiki; do
+  for src in "$scripts_source"/*.sh "$scripts_source"/*.py "$scripts_source"/kb-init-team "$scripts_source"/kb-api-key "$scripts_source"/kb-msg-provision "$scripts_source"/kb-spacedock "$scripts_source"/kb-pr-monitor "$scripts_source"/kb-pr-base "$scripts_source"/kb-token-report "$scripts_source"/aiteamforge-paths "$scripts_source"/kb-notify "$scripts_source"/kb-release-push-promote "$scripts_source"/kb-release-version-bump "$scripts_source"/kb-release-version-gate "$scripts_source"/kb-wiki "$scripts_source"/kb-where; do
     [ -f "$src" ] || continue
     name="$(basename "$src")"
     target="${scripts_dest}/${name}"
