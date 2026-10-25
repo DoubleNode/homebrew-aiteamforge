@@ -168,11 +168,21 @@ def marker_sockets():
 
 
 def _load_kanban_utils():
-    """Import kanban_utils for the team registry / board paths (read-only)."""
+    """Import kanban_utils for the team registry / board paths (read-only).
+    Only ABSOLUTE candidate dirs are searched (XACA-1625): an unset/empty AITEAMFORGE_DIR
+    or HOME would otherwise yield a cwd-relative "kanban-hooks", importing whatever
+    kanban_utils.py sits under the caller's current directory."""
     here = os.path.dirname(os.path.realpath(__file__))
-    for base in (os.path.join(here, "..", "kanban-hooks"),
-                 os.path.join(os.environ.get("AITEAMFORGE_DIR", ""), "kanban-hooks"),
-                 os.path.join(home(), "dev-team", "kanban-hooks")):
+    aitf = os.environ.get("AITEAMFORGE_DIR") or ""
+    hm = home() or ""
+    candidates = [os.path.join(here, "..", "kanban-hooks")]
+    if aitf:
+        candidates.append(os.path.join(aitf, "kanban-hooks"))
+    if hm:
+        candidates.append(os.path.join(hm, "dev-team", "kanban-hooks"))
+    for base in candidates:
+        if not os.path.isabs(base):
+            continue
         if os.path.isfile(os.path.join(base, "kanban_utils.py")):
             sys.path.insert(0, base)
             try:
