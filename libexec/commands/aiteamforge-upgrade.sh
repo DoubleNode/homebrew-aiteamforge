@@ -1105,12 +1105,21 @@ _xaca0608_aux_scriptdir_basenames() {
 # "[ ! -f $target ] && continue" guard would skip every already-installed box forever. Extensionless
 # and scripts/-destined, so this is the list it belongs in. plugins-manifest.json is data and goes
 # through update_plugins_manifest(), not this pair.
+#
+# XACA-1625: kb-port-reconcile -- measured, not inferred. The tap first shipped
+# share/scripts/kb-port-reconcile on 2026-06-09 (7a8294fd, XACA-0626); fresh installs
+# get it (setup's bulk share/scripts copy + install-kanban.sh), but its only upgrade
+# path is the aux-map line above, which update_aux_scripts() SKIPS when the target is
+# absent. So every box installed before 2026-06-09 and only ever upgraded since has
+# never received it. Extensionless and scripts/-destined, so this is its list. Found
+# by tests/test-xaca-1625-extensionless-upgrade-coverage.sh.
 _xaca1143_aux_mandatory_materialize_basenames() {
   cat <<'EOF'
 worktree-helpers.sh
 iterm2_badge_helper.sh
 kb-sync-personas
 kb-sync-plugins
+kb-port-reconcile
 EOF
 }
 

@@ -16,9 +16,14 @@
 # by nothing.
 #
 # A file is covered when it is in:
-#   (a) the mandatory-materialize list AND the sweep loop, or
-#   (b) _xaca0608_aux_script_map (its own materialise + refresh path), or
-#   (c) EXEMPT below, with a reason.
+#   (a) _xaca0673_mandatory_materialize_basenames AND the update_runtime_helpers
+#       sweep loop (materialise-when-absent + refresh), or
+#   (b) _xaca0608_aux_script_map AND _xaca1143_aux_mandatory_materialize_basenames
+#       (the same pair for update_aux_scripts(), which otherwise SKIPS an absent
+#       target: "[ ! -f $target ] && continue"), or
+#   (c) EXEMPT below, with a non-empty reason.
+# One list alone is refresh-only or materialise-only, and neither delivers a file
+# that an upgraded consumer has never received.
 #
 # Assertions:
 #   1. Every extensionless top-level share/scripts file is covered (real tap).
@@ -26,6 +31,9 @@
 #   3. An uncovered new file is named in the failure.
 #   4. Dropping a name from the sweep (mandatory-only) is a FAIL.
 #   5. A stale exemption (now covered, or file gone) is a FAIL.
+#   6. Aux-map coverage is the EXACT basename: kb-cr.sh in the map does not cover an
+#      extensionless kb-cr; an unprefixed name in the map does cover; removing a
+#      map line uncovers it.
 #
 # Read-only on the tap; fixtures live in TEST_TMP_DIR. Never touches $HOME.
 
@@ -72,49 +80,78 @@ m = re.search(r"^_xaca0673_mandatory_materialize_basenames\(\) \{\n  cat <<'EOF'
 mand = set(m.group(1).split()) if m else set()
 loops = re.findall(r'^\s*for src in ("\$scripts_source"/\*\.sh[^\n]*); do$', src, re.M)
 sweep = set(re.findall(r'"\$scripts_source"/([A-Za-z0-9_.-]+)', loops[0])) if len(loops) == 1 else set()
-a = re.search(r"^_xaca0608_aux_script_map\(\) \{\n(.*?)\n\}", src, re.S | re.M)
-aux = set(re.findall(r"\b((?:kb|aiteamforge)-[a-z0-9-]+)\b", a.group(1))) if a else set()
+# The aux map is a heredoc of "<basename>|<dest>" lines. Take the EXACT first field:
+# a prefix/regex scan would read "kb-cr" out of "kb-cr.sh" and call an extensionless
+# kb-cr covered (fail-open), and would miss any name without a kb-/aiteamforge- prefix.
+a = re.search(r"^_xaca0608_aux_script_map\(\) \{\n  cat <<'?EOF'?\n(.*?)\nEOF\n\}", src, re.S | re.M)
+aux, aux_bad = set(), []
+for line in (a.group(1).splitlines() if a else []):
+    if not line.strip():
+        continue
+    if "|" not in line:
+        aux_bad.append(line)
+        continue
+    aux.add(line.split("|", 1)[0].strip())
+x = re.search(r"^_xaca1143_aux_mandatory_materialize_basenames\(\) \{\n  cat <<'EOF'\n(.*?)\nEOF\n", src, re.S | re.M)
+aux_mand = set(x.group(1).split()) if x else set()
 
 problems = []
+if len(aux_mand) < 2:
+    problems.append("_xaca1143_aux_mandatory_materialize_basenames parsed to %d name(s) (< 2 floor)" % len(aux_mand))
+if aux_bad:
+    problems.append("_xaca0608_aux_script_map has %d line(s) without a '|' separator: %r" % (len(aux_bad), aux_bad[:3]))
 if len(mand) < 10:
     problems.append("mandatory list parsed to %d name(s) (< 10 floor)" % len(mand))
 if len(loops) != 1:
     problems.append("expected exactly 1 update_runtime_helpers sweep loop, found %d" % len(loops))
 elif len(sweep) < 5:
     problems.append("sweep loop parsed to %d explicit name(s) (< 5 floor)" % len(sweep))
-if not aux:
-    problems.append("_xaca0608_aux_script_map parsed to 0 names")
+if len(aux) < 5:
+    problems.append("_xaca0608_aux_script_map parsed to %d name(s) (< 5 floor)" % len(aux))
 if problems:
     for p in problems:
         print("     PARSE-FAIL (fail-closed): " + p, file=sys.stderr)
     sys.exit(2)
 
+bad = False
 exempt = {}
 for line in os.environ.get("EXEMPT", "").splitlines():
-    if "|" in line:
-        name, reason = line.split("|", 1)
-        exempt[name.strip()] = reason.strip()
+    if not line.strip():
+        continue
+    name, sep, reason = line.partition("|")
+    if not sep or not name.strip() or not reason.strip():
+        bad = True
+        print("     BAD-EXEMPTION: %r needs the form '<name>|<non-empty reason>'" % line, file=sys.stderr)
+        continue
+    exempt[name.strip()] = reason.strip()
+
+
+def covered(n):
+    return (n in mand and n in sweep) or (n in aux and n in aux_mand)
+
 
 names = sorted(n for n in os.listdir(scripts) if "." not in n and os.path.isfile(os.path.join(scripts, n)))
-bad = False
-counts = {"mandatory+sweep": 0, "aux map": 0, "exempt": 0}
+counts = {"mandatory+sweep": 0, "aux map+aux mandatory": 0, "exempt": 0}
 for n in names:
     if n in mand and n in sweep:
         counts["mandatory+sweep"] += 1
-    elif n in aux:
-        counts["aux map"] += 1
+    elif n in aux and n in aux_mand:
+        counts["aux map+aux mandatory"] += 1
     elif n in exempt:
         counts["exempt"] += 1
     else:
         bad = True
-        where = "mandatory only" if n in mand else "sweep only" if n in sweep else "no list"
+        have = [label for label, s in (("mandatory", mand), ("sweep", sweep), ("aux map", aux),
+                                       ("aux mandatory", aux_mand)) if n in s]
         print("     UNCOVERED: share/scripts/%s (%s) - add it to BOTH _xaca0673_mandatory_materialize_basenames "
-              "and the update_runtime_helpers sweep loop, or to EXEMPT with a reason" % (n, where), file=sys.stderr)
+              "and the update_runtime_helpers sweep loop, or to BOTH _xaca0608_aux_script_map and "
+              "_xaca1143_aux_mandatory_materialize_basenames, or to EXEMPT with a reason"
+              % (n, " + ".join(have) + " only" if have else "no list"), file=sys.stderr)
 for n in exempt:
     if n not in names:
         bad = True
         print("     STALE-EXEMPTION: '%s' no longer exists in share/scripts" % n, file=sys.stderr)
-    elif (n in mand and n in sweep) or n in aux:
+    elif covered(n):
         bad = True
         print("     STALE-EXEMPTION: '%s' now has an upgrade path - remove it from EXEMPT" % n, file=sys.stderr)
 print("     %d extensionless file(s): %s" % (len(names), ", ".join("%s %d" % kv for kv in counts.items())))
@@ -204,6 +241,59 @@ if [ "$_rc" -eq 1 ] && [[ "$_out" == *"STALE-EXEMPTION: 'kb-tap-release' now has
 else
     test_fail "expected exit 1 with a now-covered line, got rc=$_rc"
 fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TEST 6: aux-map coverage is the exact basename (table-driven)
+# ═══════════════════════════════════════════════════════════════════════════
+# case | setup (perl edit of upgrade.sh, or "touch:<name>") ... | expected rc | expected text
+_aux_case() {
+    local label="$1" expect_rc="$2" expect_txt="$3"; shift 3
+    test_start "aux map: $label"
+    local d step; d="$(fixture "aux-$(printf '%s' "$label" | tr -c 'a-z0-9' '-')")"
+    for step in "$@"; do
+        case "$step" in
+            touch:*) : > "$d/scripts/${step#touch:}" ;;
+            rm:*)    rm -f -- "$d/scripts/${step#rm:}" ;;
+            *)       perl -pi -e "$step" "$d/upgrade.sh" ;;
+        esac
+    done
+    local out rc; out="$(check "$d/upgrade.sh" "$d/scripts" 2>&1)"; rc=$?
+    if [ "$rc" -eq "$expect_rc" ] && { [ -z "$expect_txt" ] || [[ "$out" == *"$expect_txt"* ]]; }; then
+        test_pass
+    else
+        # shellcheck disable=SC2016  # the quotes are literal output, not an expansion
+        test_fail "expected rc=$expect_rc${expect_txt:+ with '$expect_txt'}, got rc=$rc"
+    fi
+}
+_aux_case "kb-cr.sh in the map does not cover an extensionless kb-cr" 1 \
+    "UNCOVERED: share/scripts/kb-cr (no list)" "touch:kb-cr"
+_aux_case "an unprefixed name in the map AND the aux mandatory list is covered" 0 "" \
+    "touch:zz-tool" 's{^kb-sync-plugins\|}{zz-tool|\$\{WORKING_DIR\}/scripts/zz-tool\nkb-sync-plugins|}' \
+    's{^kb-sync-plugins$}{kb-sync-plugins\nzz-tool}'
+_aux_case "in the aux map but NOT the aux mandatory list FAILS (refresh-only)" 1 \
+    "UNCOVERED: share/scripts/zz-tool (aux map only)" \
+    "touch:zz-tool" 's{^kb-sync-plugins\|}{zz-tool|\$\{WORKING_DIR\}/scripts/zz-tool\nkb-sync-plugins|}'
+_aux_case "in the aux mandatory list but NOT the aux map FAILS" 1 \
+    "UNCOVERED: share/scripts/kb-sync-plugins (aux mandatory only)" 's{^kb-sync-plugins\|.*\n}{}'
+_aux_case "an exempt name that is only refresh-covered (aux map only) is NOT a stale exemption" 0 "" \
+    's{^kb-sync-plugins\|}{kb-tap-release|\$\{WORKING_DIR\}/scripts/kb-tap-release\nkb-sync-plugins|}'
+_aux_case "a malformed map line (no '|') is a parse FAIL" 2 "" \
+    's{^kb-sync-plugins\|}{kb-sync-plugins }'
+_aux_case "a missing aux mandatory list is a parse FAIL" 2 "" \
+    's/^_xaca1143_aux_mandatory_materialize_basenames\(\) \{/_renamed_aux_mand() {/'
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TEST 7: exemptions need a reason
+# ═══════════════════════════════════════════════════════════════════════════
+for _bad in 'kb-tap-release|' 'kb-tap-release|   ' 'kb-tap-release' '|a reason'; do
+    test_start "exemption '$_bad' (missing name or reason) FAILS"
+    _out="$(EXEMPT="$_bad" check "$UPGRADE_SH" "$SCRIPTS_DIR" 2>&1)"; _rc=$?
+    if [ "$_rc" -eq 1 ] && [[ "$_out" == *"BAD-EXEMPTION"* ]]; then
+        test_pass
+    else
+        test_fail "expected exit 1 with BAD-EXEMPTION, got rc=$_rc"
+    fi
+done
 
 if [ "$_STANDALONE" = true ]; then
     echo ""
