@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1445 cover pending/requested prefetch; fakes serve backstop
+- Tap files updated in this publish: `fleet-monitor/server/tests/xaca-1441-dispatcher.test.js`,`fleet-monitor/server/tests/xaca-1479-ci-priority-dispatch.test.js`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1625 kb-where absolute-only kanban_utils import + tap guard for extensionless upgrade coverage
 - Tap files updated in this publish: `share/scripts/kb-where`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1607 kb-where — where every session left off and what is next

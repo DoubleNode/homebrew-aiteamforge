@@ -459,7 +459,7 @@ describe('ghost demand is bounded end to end (PR #1083)', () => {
     const httpErr = (status) => new GithubError('HTTP', `GET jobs failed: HTTP ${status}`, { status });
 
     function fakeWorld() {
-        const w = { queued: [], in_progress: [], jobs: {}, failJobs: {}, seen: new Map() };
+        const w = { queued: [], in_progress: [], pending: [], requested: [], jobs: {}, failJobs: {}, seen: new Map() };
         w.github = {
             getRateState: () => ({ mode: 'normal', resumeAt: null }),
             async conditionalGet({ path: p }) {
@@ -467,6 +467,8 @@ describe('ghost demand is bounded end to end (PR #1083)', () => {
                 if ((m = /\/actions\/runs\/(\d+)\/jobs/.exec(p)) && w.failJobs[m[1]]) throw w.failJobs[m[1]];
                 let data;
                 if ((m = /\/actions\/runs\?status=(\w+)/.exec(p))) data = { workflow_runs: w[m[1]] };
+                // XACA-1445-037 backstop: the unfiltered newest-runs page, answered with every listed run.
+                else if (/\/actions\/runs\?per_page=\d+$/.test(p)) data = { workflow_runs: [...w.queued, ...w.in_progress, ...w.pending, ...w.requested] };
                 else if ((m = /\/actions\/runs\/(\d+)\/jobs/.exec(p))) data = { jobs: w.jobs[m[1]] || [] };
                 else throw new Error(`unexpected path ${p}`);
                 const body = JSON.stringify(data);
@@ -515,6 +517,13 @@ describe('ghost demand is bounded end to end (PR #1083)', () => {
             assert.equal(g.mintsFor(101), 1, 'no further generate-jitconfig for the ghost');
         });
     }
+
+    test('XACA-1445-039/040: the fake serves the recent-runs backstop, so no cycle takes the failure branch', async () => {
+        const g = build();
+        await g.step();
+        await g.step();
+        assert.equal(g.s.watcher.snapshot().lastCycle.backstopFailed, 0);
+    });
 
     test('run parked off the lists with an unchanged body (e.g. waiting): mints capped, then retired', async () => {
         const g = build();

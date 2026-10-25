@@ -334,12 +334,14 @@ describe('005 listBranchPullLabels', () => {
 // ============================================================================
 
 function makeWorld() {
-    const world = { queued: [], in_progress: [], jobs: {}, seen: new Map() };
+    const world = { queued: [], in_progress: [], pending: [], requested: [], jobs: {}, seen: new Map() };
     world.github = {
         getRateState: () => ({ mode: 'normal', resumeAt: null }),
         async conditionalGet({ path: p }) {
             let data; let m;
             if ((m = /\/actions\/runs\?status=(\w+)/.exec(p))) data = { workflow_runs: world[m[1]] };
+            // XACA-1445-037 backstop: the unfiltered newest-runs page, answered with every listed run.
+            else if (/\/actions\/runs\?per_page=\d+$/.test(p)) data = { workflow_runs: [...world.queued, ...world.in_progress, ...world.pending, ...world.requested] };
             else if ((m = /\/actions\/runs\/(\d+)\/jobs/.exec(p))) data = { jobs: world.jobs[m[1]] || [] };
             else throw new Error(`unexpected path ${p}`);
             const body = JSON.stringify(data);
@@ -720,5 +722,36 @@ describe('007 queue() priority field (additive)', () => {
         s.d.onJob(rec(1, { priority: 'normal' }), 'queued');
         s.d.onJob(rec(1, { priority: 'critical' }), 'priority');
         assert.equal(s.d.queue()[0].priority, 'critical');
+    });
+});
+
+// XACA-1445-038: the first-sight prefetch must cover pending/requested runs, not only queued ones.
+describe('005 watcher: priority prefetch covers pending and requested runs (XACA-1445-038)', () => {
+    test('pending + requested runs are looked up CONCURRENTLY at first sight (serial would show 1 in flight)', async () => {
+        const waiting = [];
+        const resolver = (a) => new Promise((res) => { waiting.push({ a, res }); });
+        const tick = async () => { for (let i = 0; i < 20; i++) await new Promise((res) => setImmediate(res)); };
+        const s = watcherSetup(resolver);
+        s.world.pending = [wrun(1, { status: 'pending', head_branch: 'feature/p' })];
+        s.world.requested = [wrun(2, { status: 'requested', head_branch: 'feature/r' })];
+        s.world.jobs[1] = [wjob(10)]; s.world.jobs[2] = [wjob(20)];
+        const c = s.w.runCycle();
+        await tick();
+        assert.deepEqual(waiting.map((w) => w.a.branch).sort(), ['feature/p', 'feature/r'], 'both lookups are in flight at once');
+        waiting.splice(0).forEach((w) => w.res('normal'));
+        await c;
+        assert.equal(s.events.filter((e) => e.change === 'queued').length, 2);
+    });
+});
+
+// XACA-1445-039/040: this suite's fake answers the unfiltered recent-runs page, so the watcher
+// exercises the backstop instead of the non-fatal failure branch.
+describe('005 watcher: the fake serves the recent-runs backstop (XACA-1445-039/040)', () => {
+    test('a cycle reads the backstop page successfully: backstopFailed is 0', async () => {
+        const s = watcherSetup();
+        s.world.queued = [wrun(1)]; s.world.jobs[1] = [wjob(11)];
+        await s.w.runCycle();
+        assert.equal(s.w.snapshot().lastCycle.backstopFailed, 0);
+        assert.equal(s.events.filter((e) => e.change === 'queued').length, 1);
     });
 });
