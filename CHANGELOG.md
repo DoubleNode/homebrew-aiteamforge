@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1607 kb-where — where every session left off and what is next
+- Tap files updated in this publish: `share/scripts/kb-where`. Run `brew upgrade aiteamforge` to receive them.
 
 ## [0.21.7] - 2026-10-24
 - XACA-1599 per-team Claude Code plugins — manifest, kb-sync-plugins, drift check, binaries (PR-A)

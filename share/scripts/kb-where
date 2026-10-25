@@ -1,0 +1,1320 @@
+#!/usr/bin/env python3
+# ============================================================================
+# kb-where — where did every Claude window leave off, and what is next? (XACA-1607)
+# ============================================================================
+#   kb-where                 live: every Claude window on this machine, its ticket,
+#                            next step, and how to get back
+#   kb-where --next [N]      next N unstarted items per team, earliest release first
+#   kb-where --last          last saved snapshot (works with tmux dead / after reboot)
+#   kb-where --json          machine-readable (combine with any of the above)
+#   kb-where --team ID       narrow to one team (= tmux socket name)
+#   kb-where --write-snapshot [--quiet] [--writer NAME]
+#                            refresh the snapshot only (used by the Stop/SessionStart
+#                            hook claude-hooks/kb-where-refresh.sh)
+#
+# DESIGN: kanban/plans/XACA-1607/XACA-1607_decisions.md (binding). Gotchas:
+#   * One tmux server PER TEAM (`tmux -L <team>`); a bare `tmux list-panes -a`
+#     sees only one. Sockets are discovered registry-gated, never by scanning
+#     the socket dir (it is full of leaked test servers).
+#   * READ-ONLY: never writes board JSON, never send-keys, never mutates tmux.
+#     NEVER reads process environments (no `ps e`, no /proc): they carry API
+#     tokens. Only `ps -axo pid=,ppid=,command=` (argv) is used, and the
+#     snapshot stores only the session uuid and --name, never raw argv (it holds
+#     the whole --append-system-prompt persona text).
+#   * Session identity comes ONLY from the uuid in claude's argv (7 of 12 live
+#     windows share one cwd; "newest transcript in the dir" is the XACA-1074 bug).
+#   * Board `status` absent == todo (422 of 1,601 items).
+#
+# Exit codes: 0 ok; 1 usage; 2 environment (no tmux binary / no board);
+#             3 --last with no snapshot.
+# stdlib only.
+# ============================================================================
+import argparse
+import json
+import os
+import re
+import shlex
+import socket as _socket
+import stat
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+
+SCHEMA_VERSION = 1
+BOOKMARK_IDLE_S = 1800          # idle >= this => "BOOKMARK" flag
+_TMO = os.environ.get("KB_WHERE_TMUX_TIMEOUT") or "2"      # env knob: tests on a loaded box
+TMUX_TIMEOUT_S = max(1, int(_TMO)) if _TMO.isdigit() else 2
+TERMINAL = {"completed", "cancelled", "done"}
+PRIO_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+NO_DATE = "9999-99-99"
+KEEP_ARCHIVES = 20               # newest N archives by written time; the dir cannot grow past this
+ARCHIVE_REASONS = {"reboot": "before tmux restart", "drop": "before Claude windows closed or died"}
+LOCK_STALE_S = 60
+CONT_TAIL_BYTES = 64 * 1024
+CONT_FULLSCAN_CAP = 4 * 1024 * 1024
+WIDTH = 100
+
+_CLAUDE_RE = re.compile(r"^(?:\S*/)?claude(?:\s|$)")
+_UUID = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+_SID_RE = re.compile(r"--session-id[ =](" + _UUID + r")")
+_RES_RE = re.compile(r"--resume[ =](" + _UUID + r")")
+_NAME_RE = re.compile(r"--name[ =](.*?)(?= --[a-z][a-z-]*(?: |$)|$)")
+# Full id: every dash segment, ending in digits, terminated by ":", ",", whitespace or end
+# (so REL-2026-Q4-031 is never cut to REL-2026). Lowercase names do not match.
+_NAME_ID_RE = re.compile(r"^([A-Z]+(?:-[A-Z0-9]+)*-\d+)(?=[:,]|\s|$)")
+_CONTAINER_PREFIXES = ("REL-", "EPIC-")      # release / epic containers are not tickets
+_BRANCH_RE = re.compile(r"^(?:feature|bugfix|hotfix|release)/([A-Za-z0-9][A-Za-z0-9-]*)")
+_WT_DIR_RE = re.compile(r"/worktrees/([A-Za-z0-9][A-Za-z0-9-]*)")
+
+
+# ---------------------------------------------------------------- small utils
+def now_epoch():
+    return int(time.time())
+
+
+def iso_utc(epoch):
+    return datetime.fromtimestamp(epoch, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def home():
+    return os.environ.get("HOME") or os.path.expanduser("~")
+
+
+def where_dir():
+    return os.environ.get("KB_WHERE_DIR") or os.path.join(home(), ".aiteamforge", "run", "where")
+
+
+def clip(s, n):
+    s = " ".join(str(s).split())
+    return s if len(s) <= n else s[: n - 3] + "..."
+
+
+def age_str(sec):
+    if sec is None:
+        return "?"
+    sec = int(sec)
+    if sec < 90:
+        return "%ds" % sec
+    if sec < 5400:
+        return "%dm" % (sec // 60)
+    if sec < 172800:
+        return "%dh%02dm" % (sec // 3600, (sec % 3600) // 60)
+    return "%dd" % (sec // 86400)
+
+
+def safe_int(v, default=0):
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return default
+
+
+# ------------------------------------------------------------------- tmux/ps
+def find_tmux():
+    for p in ("/opt/homebrew/bin/tmux", "/usr/local/bin/tmux"):
+        if os.access(p, os.X_OK):
+            return p
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        p = os.path.join(d, "tmux")
+        if d and os.access(p, os.X_OK):
+            return p
+    return None
+
+
+def socket_dir():
+    d = os.environ.get("KB_WHERE_TMUX_SOCKET_DIR")
+    if d:
+        return d
+    base = os.environ.get("TMUX_TMPDIR") or "/tmp"
+    return os.path.join(base, "tmux-%d" % os.getuid())
+
+
+def tmux_env():
+    env = dict(os.environ)
+    env.pop("TMUX", None)
+    env.pop("TMUX_PANE", None)
+    return env
+
+
+def socket_alive_file(name):
+    try:
+        return stat.S_ISSOCK(os.stat(os.path.join(socket_dir(), name)).st_mode)
+    except OSError:
+        return False
+
+
+def marker_dir():
+    return os.environ.get("KB_RUN_MARKER_DIR") or os.path.join(
+        home(), ".aiteamforge", "run", "teams-running")
+
+
+def marker_sockets():
+    out = []
+    try:
+        names = sorted(os.listdir(marker_dir()))
+    except OSError:
+        return out
+    for fn in names:
+        if not fn.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(marker_dir(), fn)) as f:
+                d = json.load(f)
+            out.append(str(d.get("socket") or fn[:-5]))
+        except (OSError, ValueError):
+            out.append(fn[:-5])
+    return out
+
+
+def _load_kanban_utils():
+    """Import kanban_utils for the team registry / board paths (read-only)."""
+    here = os.path.dirname(os.path.realpath(__file__))
+    for base in (os.path.join(here, "..", "kanban-hooks"),
+                 os.path.join(os.environ.get("AITEAMFORGE_DIR", ""), "kanban-hooks"),
+                 os.path.join(home(), "dev-team", "kanban-hooks")):
+        if os.path.isfile(os.path.join(base, "kanban_utils.py")):
+            sys.path.insert(0, base)
+            try:
+                import kanban_utils  # noqa: PLC0415
+                return kanban_utils
+            except Exception:
+                return None
+            finally:
+                try:
+                    sys.path.remove(base)
+                except ValueError:
+                    pass
+    return None
+
+
+_KU = {"loaded": False, "mod": None}
+
+
+def kanban_utils():
+    if not _KU["loaded"]:
+        _KU["loaded"] = True
+        _KU["mod"] = _load_kanban_utils()
+    return _KU["mod"]
+
+
+def registered_teams():
+    env = os.environ.get("KB_WHERE_TEAMS")
+    if env is not None:
+        return [t for t in env.split(",") if t]
+    ku = kanban_utils()
+    if ku is not None:
+        try:
+            return sorted(ku.TEAM_KANBAN_DIRS)
+        except Exception:
+            pass
+    return []
+
+
+def board_path(team):
+    d = os.environ.get("KB_WHERE_BOARD_DIR")
+    if d:
+        return os.path.join(d, "%s-board.json" % team)
+    ku = kanban_utils()
+    if ku is not None:
+        try:
+            return ku.get_board_file(team)
+        except Exception:
+            pass
+    return os.path.join(home(), "dev-team", "kanban", "%s-board.json" % team)
+
+
+def candidate_teams():
+    """Registry-gated (+ marker) team/socket names. Never scans the socket dir."""
+    seen, out = set(), []
+    for t in marker_sockets() + registered_teams():
+        if t not in seen and re.match(r"^[A-Za-z0-9._-]+$", t):
+            seen.add(t)
+            out.append(t)
+    marked = set(marker_sockets())
+    return [t for t in out if t in marked or socket_alive_file(t)], marked
+
+
+class TmuxResult:
+    def __init__(self, state, panes=None, server=None, detail=""):
+        self.state = state          # up | down | unreachable
+        self.panes = panes or []
+        self.server = server
+        self.detail = detail
+
+
+PANE_FMT = "\t".join(["#{pane_pid}", "#{pane_id}", "#{pid}", "#{start_time}",
+                      "#{session_name}", "#{window_index}", "#{window_name}",
+                      "#{pane_current_path}"])
+
+
+def tmux_panes(tmux, sock):
+    try:
+        r = subprocess.run([tmux, "-L", sock, "list-panes", "-a", "-F", PANE_FMT],
+                           capture_output=True, text=True, timeout=TMUX_TIMEOUT_S,
+                           env=tmux_env())
+    except subprocess.TimeoutExpired:
+        return TmuxResult("unreachable", detail="tmux timed out after %ds" % TMUX_TIMEOUT_S)
+    except OSError as e:
+        return TmuxResult("unreachable", detail=str(e))
+    if r.returncode != 0:
+        err = (r.stderr or "").strip()
+        if "no server running" in err or "error connecting" in err or "No such file" in err:
+            return TmuxResult("down", detail=err)
+        return TmuxResult("unreachable", detail=err or "rc=%d" % r.returncode)
+    panes, server = [], None
+    for line in r.stdout.splitlines():
+        f = line.split("\t", 7)
+        if len(f) < 8:
+            continue
+        server = server or {"socket": sock, "pid": safe_int(f[2]), "start_epoch": safe_int(f[3])}
+        panes.append({"pane_pid": safe_int(f[0]), "pane_id": f[1], "session": f[4],
+                      "window_index": safe_int(f[5]), "window_name": f[6], "cwd": f[7]})
+    return TmuxResult("up", panes, server or {"socket": sock, "pid": 0, "start_epoch": 0})
+
+
+class Procs(dict):
+    """pid -> (ppid, command); .etime maps pid -> seconds since the process started."""
+    etime = {}
+
+
+def _etime_s(txt):
+    """ps etime "[[dd-]hh:]mm:ss" -> seconds (None if unparseable)."""
+    m = re.match(r"^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)$", txt or "")
+    if not m:
+        return None
+    dd, hh, mm, ss = (int(x or 0) for x in m.groups())
+    return ((dd * 24 + hh) * 60 + mm) * 60 + ss
+
+
+def ps_snapshot():
+    """pid -> (ppid, command). ONE ps call, argv + elapsed time only (never environment)."""
+    try:
+        r = subprocess.run(["ps", "-axww", "-o", "pid=,ppid=,etime=,command="],
+                           capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    procs, procs.etime = Procs(), {}
+    for line in r.stdout.splitlines():
+        m = re.match(r"\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$", line)
+        if m:
+            procs[int(m.group(1))] = (int(m.group(2)), m.group(4))
+            e = _etime_s(m.group(3))
+            if e is not None:
+                procs.etime[int(m.group(1))] = e
+    return procs
+
+
+def find_claude(procs, root_pid):
+    """BFS descendants of root_pid for a claude process. Returns (pid, cmd) or None."""
+    kids = {}
+    for pid, (ppid, _) in procs.items():
+        kids.setdefault(ppid, []).append(pid)
+    queue, seen = [(root_pid, 0)], {root_pid}
+    while queue and len(seen) <= 200:
+        pid, depth = queue.pop(0)
+        # root included: a pane started as `tmux new-window claude ...` IS claude
+        if pid in procs and _CLAUDE_RE.match(procs[pid][1]):
+            return pid, procs[pid][1]
+        if depth >= 6:
+            continue
+        for k in sorted(kids.get(pid, [])):
+            if k not in seen:
+                seen.add(k)
+                queue.append((k, depth + 1))
+    return None
+
+
+def parse_argv(cmd):
+    """Only uuid + name leave this function. Persona text is cut off first."""
+    head = cmd.split(" --append-system-prompt", 1)[0]
+    sid = _SID_RE.search(head)
+    res = _RES_RE.search(head)
+    nm = _NAME_RE.search(head)
+    name = nm.group(1).strip().strip("'\"") if nm else None
+    if sid:
+        return sid.group(1).lower(), "session-id", name
+    if res:
+        return res.group(1).lower(), "resume", name
+    return None, None, name
+
+
+# ---------------------------------------------------------------- transcripts
+def projects_dir():
+    return os.environ.get("KB_WHERE_CLAUDE_PROJECTS") or os.path.join(home(), ".claude", "projects")
+
+
+def cwd_slug(cwd):
+    # Confirmed rule: every non-alphanumeric char becomes '-' (dot, space, underscore too).
+    return re.sub(r"[^A-Za-z0-9]", "-", cwd)
+
+
+def find_transcript(uuid, cwd):
+    pd = projects_dir()
+    p = os.path.join(pd, cwd_slug(cwd), uuid + ".jsonl")
+    if os.path.isfile(p):
+        return p
+    try:
+        for d in os.listdir(pd):
+            q = os.path.join(pd, d, uuid + ".jsonl")
+            if os.path.isfile(q):
+                return q
+    except OSError:
+        pass
+    return None
+
+
+def continued_in(path):
+    """Successor uuid if the transcript carries a continued-in record, else None.
+    Matches the record TYPE, not the bare substring (which appears in plain text)."""
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as f:
+            if size > CONT_TAIL_BYTES:
+                f.seek(size - CONT_TAIL_BYTES)
+            data = f.read()
+            if size > CONT_TAIL_BYTES and b'"continued-in"' not in data and size <= CONT_FULLSCAN_CAP:
+                f.seek(0)
+                data = f.read()
+    except OSError:
+        return None
+    for line in reversed(data.decode("utf-8", "replace").splitlines()):
+        if '"continued-in"' not in line:
+            continue
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(d, dict) and d.get("type") == "continued-in" and d.get("continuedInSessionId"):
+            return str(d["continuedInSessionId"]).lower()
+    return None
+
+
+def is_stub(path):
+    """A transcript with no user/assistant entries in its first 256 KB."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(256 * 1024).decode("utf-8", "replace")
+    except OSError:
+        return True
+    return not re.search(r'"type"\s*:\s*"(user|assistant)"', head)
+
+
+def resolve_session(uuid, cwd, now):
+    """-> dict of transcript fields. Follows continued-in (depth<=5, cycle-guarded)."""
+    out = {"transcript": None, "transcript_state": "unknown", "successor_id": None,
+           "successor_stub": False, "last_write_epoch": None, "idle_s": None}
+    if not uuid:
+        return out
+    path = find_transcript(uuid, cwd)
+    if not path:
+        out["transcript_state"] = "missing"
+        return out
+    out["transcript"], out["transcript_state"] = path, "ok"
+    cur_path, cur_id, seen = path, uuid, {uuid}
+    for _ in range(5):
+        nxt = continued_in(cur_path)
+        if not nxt or nxt in seen:
+            break
+        seen.add(nxt)
+        npath = find_transcript(nxt, cwd)
+        out["transcript_state"], out["successor_id"] = "continued", nxt
+        if not npath:
+            break
+        if is_stub(npath):
+            out["successor_stub"] = True
+            break
+        cur_path, cur_id = npath, nxt
+        out["successor_stub"] = False
+    out["resume_id"] = cur_id if out["transcript_state"] == "continued" and not out["successor_stub"] \
+        and cur_id != uuid else uuid
+    try:
+        mt = int(os.stat(cur_path).st_mtime)
+        out["last_write_epoch"], out["idle_s"] = mt, max(0, now - mt)
+    except OSError:
+        pass
+    return out
+
+
+# --------------------------------------------------------------------- boards
+class Board:
+    def __init__(self, team):
+        self.team, self.path, self.error = team, board_path(team), None
+        self.items, self.by_id, self.releases = [], {}, {}
+        try:
+            with open(self.path) as f:           # read-only, one json.load
+                data = json.load(f)
+        except (OSError, ValueError) as e:
+            self.error = "%s: %s" % (self.path, e)
+            return
+        bl = data.get("backlog") if isinstance(data, dict) else None
+        self.items = [i for i in (bl or []) if isinstance(i, dict) and i.get("id")]
+        self.by_id = {i["id"]: i for i in self.items}
+        for r in data.get("releases") or []:
+            if isinstance(r, dict) and r.get("id"):
+                self.releases[r["id"]] = r
+
+    @staticmethod
+    def status(item):
+        return (item.get("status") or "todo")    # absent == todo (memory: board_json_absent_status)
+
+    def release_of(self, item):
+        ra = item.get("releaseAssignment")
+        rid = ra.get("releaseId") if isinstance(ra, dict) else (ra if isinstance(ra, str) else None)
+        if not rid:
+            return None
+        r = self.releases.get(rid) or {}
+        return {"id": rid, "short": r.get("shortTitle") or rid, "name": r.get("name") or None,
+                "target": r.get("targetDate") or None}
+
+    def ticket_info(self, item, via):
+        subs = [s for s in (item.get("subitems") or []) if isinstance(s, dict)]
+        open_subs = [s for s in subs if (s.get("status") or "todo") not in TERMINAL]
+        doing = next((s for s in subs if (s.get("status") or "todo") == "in_progress"), None)
+        nxt = next((s for s in open_subs if s is not doing), None)
+
+        def brief(s, blocked=False):
+            if not s:
+                return None
+            d = {"id": s.get("id"), "title": s.get("title") or "", "status": s.get("status") or "todo"}
+            if blocked and s.get("blockedReason"):
+                d["blocked_reason"] = s["blockedReason"]
+            return d
+        return {"id": item["id"], "via": via, "title": item.get("title") or "",
+                "status": self.status(item), "release": self.release_of(item),
+                "points": item.get("points"), "doing": brief(doing),
+                "next": brief(nxt, blocked=True), "open_subitems": len(open_subs)}
+
+    def _lookup(self, ident):
+        """id -> ("ticket", item) | ("release", rel) | None. A subitem id resolves to its parent."""
+        if ident in self.by_id:
+            return ("ticket", self.by_id[ident])
+        if ident in self.releases:
+            return ("release", self.releases[ident])
+        parent = ident.rsplit("-", 1)[0]
+        it = self.by_id.get(parent)
+        if it and any(isinstance(s, dict) and s.get("id") == ident for s in (it.get("subitems") or [])):
+            return ("ticket", it)
+        return None
+
+    def _longest_known(self, text):
+        """Longest dash-segment prefix of a dir/branch component that is a KNOWN id
+        (never a truncated guess: rel-2026-q4-031 must not become REL-2026)."""
+        segs = text.upper().split("-")
+        for k in range(len(segs), 1, -1):
+            hit = self._lookup("-".join(segs[:k]))
+            if hit:
+                return hit
+        return None
+
+    def _release_info(self, rel):
+        return {"id": rel["id"], "title": rel.get("name") or rel.get("title") or rel.get("shortTitle") or "",
+                "target": rel.get("targetDate") or None}
+
+    def resolve(self, name, cwd, linked=False, n_share=1):
+        """-> {"ticket", "release", "note"}. Never invents a ticket.
+        name id -> (linked worktree only) open item worktree == cwd -> /worktrees/<id> dir
+        -> (linked worktree only) branch id. A main checkout is shared by many windows
+        and its stale pointers/branch say nothing about THIS window."""
+        out = {"ticket": None, "release": None, "note": None}
+        unknown = None
+        m = _NAME_ID_RE.match(name or "")
+        if m:
+            ident = m.group(1)
+            hit = self._lookup(ident)
+            if hit and hit[0] == "ticket":
+                out["ticket"] = self.ticket_info(hit[1], "name")
+                return out
+            if hit:
+                out["release"] = self._release_info(hit[1])
+                return out
+            if not ident.startswith(_CONTAINER_PREFIXES):
+                unknown = ident
+        c = (cwd or "").rstrip("/")
+        stale = False
+        if c:
+            for it in self.items:
+                wt = (it.get("worktree") or "").rstrip("/")
+                if wt and wt == c and self.status(it) not in TERMINAL:
+                    if linked:
+                        out["ticket"] = self.ticket_info(it, "worktree")
+                        return out
+                    stale = True
+            wm = _WT_DIR_RE.search(c)
+            hit = self._longest_known(wm.group(1)) if wm else None
+            via = "worktree"
+            if not hit and linked:
+                br = git_branch(c)
+                bm = _BRANCH_RE.match(br or "")
+                hit, via = (self._longest_known(bm.group(1)), "branch") if bm else (None, None)
+            if hit and hit[0] == "ticket":
+                out["ticket"] = self.ticket_info(hit[1], via)
+                return out
+            if hit:
+                out["release"] = self._release_info(hit[1])
+                return out
+            if stale and n_share >= 2:
+                out["note"] = "(ambiguous: %d windows in %s)" % (n_share, c)
+        if unknown and not out["note"]:
+            out["note"] = "%s (not on this team's board)" % unknown
+        return out
+
+    def resolve_ticket(self, name, cwd, linked=False, n_share=1):
+        return self.resolve(name, cwd, linked, n_share)["ticket"]
+
+    def next_up(self, held, limit, today):
+        rows = []
+        for it in self.items:
+            if self.status(it) != "todo" or it.get("worktree") or it.get("startedAt"):
+                continue
+            if it["id"] in held:
+                continue
+            rel = self.release_of(it)
+            target = (rel or {}).get("target") or NO_DATE
+            prio = str(it.get("priority") or "medium").lower()
+            rows.append(((target, PRIO_RANK.get(prio, 2), safe_int(it["id"].rsplit("-", 1)[-1])), it, rel, prio))
+        rows.sort(key=lambda r: r[0])
+        out = []
+        for key, it, rel, prio in rows[:limit]:
+            tgt = (rel or {}).get("target")
+            out.append({"id": it["id"], "title": it.get("title") or "", "priority": prio,
+                        "release": (rel or {}).get("short"), "release_name": (rel or {}).get("name"),
+                        "target": tgt,
+                        "points": it.get("points"), "overdue": bool(tgt and tgt < today)})
+        return out, len(rows)
+
+    def in_progress_parents(self):
+        return {it["id"] for it in self.items for s in (it.get("subitems") or [])
+                if isinstance(s, dict) and s.get("status") == "in_progress"}
+
+    def started_no_window(self, held):
+        return [it["id"] for it in self.items
+                if self.status(it) not in TERMINAL and (it.get("worktree") or it.get("startedAt"))
+                and it["id"] not in held]
+
+
+def git_root(cwd):
+    """Nearest ancestor-or-self of cwd holding a .git (file or dir). Stops BEFORE $HOME and
+    at / (a dotfiles repo in $HOME must not claim every directory below it)."""
+    d, h = os.path.normpath(cwd or "/"), os.path.normpath(home())
+    for _ in range(40):
+        if d in (h, "/", ""):
+            return None
+        if os.path.lexists(os.path.join(d, ".git")):
+            return d
+        d = os.path.dirname(d)
+    return None
+
+
+def is_linked_worktree(cwd):
+    """True only for a real linked worktree: .git is a FILE ("gitdir: ...") that is not a
+    submodule pointer. Stats only, no subprocess (a git call per pane is slow on a loaded
+    box). Works from a SUBDIRECTORY of the worktree (walks up, stops before $HOME)."""
+    try:
+        root = git_root(cwd)
+        g = os.path.join(root, ".git") if root else None
+        if not g or not os.path.isfile(g):
+            return False
+        with open(g) as f:
+            m = re.match(r"gitdir:\s*(.+)", f.read().strip())
+        return bool(m) and "/modules/" not in m.group(1)
+    except OSError:
+        return False
+
+
+def git_branch(cwd):
+    """Current branch by reading .git/HEAD (no git subprocess, read-only)."""
+    try:
+        root = git_root(cwd)
+        if not root:
+            return None
+        g = os.path.join(root, ".git")
+        if os.path.isfile(g):
+            with open(g) as f:
+                m = re.match(r"gitdir:\s*(.+)", f.read().strip())
+            if not m:
+                return None
+            g = m.group(1)
+            if not os.path.isabs(g):
+                g = os.path.join(root, g)
+        with open(os.path.join(g, "HEAD")) as f:
+            m = re.match(r"ref: refs/heads/(.+)", f.read().strip())
+        return m.group(1) if m else None
+    except OSError:
+        return None
+
+
+def _birth(st):
+    return getattr(st, "st_birthtime", None) or st.st_mtime     # Linux: mtime (best effort)
+
+
+def successor_candidates(cwd, start_epoch, claimed):
+    """Transcripts in this cwd's project dir created at/after the process start (2 s slack for
+    etime granularity) whose uuid no other live window claims. Newest first."""
+    pd, out = os.path.join(projects_dir(), cwd_slug(cwd)), []
+    try:
+        names = os.listdir(pd)
+    except OSError:
+        return out
+    for fn in names:
+        m = re.match(r"^(" + _UUID + r")\.jsonl$", fn)
+        if not m or m.group(1).lower() in claimed:
+            continue
+        try:
+            st = os.stat(os.path.join(pd, fn))
+        except OSError:
+            continue
+        if _birth(st) >= start_epoch - 2:
+            out.append((_birth(st), m.group(1).lower()))
+    return [u for _, u in sorted(out, reverse=True)]
+
+
+def successor_hint(cwd, start_epoch, claimed, n_missing_here):
+    """Best-effort, NEVER verified. Exactly one unclaimed candidate and exactly one missing
+    window in the dir -> its uuid; anything else -> ambiguous (no guess)."""
+    hint = {"id": None, "verified": False, "ambiguous": True}
+    if start_epoch is None:
+        return hint
+    cands = successor_candidates(cwd, start_epoch, claimed)
+    if len(cands) == 1 and n_missing_here == 1:
+        hint.update(id=cands[0], ambiguous=False)
+    return hint
+
+
+# ------------------------------------------------------------------ collector
+def reopen_for(sock, sess, idx, cwd, win_claude):
+    r = {"attach": "tmux -L %s attach -t %s \\; select-window -t %d" % (
+        shlex.quote(sock), shlex.quote(sess), idx), "resume": None,
+        "socket": sock, "session": sess, "window_index": idx}
+    if win_claude and win_claude.get("session_id") and win_claude.get("transcript_state") != "missing":
+        rid = win_claude.get("resume_id") or win_claude["session_id"]
+        r["resume"] = "cd %s && ccc --resume-exact %s" % (shlex.quote(cwd), rid)
+    hint = (win_claude or {}).get("successor_hint") or {}
+    if hint.get("id"):
+        r["resume_unverified"] = "cd %s && ccc --resume-exact %s" % (shlex.quote(cwd), hint["id"])
+    return r
+
+
+def collect_team(team, tmux, procs, now, today, board_cache):
+    res = tmux_panes(tmux, team)
+    doc = {"schema_version": SCHEMA_VERSION, "team": team, "host": _socket.gethostname(),
+           "written_at": iso_utc(now), "written_epoch": now, "writer": "kb-where",
+           "state": res.state, "state_detail": res.detail,
+           "server": res.server, "windows": [], "other_panes": 0,
+           "started_no_window": [], "next_up": [], "board_error": None}
+    if res.state != "up":
+        return doc
+    board = board_cache.setdefault(team, Board(team))
+    doc["board_error"] = board.error
+    held = set()
+    ordered = sorted(res.panes, key=lambda p: (p["session"], p["window_index"], p["pane_id"]))
+    hits = {p["pane_id"]: (find_claude(procs, p["pane_pid"]) if procs else None) for p in ordered}
+    share, linked_cache = {}, {}
+    claimed, missing_in, starts = set(), {}, {}
+    for p in ordered:
+        if hits[p["pane_id"]]:
+            share[p["cwd"]] = share.get(p["cwd"], 0) + 1
+            u = parse_argv(hits[p["pane_id"]][1])[0]
+            if u:
+                claimed.add(u)
+    etimes = getattr(procs, "etime", None) or {}
+    for p in ordered:
+        hit = hits[p["pane_id"]]
+        if not hit:
+            doc["other_panes"] += 1
+            continue
+        cpid, cmd = hit
+        uuid, id_src, name = parse_argv(cmd)
+        sess = resolve_session(uuid, p["cwd"], now)
+        if sess["transcript_state"] == "missing":
+            missing_in[p["cwd"]] = missing_in.get(p["cwd"], 0) + 1
+        claude = {"pid": cpid, "session_id": uuid, "id_source": id_src, "name": name,
+                  "transcript": sess["transcript"], "transcript_state": sess["transcript_state"],
+                  "successor_id": sess["successor_id"], "successor_stub": sess["successor_stub"],
+                  "resume_id": sess.get("resume_id"),
+                  "last_write_epoch": sess["last_write_epoch"], "idle_s": sess["idle_s"]}
+        if sess["transcript_state"] == "missing":
+            et = etimes.get(cpid)
+            starts[p["pane_id"]] = None if et is None else now - et
+        res_t = {"ticket": None, "release": None, "note": None}
+        if not board.error:
+            if p["cwd"] not in linked_cache:
+                linked_cache[p["cwd"]] = is_linked_worktree(p["cwd"])
+            res_t = board.resolve(name, p["cwd"], linked_cache[p["cwd"]], share.get(p["cwd"], 1))
+        ticket = res_t["ticket"]
+        if ticket:
+            held.add(ticket["id"])
+        doc["windows"].append({
+            "key": "%s:%d" % (p["session"], p["window_index"]), "session": p["session"],
+            "window_index": p["window_index"], "window_name": p["window_name"],
+            "pane_id": p["pane_id"], "pane_pid": p["pane_pid"], "cwd": p["cwd"],
+            "claude": claude, "ticket": ticket,
+            "release_window": res_t["release"], "ticket_note": res_t["note"],
+            "reopen": reopen_for(team, p["session"], p["window_index"], p["cwd"], claude)})
+    for w in doc["windows"]:             # successor hints need the WHOLE team's claims first
+        if w["pane_id"] not in starts:
+            continue
+        c = w["claude"]
+        taken = claimed | {x for o in doc["windows"] if o is not w
+                           for x in ((o["claude"].get("successor_id")), (o["claude"].get("resume_id"))) if x}
+        c["successor_hint"] = successor_hint(w["cwd"], starts[w["pane_id"]], taken, missing_in.get(w["cwd"], 0))
+        w["reopen"] = reopen_for(team, w["session"], w["window_index"], w["cwd"], c)
+    if not board.error:
+        held |= board.in_progress_parents()
+        doc["started_no_window"] = board.started_no_window(held)
+        doc["next_up"], _ = board.next_up(held, 10, today)
+    doc["_held"] = sorted(held)
+    return doc
+
+
+def detect_teams(only):
+    cands, marked = candidate_teams()
+    if only:
+        return [only], marked
+    return cands, marked
+
+
+# ------------------------------------------------------------------- snapshot
+def _fsync_dir(d):
+    try:
+        fd = os.open(d, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
+
+
+def atomic_write(path, text):
+    """tmp in SAME dir + fsync + 0600 + os.replace + dir fsync. Cleans tmp on error."""
+    d = os.path.dirname(path)
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(d, 0o700)
+    except OSError:
+        pass
+    tmp = os.path.join(d, ".%s.tmp.%d" % (os.path.basename(path), os.getpid()))
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    _fsync_dir(d)
+
+
+def read_snapshot(path):
+    try:
+        with open(path) as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def _server_id(doc):
+    s = (doc or {}).get("server") or {}
+    return (s.get("pid"), s.get("start_epoch"))
+
+
+def _nwin(doc):
+    return len((doc or {}).get("windows") or [])
+
+
+def _archive_name(team, start, written):
+    return "%s.%d.%d.json" % (team, start, written)
+
+
+def _win_ident(w):
+    c = w.get("claude") or {}
+    return c.get("session_id") or (w.get("reopen") or {}).get("resume") or w.get("key")
+
+
+def _archive_one(team, old, reason):
+    if not old.get("windows"):
+        return                          # an empty snapshot is never archived
+    d = where_dir()
+    start = safe_int((old.get("server") or {}).get("start_epoch"))
+    written = safe_int(old.get("written_epoch"), now_epoch())
+    body = dict(old, archive_reason=reason, archived_epoch=now_epoch())
+    body.pop("peak", None)              # round-3 high-water field; legacy snapshots may carry it
+    path = os.path.join(d, _archive_name(team, start, written))
+    while os.path.exists(path):
+        prior = read_snapshot(path)
+        if prior and prior.get("written_epoch") == old.get("written_epoch") \
+                and prior.get("windows") == old.get("windows"):
+            return                      # this exact record is already archived (retry after a crash)
+        written += 1                    # same name, DIFFERENT record: never overwrite
+        path = os.path.join(d, _archive_name(team, start, written))
+    atomic_write(path, json.dumps(body, indent=1) + "\n")
+
+
+def archive_generations(team, old, new_doc):
+    """Keep the record before it is lost. The outgoing snapshot is archived as
+    <team>.<server_start>.<written_epoch>.json (unique name, reason field) whenever the
+    incoming one (a) belongs to a different tmux server ("reboot"), or (b) is missing ANY
+    window identity (claude session id) the outgoing one had ("drop": a window closed or
+    claude died, tmux alive). Identity, not count (XACA-1607-023): counting rules missed
+    gradual loss, windows born after a peak, and like-for-like replacement. Because every
+    loss archives, the outgoing snapshot always holds everything seen since the last
+    archive, so no extra state is carried. Recency decides what is kept; an empty
+    snapshot is never archived. Retention: newest KEEP_ARCHIVES by written time, plus the
+    newest "reboot" archive, which is never rotated out (XACA-1607-024)."""
+    if not old:
+        return
+    if _server_id(old) != _server_id(new_doc):
+        reason = "reboot"
+    elif {_win_ident(w) for w in old.get("windows") or []} - {_win_ident(w) for w in new_doc.get("windows") or []}:
+        reason = "drop"
+    else:
+        return
+    _archive_one(team, old, reason)
+    d = where_dir()
+    pinned = newest_reboot_archive(team)
+    for _, fn in generation_files(team)[KEEP_ARCHIVES:]:
+        if fn == pinned:
+            continue                    # XACA-1607-024: post-reboot churn never rotates out the pre-reboot set
+        try:
+            os.unlink(os.path.join(d, fn))
+        except OSError:
+            pass
+
+
+def newest_reboot_archive(team):
+    """Filename of the newest archive with archive_reason == "reboot" (holding windows), or None."""
+    for _, fn in generation_files(team):
+        p = read_snapshot(os.path.join(where_dir(), fn))
+        if p and p.get("archive_reason") == "reboot" and _nwin(p) > 0:
+            return fn
+    return None
+
+
+def generation_files(team):
+    """Archives, newest first: [(written_epoch, filename)]. Pre-round-2 files named
+    <team>.<start>.json sort by their start epoch (older than any new-style archive)."""
+    out = []
+    try:
+        for fn in os.listdir(where_dir()):
+            m = re.match(r"^" + re.escape(team) + r"\.(\d+)(?:\.(\d+))?\.json$", fn)
+            if m:
+                out.append((int(m.group(2) or m.group(1)), fn))
+    except OSError:
+        pass
+    return sorted(out, reverse=True)
+
+
+def take_lock(team):
+    d = where_dir()
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    lock = os.path.join(d, ".%s.lock" % team)
+    for _ in range(2):
+        try:
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            os.close(fd)
+            return lock
+        except FileExistsError:
+            try:
+                if time.time() - os.stat(lock).st_mtime > LOCK_STALE_S:
+                    os.unlink(lock)
+                    continue
+            except OSError:
+                pass
+            return None
+        except OSError:
+            return None
+    return None
+
+
+def write_snapshot(doc, writer):
+    team = doc["team"]
+    lock = take_lock(team)
+    if not lock:
+        return False
+    try:
+        d = where_dir()
+        public = {k: v for k, v in doc.items() if not k.startswith("_")}
+        public["writer"] = writer
+        archive_generations(team, read_snapshot(os.path.join(d, team + ".json")), public)
+        atomic_write(os.path.join(d, team + ".json"), json.dumps(public, indent=1) + "\n")
+        atomic_write(os.path.join(d, team + ".md"),
+                     "# kb-where snapshot: %s\n\n```\n%s\n```\n" % (team, render_team(public, last=True)))
+        return True
+    finally:
+        try:
+            os.unlink(lock)
+        except OSError:
+            pass
+
+
+# ------------------------------------------------------------------ rendering
+def release_label(short, name, target):
+    """ONE release label for every view: "R01 (Space Dock) 11-06"; degrades to what exists."""
+    parts = [short or name or "no-release"]
+    if name and short and name != short:
+        parts.append("(%s)" % name)
+    if target:
+        parts.append(target[5:])
+    return " ".join(parts)
+
+
+def go_attach(ro):
+    """The attach hint for the CURRENT shell. Inside tmux, `tmux attach` is refused
+    ("sessions should be nested with care"), so the same server gets switch-client."""
+    att = ro.get("attach")
+    sock, sess, idx = ro.get("socket"), ro.get("session"), ro.get("window_index")
+    tm = os.environ.get("TMUX")
+    if not tm or not att or sock is None or sess is None or idx is None:
+        return [att]
+    if os.path.basename(tm.split(",")[0]) == sock:
+        return ["tmux switch-client -t %s" % shlex.quote("%s:%d" % (sess, idx))]
+    return [att + "   (detach first: prefix d)"]
+
+
+def render_window(w, last=False, live=True):
+    c, t = w.get("claude") or {}, w.get("ticket")
+    idle = c.get("idle_s")
+    flags = []
+    if idle is not None and idle >= BOOKMARK_IDLE_S:
+        flags.append("BOOKMARK (idle bookmark, no recent work)")
+    if t and t.get("status") in TERMINAL:
+        flags.append("TICKET %s - safe to close" % t["status"].upper())
+    head = "%s  (%s)  idle %s" % (w["key"], w.get("window_name") or "", age_str(idle))
+    lines = [head]
+    if t:
+        rel = t.get("release")
+        relstr = " " + (release_label(rel["short"], rel.get("name"), rel.get("target")) if rel else "no-release")
+        lines.append("  %s  %s" % (t["id"], clip(t["title"], WIDTH - 14)))
+        stat = t["status"]
+        if stat == "todo" and t.get("doing"):
+            stat = "todo, board"        # board status lags the work: a doing: subitem is in flight
+        lines.append("  [%s]%s" % (stat, relstr))
+        if t.get("doing"):
+            lines.append("  doing: %s %s" % (t["doing"]["id"], clip(t["doing"]["title"], WIDTH - 24)))
+        if t.get("next"):
+            n = t["next"]
+            extra = "  BLOCKED: %s" % clip(n["blocked_reason"], 40) if n.get("blocked_reason") else ""
+            lines.append("  next:  %s %s%s" % (n["id"], clip(n["title"], WIDTH - 24), extra))
+        elif not t.get("doing"):
+            lines.append("  next:  (no open subitems)")
+    elif w.get("release_window"):
+        r = w["release_window"]
+        lines.append("  release %s: %s" % (r["id"], clip(r.get("title") or "", WIDTH - 20 - len(r["id"]))))
+        if r.get("target"):
+            lines.append("  target %s" % r["target"])
+    else:
+        nm = c.get("name")
+        lines.append("  (no ticket)%s" % ("  " + clip(nm, WIDTH - 20) if nm else ""))
+        if w.get("ticket_note"):
+            lines.append("  %s" % clip(w["ticket_note"], WIDTH - 4))
+    if c.get("session_id") is None:
+        lines.append("  session: id unknown (no --session-id/--resume in argv)")
+    elif c.get("transcript_state") == "missing":
+        lines.append("  session: %s - NO TRANSCRIPT FOUND, cannot resume" % c["session_id"][:8])
+        sh = c.get("successor_hint")
+        if sh and sh.get("id"):
+            lines.append("  likely successor: %s (unverified)" % sh["id"])
+        elif sh:
+            lines.append("  (no unambiguous successor)")
+    if c.get("transcript_state") == "continued":
+        lines.append("  session continued in %s%s" % ((c.get("successor_id") or "?")[:8],
+                     " (stub: resume the original)" if c.get("successor_stub") else ""))
+    if flags:
+        lines.append("  ** " + " | ".join(flags))
+    ro = w.get("reopen") or {}
+    if live and ro.get("attach"):
+        lines.append("  go:    " + go_attach(ro)[0])
+    elif ro.get("resume"):
+        lines.append("  go:    " + ro["resume"])
+    if ro.get("resume_unverified") and (last or not live):
+        lines.append("  go?:   %s   (UNVERIFIED successor guess)" % ro["resume_unverified"])
+    elif not live and ro.get("attach") is not None and not ro.get("resume"):
+        lines.append("  go:    (no resume id - open a fresh window in %s)" % w.get("cwd"))
+    return lines
+
+
+def render_next(rows, indent="  "):
+    out = []
+    for r in rows:
+        rel = release_label(r.get("release"), r.get("release_name"), r.get("target")) if r.get("release") else "no-release"
+        flag = " OVERDUE" if r.get("overdue") else ""
+        pts = ("%sh" % r["points"]) if r.get("points") is not None else "?h"
+        out.append("%s%-10s %-8s %-4s %s%s" % (indent, r["id"], r["priority"].upper()[:8], pts,
+                                               clip(r["title"], WIDTH - 40), ""))
+        out.append("%s%12s%s%s" % (indent, "", rel, flag))
+    return out
+
+
+def render_team(doc, last=False, live=True, next_n=3):
+    team, wins = doc["team"], doc.get("windows") or []
+    srv = doc.get("server") or {}
+    lines = []
+    if last:
+        lines.append("== %s  snapshot %s  (%s)  %d Claude window(s)" % (
+            team, doc.get("written_at", "?"), doc.get("writer", "?"), len(wins)))
+    else:
+        lines.append("== %s  tmux -L %s  %d Claude window(s), %d other pane(s)" % (
+            team, team, len(wins), doc.get("other_panes", 0)))
+    if doc.get("board_error"):
+        lines.append("  !! board unreadable - tickets NOT resolved (%s)" % clip(doc["board_error"], 70))
+    lines.append("")
+    for w in wins:
+        lines.extend(render_window(w, last=last, live=live))
+        lines.append("")
+    if not wins:
+        lines.append("  (no Claude windows)")
+        lines.append("")
+    if doc.get("started_no_window"):
+        s = doc["started_no_window"]
+        lines.append("  STARTED, NO WINDOW (%d): %s%s" % (len(s), ", ".join(s[:8]), " ..." if len(s) > 8 else ""))
+        lines.append("")
+    nu = (doc.get("next_up") or [])[:next_n]
+    if nu:
+        lines.append("  NEXT UP")
+        lines.extend(render_next(nu))
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def banner(docs, title):
+    nw = sum(len(d.get("windows") or []) for d in docs)
+    return "%s   %s   %d team(s), %d Claude window(s)\n" % (
+        title, datetime.now().strftime("%Y-%m-%d %H:%M"), len(docs), nw)
+
+
+# ----------------------------------------------------------------------- main
+def run_live(args):
+    tmux = find_tmux()
+    if not tmux:
+        print("kb-where: tmux not found (probed /opt/homebrew/bin, /usr/local/bin, PATH)", file=sys.stderr)
+        return 2, []
+    teams, marked = detect_teams(args.team)
+    procs = ps_snapshot()
+    if not procs:      # None (ps failed) AND {} (empty/unparsable): an empty map would silently
+        # turn every window into an "other pane" and snapshot an empty world
+        print("kb-where: process listing failed or was empty; cannot find Claude processes", file=sys.stderr)
+        return 2, []
+    now = now_epoch()
+    today = datetime.fromtimestamp(now).strftime("%Y-%m-%d")
+    cache, docs = {}, []
+    for t in teams:
+        docs.append(collect_team(t, tmux, procs, now, today, cache))
+    return 0, docs, marked, cache, now, today
+
+
+def cmd_live(args):
+    r = run_live(args)
+    if r[0]:
+        return r[0]
+    _, docs, marked, cache, now, today = r
+    up = [d for d in docs if d["state"] == "up"]
+    bad = [d for d in docs if d["state"] != "up"]
+    if args.write_snapshot:
+        for d in up:
+            try:
+                write_snapshot(d, args.writer)
+            except OSError as e:
+                if not args.quiet:
+                    print("kb-where: snapshot write failed for %s: %s" % (d["team"], e), file=sys.stderr)
+        return 0
+    if args.team and not up:
+        found = [t for t in candidate_teams()[0] if socket_alive_file(t)]
+        print("kb-where: no tmux server for team %s (teams found: %s)" % (
+            args.team, ", ".join(found) or "none"), file=sys.stderr)
+        return 1
+    if args.json:
+        out = {"schema_version": SCHEMA_VERSION, "generated_epoch": now, "teams": [
+            {k: v for k, v in d.items() if not k.startswith("_")} for d in docs]}
+        print(json.dumps(out, indent=1))
+    else:
+        sys.stdout.write(banner(up, "KB-WHERE"))
+        sys.stdout.write("\n")
+        for d in up:
+            sys.stdout.write(render_team(d))
+            sys.stdout.write("\n")
+        for d in bad:
+            if d["team"] in marked or d["state"] == "unreachable":
+                sys.stdout.write("!! %s: tmux %s%s - its windows are NOT listed\n" % (
+                    d["team"], d["state"], " (" + clip(d["state_detail"], 60) + ")" if d["state_detail"] else ""))
+        if not up:
+            sys.stdout.write("No live tmux servers found. After a reboot run: kb-where --last\n")
+    for d in up:               # every live run keeps the snapshot fresh (plan: "every run writes")
+        try:
+            write_snapshot(d, "kb-where")
+        except OSError as e:
+            print("kb-where: snapshot not written for %s: %s" % (d["team"], e), file=sys.stderr)
+    return 0
+
+
+def next_teams(args):
+    if args.team:
+        return [args.team]
+    cands, marked = candidate_teams()
+    if cands:
+        return cands
+    for guess in (os.environ.get("KB_TEAM"), "academy"):
+        if guess:
+            return [guess]
+    return ["academy"]
+
+
+def cmd_next(args):
+    n = args.next if args.next else 10
+    now = now_epoch()
+    today = datetime.fromtimestamp(now).strftime("%Y-%m-%d")
+    tmux, procs = find_tmux(), None
+    result = []
+    for team in next_teams(args):
+        board = Board(team)
+        if board.error:
+            result.append({"team": team, "error": board.error, "next_up": [], "total": 0})
+            continue
+        held, live_known = set(), False
+        if tmux:
+            procs = procs if procs is not None else ps_snapshot()
+            doc = collect_team(team, tmux, procs or {}, now, today, {team: board}) if procs else None
+            if doc and doc["state"] == "up":
+                held, live_known = set(doc.get("_held") or []), True
+        held |= board.in_progress_parents()
+        rows, total = board.next_up(held, n, today)
+        result.append({"team": team, "next_up": rows, "total": total, "live_windows_known": live_known})
+    if args.json:
+        print(json.dumps({"schema_version": SCHEMA_VERSION, "teams": result}, indent=1))
+        return 0
+    for r in result:
+        if r.get("error"):
+            print("== %s  !! board unreadable (%s)" % (r["team"], clip(r["error"], 70)))
+            continue
+        print("== %s  next %d of %d unstarted (earliest release target first)%s" % (
+            r["team"], len(r["next_up"]), r["total"],
+            "" if r["live_windows_known"] else "   [no live tmux: windows not excluded]"))
+        out = render_next(r["next_up"])
+        print("\n".join(out) if out else "  (nothing unstarted)")
+        print()
+    return 0
+
+
+def load_snapshots(only):
+    d, docs = where_dir(), []
+    try:
+        names = sorted(os.listdir(d))
+    except OSError:
+        return docs
+    for fn in names:
+        m = re.match(r"^([A-Za-z0-9_-]+(?:\.[A-Za-z][A-Za-z0-9_-]*)*)\.json$", fn)
+        if not m or re.search(r"\.\d+(?:\.\d+)?\.json$", fn):
+            continue
+        if only and m.group(1) != only:
+            continue
+        doc = read_snapshot(os.path.join(d, fn))
+        if doc and doc.get("schema_version", 0) >= 1:
+            docs.append(doc)
+    return docs
+
+
+def server_is_current(doc):
+    tmux = find_tmux()
+    s = doc.get("server") or {}
+    if not tmux or not s.get("socket"):
+        return False
+    try:
+        r = subprocess.run([tmux, "-L", s["socket"], "display-message", "-p", "#{pid} #{start_time}"],
+                           capture_output=True, text=True, timeout=TMUX_TIMEOUT_S, env=tmux_env())
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return r.returncode == 0 and r.stdout.split() == [str(s.get("pid")), str(s.get("start_epoch"))]
+
+
+def cmd_last(args):
+    docs = load_snapshots(args.team)
+    if not docs:
+        print("kb-where: no snapshot found in %s%s. Nothing has been saved yet on this machine "
+              "(a snapshot is written by every `kb-where` run and by the Stop/SessionStart hook)." % (
+                  where_dir(), " for team " + args.team if args.team else ""), file=sys.stderr)
+        return 3
+    if args.json:
+        gens = {d["team"]: [{"written_epoch": w, "file": fn} for w, fn in generation_files(d["team"])]
+                for d in docs}
+        print(json.dumps({"schema_version": SCHEMA_VERSION, "snapshots": docs, "previous_generations": gens}, indent=1))
+        return 0
+    sys.stdout.write("KB-WHERE --last   (saved state, not live)\n\n")
+    for d in docs:
+        live = server_is_current(d)
+        age = now_epoch() - safe_int(d.get("written_epoch"), now_epoch())
+        sys.stdout.write("snapshot is %s old; tmux server %s\n" % (
+            age_str(age), "is STILL the same one (use the tmux lines)" if live
+            else "is GONE or restarted (use the 'cd ... && ccc --resume-exact' lines)"))
+        sys.stdout.write(render_team(d, last=True, live=live, next_n=5))
+        arch = [(fn, read_snapshot(os.path.join(where_dir(), fn))) for _, fn in generation_files(d["team"])]
+        arch = [(fn, p) for fn, p in arch if _nwin(p) > 0]          # only archives that hold windows
+        if arch:
+            # XACA-1607-024/025: the newest loss leads (recency); the pinned pre-reboot set always
+            # gets its own block too, so routine closes after a restart cannot bury it. Each
+            # block states its age so a weeks-old set is never mistaken for today's.
+            reboot = [(fn, p) for fn, p in arch if p.get("archive_reason") == "reboot"][:1]
+            shown = arch[:1] + [a for a in reboot if a not in arch[:1]]
+            for i, (fn0, prev) in enumerate(shown):
+                why = ARCHIVE_REASONS.get(prev.get("archive_reason"), "earlier saved state")
+                head = "WHAT YOU LOST" if i == 0 else "EARLIER, BEFORE THE LAST TMUX RESTART"
+                age = now_epoch() - safe_int(prev.get("written_epoch"), now_epoch())
+                sys.stdout.write("\n  %s (%s): saved %s (%s ago), %d window(s)\n" % (
+                    head, why, prev.get("written_at", "?"), age_str(age), _nwin(prev)))
+                sys.stdout.write(render_team(prev, last=True, live=False, next_n=0))
+            rest = [a for a in arch if a not in shown]
+            if rest:
+                sys.stdout.write("  + %d older archive(s) in %s\n" % (len(rest), where_dir()))
+                for fn, p in rest[:3]:
+                    sys.stdout.write("    older: %s  %d window(s)  %s  (%s)\n" % (
+                        p.get("written_at", "?"), _nwin(p),
+                        ARCHIVE_REASONS.get(p.get("archive_reason"), "earlier saved state"),
+                        os.path.join(where_dir(), fn)))
+        sys.stdout.write("\n")
+    return 0
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="kb-where", description="Where did every Claude window leave off, and what is next?")
+    ap.add_argument("--next", nargs="?", const=10, type=int, metavar="N",
+                    help="next N unstarted items per team (default 10), earliest release target first")
+    ap.add_argument("--last", action="store_true", help="show the last saved snapshot (no tmux needed)")
+    ap.add_argument("--json", action="store_true", help="machine-readable output")
+    ap.add_argument("--team", metavar="ID", help="narrow to one team (tmux socket name)")
+    ap.add_argument("--write-snapshot", action="store_true", help="refresh the snapshot only (hook mode)")
+    ap.add_argument("--quiet", action="store_true", help="suppress warnings (hook mode)")
+    ap.add_argument("--writer", default="kb-where", help=argparse.SUPPRESS)
+    try:
+        args = ap.parse_args(argv)
+    except SystemExit as e:
+        return 1 if e.code else 0
+    if args.team and not re.match(r"^[A-Za-z0-9._-]+$", args.team):
+        print("kb-where: bad --team value", file=sys.stderr)
+        return 1
+    if args.next is not None and args.next < 1:
+        print("kb-where: --next N must be >= 1", file=sys.stderr)
+        return 1
+    if args.last and (args.next is not None or args.write_snapshot):
+        print("kb-where: --last cannot be combined with --next/--write-snapshot", file=sys.stderr)
+        return 1
+    if args.write_snapshot and not args.team:
+        sock = (os.environ.get("TMUX") or "").split(",")[0]
+        if sock:
+            args.team = os.path.basename(sock)
+    try:
+        if args.last:
+            return cmd_last(args)
+        if args.next is not None:
+            return cmd_next(args)
+        return cmd_live(args)
+    except BrokenPipeError:
+        return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
