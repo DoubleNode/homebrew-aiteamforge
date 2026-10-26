@@ -421,16 +421,19 @@ if [[ "$_XACA1237_SKIP_PORT" != "true" ]]; then
     # other case (absent, None, 0, negative) falls through to allocate as before.
     _xaca0463_existing_port=""
     if [[ -f "$_xaca0463_team_paths" ]]; then
+        # XACA-1237: the -c body stays at column 0 even though this block is now
+        # indented: python3 < 3.14 rejects an indented body (IndentationError,
+        # hidden by 2>/dev/null || true), which silently disables this reuse guard.
         _xaca0463_existing_port=$(python3 -c "
-    import json, sys
-    try:
-        d = json.load(open('$_xaca0463_team_paths'))
-        p = d.get('teams', {}).get('$INSTANCE_ID', {}).get('lcars_port')
-        if p and int(p) > 0:
-            print(int(p))
-    except Exception:
-        pass
-    " 2>/dev/null || true)
+import json, sys
+try:
+    d = json.load(open('$_xaca0463_team_paths'))
+    p = d.get('teams', {}).get('$INSTANCE_ID', {}).get('lcars_port')
+    if p and int(p) > 0:
+        print(int(p))
+except Exception:
+    pass
+" 2>/dev/null || true)
     fi
     if [[ -n "$_xaca0463_existing_port" ]]; then
         TEAM_LCARS_PORT="$_xaca0463_existing_port"

@@ -24,6 +24,9 @@
 #      with a numeric port.
 #   D  static ordering: AS exit after XACA-0485 + XACA-0498; full install still
 #      calls _ensure_org_config / prints the banner under the render-only gate.
+#   E  CO reuses an existing lcars_port (XACA-0626 guard still works inside
+#      the gated block, incl. on python3 < 3.14); static column-0 check on
+#      every multi-line `python3 -c` body.
 #
 # NO-TTY: every installer run goes through a fork+os.setsid() wrapper so
 # /dev/tty is genuinely unavailable (a plain setsid fails with EPERM when the
@@ -327,6 +330,44 @@ if [ -n "$D_BANNER_LINE" ] \
     test_pass
 else
     test_fail "banner at L${D_BANNER_LINE:-none} has no _XACA1237_RENDER_ONLY gate within 6 lines above it"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CASE E — the XACA-0626 existing-port reuse guard survives the gating.
+# Wrapping the port block in an `if` re-indented its `python3 -c "..."` body;
+# python3 < 3.14 rejects an indented body (IndentationError, swallowed by
+# `2>/dev/null || true`), so the reuse lookup came back empty and --connect-only
+# re-allocated: +1 port drift (PR #1222 review). Python 3.14 dedents -c bodies,
+# so a 3.14-only machine cannot see this; E1 is version-independent and E2
+# prefers a pre-3.14 python3 when one is on the box (CI's is pre-3.14).
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "E1: every multi-line 'python3 -c \"' body in the installer starts at column 0"
+E_INDENTED=$(awk '/python3? -c "$/ {getline nx; if (nx ~ /^[ \t]/) print NR+1": "nx}' "$INSTALLER")
+if [ -z "$E_INDENTED" ]; then test_pass; else test_fail "indented -c body (IndentationError on python3 < 3.14): $E_INDENTED"; fi
+
+_new_case case-e
+E_PREFIX="$TEST_TMP_DIR/run-case-e"
+E_PORT=8387   # in spacedock's band but NOT what the allocator picks on this fixture (8380)
+printf '{"schema_version": 2, "teams": {"spacedock": {"lcars_port": %s}}}\n' "$E_PORT" > "$CASE_CFG"
+E_SHIM="$TEST_TMP_DIR/case-e/py-shim"
+mkdir -p "$E_SHIM"
+E_PYVER=""
+if [ -x /usr/bin/python3 ] && /usr/bin/python3 -c 'import sys; sys.exit(0 if sys.version_info < (3, 14) else 1)' 2>/dev/null; then
+    ln -s /usr/bin/python3 "$E_SHIM/python3"
+    E_PYVER="$(/usr/bin/python3 --version 2>&1)"
+fi
+E_SAVED_PATH="$PATH"
+PATH="$E_SHIM:$PATH"
+_run_installer "$E_PREFIX" spacedock --connect-only
+PATH="$E_SAVED_PATH"
+
+test_start "E2: --connect-only REUSES an existing lcars_port ($E_PORT) instead of re-allocating (python: ${E_PYVER:-default python3})"
+E_CONNECT="$CASE_ATF/spacedock-connect.sh"
+if [ "$RUN_EXIT" -eq 0 ] && grep -q "reusing existing port $E_PORT" "$E_PREFIX.all" \
+   && grep -q "^LCARS_PORT=\"$E_PORT\"" "$E_CONNECT" 2>/dev/null; then
+    test_pass
+else
+    test_fail "connect LCARS_PORT=$(grep -m1 '^LCARS_PORT=' "$E_CONNECT" 2>/dev/null) — $(_diag "$E_PREFIX")"
 fi
 
 if $_STANDALONE; then
