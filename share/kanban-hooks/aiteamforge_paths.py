@@ -309,6 +309,20 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "lcars_port_base": 8200,
         "lcars_port_range": 10,
         "lcars_port": 8203,
+        # XACA-1644: arms kb-release-version-gate for platform "other". Without
+        # it the gate SKIPS for academy ("no version_source configured").
+        # Materialized into every machine's overlay by seed convergence
+        # (XACA-1161-003), since the shell gate reads the overlay only.
+        "version_sources": [
+            {
+                "platform": "other",
+                "file": "VERSION",
+                "match_pattern": "{version}",
+                "write_pattern": "{version}",
+                "encoding": "utf-8",
+                "replace_all": False,
+            }
+        ],
     },
     "ios": {
         "team_code": "IOS",
