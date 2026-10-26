@@ -504,7 +504,10 @@ else
 fi
 
 if [ "${AGENT_SCRIPTS_ONLY_PRESENT:-0}" -ge 1 ]; then
-    C_EXIT_LINE=$(grep -n 'AGENT_SCRIPTS_ONLY.*==.*true' "$INSTALL_TEAM" | head -1 | cut -d: -f1)
+    # XACA-1237: anchor on the real exit statement, not the first loose match, so
+    # an added "$AGENT_SCRIPTS_ONLY" test earlier in the file cannot silently
+    # weaken this safety preflight.
+    C_EXIT_LINE=$(grep -n '^if \[\[ "\$AGENT_SCRIPTS_ONLY" == "true" \]\]; then' "$INSTALL_TEAM" | head -1 | cut -d: -f1)
     C_BREW_LINE=$(grep -n '^\s*brew install ' "$INSTALL_TEAM" | head -1 | cut -d: -f1)
     test_start "C preflight: --agent-scripts-only branch precedes any 'brew install' call (safety precondition)"
     if [ -n "$C_EXIT_LINE" ] && [ -n "$C_BREW_LINE" ] && [ "$C_EXIT_LINE" -lt "$C_BREW_LINE" ]; then

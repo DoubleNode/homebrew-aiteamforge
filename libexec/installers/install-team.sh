@@ -376,79 +376,100 @@ _is_parametric_team() {
 }
 
 # ============================================================================
-# XACA-0463: Per-instance LCARS port allocation (team-id-contract §4.1)
+# XACA-1237: Render-only modes must not behave like a full install
 # ============================================================================
-# Call the pure allocator from aiteamforge-paths.sh (sourced above).
-# The allocator scans team-paths.json for all used ports in the template's band
-# and returns the lowest free port on stdout.  It does NOT mutate team-paths.json;
-# the writer below (WRITE BACK section, after the connect-only early exit) is
-# responsible for persisting the resolved port for this instance.
-#
-# $TEAM_LCARS_PORT is overwritten here from the conf-file-read value (template
-# default) to the per-instance allocated value.  All downstream consumers
-# (sed substitutions in connect/disconnect/startup templates, the lcars-ports
-# directory writer, and the agent port derivation at AGENT_PORT=$((TEAM_LCARS_PORT+n)))
-# pick up the correct instance port automatically because they all reference the
-# same variable.
-_xaca0463_team_paths="${AITEAMFORGE_CONFIG:-$HOME/.aiteamforge/team-paths.json}"
-# XACA-0626: Self-collision guard — if this INSTANCE_ID already has a valid
-# (positive integer) lcars_port in team-paths.json, REUSE it instead of calling
-# the allocator. The allocator's used-port scan includes ALL in-band entries,
-# so a re-install of an already-provisioned instance would see its own port as
-# "used" and allocate the next one (+1 drift). Short-circuiting on an existing
-# valid port prevents the self-collision while leaving new installs unaffected.
-# Conservative: only short-circuits when a positive-int port is found; any
-# other case (absent, None, 0, negative) falls through to allocate as before.
-_xaca0463_existing_port=""
-if [[ -f "$_xaca0463_team_paths" ]]; then
-    _xaca0463_existing_port=$(python3 -c "
-import json, sys
-try:
-    d = json.load(open('$_xaca0463_team_paths'))
-    p = d.get('teams', {}).get('$INSTANCE_ID', {}).get('lcars_port')
-    if p and int(p) > 0:
-        print(int(p))
-except Exception:
-    pass
-" 2>/dev/null || true)
-fi
-if [[ -n "$_xaca0463_existing_port" ]]; then
-    TEAM_LCARS_PORT="$_xaca0463_existing_port"
-    unset _xaca0463_existing_port
-    echo "  ✓ XACA-0626: reusing existing port $TEAM_LCARS_PORT for instance $INSTANCE_ID (prevents self-collision on re-install)"
-elif command -v aiteamforge_compute_instance_port >/dev/null 2>&1; then
-    unset _xaca0463_existing_port
-    _xaca0463_allocated=""
-    # XACA-1206: capture STDOUT ONLY. The allocator's contract is "stdout: the
-    # port; stderr: diagnostics". This used to be `2>&1`, which folded any stderr
-    # line into the port value — measured on a schema_version 3 consumer, the
-    # accessor's "[aiteamforge-paths] WARNING: schema_version=3 unsupported"
-    # became part of TEAM_LCARS_PORT and the startup-script sed died with
-    # "unescaped newline inside substitute pattern". stderr now reaches the
-    # terminal directly, where it is still visible on failure.
-    if ! _xaca0463_allocated=$(aiteamforge_compute_instance_port "$TEAM_ID" "$_xaca0463_team_paths"); then
-        echo "❌ XACA-0463 port allocator failed for template '$TEAM_ID' (see the message above)." >&2
-        echo "   See docs/architecture/team-id-contract.md §4.1 (Port allocation rule)." >&2
+# --connect-only and --agent-scripts-only only RENDER scripts. They are re-run
+# non-interactively (`aiteamforge upgrade` backfill/refresh sweeps, setup piping
+# through sed), so they must never prompt, never write organization.yaml, and
+# never print the full-install banner: _ensure_org_config prompts on /dev/tty
+# and does `return 1` with no tty, which kills the installer under set -e.
+# --agent-scripts-only also skips port allocation (its renderer reads no
+# TEAM_LCARS_PORT, so an allocator failure must not abort an upgrade backfill);
+# --connect-only still needs the port for the connect templates.
+# Uses `case` rather than a [[ ... == ... ]] test on the agent-scripts flag:
+# test-xaca-1215 Case C locates the real exit with a first-match grep on that shape.
+_XACA1237_RENDER_ONLY=false
+_XACA1237_SKIP_PORT=false
+case "$CONNECT_ONLY:$AGENT_SCRIPTS_ONLY" in *true*) _XACA1237_RENDER_ONLY=true ;; esac
+case "$AGENT_SCRIPTS_ONLY" in true) _XACA1237_SKIP_PORT=true ;; esac
+
+# XACA-1237: skipped for --agent-scripts-only (renderer reads no TEAM_LCARS_PORT)
+if [[ "$_XACA1237_SKIP_PORT" != "true" ]]; then
+    # ============================================================================
+    # XACA-0463: Per-instance LCARS port allocation (team-id-contract §4.1)
+    # ============================================================================
+    # Call the pure allocator from aiteamforge-paths.sh (sourced above).
+    # The allocator scans team-paths.json for all used ports in the template's band
+    # and returns the lowest free port on stdout.  It does NOT mutate team-paths.json;
+    # the writer below (WRITE BACK section, after the connect-only early exit) is
+    # responsible for persisting the resolved port for this instance.
+    #
+    # $TEAM_LCARS_PORT is overwritten here from the conf-file-read value (template
+    # default) to the per-instance allocated value.  All downstream consumers
+    # (sed substitutions in connect/disconnect/startup templates, the lcars-ports
+    # directory writer, and the agent port derivation at AGENT_PORT=$((TEAM_LCARS_PORT+n)))
+    # pick up the correct instance port automatically because they all reference the
+    # same variable.
+    _xaca0463_team_paths="${AITEAMFORGE_CONFIG:-$HOME/.aiteamforge/team-paths.json}"
+    # XACA-0626: Self-collision guard — if this INSTANCE_ID already has a valid
+    # (positive integer) lcars_port in team-paths.json, REUSE it instead of calling
+    # the allocator. The allocator's used-port scan includes ALL in-band entries,
+    # so a re-install of an already-provisioned instance would see its own port as
+    # "used" and allocate the next one (+1 drift). Short-circuiting on an existing
+    # valid port prevents the self-collision while leaving new installs unaffected.
+    # Conservative: only short-circuits when a positive-int port is found; any
+    # other case (absent, None, 0, negative) falls through to allocate as before.
+    _xaca0463_existing_port=""
+    if [[ -f "$_xaca0463_team_paths" ]]; then
+        _xaca0463_existing_port=$(python3 -c "
+    import json, sys
+    try:
+        d = json.load(open('$_xaca0463_team_paths'))
+        p = d.get('teams', {}).get('$INSTANCE_ID', {}).get('lcars_port')
+        if p and int(p) > 0:
+            print(int(p))
+    except Exception:
+        pass
+    " 2>/dev/null || true)
+    fi
+    if [[ -n "$_xaca0463_existing_port" ]]; then
+        TEAM_LCARS_PORT="$_xaca0463_existing_port"
+        unset _xaca0463_existing_port
+        echo "  ✓ XACA-0626: reusing existing port $TEAM_LCARS_PORT for instance $INSTANCE_ID (prevents self-collision on re-install)"
+    elif command -v aiteamforge_compute_instance_port >/dev/null 2>&1; then
+        unset _xaca0463_existing_port
+        _xaca0463_allocated=""
+        # XACA-1206: capture STDOUT ONLY. The allocator's contract is "stdout: the
+        # port; stderr: diagnostics". This used to be `2>&1`, which folded any stderr
+        # line into the port value — measured on a schema_version 3 consumer, the
+        # accessor's "[aiteamforge-paths] WARNING: schema_version=3 unsupported"
+        # became part of TEAM_LCARS_PORT and the startup-script sed died with
+        # "unescaped newline inside substitute pattern". stderr now reaches the
+        # terminal directly, where it is still visible on failure.
+        if ! _xaca0463_allocated=$(aiteamforge_compute_instance_port "$TEAM_ID" "$_xaca0463_team_paths"); then
+            echo "❌ XACA-0463 port allocator failed for template '$TEAM_ID' (see the message above)." >&2
+            echo "   See docs/architecture/team-id-contract.md §4.1 (Port allocation rule)." >&2
+            exit 1
+        fi
+        # XACA-1206: fail closed on anything but a bare positive integer. An exit-0
+        # allocator whose stdout is not a port must never reach the sed templates.
+        case "$_xaca0463_allocated" in
+            ''|*[!0-9]*|0)
+                echo "❌ XACA-0463 port allocator for template '$TEAM_ID' returned a non-port value: [$_xaca0463_allocated]" >&2
+                echo "   Refusing to render startup/connect scripts with it." >&2
+                exit 1
+                ;;
+        esac
+        TEAM_LCARS_PORT="$_xaca0463_allocated"
+        unset _xaca0463_allocated
+        echo "  ✓ XACA-0463: allocated port $TEAM_LCARS_PORT for instance $INSTANCE_ID (template $TEAM_ID band)"
+    else
+        echo "❌ XACA-0463: aiteamforge_compute_instance_port not in scope." >&2
+        echo "   aiteamforge-paths.sh should have been sourced above; check for errors." >&2
         exit 1
     fi
-    # XACA-1206: fail closed on anything but a bare positive integer. An exit-0
-    # allocator whose stdout is not a port must never reach the sed templates.
-    case "$_xaca0463_allocated" in
-        ''|*[!0-9]*|0)
-            echo "❌ XACA-0463 port allocator for template '$TEAM_ID' returned a non-port value: [$_xaca0463_allocated]" >&2
-            echo "   Refusing to render startup/connect scripts with it." >&2
-            exit 1
-            ;;
-    esac
-    TEAM_LCARS_PORT="$_xaca0463_allocated"
-    unset _xaca0463_allocated
-    echo "  ✓ XACA-0463: allocated port $TEAM_LCARS_PORT for instance $INSTANCE_ID (template $TEAM_ID band)"
-else
-    echo "❌ XACA-0463: aiteamforge_compute_instance_port not in scope." >&2
-    echo "   aiteamforge-paths.sh should have been sourced above; check for errors." >&2
-    exit 1
+    unset _xaca0463_team_paths
 fi
-unset _xaca0463_team_paths
 
 # Load branding fields from registry.json keyed on TEAM_ID (template id).
 # These are used for board JSON writes and summary display.
@@ -471,10 +492,13 @@ REGISTRY_ICON="$(echo "$_REGISTRY_ENTRY"     | jq -r '.icon')"
 # on the board. <team>.conf TEAM_THEME values are authoritative and distinct
 # from team names. registry.json data sync is a separate concern.
 
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  Installing Team: $TEAM_ID  (instance: $INSTANCE_ID)"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo ""
+# XACA-1237: banner is full-install only (render-only modes print their own status)
+if [[ "$_XACA1237_RENDER_ONLY" != "true" ]]; then
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "  Installing Team: $TEAM_ID  (instance: $INSTANCE_ID)"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+fi
 
 # ============================================================================
 # ORGANIZATION CONFIG SETUP (XACA-0139)
@@ -598,7 +622,8 @@ ORGEOF
     echo ""
 }
 
-_ensure_org_config
+# XACA-1237: render-only modes never prompt for / write organization config
+[[ "$_XACA1237_RENDER_ONLY" == "true" ]] || _ensure_org_config
 
 # Pre-build template substitution variables now so the --connect-only path
 # can use them before the heavy install sections run.
