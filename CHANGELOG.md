@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+
+## [0.21.8] - 2026-10-27
 - XACA-1241 LCARS health check resolves tmux by absolute path under launchd
 - XACA-1649 kb-release create computes default versions and refuses regressions
 - XACA-1245 LCARS CR EDIT STATE transitions resolve helpers from the install root
@@ -8064,7 +8066,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.7...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.8...HEAD
+[0.21.8]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.7...v0.21.8
 [0.21.7]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.6...v0.21.7
 [0.21.6]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.5...v0.21.6
 [0.21.5]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.4...v0.21.5
