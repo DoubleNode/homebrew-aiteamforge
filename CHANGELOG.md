@@ -6,6 +6,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1241 LCARS health check resolves tmux by absolute path under launchd
+- XACA-1649 kb-release create computes default versions and refuses regressions
+- XACA-1245 LCARS CR EDIT STATE transitions resolve helpers from the install root
+- XACA-1648 serve each LCARS server's own team at /lcars-target.js
+- XACA-1647 Send LCARS API key on version-gate and push-promote POSTs
+- Tap files updated in this publish: `share/lcars-ui/server.py`,`share/lcars-ui/tests/test_xaca1245_helpers_root_resolver.py` `share/lcars-ui/tests/test_xaca1648_per_server_target.py`,`share/scripts/kb-release-push-promote` `share/scripts/kb-release-version-gate`,`share/scripts/lcars-health-check.sh` `share/scripts/lcars-launch-helpers.sh`,`share/scripts/teams/finance-startup.sh` (+5 more). Run `brew upgrade aiteamforge` to receive them.
 - XACA-1644 Academy release versioning repair — arm version gate, VERSION 1.25.0
 - Tap files updated in this publish: `share/kanban-hooks/aiteamforge_paths.py`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1623 LCARS release platform labels from releaseConfig.platforms

@@ -26644,7 +26644,7 @@ _kb_release_name() {
 }
 
 # Create a new release
-# Usage: kb-release-create <name> [--type feature|bugfix|hotfix|maintenance] [--platforms ios,android,firebase] [--project name] [--target-date YYYY-MM-DD] [--short-title title]
+# Usage: kb-release-create <name> [--type feature|bugfix|hotfix|maintenance] [--platforms ios,android,firebase] [--project name] [--target-date YYYY-MM-DD] [--short-title title] [--platform-version <plt>=<v>] [--allow-version-regression]
 kb-release-create() {
     local name=""
     local rel_type="feature"
@@ -26656,6 +26656,10 @@ kb-release-create() {
     # --planned is a convenience shorthand that forces the full PLANNED-leading pipeline.
     local environments=""
     local use_planned_pipeline="false"
+    # XACA-1649: explicit per-platform versions (newline-separated "<plt>=<v>") and the guard override.
+    local platform_versions=""
+    local allow_regression="false"
+    local pv=""
 
     # Parse arguments
     while [[ $# -gt 0 ]]; do
@@ -26684,6 +26688,22 @@ kb-release-create() {
                 environments="$2"
                 shift 2
                 ;;
+            --platform-version)
+                # XACA-1649: repeatable; sent as <platform>Version. Same spelling as kb-release edit.
+                pv="$2"
+                if [[ -z "$pv" || "$pv" != *=* || -z "${pv%%=*}" || -z "${pv#*=}" ]]; then
+                    echo "Error: --platform-version requires <platform>=<version> (e.g. ios=2.10.0)"
+                    return 1
+                fi
+                platform_versions="${platform_versions}${pv}"$'\n'
+                shift 2
+                ;;
+            --allow-version-regression)
+                # XACA-1649: override the server guard that refuses a version at/below the last
+                # shipped one (or one held by an open release). Recorded in the release activity log.
+                allow_regression="true"
+                shift
+                ;;
             --planned)
                 # XACA-0736: convenience flag — forces the PLANNED-leading default pipeline.
                 # Equivalent to --environments PLANNED,DEV,QA,ALPHA,BETA,GAMMA,PROD.
@@ -26702,6 +26722,13 @@ kb-release-create() {
                 echo "  --environments <list>  Override environments pipeline (comma-separated, e.g. PLANNED,DEV,QA,PROD)"
                 echo "  --planned              Force the full PLANNED-leading pipeline (XACA-0736);"
                 echo "                         overrides board's defaultEnvironments if drifted"
+                echo "  --platform-version <plt>=<v>"
+                echo "                         Set a platform's version explicitly (repeatable; <plt> must be in --platforms)."
+                echo "                         Without it the server computes the next version per platform:"
+                echo "                         hotfix = last shipped + patch, others = highest known + minor."
+                echo "  --allow-version-regression"
+                echo "                         Allow a version at/below the last shipped one, or one an open release holds"
+                echo "                         (the server refuses these by default; the override is audited)"
                 echo ""
                 echo "Examples:"
                 echo "  kb-release create 'Q1 2026 Feature Release'"
@@ -26709,6 +26736,8 @@ kb-release-create() {
                 echo "  kb-release create 'March Update' --platforms ios,android,firebase --target-date 2026-03-15"
                 echo "  kb-release create 'Sprint 12' --planned"
                 echo "  kb-release create 'Hotfix 2.9.1' --environments PLANNED,PROD --platforms ios"
+                echo "  kb-release create 'Urgent fix' --type hotfix --platforms ios   # version computed: shipped + patch"
+                echo "  kb-release create 'Big one' --platforms ios,android --platform-version ios=3.0.0"
                 return 0
                 ;;
             *)
@@ -26765,6 +26794,27 @@ kb-release-create() {
         _lcars_port="8080"
     }
 
+    # XACA-1649: per-platform versions + override go in ONE object merged into both payload
+    # branches below (so neither can miss them). Reject a platform not in --platforms: the server
+    # silently ignores an unknown <platform>Version key.
+    local _pv_line _pv_plt
+    while IFS= read -r _pv_line; do
+        [[ -z "$_pv_line" ]] && continue
+        _pv_plt="${_pv_line%%=*}"
+        if [[ ",${platforms}," != *",${_pv_plt},"* ]]; then
+            echo "Error: --platform-version ${_pv_line}: platform '${_pv_plt}' is not in --platforms (${platforms})" >&2
+            return 1
+        fi
+    done <<< "$platform_versions"
+    local extra_json
+    extra_json=$(jq -n --arg pv "$platform_versions" --arg allow "$allow_regression" '
+        ($pv | split("\n") | map(select(. != "") | {key: (.[:index("=")] + "Version"), value: .[index("=") + 1:]})
+            | from_entries)
+        + (if $allow == "true" then {allowVersionRegression: true} else {} end)') || {
+        echo "Error: could not build version payload" >&2
+        return 1
+    }
+
     # Build JSON payload — include environments only when explicitly provided
     local json_payload
     if [[ -n "$environments" ]]; then
@@ -26776,6 +26826,7 @@ kb-release-create() {
             --arg targetDate "$target_date" \
             --arg shortTitle "$short_title" \
             --arg team "$team" \
+            --argjson extra "$extra_json" \
             --arg environments "$environments" \
             '{
                 name: $name,
@@ -26786,7 +26837,7 @@ kb-release-create() {
                 project: (if $project != "" then $project else null end),
                 targetDate: (if $targetDate != "" then $targetDate else null end),
                 shortTitle: (if $shortTitle != "" then $shortTitle else null end)
-            }')
+            } + $extra')
     else
         json_payload=$(jq -n \
             --arg name "$name" \
@@ -26796,6 +26847,7 @@ kb-release-create() {
             --arg targetDate "$target_date" \
             --arg shortTitle "$short_title" \
             --arg team "$team" \
+            --argjson extra "$extra_json" \
             '{
                 name: $name,
                 type: $type,
@@ -26804,7 +26856,7 @@ kb-release-create() {
                 project: (if $project != "" then $project else null end),
                 targetDate: (if $targetDate != "" then $targetDate else null end),
                 shortTitle: (if $shortTitle != "" then $shortTitle else null end)
-            }')
+            } + $extra')
     fi
 
     # Call LCARS server to create the release
@@ -26833,6 +26885,10 @@ kb-release-create() {
         echo "  Team: $team (LCARS port $_lcars_port)"
         echo "  Type: $rel_type"
         echo "  Platforms: $platforms"
+        # XACA-1649: show the resolved per-platform versions (kb-release show hides them)
+        local _resolved
+        _resolved=$(printf '%s\n' "$body" | jq -r '[.platforms // {} | to_entries[] | "\(.key)=\(.value.version)"] | join(", ")' 2>/dev/null)
+        [[ -n "$_resolved" ]] && echo "  Versions: $_resolved"
         [[ -n "$environments" ]] && echo "  Environments: $environments"
         [[ -n "$target_date" ]] && echo "  Target: $target_date"
         [[ -n "$project" ]] && echo "  Project: $project"
@@ -26854,7 +26910,10 @@ kb-release-create() {
         return 1
     else
         echo "Error: Failed to create release (HTTP $http_code)"
-        [[ -n "$body" ]] && echo "  $body"
+        # XACA-1649: the server answers 400 with {"error": ...}; show the message, not raw JSON
+        local _err_msg
+        _err_msg=$(printf '%s\n' "$body" | jq -r '.error // empty' 2>/dev/null)
+        [[ -n "$_err_msg" ]] && echo "  $_err_msg" || { [[ -n "$body" ]] && echo "  $body"; }
         return 1
     fi
 }

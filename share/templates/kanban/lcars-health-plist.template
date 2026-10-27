@@ -29,6 +29,15 @@
   script) must change TOGETHER, through one mirror two-step. Same shape as
   host-ready-plist.template beside it; do not move it back tap-side-only.
 
+  ── PATH (XACA-1241-002) ───────────────────────────────────────────────
+  launchd's default PATH is the system dirs only, which lack Homebrew's
+  tmux (/opt/homebrew/bin, or /usr/local/bin on Intel). Without this key
+  the health check could neither see nor recreate LCARS tmux sessions.
+  lcars-health-check.sh now ALSO resolves tmux by absolute path, so a box
+  whose plist predates this key is still fixed by the script alone (the
+  plist only reaches a consumer when it is re-rendered). PATH ONLY: no
+  credentials or tokens belong in a plist (not mode 600; see XACA-1246).
+
   ── LOG SINK: why not /tmp, why not the logs subdirectory ───────────────
   The tap job used to write stdout to /tmp/lcars-health.log — the SAME file
   the dev-native com.devteam.lcars-health job writes (two jobs, one sink;
@@ -38,6 +47,7 @@
     StandardOutPath                      the file launchd appends stdout to
     StandardErrorPath                    the SAME file (see below)
     EnvironmentVariables:LCARS_HEALTH_LOG  what lcars-health-check.sh ROTATES
+    EnvironmentVariables:PATH            Homebrew dirs first (XACA-1241-002)
   The script rotates LOG_FILE but never writes it; if the plist and the
   script disagree, one file is rotated while the real sink grows unbounded.
 
@@ -93,6 +103,8 @@
     <string>{{AITEAMFORGE_DIR}}/lcars-health.log</string>
     <key>EnvironmentVariables</key>
     <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
         <key>LCARS_HEALTH_LOG</key>
         <string>{{AITEAMFORGE_DIR}}/lcars-health.log</string>
     </dict>

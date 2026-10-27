@@ -2181,6 +2181,159 @@ def _strip_label_prefix(name: str, label: str) -> str:
     return name
 
 
+# --- XACA-1649: default release version rule + monotonic guard ---------------
+# Pure helpers (no I/O except _read_release_version_file) so the rule is testable from fixtures.
+# Design: kanban/plans/XACA-1649/XACA-1649_default_version_rule.md
+_REL_VERSION_RE = re.compile(r'^(\d+)\.(\d+)(?:\.(\d+))?(?:-[A-Za-z0-9.+]+)?$')
+# XACA-1649 (PR #1224 round 1): a name/shortTitle yields a version ONLY as a v-prefixed THREE-part token,
+# word-bounded and not followed by another '.digit' (v1.2.3.4 is ignored, not truncated). Bare numbers
+# (3.11.4, 2026.10.26, 10.0.0.1) and two-part v-tokens (v2026.10) are dates/deps/builds, never versions.
+_REL_LABEL_V_RE = re.compile(r'\bv(\d+\.\d+\.\d+)\b(?!\.\d)', re.IGNORECASE)   # v2.10.0
+
+
+def _release_version_tuple(value):
+    """'1.24.0' / '1.3' / '1.2.0-rc1' -> (1, 24, 0); None when not a parseable string. Suffix ignored."""
+    if not isinstance(value, str):
+        return None
+    m = _REL_VERSION_RE.match(value.strip())
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3) or 0)) if m else None
+
+
+def _release_version_str(t):
+    return "%d.%d.%d" % t
+
+
+def _release_version_label(text):
+    """Version label from a release name/shortTitle, or None. Only a v-prefixed three-part token counts
+    ('v2.10.0'); bare numbers, two-part tokens and four-part tokens are not versions (PR #1224 round 1)."""
+    if not isinstance(text, str):
+        return None
+    m = _REL_LABEL_V_RE.search(text)
+    return m.group(1) if m else None
+
+
+def _release_ships_platform(release, platform):
+    """True when this release record counts as shipped for `platform` (stage PROD, or that platform's own
+    legacy environment is PROD). Git tags are deliberately not a source (design section 1.1)."""
+    plat = (release.get('platforms') or {}).get(platform) if isinstance(release.get('platforms'), dict) else None
+    if not isinstance(plat, dict):
+        return False
+    stage = release.get('stage')
+    if _release_gate is not None:
+        try:
+            stage = _release_gate.current_stage(release)
+        except Exception:  # malformed record: fall back to the explicit stage field
+            pass
+    return stage == 'PROD' or plat.get('environment') == 'PROD'
+
+
+def _release_version_baseline(team, platform, board_releases, archived_releases):
+    """-> (shipped, held). shipped = (tuple, release_id) of the highest PROD version for the platform over
+    board + archive, or None. held = {tuple: release_id} of versions held by unshipped BOARD releases
+    (any status: a cancelled release still holds its version, XACA-1602). Archived non-PROD releases are
+    ignored: archiving dropped them and their versions are junk."""
+    shipped, held = None, {}
+    for is_board, releases in ((True, board_releases), (False, archived_releases)):
+        for rel in releases or []:
+            if not isinstance(rel, dict) or rel.get('team') not in (None, '', team):
+                continue
+            plat = (rel.get('platforms') or {}).get(platform) if isinstance(rel.get('platforms'), dict) else None
+            t = _release_version_tuple(plat.get('version')) if isinstance(plat, dict) else None
+            if t is None:
+                continue
+            if _release_ships_platform(rel, platform):
+                if shipped is None or t > shipped[0]:
+                    shipped = (t, rel.get('id'))
+            elif is_board:
+                held.setdefault(t, rel.get('id'))
+    return shipped, held
+
+
+def _read_release_version_file(team, platform):
+    """Version string from the team's first version_sources entry for `platform`, or None. Same read as
+    kb-release-version-gate Step 3. Read-only (read_config_view) and never raises: any failure is None."""
+    if not _AITEAMFORGE_PATHS_AVAILABLE:
+        return None
+    try:
+        import aiteamforge_paths as _ap
+        cfg = _ap.read_config_view()
+        sources = _ap.get_team_version_sources(team, platform, config=cfg)
+        if not sources or not sources[0].get('file') or not sources[0].get('match_pattern'):
+            return None
+        path = Path(str(sources[0]['file'])).expanduser()
+        if not path.is_absolute():
+            wd = (cfg.get('teams', {}).get(team, {}) or {}).get('working_dir')
+            if not wd:
+                return None
+            path = Path(wd).expanduser() / path
+        regex = re.escape(sources[0]['match_pattern']).replace(
+            r'\{version\}', r'([0-9]+\.[0-9]+(?:\.[0-9]+)?(?:-[A-Za-z0-9.+]+)?)')
+        m = re.search(regex, path.read_text(encoding='utf-8', errors='replace'))
+        return m.group(1) if m else None
+    except Exception:
+        return None
+
+
+def _resolve_default_release_version(release_type, shipped, held, file_version):
+    """The default-version rule. -> (version_str, source). See design section 1.2."""
+    shipped_t = shipped[0] if shipped else None
+    file_t = _release_version_tuple(file_version)
+    open_max = max(held) if held else None
+    if release_type == 'hotfix':
+        base, source = (shipped_t, 'shipped+patch') if shipped_t else (
+            max((x for x in (file_t, open_max) if x), default=None), 'open+patch')
+        if base is None:
+            return "1.0.0", 'initial'  # intentional: nothing shipped, open or in a file for this platform
+        cand = (base[0], base[1], base[2] + 1)
+        while cand in held:  # never collide with an open hotfix
+            cand = (cand[0], cand[1], cand[2] + 1)
+        return _release_version_str(cand), source
+    floor = max((x for x in (shipped_t, open_max) if x), default=None)
+    if file_t and (floor is None or file_t > floor):
+        return _release_version_str(file_t), 'file'  # reserved, unclaimed next version: take as-is
+    if floor:
+        return _release_version_str((floor[0], floor[1] + 1, 0)), 'open+minor'
+    # Intentional 1.0.0: the first release of a brand-new line. Only reachable when this platform has no
+    # shipped, open or version-file data at all (XACA-1649; it used to be every release's fallback).
+    return "1.0.0", 'initial'
+
+
+def _guard_release_version(platform, value, origin, shipped, held, default, allow_override):
+    """Monotonic guard. -> (error_message_or_None, overridden). Refuses a version at/below last shipped or
+    held by an open release; a malformed value is refused even with the override (cannot be compared)."""
+    t = _release_version_tuple(value)
+    if t is None:
+        return ("invalid version %r for platform '%s': expected x.y or x.y.z "
+                "(the version-regression override does not bypass this)" % (value, platform)), False
+    if shipped and t <= shipped[0]:
+        problem = "is at or below the last shipped version %s (%s)" % (_release_version_str(shipped[0]), shipped[1])
+    elif t in held:
+        problem = "is already held by open release %s" % held[t]
+    else:
+        return None, False
+    if allow_override:
+        return None, True
+    # The text is shown verbatim in the LCARS Create/Edit Release modals AND by the CLI, so it names no
+    # payload field; the remedy is chosen by where the value came from.
+    src = {'name': "taken from the release name/short title", 'inherited': "inherited from the release's "
+           "existing platforms", 'explicit': "requested", 'default': "computed"}.get(origin, origin)
+    if origin == 'name':
+        remedy = ("Remove the version from the name/short title to use %s, or set it from the CLI: "
+                  "kb-release create --platform-version %s=<version> (override: --allow-version-regression)."
+                  % (default, platform))
+    elif origin == 'inherited':
+        # kb-release has no add-platform command and no override on edit, so say exactly that.
+        remedy = ("Raise the release's existing platform versions to %s or above first "
+                  "(kb-release edit <release-id> --platform-version <platform>=<version>), then add the "
+                  "platform. The CLI has no version-regression override for adding a platform."
+                  % default)
+    else:
+        remedy = ("Use kb-release create --platform-version %s=%s, or override with "
+                  "--allow-version-regression." % (platform, default))
+    return ("version %s for platform '%s' (%s) %s. Next available: %s. %s"
+            % (value, platform, src, problem, default, remedy)), False
+
+
 def _compute_secrets_summary(team_id: str, paired_export_id) -> dict:
     """Build the top-level secrets_summary dict for stamping into manifest + EXPORT_JOBS.
 
@@ -4078,6 +4231,12 @@ _CC_TOKEN_SENTINEL = "===AITF-CRED-TOKEN==="
 def lcars_runtime_target_path() -> Path:
     """XACA-0798: absolute path of the RUNTIME router-redirect file.
 
+    XACA-1648: this is now the FALLBACK source only. serve_lcars_target reads it
+    solely for a server started WITHOUT an explicit LCARS_TEAM; a server with an
+    explicit team generates its own /lcars-target.js and never consults this
+    machine-wide file (it is shared by every team, so the last-started team
+    used to hijack every other team's router). Startups still write it.
+
     MUST stay byte-for-byte equivalent to the shell-side definition in
     scripts/lcars-launch-helpers.sh::lcars_runtime_target_file — that helper is
     the writer, this is the reader. Same default, same env override.
@@ -4096,6 +4255,38 @@ def lcars_runtime_target_path() -> Path:
     if override:
         return Path(override)
     return Path.home() / ".aiteamforge" / "lcars-target.js"
+
+
+def _js_string_literal(value: str) -> str:
+    """XACA-1648: render `value` as a double-quoted JS string literal.
+
+    json.dumps with its default ensure_ascii=True already escapes quotes,
+    backslashes, control characters and every non-ASCII code point (so U+2028 /
+    U+2029, which terminate a JS line, come out as \\u2028 / \\u2029). The
+    extra pass neutralises '<', '>' and '&' so a value can never close an
+    inline <script> or open an HTML comment, whatever loads the file.
+    """
+    return (json.dumps(value)
+            .replace('<', '\\u003c')
+            .replace('>', '\\u003e')
+            .replace('&', '\\u0026'))
+
+
+def _build_lcars_target_js() -> str:
+    """XACA-1648: the /lcars-target.js body for a server with an explicit team.
+
+    Built only from this process's own LCARS_TEAM / LCARS_SESSION_NAME. The
+    session line is emitted only when LCARS_SESSION_NAME was explicitly set and
+    non-empty in the environment: SESSION_NAME defaults to "lcars", shared by
+    every unlabelled server, and advertising that default would let redirect.html
+    match the wrong server. SESSION_NAME is the value /api/status reports as
+    session_name, which is what redirect.html compares against.
+    """
+    lines = [f"window.LCARS_TARGET_TEAM = {_js_string_literal(LCARS_TEAM)};"]
+    if os.environ.get("LCARS_SESSION_NAME", "").strip():
+        lines.append(
+            f"window.LCARS_TARGET_SESSION = {_js_string_literal(SESSION_NAME)};")
+    return "\n".join(lines) + "\n"
 
 
 def _resolve_server_hostname() -> str:
@@ -5001,6 +5192,19 @@ def _notify_effective_severity(team, notice_type, catalog):
     except Exception:  # noqa: BLE001 - e.g. a hand-edited bad override: fall back to the catalog default
         return catalog[notice_type]['defaultSeverity']
 
+
+
+class LcarsHelpersNotFound(RuntimeError):
+    """XACA-1245: no install root holds BOTH kanban-helpers.sh and
+    scripts/kb-cr.sh. `searched_roots` lists every root tried (str paths, in
+    resolution order) so a caller can name them all in its error message."""
+
+    def __init__(self, searched_roots):
+        self.searched_roots = [str(r) for r in searched_roots]
+        super().__init__(
+            "kanban-helpers.sh and scripts/kb-cr.sh were not found together in any "
+            "install root; searched: " + ", ".join(self.searched_roots)
+        )
 
 
 class LCARSHandler(http.server.SimpleHTTPRequestHandler):
@@ -8871,10 +9075,28 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     # --- POST Handlers ---
 
     def _extract_version_from_name(self, name):
-        """Extract version number from release name (e.g., 'v1.3.0' -> '1.3.0')"""
-        # Match patterns like: v1.3.0, 1.3.0, v1.3, 1.3, Version 1.3.0, etc.
-        match = re.search(r'v?(\d+\.\d+(?:\.\d+)?)', name, re.IGNORECASE)
-        return match.group(1) if match else '1.0.0'
+        """Version LABEL from a release name/shortTitle ('v2.10.0'), or None.
+
+        XACA-1649: v-prefixed three-part only ('Python 3.11.4', '2026.10.26', 'v2026.10' are not versions)
+        and no fallback to '1.0.0' - the caller's default-version rule applies instead."""
+        return _release_version_label(name)
+
+    def _plan_release_version(self, data, archived, platform, release_type, requested, origin, allow_override):
+        """Resolve + guard one platform's version. -> (version, source, overridden, error_payload).
+
+        requested is None -> the computed default; else the explicit/name/inherited value, guarded.
+        error_payload is a 400 body (or None): the CALLER raises it as a _DeferredResponse, because the
+        deferred-raise invariant (test_xaca0890) wants every raiser to own its `except _DeferredResponse`."""
+        shipped, held = _release_version_baseline(LCARS_TEAM, platform, data.get('releases'), archived)
+        default, source = _resolve_default_release_version(
+            release_type, shipped, held, _read_release_version_file(LCARS_TEAM, platform))
+        if requested is None:
+            requested, origin = default, source
+        err, overridden = _guard_release_version(
+            platform, requested, origin, shipped, held, default, allow_override)
+        if err:
+            return requested, origin, False, {"error": err, "platform": platform, "defaultVersion": default}
+        return requested, origin, overridden, None
 
     def handle_create_release(self):
         """POST /api/releases - Create new release"""
@@ -8918,11 +9140,13 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                                      "projectEnvironments" if (project and project in data.get('projectEnvironments', {}))
                                      else "the request body or defaultEnvironments")}, 400)
 
-                # Extract default version: prefer shortTitle (the user-facing
-                # version label, e.g. "v2.10.0"), fall back to name.
-                default_version = self._extract_version_from_name(
-                    post_data.get('shortTitle') or name
-                )
+                # XACA-1649: a version label in shortTitle (preferred) or name is a strict, guarded
+                # "name-derived" value; with none, each platform gets the computed default (no 1.0.0).
+                name_version = (self._extract_version_from_name(post_data.get('shortTitle'))
+                                or self._extract_version_from_name(name))
+                allow_override = post_data.get('allowVersionRegression') is True
+                release_type = post_data.get('type', 'feature')
+                archived_releases = self._load_archived_releases(LCARS_TEAM)
 
                 # XACA-0453: Strip duplicate label prefix from name before persisting.
                 # e.g. POST {name: "REL - Sprint 5", shortTitle: "REL"} → name stored as "Sprint 5".
@@ -8964,9 +9188,24 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     initial_environment = environments[0]
 
                 platforms = {}
+                resolution = {}
+                overridden_platforms = []
                 for platform in platforms_input:
+                    explicit = post_data.get(f'{platform}Version')
+                    if explicit is not None:  # a non-string is refused by the guard (cannot be compared)
+                        requested = explicit.strip() if isinstance(explicit, str) else explicit
+                        origin = 'explicit'
+                    else:
+                        requested, origin = name_version, 'name'
+                    version, source, overridden, version_error = self._plan_release_version(
+                        data, archived_releases, platform, release_type, requested, origin, allow_override)
+                    if version_error:
+                        raise _DeferredResponse.json(version_error, 400)
+                    resolution[platform] = {"version": version, "source": source}
+                    if overridden:
+                        overridden_platforms.append(platform)
                     platforms[platform] = {
-                        "version": post_data.get(f'{platform}Version', default_version),
+                        "version": version,
                         "buildNumber": post_data.get(f'{platform}Build', 1),
                         "environment": initial_environment,
                         "environmentHistory": []
@@ -8977,7 +9216,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     "name": name,
                     "shortTitle": post_data.get('shortTitle'),  # XACA-0050: Optional short display name
                     "project": project,
-                    "type": post_data.get('type', 'feature'),
+                    "type": release_type,
                     "status": "in_progress",
                     "targetDate": post_data.get('targetDate'),
                     "createdAt": self._get_timestamp(),
@@ -8996,6 +9235,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 data['releases'].append(release)
                 self._save_releases_config(data, _lock_held=True)
 
+            if overridden_platforms:  # XACA-1649: make every guard bypass auditable
+                self._log_release_activity(release_id, 'version_guard_overridden',
+                                           versionGuardOverridden=overridden_platforms)
+
             # Create empty manifest with team ownership. XACA-0890-003: no
             # prior read here (the manifest doesn't exist yet), but the lock
             # still guards against a concurrent request racing an assign/sync
@@ -9012,7 +9255,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header('Content-Type', 'application/json')
             self._send_cors_headers()
             self.end_headers()
-            self.wfile.write(json.dumps(release, indent=2).encode())
+            # versionResolution is response-only (not persisted): how each platform's version was chosen.
+            self.wfile.write(json.dumps(dict(release, versionResolution=resolution), indent=2).encode())
 
         except _DeferredResponse as deferred:
             # emitted OUTSIDE the board lock (XACA-0890-022); must stay ABOVE the generic except
@@ -9577,15 +9821,14 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     def _kb_cr_script_paths(cls):
         """(kanban-helpers.sh, scripts/kb-cr.sh) from the first install root holding BOTH, or (None, None).
         PR #1036 round 1 (advisory): this was Path.home()/"dev-team" only, which does not exist on a tap
-        consumer, so the durable assumed-approval stamp was never written there. Same candidate-root chain
-        as XACA-1239-020 (dev checkout, $AITEAMFORGE_DIR, the server's own install dir)."""
-        for root in cls._cr_schema_validator_candidate_roots():
-            helpers = next((c for c in (root / 'kanban-helpers.sh', root / 'scripts' / 'kanban-helpers.sh')
-                            if cls._is_regular_file(c)), None)
-            kbcr = root / 'scripts' / 'kb-cr.sh'
-            if helpers is not None and cls._is_regular_file(kbcr):
-                return helpers, kbcr
-        return None, None
+        consumer, so the durable assumed-approval stamp was never written there. XACA-1245-012: delegates
+        to _resolve_lcars_helpers_root() so the promote stamp and the CR transition endpoint can never
+        source from different trees. The old <root>/scripts/kanban-helpers.sh variant is gone: neither
+        the dev checkout nor the tap install has that file, and the transition endpoint never accepted it."""
+        root = cls._resolve_lcars_helpers_root()
+        if root is None:
+            return None, None
+        return root / 'kanban-helpers.sh', root / 'scripts' / 'kb-cr.sh'
 
     def _persist_assumed_approvals_before_promote(self, release_id, team):
         """XACA-1349-014: before a NON-dryRun promote takes the board lock, let kb-cr durably stamp
@@ -11120,13 +11363,17 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                                     release['platforms'][platform][key] = updates[key]
 
                 # Add new platforms if requested (cannot remove existing ones).
-                # Newly-added platforms inherit the release's current version
-                # (parsed from shortTitle, falling back to name).
+                # XACA-1649: a new platform inherits the release's version when its existing platforms all
+                # agree (release_branches needs a single version), else gets the computed default. The
+                # monotonic guard (+ allowVersionRegression override) applies to the new platform only.
+                overridden_platforms = []
                 if 'addPlatforms' in post_data:
                     existing_platforms = release.get('platforms', {})
-                    release_version = self._extract_version_from_name(
-                        release.get('shortTitle') or release.get('name') or ''
-                    )
+                    existing_versions = {p.get('version') for p in existing_platforms.values()
+                                         if isinstance(p, dict)}
+                    inherited = (existing_versions.pop() if len(existing_versions) == 1 else None) or None
+                    allow_override = post_data.get('allowVersionRegression') is True
+                    archived_releases = self._load_archived_releases(LCARS_TEAM)
                     for platform in post_data['addPlatforms']:
                         if platform not in existing_platforms:
                             # XACA-1346: a new platform MIRRORS the release's current stage. A fixed
@@ -11138,8 +11385,15 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                                 _new_env = self._legacy_environment_for_stage(
                                     release, data, _release_gate.current_stage(release),
                                     self._crsupport_enabled(self._read_board_raw_locked()))
+                            new_version, _src, overridden, version_error = self._plan_release_version(
+                                data, archived_releases, platform, release.get('type'), inherited,
+                                'inherited', allow_override)
+                            if version_error:
+                                raise _DeferredResponse.json(version_error, 400)
+                            if overridden:
+                                overridden_platforms.append(platform)
                             existing_platforms[platform] = {
-                                "version": release_version,
+                                "version": new_version,
                                 "buildNumber": 1,
                                 "environment": _new_env,
                                 "environmentHistory": []
@@ -11147,6 +11401,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     release['platforms'] = existing_platforms
 
                 self._save_releases_config(data, _lock_held=True)
+
+            if overridden_platforms:  # XACA-1649: make every guard bypass auditable
+                self._log_release_activity(release_id, 'version_guard_overridden',
+                                           versionGuardOverridden=overridden_platforms)
 
             # XACA-0659 (GAP A): Write-through updated release metadata into manifest.json
             # so the manifest mirrors the board's authoritative values after any field update.
@@ -16365,9 +16623,23 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     _cr_evidence_validator_cache = {}
 
     @staticmethod
-    def _cr_schema_validator_candidate_roots():
-        """Ordered, de-duplicated list of root dirs to try for
-        scripts/cr-schema-validator.py in production (helpers_root is None).
+    def _lcars_helpers_candidate_roots():
+        """Ordered, de-duplicated list of install roots to try in production
+        (helpers_root is None) for scripts/cr-schema-validator.py AND for
+        kanban-helpers.sh + scripts/kb-cr.sh.
+
+        XACA-1245: renamed from _cr_schema_validator_candidate_roots (kept
+        below as a thin alias) because the CR transition shell builder had the
+        identical ~/dev-team-only bug the validator had (XACA-1239-020): it
+        sourced <home>/dev-team/kanban-helpers.sh, so every POST
+        /api/kanban/cr/<id>/transition 500'd on a tap consumer. ONE chain now
+        feeds both, so the evidence map (validator) and the enforcement (shell
+        helpers) cannot resolve from different trees. XACA-0816's
+        crash-recovery reconcile site (dev_team_root = Path.home() /
+        "dev-team") should reuse this resolver too; it is deliberately NOT
+        changed here.
+
+        Original XACA-1239-020 notes follow.
 
         XACA-1239-020: before this, production resolved ONLY
         Path.home()/"dev-team" — which does not exist on a consumer
@@ -16419,6 +16691,29 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             roots.append(root)
         return roots
 
+    @staticmethod
+    def _cr_schema_validator_candidate_roots():
+        """Thin alias for _lcars_helpers_candidate_roots (XACA-1245): the
+        pre-rename name, kept so existing callers/tests keep working."""
+        return LCARSHandler._lcars_helpers_candidate_roots()
+
+    @classmethod
+    def _resolve_lcars_helpers_root(cls):
+        """XACA-1245: first candidate root holding BOTH kanban-helpers.sh and
+        scripts/kb-cr.sh as regular files (the installed layout: see
+        homebrew-tap/libexec/installers/install-kanban.sh, which puts them at
+        $AITEAMFORGE_DIR/kanban-helpers.sh and $AITEAMFORGE_DIR/scripts/kb-cr.sh),
+        or None. A root with only one of the two does NOT qualify: the
+        generated script sources both, so half a root is a guaranteed shell
+        failure. Callers needing the searched list for an error message call
+        _lcars_helpers_candidate_roots() (or catch LcarsHelpersNotFound from
+        _build_cr_transition_shell_parts)."""
+        for root in cls._lcars_helpers_candidate_roots():
+            if (cls._is_regular_file(root / "kanban-helpers.sh")
+                    and cls._is_regular_file(root / "scripts" / "kb-cr.sh")):
+                return root
+        return None
+
     @classmethod
     def _resolve_cr_schema_validator_path(cls, helpers_root=None):
         """Resolve scripts/cr-schema-validator.py.
@@ -16429,9 +16724,11 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         specific worktree/fixture never silently falls through to a real
         path elsewhere on the machine.
 
-        Production (helpers_root is None) tries each of
-        _cr_schema_validator_candidate_roots(), in order, and returns the
-        first candidate that exists on disk. If none exist, returns the
+        Production (helpers_root is None) first uses the root that qualifies
+        for the shell helpers (_resolve_lcars_helpers_root, XACA-1245), so the
+        validator and the enforcement share one tree. With no such root it
+        tries each of _lcars_helpers_candidate_roots(), in order, and returns
+        the first candidate that exists on disk. If none exist, returns the
         FIRST candidate (Path.home()/"dev-team"/scripts/…) — preserving the
         pre-XACA-1239-020 error target/message shape for the common case
         (a dev machine with no dev-team checkout at all) — but the caller
@@ -16440,7 +16737,15 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         if helpers_root is not None:
             return Path(helpers_root) / "scripts" / "cr-schema-validator.py"
 
-        roots = cls._cr_schema_validator_candidate_roots()
+        # XACA-1245: when a root qualifies for the shell helpers, the validator
+        # comes from THAT root, found or not (a missing validator there fails
+        # closed in _load_cr_schema_validator_module rather than silently
+        # falling through to a different tree than the one enforcing).
+        helpers_root_found = cls._resolve_lcars_helpers_root()
+        if helpers_root_found is not None:
+            return helpers_root_found / "scripts" / "cr-schema-validator.py"
+
+        roots = cls._lcars_helpers_candidate_roots()
         for root in roots:
             candidate = root / "scripts" / "cr-schema-validator.py"
             if cls._is_regular_file(candidate):
@@ -16723,9 +17028,14 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         swapping this function's two positional arguments would stamp the wrong
         field in production while the suite stayed green.
 
-        helpers_root exists only so a test can source the branch under test.
-        Production must leave it None: the endpoint deliberately sources from
-        ~/dev-team (the MAIN checkout), which is what the running server has.
+        helpers_root exists only so a test can source the branch under test;
+        when given it is the SOLE candidate (no fallback). Production must
+        leave it None: the root is then _resolve_lcars_helpers_root() — the
+        first of ~/dev-team (the MAIN checkout, unchanged on dev machines),
+        $AITEAMFORGE_DIR (tap consumers, XACA-1245) or the server's own
+        install dir holding BOTH kanban-helpers.sh and scripts/kb-cr.sh.
+        Raises LcarsHelpersNotFound (carrying every searched root) when none
+        qualifies; handle_cr_transition turns that into a JSON 500 before zsh runs.
 
         Returns a list of shell command strings, joined with newlines by the
         caller and executed under `zsh -c`.
@@ -16768,7 +17078,13 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         applies to the request body's own top-level `actor` field, reused
         here rather than inventing a second default.
         """
-        root = helpers_root if helpers_root is not None else str(Path.home() / "dev-team")
+        if helpers_root is not None:
+            root = helpers_root
+        else:
+            resolved = LCARSHandler._resolve_lcars_helpers_root()
+            if resolved is None:
+                raise LcarsHelpersNotFound(LCARSHandler._lcars_helpers_candidate_roots())
+            root = str(resolved)
         parts = [
             f"source {shlex.quote(root + '/kanban-helpers.sh')}",
             f"source {shlex.quote(root + '/scripts/kb-cr.sh')}",
@@ -17083,10 +17399,20 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             # (renamed variable, unquoted read, added argument, swapped
             # positional args, and two comment/string decoys) sailed past a
             # harness that rebuilt the script by hand.
-            shell_parts = self._build_cr_transition_shell_parts(
-                board_file_str, cr_id, target_state,
-                approval_waiver=approval_waiver_reason, actor=actor,
-            )
+            try:
+                shell_parts = self._build_cr_transition_shell_parts(
+                    board_file_str, cr_id, target_state,
+                    approval_waiver=approval_waiver_reason, actor=actor,
+                )
+            except LcarsHelpersNotFound as e:
+                # XACA-1245: fail closed BEFORE zsh runs, naming every searched
+                # root, instead of a raw "no such file" from `source`.
+                print(f"[LCARS] CR transition cannot run for {cr_id}: {e}")
+                self._send_json_response(
+                    {"ok": False, "error": f"Transition failed: {e}"},
+                    status=500,
+                )
+                return
 
             # XACA-0895-018's own crState+entry-timestamp write USED to live here.
             # It is deliberately not invoked any more (XACA-0297-006).
@@ -26017,18 +26343,6 @@ end tell
         except Exception as e:
             self.send_error(500, f"Error listing backup files: {e}")
 
-    def serve_dynamic_target(self):
-        """Dynamically serve lcars-target.js with the server's configured team"""
-        js_content = f"window.LCARS_TARGET_TEAM = '{LCARS_TEAM}';\n"
-
-        self.send_response(200)
-        self.send_header('Content-Type', 'application/javascript')
-        self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
-        self.send_header('Pragma', 'no-cache')
-        self.send_header('Expires', '0')
-        self.end_headers()
-        self.wfile.write(js_content.encode())
-
     def do_HEAD(self):
         """Mirror do_GET dispatch for routes that need explicit HEAD support.
 
@@ -26120,32 +26434,48 @@ end tell
         super().do_HEAD()
 
     def serve_lcars_target(self, head_only=False):
-        """XACA-0798: serve the RUNTIME router-redirect file, else the shipped default.
+        """XACA-1648: serve THIS server's own router-redirect script.
 
-        Resolution order for /lcars-target.js:
-          1. ~/.aiteamforge/lcars-target.js  — written at startup by
-             lcars-launch-helpers.sh::start_lcars_server + the *-startup.sh
-             session-line appends. Outside lcars-ui/, so writing it does NOT
-             trip the com.aiteamforge.lcars-watch WatchPaths agent.
-          2. lcars-ui/lcars-target.js        — the shipped static default,
-             written only at install/upgrade time and never at runtime.
+        Resolution for /lcars-target.js:
+          1. Server started with an explicit LCARS_TEAM
+             (_LCARS_TEAM_WAS_EXPLICIT) — the body is GENERATED from this
+             process's own state and nothing else is read:
+               window.LCARS_TARGET_TEAM = "<LCARS_TEAM>";
+               window.LCARS_TARGET_SESSION = "<SESSION_NAME>";   (optional)
+             The session line appears only when LCARS_SESSION_NAME was
+             explicitly set and non-empty; SESSION_NAME defaults to "lcars",
+             which every unlabelled server shares, so that default is never
+             emitted. The value is the same one /api/status reports as
+             session_name, so redirect.html's self-match holds.
+          2. No explicit team — the XACA-0798 chain, unchanged:
+             a. runtime file (lcars_runtime_target_path()), outside lcars-ui/
+                so writing it does not trip the lcars-watch WatchPaths agent;
+             b. shipped lcars-ui/lcars-target.js default;
+             c. 404, which the HTML loader's onerror path already handles.
+             A read error on (a) falls through to (b) rather than 500-ing.
 
-        A read error on (1) falls through to (2) rather than 500-ing: a broken
-        runtime file must degrade to the shipped default, not black-hole the
-        router. Absence of BOTH yields the same 404 serve_no_cache_static has
-        always produced, which the HTML loader's onerror path already handles.
+        Why: the runtime file is ONE machine-wide path that every team startup
+        overwrites, and every LCARS server used to serve it. The last-started
+        team therefore hijacked every other team's router (XACA-1648). A server
+        already knows its own team, so an explicit-team server never consults
+        the shared file — a stale or foreign file cannot redirect it, and
+        nothing from that file is merged into the generated body.
 
-        The XACA-0301 manual override (~/.aiteamforge/lcars-target.local.js) is
-        a SEPARATE chained script load and is deliberately untouched here — it
-        loads after this file and still wins last.
+        The server writes nothing at runtime (XACA-0798 invariant). The
+        XACA-0301 manual override (~/.aiteamforge/lcars-target.local.js) is a
+        SEPARATE chained script load, untouched here; it loads after this file
+        and still wins last.
         """
-        runtime_path = lcars_runtime_target_path()
         data = None
-        try:
-            if runtime_path.is_file():
-                data = runtime_path.read_bytes()
-        except OSError:
-            data = None
+        if _LCARS_TEAM_WAS_EXPLICIT:
+            data = _build_lcars_target_js().encode('utf-8')
+        else:
+            runtime_path = lcars_runtime_target_path()
+            try:
+                if runtime_path.is_file():
+                    data = runtime_path.read_bytes()
+            except OSError:
+                data = None
 
         if data is None:
             self.serve_no_cache_static('/lcars-target.js', head_only=head_only)

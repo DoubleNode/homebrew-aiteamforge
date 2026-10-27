@@ -988,16 +988,66 @@ if [[ ! -d "$TMUX_SOCKET_DIR" ]]; then
     log "WARNING: tmux socket dir not found: $TMUX_SOCKET_DIR (UID: $TMUX_UID)"
 fi
 
+# XACA-1241-002: under launchd PATH is /usr/bin:/bin:/usr/sbin:/sbin, so bare
+# `tmux` (Homebrew: /opt/homebrew/bin or /usr/local/bin) was command-not-found
+# at every call site below, silently (2>/dev/null): every session read "dead"
+# and the heal path could neither see nor kill one. The ONE resolver lives in
+# scripts/lcars-launch-helpers.sh (resolve_lcars_tmux_bin). Helpers are
+# otherwise sourced lazily inside _hc_start_lcars_server, AFTER the checks
+# below have already run, so they are sourced here too. Sourcing is
+# side-effect free (function definitions plus one string constant; verified)
+# and re-sourcing later just redefines the same functions.
+if [[ -f "${_SCRIPT_DIR}/scripts/lcars-launch-helpers.sh" ]]; then
+    # shellcheck disable=SC1091
+    source "${_SCRIPT_DIR}/scripts/lcars-launch-helpers.sh" 2>/dev/null || true
+fi
+
+# Resolve tmux ONCE per sweep into LCARS_TMUX_BIN (also read by
+# ensure_lcars_tmux_session) and log ONE warning if it is genuinely absent.
+# Empty LCARS_TMUX_BIN = tmux unavailable: check_tmux_session then returns 2
+# ("unknown", not "dead") and the heal path skips its tmux kill.
+_hc_resolve_tmux() {
+    # An inherited LCARS_TMUX_BIN (env / plist override) is honored: the
+    # resolver re-validates it (-x) and falls through to its probes if stale.
+    if typeset -f resolve_lcars_tmux_bin >/dev/null 2>&1; then
+        LCARS_TMUX_BIN="$(resolve_lcars_tmux_bin 2>/dev/null)" || LCARS_TMUX_BIN=""
+    elif [[ -n "${LCARS_TMUX_BIN:-}" && -x "${LCARS_TMUX_BIN}" ]]; then
+        :   # helpers failed to source: keep the valid inherited override
+    elif command -v tmux >/dev/null 2>&1; then
+        # helpers failed to source: degrade to the old PATH-only behavior
+        LCARS_TMUX_BIN="$(command -v tmux)"
+    else
+        LCARS_TMUX_BIN=""
+    fi
+    if [[ -z "$LCARS_TMUX_BIN" ]]; then
+        log "WARNING: tmux not found (PATH=$PATH; also tried /opt/homebrew/bin, /usr/local/bin) - tmux session state is UNKNOWN this sweep and tmux sessions cannot be killed/recreated (XACA-1241-002)"
+        return 1
+    fi
+    return 0
+}
+
+# Returns 0 = session matches, 1 = no match / no sessions, 2 = tmux itself
+# unavailable (state unknown; callers treating nonzero as false are unchanged).
 check_tmux_session() {
     local socket=$1
     local session_pattern=$2
+
+    # Standalone callers (no sweep) resolve lazily, silently.
+    local _tmux="${LCARS_TMUX_BIN:-}"
+    if [[ -z "$_tmux" ]] && typeset -f resolve_lcars_tmux_bin >/dev/null 2>&1; then
+        _tmux="$(resolve_lcars_tmux_bin 2>/dev/null)" || _tmux=""
+    elif [[ -z "$_tmux" ]]; then
+        # helpers not sourced: degrade to the old PATH-only lookup
+        _tmux="$(command -v tmux 2>/dev/null)" || _tmux=""
+    fi
+    [[ -n "$_tmux" ]] || return 2
 
     # Use explicit socket path for launchd compatibility
     local socket_path="$TMUX_SOCKET_DIR/$socket"
 
     if [[ ! -S "$socket_path" ]]; then
         # Also try the -L syntax as fallback
-        local sessions=$(tmux -L "$socket" list-sessions -F "#{session_name}" 2>/dev/null)
+        local sessions=$("$_tmux" -L "$socket" list-sessions -F "#{session_name}" 2>/dev/null)
         if [[ -n "$sessions" ]]; then
             if echo "$sessions" | grep -q "$session_pattern"; then
                 return 0
@@ -1007,7 +1057,7 @@ check_tmux_session() {
     fi
 
     # Get all sessions for this socket using -S (explicit path)
-    local sessions=$(tmux -S "$socket_path" list-sessions -F "#{session_name}" 2>/dev/null)
+    local sessions=$("$_tmux" -S "$socket_path" list-sessions -F "#{session_name}" 2>/dev/null)
 
     if [[ -z "$sessions" ]]; then
         return 1  # No sessions at all
@@ -1489,16 +1539,28 @@ _hc_heal_noncanonical_port() {
     #    =-expansion (command-path lookup) and errors.
     local kill_session="${session_name}"
     local socket_path="$TMUX_SOCKET_DIR/$tmux_socket"
-    if [[ -S "$socket_path" ]]; then
-        if tmux -S "$socket_path" has-session -t "=${kill_session}" 2>/dev/null; then
+    # XACA-1241-002: absolute tmux (see _hc_resolve_tmux). Absent tmux: skip
+    # only the session kill (nothing to kill without tmux); step 2 below still
+    # kills the stale server.py by port, as before.
+    local _tmux="${LCARS_TMUX_BIN:-}"
+    if [[ -z "$_tmux" ]] && typeset -f resolve_lcars_tmux_bin >/dev/null 2>&1; then
+        _tmux="$(resolve_lcars_tmux_bin 2>/dev/null)" || _tmux=""
+    elif [[ -z "$_tmux" ]]; then
+        # helpers not sourced: degrade to the old PATH-only lookup
+        _tmux="$(command -v tmux 2>/dev/null)" || _tmux=""
+    fi
+    if [[ -z "$_tmux" ]]; then
+        log "    tmux unavailable - skipping tmux session kill for $kill_session (socket $tmux_socket)"
+    elif [[ -S "$socket_path" ]]; then
+        if "$_tmux" -S "$socket_path" has-session -t "=${kill_session}" 2>/dev/null; then
             log "    Killing stale tmux session: $kill_session (socket $tmux_socket)"
-            tmux -S "$socket_path" kill-session -t "=${kill_session}" 2>/dev/null || true
+            "$_tmux" -S "$socket_path" kill-session -t "=${kill_session}" 2>/dev/null || true
         fi
     else
         # Fallback to -L syntax.
-        if tmux -L "$tmux_socket" has-session -t "=${kill_session}" 2>/dev/null; then
+        if "$_tmux" -L "$tmux_socket" has-session -t "=${kill_session}" 2>/dev/null; then
             log "    Killing stale tmux session: $kill_session (socket $tmux_socket)"
-            tmux -L "$tmux_socket" kill-session -t "=${kill_session}" 2>/dev/null || true
+            "$_tmux" -L "$tmux_socket" kill-session -t "=${kill_session}" 2>/dev/null || true
         fi
     fi
 
@@ -2301,6 +2363,9 @@ run_health_check() {
         return 0  # another live invocation is already sweeping; not an error
     fi
 
+    # XACA-1241-002: resolve tmux once per sweep (one warning if absent).
+    _hc_resolve_tmux || true
+
     local healthy=0
     local unhealthy=0
     local skipped=0
@@ -2501,9 +2566,11 @@ run_health_check() {
         # from aiteamforge_paths.py / team-paths.json) is a configured team that
         # SHOULD have LCARS running. We still log session/process state as a hint.
         local has_session=false has_process=false
-        if check_tmux_session "$tmux_socket" "$session_pattern"; then
-            has_session=true
-        fi
+        check_tmux_session "$tmux_socket" "$session_pattern"
+        case $? in
+            0) has_session=true ;;
+            2) has_session=unknown ;;   # XACA-1241-002: tmux unavailable, not "dead"
+        esac
         if check_server_process_exists "$local_port"; then
             has_process=true
         fi

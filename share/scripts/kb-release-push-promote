@@ -821,11 +821,22 @@ print(json.dumps({'platform': sys.argv[1], 'targetEnvironment': sys.argv[2]}))
             else
                 # Capture both body and HTTP code
                 _promote_response_file=$(mktemp /tmp/kb-promote-resp.XXXXXX)
-                _promote_http=$(curl -s \
+                # XACA-1647: since XACA-0395 every mutating LCARS route needs
+                # the Bearer key once ~/.aiteamforge/api-key exists. The key
+                # goes to curl via --config on stdin (never argv). No key =>
+                # both stay empty and behaviour is unchanged. The ${arr+...}
+                # form keeps an empty array safe under set -u on bash 3.2.
+                _KB_LCARS_AUTH_ARGS=()
+                _KB_LCARS_AUTH_STDIN=""
+                if command -v _kb_lcars_auth_args >/dev/null 2>&1; then
+                    _kb_lcars_auth_args || true
+                fi
+                _promote_http=$(printf '%s' "$_KB_LCARS_AUTH_STDIN" | curl -s \
                     -o "$_promote_response_file" \
                     -w "%{http_code}" \
                     -X POST \
                     -H "Content-Type: application/json" \
+                    ${_KB_LCARS_AUTH_ARGS[@]+"${_KB_LCARS_AUTH_ARGS[@]}"} \
                     -d "$_promote_payload" \
                     --connect-timeout 5 \
                     --max-time 15 \
@@ -841,6 +852,18 @@ print(json.dumps({'platform': sys.argv[1], 'targetEnvironment': sys.argv[2]}))
                     rm -f "$_promote_response_file"
                 fi
                 # Non-fatal — continue to next platform
+                continue
+            fi
+
+            if [ "$_promote_http" = "401" ]; then
+                # XACA-1647: auth rejection is a real failure, not a soft skip.
+                echo "[kb-release-push-promote] ERROR: LCARS rejected promote for ${_release_id} ${_platform} (HTTP 401) — API key missing or invalid." >&2
+                echo "  Check ~/.aiteamforge/api-key (kb-api-key show)." >&2
+                echo "  Recovery: kb-release promote ${_release_id} [--to STAGE]" >&2
+                if [ "$OPT_DRY_RUN" -ne 1 ]; then
+                    rm -f "$_promote_response_file" 2>/dev/null || true
+                fi
+                _OVERALL_EXIT=1
                 continue
             fi
 

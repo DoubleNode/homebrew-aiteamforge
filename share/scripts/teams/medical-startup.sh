@@ -184,6 +184,8 @@ echo "🚀 Creating terminal tabs..."
 # ~/.aiteamforge/lcars-target.js (via lcars_runtime_target_file), NOT
 # lcars-ui/lcars-target.js — lcars-ui/ is the lcars-watch WatchPaths dir and
 # writing there made every startup restart (and SIGTERM) every LCARS server.
+# XACA-1648: that file is only a fallback now; a team-launched server answers
+# /lcars-target.js from its own LCARS_TEAM/LCARS_SESSION_NAME and ignores it.
 echo "  Starting Medical LCARS server on port $LCARS_PORT..."
 start_lcars_server "${SESSION_PREFIX}" "$LCARS_PORT" "${SESSION_PREFIX}-lcars" \
     || echo "    ⚠️  Continuing without a confirmed-ready LCARS server (see above)."

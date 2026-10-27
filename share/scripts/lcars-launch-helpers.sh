@@ -2,8 +2,9 @@
 # shellcheck shell=bash
 # lcars-launch-helpers.sh — Shared helper functions for LCARS server startup
 #
-# Source this file in team-startup scripts; it provides three functions:
+# Source this file in team-startup scripts; it provides these functions:
 #
+#   resolve_lcars_tmux_bin   (echo an absolute tmux path; rc 1 if none)
 #   ensure_lcars_tmux_session <session_name> <tmux_socket> [working_dir]
 #   start_lcars_server <team> <port> [session_name]
 #   open_lcars_tab <port> <window_title> <tab_name> <tmux_socket> <lcars_session> <startup_log>
@@ -78,6 +79,12 @@
 #   (2) shadows (1) at the /lcars-target.js route; (3) is a SEPARATE chained
 #   script load and still wins last. Never auto-write (3) — it is a documented
 #   deliberate developer override (XACA-0301) and clobbering it destroys work.
+#
+#   XACA-1648: (2) is now a FALLBACK ONLY. A server launched with an explicit
+#   LCARS_TEAM answers /lcars-target.js from its OWN team (and session, when
+#   LCARS_SESSION_NAME is set) and never reads this file; only a server started
+#   without LCARS_TEAM falls back to it. The startup writes are kept but are
+#   effectively vestigial for team-launched servers (retiring them: follow-up).
 #
 # PATH CHOICE: ~/.aiteamforge/ — the same directory that already holds the
 # manual override, team-paths.json and run/. It is keyed to $HOME (NOT to
@@ -730,6 +737,34 @@ has_iterm_gui() {
 }
 
 # ---------------------------------------------------------------------------
+# resolve_lcars_tmux_bin — echo the absolute path of a usable tmux, rc 1 (and
+# no output) if none exists. XACA-1241-002.
+#
+# WHY: under launchd the default PATH is /usr/bin:/bin:/usr/sbin:/sbin, and
+# Homebrew's tmux lives in /opt/homebrew/bin (Apple Silicon) or /usr/local/bin
+# (Intel). Bare `tmux` therefore failed with command-not-found, which the
+# `2>/dev/null` at every call site swallowed: lcars-health-check.sh reported
+# every team's session as "dead" and ensure_lcars_tmux_session could never
+# recreate one. Same defect class and same fix shape as resolve_lcars_python
+# (XACA-0713): probe absolute paths so resolution does not depend on PATH.
+#
+# Probe order: $LCARS_TMUX_BIN (override / caller's already-resolved value),
+# `command -v tmux`, /opt/homebrew/bin/tmux, /usr/local/bin/tmux.
+# Pure: prints a path, sets nothing, touches no tmux server.
+resolve_lcars_tmux_bin() {
+    local _tb
+    if [[ -n "${LCARS_TMUX_BIN:-}" && -x "${LCARS_TMUX_BIN}" ]]; then
+        echo "${LCARS_TMUX_BIN}"; return 0
+    fi
+    _tb="$(command -v tmux 2>/dev/null)"
+    if [[ -n "$_tb" && -x "$_tb" ]]; then echo "$_tb"; return 0; fi
+    for _tb in /opt/homebrew/bin/tmux /usr/local/bin/tmux; do
+        if [[ -x "$_tb" ]]; then echo "$_tb"; return 0; fi
+    done
+    return 1
+}
+
+# ---------------------------------------------------------------------------
 # resolve_lcars_python — echo the python interpreter that has the LCARS runtime
 # deps (pyzipper, requests, …). Single source of truth for both
 # start_lcars_server and lcars-health-check.sh::_hc_start_lcars_server.
@@ -1031,9 +1066,11 @@ ensure_lcars_tmux_session() {
     local _ets_socket="${2:?ensure_lcars_tmux_session: tmux_socket required}"
     local _ets_dir="${3:-${AITEAMFORGE_DIR:-$HOME/dev-team}}"
 
-    if ! command -v tmux >/dev/null 2>&1; then
-        return 1
-    fi
+    # XACA-1241-002: absolute tmux path (bare `tmux` is not on launchd's PATH).
+    # Honors the caller's resolved LCARS_TMUX_BIN (health-check resolves once
+    # per sweep); resolves here otherwise so standalone callers work too.
+    local _ets_tmux
+    _ets_tmux="$(resolve_lcars_tmux_bin)" || return 1
 
     # Match lcars-health-check.sh's socket-dir computation exactly when it
     # has already set TMUX_SOCKET_DIR (launchd-safe); otherwise derive it the
@@ -1048,16 +1085,16 @@ ensure_lcars_tmux_session() {
     # statement, and stays safe under bash 3.2 (macOS's shipped bash), which
     # this file must support (feedback_verify_under_bin_bash_not_path_bash).
     if [[ -S "$_ets_socket_path" ]]; then
-        if tmux -S "$_ets_socket_path" has-session -t "$_ets_session" 2>/dev/null; then
+        if "$_ets_tmux" -S "$_ets_socket_path" has-session -t "$_ets_session" 2>/dev/null; then
             return 0
         fi
-        tmux -S "$_ets_socket_path" new-session -d -s "$_ets_session" -n "lcars-monitor" -c "$_ets_dir" 2>/dev/null
+        "$_ets_tmux" -S "$_ets_socket_path" new-session -d -s "$_ets_session" -n "lcars-monitor" -c "$_ets_dir" 2>/dev/null
         return $?
     else
-        if tmux -L "$_ets_socket" has-session -t "$_ets_session" 2>/dev/null; then
+        if "$_ets_tmux" -L "$_ets_socket" has-session -t "$_ets_session" 2>/dev/null; then
             return 0
         fi
-        tmux -L "$_ets_socket" new-session -d -s "$_ets_session" -n "lcars-monitor" -c "$_ets_dir" 2>/dev/null
+        "$_ets_tmux" -L "$_ets_socket" new-session -d -s "$_ets_session" -n "lcars-monitor" -c "$_ets_dir" 2>/dev/null
         return $?
     fi
 }
@@ -1618,6 +1655,10 @@ start_lcars_server() {
     # which SIGTERM'd the server this very function had just launched. See the
     # helper's header for the full rationale. lcars-ui/lcars-target.js is now
     # an install-time-only shipped default and is NEVER written at runtime.
+    #
+    # XACA-1648: this machine-wide file is now only a FALLBACK for a server
+    # started without LCARS_TEAM. A team-launched server serves its own team
+    # and never reads it, so this write is effectively vestigial.
     #
     # XACA-0763 (004): suppressible via LCARS_SKIP_TARGET_WRITE=1. The direct
     # callers of start_lcars_server (team-startup.sh, restart_team_lcars) are

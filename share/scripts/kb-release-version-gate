@@ -264,16 +264,28 @@ print(json.dumps({
     }
 
     # POST to the new endpoint (XACA-0658-004)
+    # XACA-1647: LCARS requires `Authorization: Bearer <key>` on mutating
+    # routes once ~/.aiteamforge/api-key exists (XACA-0395). Deliver it via
+    # `curl --config -` on stdin (never argv). No key => no --config flag,
+    # curl never reads stdin, behaviour unchanged. -d stays plain argv data.
+    # The ${arr[@]+...} splice is set -u safe on bash 3.2 with an empty array.
+    local _KB_LCARS_AUTH_ARGS=() _KB_LCARS_AUTH_STDIN=""
+    if declare -F _kb_lcars_auth_args >/dev/null 2>&1; then
+        _kb_lcars_auth_args || true
+    fi
     local http_code
-    http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+    http_code=$(printf '%s' "$_KB_LCARS_AUTH_STDIN" | curl -s -o /dev/null -w "%{http_code}" \
         -X POST \
         -H "Content-Type: application/json" \
+        ${_KB_LCARS_AUTH_ARGS[@]+"${_KB_LCARS_AUTH_ARGS[@]}"} \
         -d "$payload" \
         --connect-timeout 3 \
         --max-time 5 \
         "${_lcars_base}/api/releases/${_release_id}/platform-gate-status" 2>/dev/null) || http_code="000"
 
-    if [[ "$http_code" != "200" ]]; then
+    if [[ "$http_code" == "401" ]]; then
+        [[ $_quiet -eq 0 ]] && echo "Warning: LCARS rejected gateStatus write (HTTP 401) — API key missing or invalid; check ~/.aiteamforge/api-key / kb-api-key show (non-fatal — gate result stands)" >&2
+    elif [[ "$http_code" != "200" ]]; then
         [[ $_quiet -eq 0 ]] && echo "Warning: LCARS gateStatus write returned HTTP ${http_code} (non-fatal — gate result stands)" >&2
     fi
     return 0
