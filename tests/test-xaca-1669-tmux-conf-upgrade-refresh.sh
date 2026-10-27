@@ -1,0 +1,674 @@
+#!/bin/bash
+# test-xaca-1669-tmux-conf-upgrade-refresh.sh
+#
+# XACA-1669-006: FUNCTIONAL regression suite for the receipt-guarded
+# ~/.tmux.conf refresh on the UPGRADE path plus the running-tmux-server reload.
+#
+# Code under test:
+#   libexec/installers/install-claude-config.sh
+#     install_tmux_conf()                  writes ${AITEAMFORGE_DIR}/.tmux-conf.receipt
+#     _xaca1669_refresh_tmux_conf()        rc 0 current | 1 soft-fail | 2 refreshed
+#                                          | 3 left untouched (+ ~/.tmux.conf.new sidecar)
+#                                          | 4 no live file
+#     _xaca1669_reload_tmux_servers()      source-file + refresh-client -S on every
+#                                          live socket under ${TMUX_TMPDIR:-/tmp}/tmux-<uid>/
+#   libexec/commands/aiteamforge-upgrade.sh
+#     update_tmux_conf()                   fail-soft wrapper; reload ONLY on rc 2
+#
+# Unlike test-xaca-1159-global-claude-md-upgrade-registration.sh (structural
+# only), this suite EXECUTES the real installer functions, sourcing the real
+# installer file exactly as the upgrade does. Cases:
+#   C1  fresh install writes receipt == live file
+#   C2  pristine (receipt match) + changed template -> rc 2, refreshed, backup
+#   C3  pristine + unchanged template -> rc 0, no write (inode + mtime)
+#   C4  customized (receipt mismatch) -> rc 3, untouched, sidecar == template
+#   C5  pre-receipt box on the historical shipped blob -> rc 2, receipt written
+#       (also pins the embedded sha256 constant to the real tap blob 2fec0ca5)
+#   C6  pre-receipt box, foreign content -> rc 3, untouched, sidecar
+#   C7  symlink (incl. target bytes == receipt) and dangling symlink -> rc 3
+#   C8  no ~/.tmux.conf -> rc 4, nothing created
+#   C9  idempotence: second run after a refresh -> rc 0
+#   C10 reload against throwaway tmux servers (-L, isolated TMUX_TMPDIR)
+#   C11 upgrade wiring: static order checks + the REAL update_tmux_conf body
+#   C12 soft-fail paths (missing template, unwritable backup dir) -> rc 1
+#
+# ISOLATION (non-negotiable): every case builds its own mktemp HOME and
+# AITEAMFORGE_DIR and its own TMUX_TMPDIR (short path under /tmp: unix socket
+# paths cap at 104 bytes on macOS); TMUX, GIT_DIR, GIT_WORK_TREE are unset; tmux
+# is only ever driven through tm(), which refuses to run without an isolated
+# TMUX_TMPDIR and always passes -L, so the default socket and real team servers
+# are unreachable. Only servers this suite started are killed.
+#
+# Mutation seam: XACA1669_INSTALLER / XACA1669_UPGRADE_SH override the files
+# under test so the mutation sentinels can aim the suite at a mutated scratch
+# copy. Unset in normal runs.
+#
+# Runs standalone (bash tests/test-xaca-1669-tmux-conf-upgrade-refresh.sh) OR
+# via test-runner.sh. Exit 0 = all pass (and >=1 assertion ran), exit 1 = any
+# fail OR zero assertions executed (vacuous-green guard).
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TAP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+INSTALLER="${XACA1669_INSTALLER:-$TAP_ROOT/libexec/installers/install-claude-config.sh}"
+UPGRADE_SH="${XACA1669_UPGRADE_SH:-$TAP_ROOT/libexec/commands/aiteamforge-upgrade.sh}"
+REAL_TEMPLATE="$TAP_ROOT/share/templates/claude/tmux.conf"
+
+# The historically shipped render: tap blob 2fec0ca5 == the current tap
+# template (the single-line tab bar). The installer embeds its sha256.
+HIST_SHA256="f83149da485c2edf2aeefbd261e7d6d5378edb5b399df27d0b2266b42b92d924"
+HIST_BLOB="2fec0ca5"
+
+for _need in "$INSTALLER" "$UPGRADE_SH"; do
+    if [ ! -f "$_need" ]; then
+        echo "FATAL: required file not found: $_need" >&2
+        exit 1
+    fi
+done
+
+# The interpreter running this suite is the interpreter that runs the installer
+# (so /bin/bash 3.2 runs exercise the installer under 3.2 too).
+TEST_BASH="${BASH:-bash}"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Standalone framework stubs (mirrors test-xaca-1159 / test-xaca-0761).
+# ─────────────────────────────────────────────────────────────────────────────
+if ! type -t test_start >/dev/null 2>&1; then
+    _PASS_COUNT=0
+    _FAIL_COUNT=0
+    _CURRENT_TEST=""
+    test_start() { _CURRENT_TEST="$1"; echo "  >> $1"; }
+    test_pass()  { _PASS_COUNT=$((_PASS_COUNT + 1)); echo "     PASS: $_CURRENT_TEST"; }
+    test_fail()  { _FAIL_COUNT=$((_FAIL_COUNT + 1)); echo "     FAIL: $_CURRENT_TEST — $1" >&2; }
+fi
+
+# Scratch roots. TEST_TMP_DIR: runner-supplied or our own. TMUX_BASE is always
+# our own SHORT dir (socket path limit), never shared with the runner.
+if [ -z "${TEST_TMP_DIR:-}" ] || [ ! -d "${TEST_TMP_DIR:-}" ]; then
+    TEST_TMP_DIR="$(mktemp -d -t xaca1669.XXXXXX)"
+    _OWN_TMP=true
+else
+    _OWN_TMP=false
+fi
+TMUX_BASE="$(mktemp -d /tmp/xt1669.XXXXXX)"
+
+# Servers/clients this suite started: "<TMUX_TMPDIR>|<-L name>" lines.
+STARTED_SERVERS=""
+FIFO_FDS=""
+
+tm() {
+    # Only ever talk to a server under an isolated, suite-owned TMUX_TMPDIR.
+    case "${TMUXB:-}" in
+        "$TMUX_BASE"/?*) ;;
+        *) echo "tm: refusing to run tmux without an isolated TMUX_TMPDIR (TMUXB='${TMUXB:-}')" >&2; return 99 ;;
+    esac
+    env -u TMUX TMUX_TMPDIR="$TMUXB" tmux "$@"
+}
+
+cleanup() {
+    local entry d n fd
+    for entry in $STARTED_SERVERS; do
+        d="${entry%%|*}"; n="${entry#*|}"
+        case "$d" in "$TMUX_BASE"/?*) env -u TMUX TMUX_TMPDIR="$d" tmux -L "$n" kill-server >/dev/null 2>&1 || true ;; esac
+    done
+    for fd in $FIFO_FDS; do eval "exec ${fd}>&-" 2>/dev/null || true; done
+    if [ "${_OWN_TMP:-false}" = true ] && [ -n "${TEST_TMP_DIR:-}" ] && [ -d "$TEST_TMP_DIR" ]; then
+        find "$TEST_TMP_DIR" -depth -delete 2>/dev/null || true
+    fi
+    if [ -n "${TMUX_BASE:-}" ] && [ -d "$TMUX_BASE" ]; then
+        find "$TMUX_BASE" -depth -delete 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Case plumbing
+# ─────────────────────────────────────────────────────────────────────────────
+CASE_ERRS=""
+begin_case() { CASE_ERRS=""; test_start "$1"; }
+fail_note()  { CASE_ERRS="${CASE_ERRS}${CASE_ERRS:+; }$1"; }
+end_case() {
+    if [ -z "$CASE_ERRS" ]; then test_pass; else test_fail "$CASE_ERRS"; fi
+}
+# check "<description>" <command...>  -> records a failure note if command fails
+check() {
+    local desc="$1"; shift
+    "$@" >/dev/null 2>&1 || fail_note "$desc"
+}
+# check_rc "<description>" <expected> <actual>
+check_rc() {
+    [ "$2" = "$3" ] || fail_note "$1: expected rc $2, got rc $3 (output: ${OUT:-})"
+}
+
+same_bytes()  { cmp -s "$1" "$2"; }
+fstat() {
+    # inode:mtime of a file (follows nothing; plain files only here)
+    if [ "$(uname)" = Darwin ]; then stat -f '%i:%m' "$1"; else stat -c '%i:%Y' "$1"; fi
+}
+sha256_of()   { shasum -a 256 "$1" | awk '{print $1}'; }
+home_strays() {
+    # anything in HOME other than the live file and its sidecar = leaked temp
+    local f
+    for f in "$HOME_T"/.tmux.conf.*; do
+        [ -e "$f" ] || [ -L "$f" ] || continue
+        [ "$f" = "$HOME_T/.tmux.conf.new" ] && continue
+        echo "$f"
+    done
+}
+backup_files() { find "$AITEAMFORGE_DIR_T/.backups" -name tmux.conf -type f 2>/dev/null; }
+
+# New sandbox: sets S HOME_T AITF TMPL_ROOT TMPL TMUXB. Synthetic "current"
+# template (v2). The tap's own template is the OLD single-line render.
+new_sandbox() {
+    S="$(mktemp -d "$TEST_TMP_DIR/case.XXXXXX")"
+    HOME_T="$S/home"
+    AITF="$S/aiteamforge"
+    AITEAMFORGE_DIR_T="$AITF"
+    TMPL_ROOT="$S/templates"
+    TMPL="$TMPL_ROOT/claude/tmux.conf"
+    mkdir -p "$HOME_T" "$AITF" "$TMPL_ROOT/claude"
+    TMUXB="$TMUX_BASE/$(basename "$S")"
+    mkdir -p "$TMUXB"
+    printf '# tmux.conf v2 (two-line tab bar)\nset -g status 2\nset -g @xaca1669-marker "v2"\n' > "$TMPL"
+    OLD_BYTES="$S/old-shipped.conf"
+    git -C "$TAP_ROOT" show "$HIST_BLOB" > "$OLD_BYTES" 2>/dev/null
+    RECEIPT="$AITF/.tmux-conf.receipt"
+    LIVE="$HOME_T/.tmux.conf"
+    RUN_PATH="$PATH"
+}
+
+# run_fn <function> [args]: sources the REAL installer in a child bash (same
+# interpreter as this suite) exactly the way update_tmux_conf does, then calls
+# the function. Sets OUT (stdout+stderr) and RC.
+run_fn() {
+    OUT="$(env -u TMUX -u GIT_DIR -u GIT_WORK_TREE \
+        PATH="$RUN_PATH" HOME="$HOME_T" USER=xaca1669 \
+        AITEAMFORGE_DIR="$AITF" TEMPLATE_DIR="$TMPL_ROOT" TMUX_TMPDIR="$TMUXB" \
+        PRELUDE="${PRELUDE:-}" \
+        "$TEST_BASH" -c 'source "$1" >/dev/null 2>&1; shift; if [ -n "$PRELUDE" ]; then source "$PRELUDE"; fi; "$@"' _ "$INSTALLER" "$@" 2>&1)" \
+        && RC=0 || RC=$?
+}
+
+refresh() { run_fn _xaca1669_refresh_tmux_conf; }
+
+# The upgrade script defines _aitf_file_mode; update_tmux_conf's subshell
+# inherits it, so the installer's mode-preservation only engages under upgrade.
+# Extract the REAL definition so we can reproduce that environment.
+MODE_HELPER="$TEST_TMP_DIR/aitf_file_mode.sh"
+awk '/^_aitf_file_mode\(\) \{/{c=1} c{print} c&&/^}$/{exit}' "$UPGRADE_SH" > "$MODE_HELPER"
+[ -s "$MODE_HELPER" ] || echo "FATAL: could not extract _aitf_file_mode from $UPGRADE_SH" >&2
+. "$MODE_HELPER"
+
+# ═══════════════════════════════════════════════════════════════════════════
+# C1 — fresh install writes receipt == live file
+# ═══════════════════════════════════════════════════════════════════════════
+begin_case "C1: install_tmux_conf writes a receipt byte-identical to the live file"
+new_sandbox
+run_fn install_tmux_conf
+check_rc "install_tmux_conf" 0 "$RC"
+check "live file == template" same_bytes "$LIVE" "$TMPL"
+check "receipt exists at \$AITEAMFORGE_DIR/.tmux-conf.receipt" test -f "$RECEIPT"
+check "receipt == live file" same_bytes "$RECEIPT" "$LIVE"
+# A symlinked ~/.tmux.conf is replaced by install (setup contract), receipt follows.
+new_sandbox
+printf 'user dotfile\n' > "$S/dotfile"; ln -s "$S/dotfile" "$LIVE"
+run_fn install_tmux_conf
+check_rc "install over symlink" 0 "$RC"
+check "install replaced the symlink with a plain file" test ! -L "$LIVE"
+check "replaced file == template" same_bytes "$LIVE" "$TMPL"
+check "receipt == live after symlink replace" same_bytes "$RECEIPT" "$LIVE"
+check "symlink destination untouched" test "$(cat "$S/dotfile")" = "user dotfile"
+end_case
+
+# ═══════════════════════════════════════════════════════════════════════════
+# C2 — pristine (receipt match) + changed template -> rc 2
+# ═══════════════════════════════════════════════════════════════════════════
+begin_case "C2: pristine file + changed template -> rc 2, refreshed, receipt updated, backup holds old bytes"
+new_sandbox
+printf '# tmux.conf v1\nset -g status on\n' > "$LIVE"
+cp "$LIVE" "$RECEIPT"
+cp "$LIVE" "$S/v1.bytes"
+chmod 600 "$LIVE"
+PRELUDE="$MODE_HELPER" refresh
+check_rc "refresh" 2 "$RC"
+check "live == new template" same_bytes "$LIVE" "$TMPL"
+check "receipt == new live bytes" same_bytes "$RECEIPT" "$LIVE"
+check "exactly one backup" test "$(backup_files | wc -l | tr -d ' ')" = 1
+check "backup holds the OLD bytes" same_bytes "$(backup_files | head -1)" "$S/v1.bytes"
+check "no sidecar on a refresh" test ! -e "$LIVE.new"
+check "no stray temp files in HOME" test -z "$(home_strays)"
+check "file mode preserved (600) when the upgrade's _aitf_file_mode is present" test "$(_aitf_file_mode "$LIVE")" = 600
+case "$OUT" in *"refreshed from shipped template"*) ;; *) fail_note "summary line missing: $OUT" ;; esac
+# Standalone (no _aitf_file_mode): documented default 644.
+new_sandbox
+cp "$OLD_BYTES" "$LIVE"; chmod 600 "$LIVE"
+refresh
+check_rc "refresh (no mode helper)" 2 "$RC"
+check "default mode 644 without the upgrade's mode helper" test "$(_aitf_file_mode "$LIVE")" = 644
+end_case
+
+# ═══════════════════════════════════════════════════════════════════════════
+# C3 — pristine + unchanged template -> rc 0, no write
+# ═══════════════════════════════════════════════════════════════════════════
+begin_case "C3: pristine file + unchanged template -> rc 0, no write (inode+mtime), no backup"
+new_sandbox
+cp "$TMPL" "$LIVE"; cp "$TMPL" "$RECEIPT"
+touch -t 200001010000 "$LIVE"
+before="$(fstat "$LIVE")"
+refresh
+check_rc "refresh" 0 "$RC"
+check "inode+mtime unchanged" test "$(fstat "$LIVE")" = "$before"
+check "live still == template" same_bytes "$LIVE" "$TMPL"
+check "receipt still == live" same_bytes "$RECEIPT" "$LIVE"
+check "no backup created" test -z "$(backup_files)"
+check "no sidecar" test ! -e "$LIVE.new"
+check "no stray temp files" test -z "$(home_strays)"
+end_case
+
+# ═══════════════════════════════════════════════════════════════════════════
+# C4 — customized (receipt mismatch) -> rc 3, untouched, sidecar
+# ═══════════════════════════════════════════════════════════════════════════
+begin_case "C4: customized file (receipt mismatch) -> rc 3, untouched byte-for-byte, sidecar == template"
+new_sandbox
+printf '# tmux.conf v1\nset -g status on\n' > "$RECEIPT"
+printf '# tmux.conf v1\nset -g status on\n# my personal tweak\nset -g mouse on\n' > "$LIVE"
+cp "$LIVE" "$S/mine.bytes"
+cp "$RECEIPT" "$S/receipt.bytes"
+refresh
+check_rc "refresh" 3 "$RC"
+check "live untouched byte-for-byte" same_bytes "$LIVE" "$S/mine.bytes"
+check "receipt untouched" same_bytes "$RECEIPT" "$S/receipt.bytes"
+check "sidecar exists" test -f "$LIVE.new"
+check "sidecar == current template" same_bytes "$LIVE.new" "$TMPL"
+check "no backup (nothing overwritten)" test -z "$(backup_files)"
+check "no stray temp files" test -z "$(home_strays)"
+case "$OUT" in *"Left untouched"*"user-customized"*) ;; *) fail_note "summary line missing: $OUT" ;; esac
+# Re-run is stable (sidecar rewritten identically, live still untouched).
+refresh
+check_rc "second refresh" 3 "$RC"
+check "live still untouched after re-run" same_bytes "$LIVE" "$S/mine.bytes"
+check "sidecar still == template after re-run" same_bytes "$LIVE.new" "$TMPL"
+# Mismatch but live already equals the template: no sidecar to write.
+new_sandbox
+printf '# older\n' > "$RECEIPT"; cp "$TMPL" "$LIVE"
+refresh
+check_rc "mismatch-but-equals-template refresh" 3 "$RC"
+check "no sidecar when live already equals the template" test ! -e "$LIVE.new"
+end_case
+
+# ═══════════════════════════════════════════════════════════════════════════
+# C5 — pre-receipt box on the historical shipped blob -> rc 2
+# ═══════════════════════════════════════════════════════════════════════════
+begin_case "C5: pre-receipt box on the historical shipped blob (2fec0ca5) -> rc 2, receipt written"
+new_sandbox
+if [ ! -s "$OLD_BYTES" ]; then
+    # Shallow clones may lack the object; the tap template at this commit IS
+    # that blob, so fall back to it only if its hash proves it.
+    cp "$REAL_TEMPLATE" "$OLD_BYTES"
+fi
+check "historical bytes sha256 == constant (git show $HIST_BLOB)" test "$(sha256_of "$OLD_BYTES")" = "$HIST_SHA256"
+check "installer embeds the SAME sha256 constant (no silent drift)" grep -q "^${HIST_SHA256}\$" "$INSTALLER"
+cp "$OLD_BYTES" "$LIVE"
+cp "$OLD_BYTES" "$S/pre.bytes"
+check "precondition: no receipt" test ! -e "$RECEIPT"
+refresh
+check_rc "refresh" 2 "$RC"
+check "live == new template" same_bytes "$LIVE" "$TMPL"
+check "receipt written == new live" same_bytes "$RECEIPT" "$LIVE"
+check "backup holds the historical bytes" same_bytes "$(backup_files | head -1)" "$S/pre.bytes"
+check "no sidecar" test ! -e "$LIVE.new"
+# Pre-receipt box already equal to the CURRENT template: pristine, rc 0, receipt written.
+new_sandbox
+cp "$TMPL" "$LIVE"
+refresh
+check_rc "pre-receipt == current template" 0 "$RC"
+check "receipt bootstrapped from current-template match" same_bytes "$RECEIPT" "$LIVE"
+check "no backup, no sidecar" test -z "$(backup_files)$( [ -e "$LIVE.new" ] && echo x)"
+end_case
+
+# ═══════════════════════════════════════════════════════════════════════════
+# C6 — pre-receipt box, foreign content -> rc 3
+# ═══════════════════════════════════════════════════════════════════════════
+begin_case "C6: pre-receipt box, foreign content -> rc 3, untouched, sidecar, no receipt invented"
+new_sandbox
+printf '# hand-authored by the user\nset -g prefix C-a\n' > "$LIVE"
+cp "$LIVE" "$S/foreign.bytes"
+refresh
+check_rc "refresh" 3 "$RC"
+check "live untouched" same_bytes "$LIVE" "$S/foreign.bytes"
+check "sidecar == template" same_bytes "$LIVE.new" "$TMPL"
+check "no receipt fabricated for a foreign file" test ! -e "$RECEIPT"
+check "no backup" test -z "$(backup_files)"
+case "$OUT" in *"no render receipt on file"*) ;; *) fail_note "summary line missing: $OUT" ;; esac
+# Near-miss: the historical blob plus ONE extra byte must NOT pass provenance.
+new_sandbox
+{ cat "$OLD_BYTES"; printf '#'; } > "$LIVE"
+cp "$LIVE" "$S/near.bytes"
+refresh
+check_rc "near-miss refresh" 3 "$RC"
+check "near-miss untouched" same_bytes "$LIVE" "$S/near.bytes"
+end_case
+
+# ═══════════════════════════════════════════════════════════════════════════
+# C7 — symlinks -> rc 3, link preserved, target untouched
+# ═══════════════════════════════════════════════════════════════════════════
+begin_case "C7: symlink (target bytes == receipt) and dangling symlink -> rc 3, link + target untouched"
+new_sandbox
+printf '# tmux.conf v1\nset -g status on\n' > "$RECEIPT"
+mkdir -p "$S/dotfiles"
+cp "$RECEIPT" "$S/dotfiles/tmux.conf"
+cp "$RECEIPT" "$S/target.bytes"
+ln -s "$S/dotfiles/tmux.conf" "$LIVE"
+refresh
+check_rc "symlink to receipt-identical target" 3 "$RC"
+check "~/.tmux.conf is still a symlink" test -L "$LIVE"
+check "link still points at the same target" test "$(readlink "$LIVE")" = "$S/dotfiles/tmux.conf"
+check "link target bytes untouched" same_bytes "$S/dotfiles/tmux.conf" "$S/target.bytes"
+check "sidecar written beside the link, == template" same_bytes "$LIVE.new" "$TMPL"
+check "sidecar is a plain file, not written through the link" test ! -L "$LIVE.new"
+check "no backup" test -z "$(backup_files)"
+check "no stray temp files" test -z "$(home_strays)"
+case "$OUT" in *"is a symlink"*) ;; *) fail_note "summary line missing: $OUT" ;; esac
+# Symlink to a target equal to the current template: no sidecar needed.
+new_sandbox
+mkdir -p "$S/dotfiles"; cp "$TMPL" "$S/dotfiles/tmux.conf"
+ln -s "$S/dotfiles/tmux.conf" "$LIVE"
+refresh
+check_rc "symlink to template-identical target" 3 "$RC"
+check "link preserved" test "$(readlink "$LIVE")" = "$S/dotfiles/tmux.conf"
+check "no sidecar when link target already equals template" test ! -e "$LIVE.new"
+# Dangling symlink.
+new_sandbox
+ln -s "$S/nowhere/tmux.conf" "$LIVE"
+refresh
+check_rc "dangling symlink" 3 "$RC"
+check "dangling link preserved" test "$(readlink "$LIVE")" = "$S/nowhere/tmux.conf"
+check "dangling target NOT created" test ! -e "$S/nowhere"
+check "sidecar == template" same_bytes "$LIVE.new" "$TMPL"
+check "no stray temp files" test -z "$(home_strays)"
+end_case
+
+# ═══════════════════════════════════════════════════════════════════════════
+# C8 — no ~/.tmux.conf -> rc 4
+# ═══════════════════════════════════════════════════════════════════════════
+begin_case "C8: no ~/.tmux.conf -> rc 4, nothing created (upgrade is not install)"
+new_sandbox
+refresh
+check_rc "refresh (no receipt)" 4 "$RC"
+check "HOME still empty" test -z "$(ls -A "$HOME_T")"
+check "no receipt created" test ! -e "$RECEIPT"
+check "no backup" test -z "$(backup_files)"
+# Even with a stale receipt on disk it must not conjure a live file.
+cp "$TMPL" "$RECEIPT"
+refresh
+check_rc "refresh (receipt present, live absent)" 4 "$RC"
+check "HOME still empty (receipt present)" test -z "$(ls -A "$HOME_T")"
+end_case
+
+# ═══════════════════════════════════════════════════════════════════════════
+# C9 — idempotence
+# ═══════════════════════════════════════════════════════════════════════════
+begin_case "C9: second run after a refresh -> rc 0, no further backup, bytes stable"
+new_sandbox
+cp "$OLD_BYTES" "$LIVE"
+refresh
+check_rc "first refresh" 2 "$RC"
+touch -t 200001010000 "$LIVE"
+before="$(fstat "$LIVE")"
+refresh
+check_rc "second refresh" 0 "$RC"
+check "live unchanged (inode+mtime)" test "$(fstat "$LIVE")" = "$before"
+check "live == template" same_bytes "$LIVE" "$TMPL"
+check "still exactly one backup" test "$(backup_files | wc -l | tr -d ' ')" = 1
+refresh
+check_rc "third refresh" 0 "$RC"
+end_case
+
+# ═══════════════════════════════════════════════════════════════════════════
+# C12 — soft-fail paths (rc 1)
+# ═══════════════════════════════════════════════════════════════════════════
+begin_case "C12: missing template and unwritable backup location -> rc 1, live file untouched"
+new_sandbox
+cp "$OLD_BYTES" "$LIVE"; cp "$OLD_BYTES" "$S/pre.bytes"
+command rm "$TMPL"
+refresh
+check_rc "missing template" 1 "$RC"
+check "live untouched (missing template)" same_bytes "$LIVE" "$S/pre.bytes"
+check "no sidecar/receipt (missing template)" test ! -e "$LIVE.new" -a ! -e "$RECEIPT"
+new_sandbox
+cp "$OLD_BYTES" "$LIVE"; cp "$OLD_BYTES" "$S/pre.bytes"
+cp "$OLD_BYTES" "$RECEIPT"
+: > "$AITF/.backups"   # a FILE where the backup dir must go: mkdir -p fails
+refresh
+check_rc "backup cannot be created" 1 "$RC"
+check "live untouched when backup fails (no overwrite without backup)" same_bytes "$LIVE" "$S/pre.bytes"
+check "receipt untouched when backup fails" same_bytes "$RECEIPT" "$S/pre.bytes"
+check "no stray temp files" test -z "$(home_strays)"
+end_case
+
+# ═══════════════════════════════════════════════════════════════════════════
+# C10 — reload against throwaway tmux servers
+# ═══════════════════════════════════════════════════════════════════════════
+begin_case "C10: reload reaches every live server (with and without a client), skips stale/non-socket entries"
+if ! command -v tmux >/dev/null 2>&1; then
+    fail_note "tmux is not installed; this suite needs it (CI installs it, XACA-0862) — refusing to skip into a vacuous pass"
+else
+    new_sandbox
+    sdir="$TMUXB/tmux-$(id -u)"
+    nA="xaca1669a-$$"; nB="xaca1669b-$$"; nS="xaca1669s-$$"
+    for n in "$nA" "$nB" "$nS"; do
+        STARTED_SERVERS="$STARTED_SERVERS $TMUXB|$n"
+        tm -L "$n" -f /dev/null new-session -d -s sess >/dev/null 2>&1 || fail_note "could not start throwaway server $n"
+    done
+    # Attached client on server A (control mode fed by a fifo we hold open).
+    fifo="$S/ctl.fifo"; mkfifo "$fifo"
+    exec 7<>"$fifo"; FIFO_FDS="$FIFO_FDS 7"
+    tm -L "$nA" -C attach <"$fifo" >/dev/null 2>&1 &
+    CLIENT_PID=$!
+    # Wait (bounded) for the client to register.
+    i=0; while [ "$i" -lt 50 ] && [ -z "$(tm -L "$nA" list-clients -F '#{client_name}' 2>/dev/null)" ]; do sleep 0.1; i=$((i+1)); done
+    check "precondition: server A has an attached client" test -n "$(tm -L "$nA" list-clients -F '#{client_name}' 2>/dev/null)"
+    # Stale socket: kill -9 the server, leave its socket file in place.
+    pidS="$(tm -L "$nS" display-message -p '#{pid}' 2>/dev/null)"
+    [ -n "$pidS" ] && kill -9 "$pidS" 2>/dev/null
+    sleep 0.3
+    check "precondition: stale socket file remains and is dead" test -S "$sdir/$nS" -a -z "$(tm -L "$nS" list-sessions 2>/dev/null)"
+    # Non-socket file in the socket dir.
+    : > "$sdir/not-a-socket"
+    # The new config: marker option that none of the servers have yet.
+    printf 'set -g @xaca1669-marker "reloaded"\n' > "$LIVE"
+    check "precondition: server A lacks the marker" test -z "$(tm -L "$nA" show -gqv @xaca1669-marker)"
+    check "precondition: server B lacks the marker" test -z "$(tm -L "$nB" show -gqv @xaca1669-marker)"
+    run_fn _xaca1669_reload_tmux_servers
+    check_rc "reload" 0 "$RC"
+    check "server A (with client) sees the new option" test "$(tm -L "$nA" show -gqv @xaca1669-marker)" = reloaded
+    check "server B (no client) sees the new option" test "$(tm -L "$nB" show -gqv @xaca1669-marker)" = reloaded
+    check "summary says 2 servers, 1 client" test "$OUT" = "reloaded 2 server(s), 1 client(s)"
+    check "stale socket file left in place (not our business)" test -S "$sdir/$nS"
+    check "non-socket file left in place" test -f "$sdir/not-a-socket"
+    check "live servers survived the reload" test -n "$(tm -L "$nA" list-sessions 2>/dev/null)" -a -n "$(tm -L "$nB" list-sessions 2>/dev/null)"
+
+    # Config that fails to parse: rc 0, nothing counted, no error leaks.
+    printf 'this-is-not-a-tmux-command\n' > "$LIVE"
+    run_fn _xaca1669_reload_tmux_servers
+    check_rc "reload with a broken config" 0 "$RC"
+    check "broken config reloads 0 servers" test "$OUT" = "reloaded 0 server(s), 0 client(s)"
+
+    # tmux not on PATH: fail-soft, servers untouched.
+    printf 'set -g @xaca1669-marker "second"\n' > "$LIVE"
+    mkdir -p "$S/bin"
+    for tool in id env date sed cat uname mkdir dirname basename mktemp cp mv cmp shasum awk chmod rm tr; do
+        t="$(command -v "$tool" 2>/dev/null)"; [ -n "$t" ] && ln -s "$t" "$S/bin/$tool"
+    done
+    RUN_PATH="$S/bin"
+    run_fn _xaca1669_reload_tmux_servers
+    RUN_PATH="$PATH"
+    check_rc "reload without tmux on PATH" 0 "$RC"
+    check "no-tmux summary" test "$OUT" = "reloaded 0 server(s), 0 client(s)"
+    check "server A untouched without tmux on PATH" test "$(tm -L "$nA" show -gqv @xaca1669-marker)" = reloaded
+
+    for n in "$nA" "$nB"; do tm -L "$n" kill-server >/dev/null 2>&1; done
+    exec 7>&-
+    FIFO_FDS=""
+    wait "$CLIENT_PID" 2>/dev/null
+fi
+# No sockets dir at all / empty sockets dir.
+new_sandbox
+check "precondition: no tmux-<uid> dir" test ! -e "$TMUXB/tmux-$(id -u)"
+run_fn _xaca1669_reload_tmux_servers
+check_rc "reload, no sockets dir" 0 "$RC"
+check "no-sockets-dir summary" test "$OUT" = "reloaded 0 server(s), 0 client(s)"
+mkdir -p "$TMUXB/tmux-$(id -u)"
+run_fn _xaca1669_reload_tmux_servers
+check_rc "reload, empty sockets dir" 0 "$RC"
+check "empty-sockets-dir summary" test "$OUT" = "reloaded 0 server(s), 0 client(s)"
+end_case
+
+# ═══════════════════════════════════════════════════════════════════════════
+# C11 — upgrade wiring
+# ═══════════════════════════════════════════════════════════════════════════
+begin_case "C11a: static wiring — update_tmux_conf defined and called immediately after update_global_claude_md"
+check "update_tmux_conf() is defined" grep -qE '^update_tmux_conf\(\) \{' "$UPGRADE_SH"
+check "exactly one bare call line" test "$(grep -cE '^update_tmux_conf$' "$UPGRADE_SH")" = 1
+md_line="$(grep -nE '^update_global_claude_md$' "$UPGRADE_SH" | head -1 | cut -d: -f1)"
+tc_line="$(grep -nE '^update_tmux_conf$' "$UPGRADE_SH" | head -1 | cut -d: -f1)"
+nxt="$(awk -v n="${md_line:-0}" 'NR>n && $0!~/^[[:space:]]*$/ && $0!~/^[[:space:]]*#/ {print; exit}' "$UPGRADE_SH")"
+check "update_tmux_conf is the very next run-sequence line after update_global_claude_md" test "$nxt" = "update_tmux_conf"
+check "call line ordered after update_global_claude_md" test -n "$md_line" -a -n "$tc_line" -a "${tc_line:-0}" -gt "${md_line:-0}"
+check "does not call raw install_tmux_conf (unguarded overwrite)" sh -c "! awk '/^update_tmux_conf\\(\\) \\{/{c=1} c{print} c&&/^}\$/{exit}' '$UPGRADE_SH' | grep -qE '(^|[^_])install_tmux_conf\\b'"
+check "reuses the guarded refresh + reload helpers" sh -c "awk '/^update_tmux_conf\\(\\) \\{/{c=1} c{print} c&&/^}\$/{exit}' '$UPGRADE_SH' | grep -q _xaca1669_refresh_tmux_conf && awk '/^update_tmux_conf\\(\\) \\{/{c=1} c{print} c&&/^}\$/{exit}' '$UPGRADE_SH' | grep -q _xaca1669_reload_tmux_servers"
+end_case
+
+# Extract the real function body once; run it with the upgrade's environment.
+UPD_BODY="$TEST_TMP_DIR/update_tmux_conf.body.sh"
+awk '/^update_tmux_conf\(\) \{/{c=1} c{print} c&&/^}$/{exit}' "$UPGRADE_SH" > "$UPD_BODY"
+
+# run_upd <installer-libexec-root> <dry_run>: builds the upgrade env around the
+# extracted real function. Output lines are print_* calls; sets OUT and RC.
+run_upd() {
+    local libexec="$1" dry="$2"
+    OUT="$(env -u TMUX -u GIT_DIR -u GIT_WORK_TREE \
+        PATH="$RUN_PATH" HOME="$HOME_T" USER=xaca1669 TMUX_TMPDIR="$TMUXB" \
+        WORKING_DIR="$AITF" FRAMEWORK_DIR="$S/framework" LIBEXEC_DIR="$libexec" DRY_RUN="$dry" \
+        "$TEST_BASH" -c '
+            print_section() { echo "SECTION: $*"; }
+            print_info()    { echo "INFO: $*"; }
+            print_success() { echo "SUCCESS: $*"; }
+            print_warning() { echo "WARNING: $*"; }
+            source "$1"
+            update_tmux_conf
+            echo "FUNC_RC=$?"' _ "$UPD_BODY" 2>&1)" && RC=0 || RC=$?
+}
+
+# upgrade_sandbox: framework share/templates -> synthetic template; real
+# installer copied under a libexec root (so the function genuinely sources it).
+upgrade_sandbox() {
+    new_sandbox
+    mkdir -p "$S/framework/share" "$S/libexec/installers"
+    ln -s "$TMPL_ROOT" "$S/framework/share/templates"
+    cp "$INSTALLER" "$S/libexec/installers/install-claude-config.sh"
+}
+
+# Fake installer: refresh returns $FAKE_RC; reload drops a marker file. Proves
+# the reload gate independent of tmux itself.
+make_fake_installer() {  # <libexec-root> <refresh-rc> <marker-file> <mode: normal|exit>
+    mkdir -p "$1/installers"
+    if [ "$4" = exit ]; then
+        printf '%s\n' 'echo "installer exploded" >&2' 'exit 7' > "$1/installers/install-claude-config.sh"
+    else
+        {
+            printf '%s\n' '_xaca1669_refresh_tmux_conf() { echo "fake refresh"; return '"$2"'; }'
+            printf '%s\n' '_xaca1669_reload_tmux_servers() { echo called > "'"$3"'"; echo "reloaded 9 server(s), 9 client(s)"; return 0; }'
+        } > "$1/installers/install-claude-config.sh"
+    fi
+}
+
+begin_case "C11b: update_tmux_conf (real body, real installer) refreshes a stale pristine file and reloads a live server"
+if ! command -v tmux >/dev/null 2>&1; then
+    fail_note "tmux is not installed; refusing to skip into a vacuous pass"
+else
+    upgrade_sandbox
+    cp "$OLD_BYTES" "$LIVE"
+    nU="xaca1669u-$$"; STARTED_SERVERS="$STARTED_SERVERS $TMUXB|$nU"
+    tm -L "$nU" -f /dev/null new-session -d -s sess >/dev/null 2>&1 || fail_note "could not start throwaway server"
+    run_upd "$S/libexec" false
+    check_rc "update_tmux_conf process" 0 "$RC"
+    case "$OUT" in *"FUNC_RC=0"*) ;; *) fail_note "function did not return 0: $OUT" ;; esac
+    check "live refreshed to template" same_bytes "$LIVE" "$TMPL"
+    check "receipt written" same_bytes "$RECEIPT" "$LIVE"
+    check "running server picked up the new config" test "$(tm -L "$nU" show -gqv @xaca1669-marker)" = v2
+    case "$OUT" in *"SUCCESS: "*refreshed*) ;; *) fail_note "no success line: $OUT" ;; esac
+    case "$OUT" in *"INFO: tmux: reloaded 1 server(s), 0 client(s)"*) ;; *) fail_note "no reload summary: $OUT" ;; esac
+    # Second upgrade run: already current, NO reload (a manually-set option on
+    # the server must survive, proving source-file was not re-run).
+    tm -L "$nU" set -g @xaca1669-marker "manual" >/dev/null 2>&1
+    run_upd "$S/libexec" false
+    case "$OUT" in *"FUNC_RC=0"*"") ;; *) fail_note "second run rc: $OUT" ;; esac
+    check "second upgrade run does NOT reload (rc 0 path)" test "$(tm -L "$nU" show -gqv @xaca1669-marker)" = manual
+    tm -L "$nU" kill-server >/dev/null 2>&1
+fi
+end_case
+
+begin_case "C11c: update_tmux_conf always returns 0 — installer that exits non-zero, rc 1/3/4, missing installer"
+upgrade_sandbox
+make_fake_installer "$S/libexec" 0 "$S/marker" exit
+run_upd "$S/libexec" false
+case "$OUT" in *"FUNC_RC=0"*) ;; *) fail_note "installer exit 7 leaked through (no FUNC_RC=0): $OUT" ;; esac
+case "$OUT" in *"WARNING: "*) ;; *) fail_note "installer failure not surfaced as a warning: $OUT" ;; esac
+check "installer failure -> no reload" test ! -e "$S/marker"
+for rcv in 1 3 4 9; do
+    upgrade_sandbox
+    command rm -f "$S/marker"
+    make_fake_installer "$S/libexec" "$rcv" "$S/marker" normal
+    run_upd "$S/libexec" false
+    case "$OUT" in *"FUNC_RC=0"*) ;; *) fail_note "refresh rc $rcv: function did not return 0: $OUT" ;; esac
+    check "refresh rc $rcv -> NO reload" test ! -e "$S/marker"
+done
+upgrade_sandbox
+run_upd "$S/does-not-exist" false
+case "$OUT" in *"FUNC_RC=0"*"") ;; *) fail_note "missing installer: $OUT" ;; esac
+case "$OUT" in *"WARNING: install-claude-config.sh not found"*) ;; *) fail_note "missing-installer warning absent: $OUT" ;; esac
+end_case
+
+begin_case "C11d: reload happens only on refresh rc 2 (fake installer)"
+upgrade_sandbox
+command rm -f "$S/marker"
+make_fake_installer "$S/libexec" 2 "$S/marker" normal
+run_upd "$S/libexec" false
+case "$OUT" in *"FUNC_RC=0"*) ;; *) fail_note "rc 2: function did not return 0: $OUT" ;; esac
+check "refresh rc 2 -> reload called" test -f "$S/marker"
+case "$OUT" in *"INFO: tmux: reloaded 9 server(s), 9 client(s)"*) ;; *) fail_note "reload summary not relayed: $OUT" ;; esac
+end_case
+
+begin_case "C11e: DRY_RUN writes nothing and reloads nothing"
+upgrade_sandbox
+cp "$OLD_BYTES" "$LIVE"; cp "$OLD_BYTES" "$S/pre.bytes"
+before_home="$(find "$HOME_T" "$AITF" | sort | tr '\n' ' ')"
+run_upd "$S/libexec" true
+case "$OUT" in *"FUNC_RC=0"*) ;; *) fail_note "dry-run rc: $OUT" ;; esac
+case "$OUT" in *"Would check ~/.tmux.conf"*) ;; *) fail_note "dry-run preview line missing: $OUT" ;; esac
+check "live untouched under DRY_RUN" same_bytes "$LIVE" "$S/pre.bytes"
+check "no receipt under DRY_RUN" test ! -e "$RECEIPT"
+check "no sidecar under DRY_RUN" test ! -e "$LIVE.new"
+check "no file created/removed under HOME or AITEAMFORGE_DIR" test "$(find "$HOME_T" "$AITF" | sort | tr '\n' ' ')" = "$before_home"
+# And with the fake installer: DRY_RUN must not even call refresh/reload.
+upgrade_sandbox
+command rm -f "$S/marker"
+make_fake_installer "$S/libexec" 2 "$S/marker" normal
+run_upd "$S/libexec" true
+check "DRY_RUN never reaches the reload" test ! -e "$S/marker"
+end_case
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Summary + vacuous-green guard
+# ═══════════════════════════════════════════════════════════════════════════
+if [ -n "${_PASS_COUNT+x}" ]; then
+    _TOTAL=$((_PASS_COUNT + _FAIL_COUNT))
+    echo ""
+    echo "XACA-1669 tmux-conf-upgrade-refresh tests: ${_PASS_COUNT} passed, ${_FAIL_COUNT} failed (${_TOTAL} assertions executed)"
+    if [ "$_TOTAL" -eq 0 ]; then
+        echo "FATAL: zero assertions executed — this is a vacuous pass, not a real result" >&2
+        exit 1
+    fi
+    [ "${_FAIL_COUNT:-0}" -eq 0 ] || exit 1
+fi
+exit 0
