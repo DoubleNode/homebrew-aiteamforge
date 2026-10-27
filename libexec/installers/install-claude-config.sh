@@ -532,6 +532,250 @@ _xaca1159_refresh_global_claude_md() {
     return 1
 }
 
+#------------------------------------------------------------------------------
+# XACA-1669: ~/.tmux.conf upgrade-side refresh guard + receipt.
+#
+# install_tmux_conf() only ever ran at `aiteamforge setup` time, so a changed
+# share/templates/claude/tmux.conf (e.g. the two-line tab bar) never reached an
+# already-installed box -- same install-time-only bug class as XACA-1159. This
+# block is a deliberate copy of the XACA-1159 receipt design, adapted to a file
+# that has NO placeholders (rendered bytes == template bytes) and has shipped
+# in exactly ONE historical form:
+#   live == receipt  -> pristine, maybe stale -> re-render
+#   live != receipt  -> customized / foreign  -> leave alone, write a sidecar
+#   no receipt       -> bootstrap: live matches a known shipped render
+#                       (sha256 list below, or the CURRENT template) -> pristine
+#
+# DIFFERENCES from XACA-1159 worth knowing:
+#   - The historical render is an embedded sha256, NOT a file under share/
+#     (share/ is publisher-owned). Compare with `shasum -a 256`.
+#   - "No live file" returns a DISTINCT code (4): upgrade is not install, and
+#     we never create ~/.tmux.conf for a box that did not opt in via setup.
+#   - Backup goes to ${BACKUP_DIR} (this file's convention) before overwrite.
+#
+# GENERAL RULE for whoever edits tmux.conf next: register the OUTGOING render's
+# sha256 in _xaca1669_tmux_conf_historical_sha256() BEFORE changing the
+# template, or every receipt-less box sitting on it is stranded as "customized".
+#------------------------------------------------------------------------------
+
+# Single source of truth for the receipt path (our own state dir, like
+# .claude-md-global.receipt).
+_xaca1669_tmux_conf_receipt_path() {
+    printf '%s' "${AITEAMFORGE_DIR}/.tmux-conf.receipt"
+}
+
+# Every shipped tmux.conf render except the current template, one sha256 per
+# line. Only one has ever shipped (git blob 2fec0ca5, the single-line tab bar).
+_xaca1669_tmux_conf_historical_sha256() {
+    cat <<'HIST'
+f83149da485c2edf2aeefbd261e7d6d5378edb5b399df27d0b2266b42b92d924
+HIST
+}
+
+_xaca1669_sha256() {
+    shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'
+}
+
+# Copy the exact bytes just installed as the receipt. Fail-soft (rc 1 on error).
+_xaca1669_write_tmux_conf_receipt() {
+    local rendered_target="$1"
+    local receipt
+    receipt="$(_xaca1669_tmux_conf_receipt_path)"
+    mkdir -p "$(dirname "$receipt")" 2>/dev/null
+    cp "$rendered_target" "$receipt" 2>/dev/null || return 1
+    return 0
+}
+
+# On a skip, render the current template next to the live file as
+# ~/.tmux.conf.new (XACA-1159 naming) for the user to diff. Prints the path on
+# success. Fail-soft: never turns a safe skip into an error.
+_xaca1669_render_tmux_conf_sidecar() {
+    local target="$1" template="$2"
+    local sidecar="${target}.new"
+    [[ -f "$template" ]] || return 1
+    local tmp
+    tmp="$(mktemp "${target}.XXXXXX" 2>/dev/null)" || return 1
+    if ! apply_template "$template" "$tmp" >/dev/null 2>&1; then
+        command rm "$tmp" 2>/dev/null || true
+        return 1
+    fi
+    if cmp -s "$tmp" "$target"; then
+        command rm "$tmp" 2>/dev/null || true
+        return 1
+    fi
+    if mv "$tmp" "$sidecar" 2>/dev/null; then
+        chmod 644 "$sidecar" 2>/dev/null || true
+        printf '%s' "$sidecar"
+        return 0
+    fi
+    command rm "$tmp" 2>/dev/null || true
+    return 1
+}
+
+# Pre-receipt provenance: 0 if the live file at $1 equals the CURRENT template
+# or any historically shipped render (by sha256); 1 otherwise (fail closed).
+_xaca1669_bootstrap_tmux_conf_provenance() {
+    local live="$1" template="$2"
+    local live_sha tmpl_sha h
+    live_sha="$(_xaca1669_sha256 "$live")"
+    [[ -n "$live_sha" ]] || return 1
+    tmpl_sha="$(_xaca1669_sha256 "$template")"
+    if [[ -n "$tmpl_sha" && "$live_sha" == "$tmpl_sha" ]]; then
+        return 0
+    fi
+    while IFS= read -r h; do
+        [[ -n "$h" ]] || continue
+        if [[ "$live_sha" == "$h" ]]; then
+            return 0
+        fi
+    done <<< "$(_xaca1669_tmux_conf_historical_sha256)"
+    return 1
+}
+
+# Upgrade-side decision function -- called ONLY from update_tmux_conf()
+# (aiteamforge-upgrade.sh), never from a fresh install. Prints a one-line
+# summary to stdout. Return codes:
+#   0 = already current, nothing to do (receipt written/refreshed if needed)
+#   1 = skipped for a soft reason (missing template, render/backup/write failure)
+#   2 = refreshed from the shipped template (the ONLY code that means "file changed")
+#   3 = left untouched: symlink, customized, or no provenance match
+#       (sidecar ~/.tmux.conf.new written when it differs)
+#   4 = no ~/.tmux.conf on this box (upgrade is not install) -- nothing done
+_xaca1669_refresh_tmux_conf() {
+    local target="${HOME}/.tmux.conf"
+    local template="${TEMPLATE_DIR}/claude/tmux.conf"
+    local receipt sidecar=""
+    receipt="$(_xaca1669_tmux_conf_receipt_path)"
+
+    if [[ ! -f "$template" ]]; then
+        echo "Shipped tmux.conf template not found -- skipping"
+        return 1
+    fi
+
+    # Symlink FIRST: `cmp`/`-f` follow links, so a link whose bytes match the
+    # receipt would otherwise read as pristine. Never write through it and
+    # never remove it (the OPPOSITE of install_tmux_conf, which replaces it).
+    if [[ -L "$target" ]]; then
+        sidecar="$(_xaca1669_render_tmux_conf_sidecar "$target" "$template")" || sidecar=""
+        if [[ -n "$sidecar" ]]; then
+            echo "Left untouched: ${target} is a symlink (user-managed). Neither the link nor its destination was modified. Current shipped version written alongside it for comparison: ${sidecar}"
+        else
+            echo "Left untouched: ${target} is a symlink (user-managed). Neither the link nor its destination was modified."
+        fi
+        return 3
+    fi
+
+    if [[ ! -f "$target" ]]; then
+        echo "~/.tmux.conf is not installed on this box (nothing to refresh) -- 'aiteamforge setup' installs it the first time"
+        return 4
+    fi
+
+    if [[ -f "$receipt" ]]; then
+        if ! cmp -s "$target" "$receipt"; then
+            sidecar="$(_xaca1669_render_tmux_conf_sidecar "$target" "$template")" || sidecar=""
+            if [[ -n "$sidecar" ]]; then
+                echo "Left untouched: live file differs from our last-known render (user-customized) -- see ${receipt}. Current shipped version written alongside it for comparison: ${sidecar}"
+            else
+                echo "Left untouched: live file differs from our last-known render (user-customized) -- see ${receipt}"
+            fi
+            return 3
+        fi
+    else
+        if ! _xaca1669_bootstrap_tmux_conf_provenance "$target" "$template"; then
+            sidecar="$(_xaca1669_render_tmux_conf_sidecar "$target" "$template")" || sidecar=""
+            if [[ -n "$sidecar" ]]; then
+                echo "Left untouched: no render receipt on file, and the live tmux.conf does not match any shipped render (user-customized or hand-authored). Current shipped version written alongside it for comparison: ${sidecar}"
+            else
+                echo "Left untouched: no render receipt on file, and the live tmux.conf does not match any shipped render (user-customized or hand-authored)"
+            fi
+            return 3
+        fi
+    fi
+
+    # Live file is now KNOWN-pristine.
+    local candidate
+    candidate="$(mktemp "${target}.XXXXXX" 2>/dev/null)" || {
+        echo "Could not create a temp file to render the current tmux.conf -- skipping this run"
+        return 1
+    }
+    if ! apply_template "$template" "$candidate" >/dev/null 2>&1; then
+        command rm "$candidate" 2>/dev/null || true
+        echo "Rendering the current tmux.conf template failed -- leaving the existing file untouched"
+        return 1
+    fi
+
+    if cmp -s "$candidate" "$target"; then
+        command rm "$candidate" 2>/dev/null || true
+        if _xaca1669_write_tmux_conf_receipt "$target"; then
+            echo "tmux.conf already current"
+        else
+            echo "tmux.conf already current (render receipt could not be written; provenance will be re-derived next run)"
+        fi
+        return 0
+    fi
+
+    # Back up before overwriting; if we cannot, do not overwrite.
+    local backup_path="${BACKUP_DIR:-${AITEAMFORGE_DIR}/.backups/claude-config-$(date +%Y%m%d-%H%M%S)}/tmux.conf"
+    if ! { mkdir -p "$(dirname "$backup_path")" && cp "$target" "$backup_path"; } 2>/dev/null; then
+        command rm "$candidate" 2>/dev/null || true
+        echo "Could not back up ~/.tmux.conf to ${backup_path} -- existing file left in place"
+        return 1
+    fi
+
+    local _mode=""
+    if command -v _aitf_file_mode >/dev/null 2>&1; then
+        _mode="$(_aitf_file_mode "$target")"
+    fi
+    case "$_mode" in ''|*[!0-7]*) _mode=644 ;; esac
+    chmod "$_mode" "$candidate" 2>/dev/null || true
+
+    if mv -f "$candidate" "$target" 2>/dev/null; then
+        if _xaca1669_write_tmux_conf_receipt "$target"; then
+            echo "tmux.conf refreshed from shipped template (previous version backed up to ${backup_path})"
+        else
+            echo "tmux.conf refreshed from shipped template (backup: ${backup_path}), but the render receipt could not be written -- the next upgrade will re-derive provenance by comparison"
+        fi
+        return 2
+    fi
+
+    command rm "$candidate" 2>/dev/null || true
+    echo "Failed to install the refreshed tmux.conf -- existing file left in place"
+    return 1
+}
+
+# XACA-1669-005: after a refresh that CHANGED ~/.tmux.conf, make running tmux
+# servers pick it up. Each team runs its own `tmux -L <team>` server, so
+# enumerate every socket in ${TMUX_TMPDIR:-/tmp}/tmux-<uid>/. Dead sockets and
+# "no server running" are skipped silently; nothing here can fail the caller.
+# Prints one summary line: "reloaded N server(s), M client(s)". Always rc 0.
+_xaca1669_reload_tmux_servers() {
+    local conf="${HOME}/.tmux.conf"
+    local dir="${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)"
+    local servers=0 clients=0 sock c
+    if ! command -v tmux >/dev/null 2>&1 || [[ ! -d "$dir" ]]; then
+        echo "reloaded 0 server(s), 0 client(s)"
+        return 0
+    fi
+    for sock in "$dir"/*; do
+        [[ -S "$sock" ]] || continue
+        # Liveness probe; a stale socket or no server fails here, silently.
+        env -u TMUX tmux -S "$sock" list-sessions >/dev/null 2>&1 || continue
+        if env -u TMUX tmux -S "$sock" source-file "$conf" >/dev/null 2>&1; then
+            servers=$((servers + 1))
+        else
+            continue
+        fi
+        while IFS= read -r c; do
+            [[ -n "$c" ]] || continue
+            if env -u TMUX tmux -S "$sock" refresh-client -S -t "$c" >/dev/null 2>&1; then
+                clients=$((clients + 1))
+            fi
+        done <<< "$(env -u TMUX tmux -S "$sock" list-clients -F '#{client_name}' 2>/dev/null)"
+    done
+    echo "reloaded ${servers} server(s), ${clients} client(s)"
+    return 0
+}
+
 # Install team-specific CLAUDE.md files
 # NOTE (XACA-0285): Team CLAUDE.md files are no longer installed into
 # ${CLAUDE_CONFIG_DIR}/agents/<team>/.  They live in each team's own
@@ -844,6 +1088,12 @@ install_tmux_conf() {
 
     # Apply template substitution (handles {{HOME}} etc. placeholders)
     apply_template "$template" "$target"
+    # XACA-1669: record a render receipt (exact copy of the bytes just written)
+    # so a LATER `aiteamforge upgrade` can tell a pristine-but-stale tmux.conf
+    # from a user-customized one. Same contract as the XACA-1159 CLAUDE.md
+    # receipt; see _xaca1669_refresh_tmux_conf() below. Fail-soft: a missing
+    # receipt only means the next upgrade re-derives provenance by comparison.
+    _xaca1669_write_tmux_conf_receipt "$target" || log_warning "Could not write the tmux.conf render receipt; upgrade will re-derive provenance by comparison"
     log_success "tmux.conf installed"
 }
 

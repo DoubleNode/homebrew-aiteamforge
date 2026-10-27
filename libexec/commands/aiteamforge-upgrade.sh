@@ -6524,6 +6524,81 @@ update_global_claude_md() {
   return 0
 }
 
+# XACA-1669: ~/.tmux.conf refresh on the UPGRADE path.
+#
+# install_tmux_conf() (libexec/installers/install-claude-config.sh) renders
+# share/templates/claude/tmux.conf, but its only caller is install_claude_config()
+# via `aiteamforge setup`. Nothing in the upgrade run sequence ever touched
+# ~/.tmux.conf again, so a changed template (the two-line tab bar) never reached
+# an installed box -- same install-time-only bug class as XACA-1159 /
+# XACA-0771 / XACA-0925.
+#
+# Why this does NOT call install_claude_config() (nor install_tmux_conf()):
+# the former also rewrites settings.json, skills, personas, etc. (the update
+# paths above own those, each with their own guards), and the latter overwrites
+# unconditionally -- it even REMOVES a symlinked ~/.tmux.conf. Unattended
+# nightly upgrades must do neither. We reuse only apply_template() and the
+# receipt-guarded _xaca1669_refresh_tmux_conf() (a copy of the XACA-1159
+# design): refresh only a file PROVEN pristine, leave customized/symlinked
+# files alone and offer ~/.tmux.conf.new to diff against.
+#
+# Subshell + fail-soft for the same reasons as update_global_claude_md: the
+# installer opens with `set -euo pipefail`, and an error here must never abort
+# the parent upgrade. Running tmux servers are reloaded ONLY when the file
+# actually changed (rc 2).
+update_tmux_conf() {
+  print_section "Updating tmux.conf"
+
+  local installer="${LIBEXEC_DIR}/installers/install-claude-config.sh"
+  if [ ! -f "$installer" ]; then
+    print_warning "install-claude-config.sh not found ($installer) — skipping tmux.conf refresh"
+    return 0
+  fi
+
+  if [ "$DRY_RUN" = true ]; then
+    echo "Would check ~/.tmux.conf against the shipped template (via its render receipt, or a shipped-render sha256 bootstrap if no receipt exists yet) and refresh it only if proven pristine-but-stale, then reload running tmux servers; a customized or symlinked file would be left untouched"
+    return 0
+  fi
+
+  print_info "Checking ~/.tmux.conf against the shipped template (idempotent; fail-soft; never overwrites a customized file)..."
+
+  local _xaca1669_result="" _xaca1669_rc=0
+  _xaca1669_result="$(
+      AITEAMFORGE_DIR="${WORKING_DIR}"
+      TEMPLATE_DIR="${FRAMEWORK_DIR}/share/templates"
+      export AITEAMFORGE_DIR TEMPLATE_DIR
+      # shellcheck source=/dev/null
+      source "$installer" >/dev/null 2>&1
+      _xaca1669_refresh_tmux_conf
+    )" && _xaca1669_rc=0 || _xaca1669_rc=$?
+
+  case "$_xaca1669_rc" in
+    0) print_success "${_xaca1669_result:-tmux.conf already current}" ;;
+    2) print_success "${_xaca1669_result:-tmux.conf refreshed from shipped template}"
+       # XACA-1669-005: file changed -> reload running servers (fail-soft).
+       local _xaca1669_reload="" _xaca1669_reload_rc=0
+       _xaca1669_reload="$(
+           AITEAMFORGE_DIR="${WORKING_DIR}"
+           TEMPLATE_DIR="${FRAMEWORK_DIR}/share/templates"
+           export AITEAMFORGE_DIR TEMPLATE_DIR
+           # shellcheck source=/dev/null
+           source "$installer" >/dev/null 2>&1
+           _xaca1669_reload_tmux_servers
+         )" && _xaca1669_reload_rc=0 || _xaca1669_reload_rc=$?
+       if [ "$_xaca1669_reload_rc" -eq 0 ]; then
+         print_info "tmux: ${_xaca1669_reload:-reload skipped}"
+       else
+         print_warning "tmux server reload skipped (non-fatal; new config applies on next tmux start)"
+       fi
+       ;;
+    3) print_warning "${_xaca1669_result:-tmux.conf left untouched — differs from our records (user-customized or symlinked)}" ;;
+    4) print_info "${_xaca1669_result:-~/.tmux.conf is not installed (nothing to refresh)}" ;;
+    *) print_warning "${_xaca1669_result:-tmux.conf refresh skipped (non-fatal; upgrade continues)}" ;;
+  esac
+
+  return 0
+}
+
 # XACA-1283: ~/.claude/settings.json on the UPGRADE path.
 #
 # install_settings_json() (install-claude-config.sh) renders and merges
@@ -6970,6 +7045,7 @@ deploy_flat_team_personas
 update_team_image_assets
 update_claude_hooks
 update_global_claude_md
+update_tmux_conf
 update_claude_settings
 update_skills
 update_launchagents
