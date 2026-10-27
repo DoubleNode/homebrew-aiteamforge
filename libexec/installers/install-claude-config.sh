@@ -417,7 +417,7 @@ _xaca1159_bootstrap_claude_md_provenance() {
 # (aiteamforge-upgrade.sh), never from a fresh install. Prints a one-line
 # human-readable summary to stdout; the exit code tells the caller what
 # happened:
-#   0 = already current, nothing to do (receipt written/refreshed if needed)
+#   0 = already current, nothing to do (receipt written/refreshed/re-synced if needed)
 #   2 = refreshed from the shipped template
 #   3 = left untouched: customized, hand-authored, or no historical match
 #   1 = skipped for a soft reason (missing target/template, render/write failure)
@@ -612,6 +612,19 @@ _xaca1669_render_tmux_conf_sidecar() {
     return 1
 }
 
+# 0 if the live file at $1 is byte-identical to the CURRENT template rendered
+# through apply_template; 1 otherwise (including any render failure -- fail
+# closed). Used to adopt a live file whose receipt is merely stale.
+_xaca1669_live_equals_current_render() {
+    local live="$1" template="$2" tmp rc=1
+    tmp="$(mktemp "${live}.XXXXXX" 2>/dev/null)" || return 1
+    if apply_template "$template" "$tmp" >/dev/null 2>&1 && cmp -s "$tmp" "$live"; then
+        rc=0
+    fi
+    command rm "$tmp" 2>/dev/null || true
+    return "$rc"
+}
+
 # Pre-receipt provenance: 0 if the live file at $1 equals the CURRENT template
 # or any historically shipped render (by sha256); 1 otherwise (fail closed).
 _xaca1669_bootstrap_tmux_conf_provenance() {
@@ -672,6 +685,19 @@ _xaca1669_refresh_tmux_conf() {
 
     if [[ -f "$receipt" ]]; then
         if ! cmp -s "$target" "$receipt"; then
+            # Receipt is stale but the live file already IS the current render
+            # (hand-copied, restored from backup, or a refresh whose receipt
+            # write failed). Nothing is customized and nothing to change:
+            # adopt it -- re-sync the receipt -- instead of stranding the user
+            # on "customized" with a pointless sidecar forever.
+            if _xaca1669_live_equals_current_render "$target" "$template"; then
+                if _xaca1669_write_tmux_conf_receipt "$target"; then
+                    echo "tmux.conf already current (render receipt re-synced to the live file)"
+                else
+                    echo "tmux.conf already current (render receipt could not be written; provenance will be re-derived next run)"
+                fi
+                return 0
+            fi
             sidecar="$(_xaca1669_render_tmux_conf_sidecar "$target" "$template")" || sidecar=""
             if [[ -n "$sidecar" ]]; then
                 echo "Left untouched: live file differs from our last-known render (user-customized) -- see ${receipt}. Current shipped version written alongside it for comparison: ${sidecar}"
@@ -747,11 +773,63 @@ _xaca1669_refresh_tmux_conf() {
 # servers pick it up. Each team runs its own `tmux -L <team>` server, so
 # enumerate every socket in ${TMUX_TMPDIR:-/tmp}/tmux-<uid>/. Dead sockets and
 # "no server running" are skipped silently; nothing here can fail the caller.
-# Prints one summary line: "reloaded N server(s), M client(s)". Always rc 0.
+# Prints one summary line: "reloaded N server(s), M client(s)", plus
+# ", K unresponsive skipped" when a server timed out. Always rc 0.
+
+# Run `tmux <args>` with a wall-clock limit (default 5 s, override with
+# XACA1669_TMUX_TIMEOUT). macOS has no timeout(1), and a SIGSTOPped or wedged
+# server makes every tmux client call block forever -- fatal for an unattended
+# upgrade -- so every call goes through here. Pure bash (works under 3.2): the
+# command runs in the background, a polling watchdog TERMs (then KILLs) it at
+# the deadline. The watchdog's stdio is detached so it can never hold a
+# caller's $(...) pipe open, and it exits by itself as soon as the command is
+# reaped. stdout of tmux is passed through; stderr is discarded.
+# Returns tmux's rc, or 124 on timeout (also if no temp dir can be made, so
+# the caller skips rather than risks an unbounded call). TMUX is unset, as in
+# every other call here.
+_xaca1669_tmux_bounded() {
+    local limit="${XACA1669_TMUX_TIMEOUT:-5}"
+    case "$limit" in ''|*[!0-9]*|0) limit=5 ;; esac
+    local work out flag pid rc
+    work="$(mktemp -d "${TMPDIR:-/tmp}/xaca1669-tmux.XXXXXX" 2>/dev/null)" || return 124
+    out="${work}/out"
+    flag="${work}/timeout"
+    env -u TMUX tmux "$@" >"$out" 2>/dev/null </dev/null &
+    pid=$!
+    (
+        local ticks=$((limit * 10)) i=0
+        while [ "$i" -lt "$ticks" ]; do
+            kill -0 "$pid" 2>/dev/null || exit 0
+            sleep 0.1
+            i=$((i + 1))
+        done
+        kill -0 "$pid" 2>/dev/null || exit 0
+        : >"$flag"
+        kill -TERM "$pid" 2>/dev/null || true
+        i=0
+        while [ "$i" -lt 10 ] && kill -0 "$pid" 2>/dev/null; do
+            sleep 0.1
+            i=$((i + 1))
+        done
+        kill -KILL "$pid" 2>/dev/null || true
+        exit 0
+    ) >/dev/null 2>&1 &
+    rc=0
+    wait "$pid" 2>/dev/null || rc=$?
+    if [[ -e "$flag" ]]; then
+        rc=124
+    else
+        cat "$out" 2>/dev/null || true
+    fi
+    command rm -f "$out" "$flag" 2>/dev/null || true
+    rmdir "$work" 2>/dev/null || true
+    return "$rc"
+}
+
 _xaca1669_reload_tmux_servers() {
     local conf="${HOME}/.tmux.conf"
     local dir="${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)"
-    local servers=0 clients=0 sock c
+    local servers=0 clients=0 skipped=0 sock c rc clist
     if ! command -v tmux >/dev/null 2>&1 || [[ ! -d "$dir" ]]; then
         echo "reloaded 0 server(s), 0 client(s)"
         return 0
@@ -759,20 +837,36 @@ _xaca1669_reload_tmux_servers() {
     for sock in "$dir"/*; do
         [[ -S "$sock" ]] || continue
         # Liveness probe; a stale socket or no server fails here, silently.
-        env -u TMUX tmux -S "$sock" list-sessions >/dev/null 2>&1 || continue
-        if env -u TMUX tmux -S "$sock" source-file "$conf" >/dev/null 2>&1; then
-            servers=$((servers + 1))
-        else
-            continue
-        fi
+        # rc 124 = the server accepted the connection but never answered
+        # (stopped/wedged): skip it, count it, keep going.
+        rc=0
+        _xaca1669_tmux_bounded -S "$sock" list-sessions >/dev/null || rc=$?
+        if [[ "$rc" -eq 124 ]]; then skipped=$((skipped + 1)); continue; fi
+        [[ "$rc" -eq 0 ]] || continue
+        rc=0
+        _xaca1669_tmux_bounded -S "$sock" source-file "$conf" >/dev/null || rc=$?
+        if [[ "$rc" -eq 124 ]]; then skipped=$((skipped + 1)); continue; fi
+        [[ "$rc" -eq 0 ]] || continue
+        servers=$((servers + 1))
+        rc=0
+        clist="$(_xaca1669_tmux_bounded -S "$sock" list-clients -F '#{client_name}')" || rc=$?
+        if [[ "$rc" -eq 124 ]]; then skipped=$((skipped + 1)); continue; fi
         while IFS= read -r c; do
             [[ -n "$c" ]] || continue
-            if env -u TMUX tmux -S "$sock" refresh-client -S -t "$c" >/dev/null 2>&1; then
+            rc=0
+            _xaca1669_tmux_bounded -S "$sock" refresh-client -S -t "$c" >/dev/null || rc=$?
+            if [[ "$rc" -eq 0 ]]; then
                 clients=$((clients + 1))
+            elif [[ "$rc" -eq 124 ]]; then
+                skipped=$((skipped + 1)); break
             fi
-        done <<< "$(env -u TMUX tmux -S "$sock" list-clients -F '#{client_name}' 2>/dev/null)"
+        done <<< "$clist"
     done
-    echo "reloaded ${servers} server(s), ${clients} client(s)"
+    if [[ "$skipped" -gt 0 ]]; then
+        echo "reloaded ${servers} server(s), ${clients} client(s), ${skipped} unresponsive skipped"
+    else
+        echo "reloaded ${servers} server(s), ${clients} client(s)"
+    fi
     return 0
 }
 

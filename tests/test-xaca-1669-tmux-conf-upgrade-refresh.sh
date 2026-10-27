@@ -22,13 +22,20 @@
 #   C2  pristine (receipt match) + changed template -> rc 2, refreshed, backup
 #   C3  pristine + unchanged template -> rc 0, no write (inode + mtime)
 #   C4  customized (receipt mismatch) -> rc 3, untouched, sidecar == template
+#   C4b stale receipt but live == CURRENT render -> rc 0, receipt re-synced, no
+#       sidecar (adoption; never strand the user on "customized")
 #   C5  pre-receipt box on the historical shipped blob -> rc 2, receipt written
-#       (also pins the embedded sha256 constant to the real tap blob 2fec0ca5)
+#       (historical bytes are the committed fixture tests/fixtures/xaca-1669/
+#       tmux.conf.2fec0ca5, sha256-pinned to the installer's constant; NO git
+#       history dependency -- CI checkouts are shallow, and the publisher will
+#       later replace the template this blob came from)
 #   C6  pre-receipt box, foreign content -> rc 3, untouched, sidecar
 #   C7  symlink (incl. target bytes == receipt) and dangling symlink -> rc 3
 #   C8  no ~/.tmux.conf -> rc 4, nothing created
 #   C9  idempotence: second run after a refresh -> rc 0
 #   C10 reload against throwaway tmux servers (-L, isolated TMUX_TMPDIR)
+#   C10b reload must stay bounded when a server is SIGSTOPped (wedged): that
+#       socket is skipped + reported, live servers still reload
 #   C11 upgrade wiring: static order checks + the REAL update_tmux_conf body
 #   C12 soft-fail paths (missing template, unwritable backup dir) -> rc 1
 #
@@ -51,12 +58,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TAP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 INSTALLER="${XACA1669_INSTALLER:-$TAP_ROOT/libexec/installers/install-claude-config.sh}"
 UPGRADE_SH="${XACA1669_UPGRADE_SH:-$TAP_ROOT/libexec/commands/aiteamforge-upgrade.sh}"
-REAL_TEMPLATE="$TAP_ROOT/share/templates/claude/tmux.conf"
 
-# The historically shipped render: tap blob 2fec0ca5 == the current tap
-# template (the single-line tab bar). The installer embeds its sha256.
+# The historically shipped render: tap blob 2fec0ca5 (the single-line tab bar),
+# committed byte-exact as a fixture (produced by `git show 2fec0ca5 >`). The
+# installer embeds its sha256. Do NOT regenerate this from git history or from
+# share/: the point is that the suite needs neither.
 HIST_SHA256="f83149da485c2edf2aeefbd261e7d6d5378edb5b399df27d0b2266b42b92d924"
-HIST_BLOB="2fec0ca5"
+HIST_FIXTURE="$SCRIPT_DIR/fixtures/xaca-1669/tmux.conf.2fec0ca5"
 
 for _need in "$INSTALLER" "$UPGRADE_SH"; do
     if [ ! -f "$_need" ]; then
@@ -64,6 +72,20 @@ for _need in "$INSTALLER" "$UPGRADE_SH"; do
         exit 1
     fi
 done
+
+if [ ! -f "$HIST_FIXTURE" ]; then
+    echo "FATAL: historical tmux.conf fixture missing: $HIST_FIXTURE" >&2
+    exit 1
+fi
+_fx_sha="$(shasum -a 256 "$HIST_FIXTURE" | awk '{print $1}')"
+if [ "$_fx_sha" != "$HIST_SHA256" ]; then
+    echo "FATAL: fixture sha256 ($_fx_sha) != expected historical sha256 ($HIST_SHA256) -- fixture corrupted or edited; refusing to fall back" >&2
+    exit 1
+fi
+if ! grep -q "^${HIST_SHA256}\$" "$INSTALLER"; then
+    echo "FATAL: installer does not embed the historical sha256 ${HIST_SHA256} (constant drifted from the fixture)" >&2
+    exit 1
+fi
 
 # The interpreter running this suite is the interpreter that runs the installer
 # (so /bin/bash 3.2 runs exercise the installer under 3.2 too).
@@ -94,6 +116,9 @@ TMUX_BASE="$(mktemp -d /tmp/xt1669.XXXXXX)"
 # Servers/clients this suite started: "<TMUX_TMPDIR>|<-L name>" lines.
 STARTED_SERVERS=""
 FIFO_FDS=""
+# PIDs of throwaway servers THIS suite SIGSTOPped (recorded before the STOP so
+# cleanup can never miss one). Only ever pids we started ourselves.
+STOPPED_PIDS=""
 
 tm() {
     # Only ever talk to a server under an isolated, suite-owned TMUX_TMPDIR.
@@ -105,7 +130,11 @@ tm() {
 }
 
 cleanup() {
-    local entry d n fd
+    local entry d n fd p
+    for p in $STOPPED_PIDS; do
+        kill -CONT "$p" >/dev/null 2>&1 || true
+        kill -KILL "$p" >/dev/null 2>&1 || true
+    done
     for entry in $STARTED_SERVERS; do
         d="${entry%%|*}"; n="${entry#*|}"
         case "$d" in "$TMUX_BASE"/?*) env -u TMUX TMUX_TMPDIR="$d" tmux -L "$n" kill-server >/dev/null 2>&1 || true ;; esac
@@ -119,6 +148,7 @@ cleanup() {
     fi
 }
 trap cleanup EXIT
+trap 'exit 130' INT TERM HUP
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Case plumbing
@@ -170,22 +200,57 @@ new_sandbox() {
     mkdir -p "$TMUXB"
     printf '# tmux.conf v2 (two-line tab bar)\nset -g status 2\nset -g @xaca1669-marker "v2"\n' > "$TMPL"
     OLD_BYTES="$S/old-shipped.conf"
-    git -C "$TAP_ROOT" show "$HIST_BLOB" > "$OLD_BYTES" 2>/dev/null
+    cp "$HIST_FIXTURE" "$OLD_BYTES"
     RECEIPT="$AITF/.tmux-conf.receipt"
     LIVE="$HOME_T/.tmux.conf"
     RUN_PATH="$PATH"
 }
 
+# kill_tree <pid>: SIGKILL a process and all its descendants (children first).
+kill_tree() {
+    local c
+    for c in $(pgrep -P "$1" 2>/dev/null); do kill_tree "$c"; done
+    kill -KILL "$1" >/dev/null 2>&1 || true
+}
+
 # run_fn <function> [args]: sources the REAL installer in a child bash (same
 # interpreter as this suite) exactly the way update_tmux_conf does, then calls
-# the function. Sets OUT (stdout+stderr) and RC.
+# the function. Sets OUT (stdout+stderr), RC, ELAPSED (whole seconds); a hang is recorded
+# as a case failure (RC=137).
+# The child runs under an OUTER watchdog (RUN_LIMIT seconds, default 60) so a
+# hang in the code under test FAILS the case instead of hanging the suite.
 run_fn() {
-    OUT="$(env -u TMUX -u GIT_DIR -u GIT_WORK_TREE \
+    local limit="${RUN_LIMIT:-60}" outf="$S/.run.out" rcf="$S/.run.rc" hungf="$S/.run.hung"
+    local pid t0
+    command rm -f "$outf" "$rcf" "$hungf"
+    t0="$(date +%s)"
+    ( env -u TMUX -u GIT_DIR -u GIT_WORK_TREE \
         PATH="$RUN_PATH" HOME="$HOME_T" USER=xaca1669 \
         AITEAMFORGE_DIR="$AITF" TEMPLATE_DIR="$TMPL_ROOT" TMUX_TMPDIR="$TMUXB" \
+        XACA1669_TMUX_TIMEOUT="${XACA1669_TMUX_TIMEOUT:-}" \
         PRELUDE="${PRELUDE:-}" \
-        "$TEST_BASH" -c 'source "$1" >/dev/null 2>&1; shift; if [ -n "$PRELUDE" ]; then source "$PRELUDE"; fi; "$@"' _ "$INSTALLER" "$@" 2>&1)" \
-        && RC=0 || RC=$?
+        "$TEST_BASH" -c 'source "$1" >/dev/null 2>&1; shift; if [ -n "$PRELUDE" ]; then source "$PRELUDE"; fi; "$@"' _ "$INSTALLER" "$@" >"$outf" 2>&1 </dev/null
+      echo $? >"$rcf" ) &
+    pid=$!
+    (
+        while kill -0 "$pid" 2>/dev/null; do
+            sleep 0.2
+            if [ $(( $(date +%s) - t0 )) -ge "$limit" ] && kill -0 "$pid" 2>/dev/null; then
+                : >"$hungf"
+                kill_tree "$pid"
+                exit 0
+            fi
+        done
+    ) >/dev/null 2>&1 &
+    wait "$pid" 2>/dev/null
+    ELAPSED=$(( $(date +%s) - t0 ))
+    OUT="$(cat "$outf" 2>/dev/null)"
+    if [ -e "$hungf" ]; then
+        RC=137
+        fail_note "HUNG: run_fn $1 exceeded ${limit}s and was killed by the outer watchdog"
+    else
+        RC="$(cat "$rcf" 2>/dev/null)"; RC="${RC:-255}"
+    fi
 }
 
 refresh() { run_fn _xaca1669_refresh_tmux_conf; }
@@ -287,12 +352,41 @@ refresh
 check_rc "second refresh" 3 "$RC"
 check "live still untouched after re-run" same_bytes "$LIVE" "$S/mine.bytes"
 check "sidecar still == template after re-run" same_bytes "$LIVE.new" "$TMPL"
-# Mismatch but live already equals the template: no sidecar to write.
+end_case
+
+# ═══════════════════════════════════════════════════════════════════════════
+# C4b — stale receipt, live == CURRENT render -> adopt (rc 0)
+# ═══════════════════════════════════════════════════════════════════════════
+# This REPLACES C4's old third sub-case, which asserted rc 3 / no sidecar for
+# "receipt != live but live == current template". That pinned a bug: nothing is
+# customized there, yet the user was reported as "left untouched" on EVERY
+# upgrade, forever (no write ever re-synced the receipt). The live file is
+# provably the current render, so the correct outcome is "already current" and
+# a re-synced receipt.
+begin_case "C4b: stale receipt but live == current render -> rc 0, receipt re-synced, no sidecar, no write"
 new_sandbox
 printf '# older\n' > "$RECEIPT"; cp "$TMPL" "$LIVE"
+touch -t 200001010000 "$LIVE"
+before="$(fstat "$LIVE")"
 refresh
-check_rc "mismatch-but-equals-template refresh" 3 "$RC"
-check "no sidecar when live already equals the template" test ! -e "$LIVE.new"
+check_rc "adopt stale-receipt/current-live" 0 "$RC"
+check "receipt re-synced to live" same_bytes "$RECEIPT" "$LIVE"
+check "live == template and not rewritten (inode+mtime)" test "$(fstat "$LIVE")" = "$before"
+check "no sidecar" test ! -e "$LIVE.new"
+check "no backup" test -z "$(backup_files)"
+check "no stray temp files" test -z "$(home_strays)"
+case "$OUT" in *"already current"*) ;; *) fail_note "summary line missing: $OUT" ;; esac
+# Second run is the plain pristine+current path.
+refresh
+check_rc "second run" 0 "$RC"
+# Guard against over-adoption: stale receipt + live differs from BOTH -> still rc 3.
+new_sandbox
+printf '# older\n' > "$RECEIPT"; printf '# something else entirely\n' > "$LIVE"
+cp "$LIVE" "$S/mine.bytes"; cp "$RECEIPT" "$S/receipt.bytes"
+refresh
+check_rc "live differs from receipt and template" 3 "$RC"
+check "live untouched" same_bytes "$LIVE" "$S/mine.bytes"
+check "receipt untouched (not adopted)" same_bytes "$RECEIPT" "$S/receipt.bytes"
 end_case
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -300,12 +394,7 @@ end_case
 # ═══════════════════════════════════════════════════════════════════════════
 begin_case "C5: pre-receipt box on the historical shipped blob (2fec0ca5) -> rc 2, receipt written"
 new_sandbox
-if [ ! -s "$OLD_BYTES" ]; then
-    # Shallow clones may lack the object; the tap template at this commit IS
-    # that blob, so fall back to it only if its hash proves it.
-    cp "$REAL_TEMPLATE" "$OLD_BYTES"
-fi
-check "historical bytes sha256 == constant (git show $HIST_BLOB)" test "$(sha256_of "$OLD_BYTES")" = "$HIST_SHA256"
+check "historical fixture bytes sha256 == installer constant" test "$(sha256_of "$OLD_BYTES")" = "$HIST_SHA256"
 check "installer embeds the SAME sha256 constant (no silent drift)" grep -q "^${HIST_SHA256}\$" "$INSTALLER"
 cp "$OLD_BYTES" "$LIVE"
 cp "$OLD_BYTES" "$S/pre.bytes"
@@ -524,6 +613,56 @@ check "empty-sockets-dir summary" test "$OUT" = "reloaded 0 server(s), 0 client(
 end_case
 
 # ═══════════════════════════════════════════════════════════════════════════
+# C10b — a wedged (SIGSTOPped) server must not hang the reload
+# ═══════════════════════════════════════════════════════════════════════════
+# A stopped server still owns its socket, so connect() succeeds and every tmux
+# client call then blocks forever. Unattended upgrades must survive that. The
+# wedged server sorts FIRST in the socket dir so the live one after it proves
+# the loop kept going. run_fn's outer watchdog (RUN_LIMIT) turns a regression
+# into a bounded FAIL rather than a hung suite.
+begin_case "C10b: SIGSTOPped server -> reload returns in bounded time, skips it (reported), live servers still reload"
+if ! command -v tmux >/dev/null 2>&1; then
+    fail_note "tmux is not installed; refusing to skip into a vacuous pass"
+else
+    new_sandbox
+    nW="xaca1669a-wedged-$$"; nL="xaca1669b-live-$$"
+    for n in "$nW" "$nL"; do
+        STARTED_SERVERS="$STARTED_SERVERS $TMUXB|$n"
+        tm -L "$n" -f /dev/null new-session -d -s sess >/dev/null 2>&1 || fail_note "could not start throwaway server $n"
+    done
+    pidW="$(tm -L "$nW" display-message -p '#{pid}' 2>/dev/null)"
+    case "$pidW" in ''|*[!0-9]*) fail_note "could not read the wedged server pid ('$pidW')"; pidW="" ;; esac
+    if [ -n "$pidW" ]; then
+        # Record BEFORE stopping so cleanup (incl. the EXIT/INT/TERM trap) always CONT+KILLs it.
+        STOPPED_PIDS="$STOPPED_PIDS $pidW"
+        kill -STOP "$pidW"
+        i=0; while [ "$i" -lt 30 ]; do
+            case "$(ps -o state= -p "$pidW" 2>/dev/null | tr -d ' ')" in T*) break ;; esac
+            sleep 0.1; i=$((i+1))
+        done
+        case "$(ps -o state= -p "$pidW" 2>/dev/null | tr -d ' ')" in
+            T*) ;; *) fail_note "precondition: wedged server is not in stopped state" ;;
+        esac
+        printf 'set -g @xaca1669-marker "reloaded"\n' > "$LIVE"
+        check "precondition: live server lacks the marker" test -z "$(tm -L "$nL" show -gqv @xaca1669-marker)"
+        RUN_LIMIT=40 XACA1669_TMUX_TIMEOUT=1 run_fn _xaca1669_reload_tmux_servers
+        check_rc "reload with a stopped server" 0 "$RC"
+        check "returned within a bounded time (<=20 s, took ${ELAPSED}s)" test "$ELAPSED" -le 20
+        check "stopped server reported as skipped, live server counted" test "$OUT" = "reloaded 1 server(s), 0 client(s), 1 unresponsive skipped"
+        check "live server (sorted AFTER the wedged one) still reloaded" test "$(tm -L "$nL" show -gqv @xaca1669-marker)" = reloaded
+        check "no tmux client processes left behind by the reload" test -z "$(pgrep -f "tmux -S $TMUXB/tmux-$(id -u)/$nW" 2>/dev/null)"
+        # Unwedge + stop it now (the trap is the backstop).
+        kill -CONT "$pidW" 2>/dev/null
+        tm -L "$nW" kill-server >/dev/null 2>&1
+        i=0; while [ "$i" -lt 30 ] && kill -0 "$pidW" 2>/dev/null; do sleep 0.1; i=$((i+1)); done
+        kill -0 "$pidW" 2>/dev/null && { kill -KILL "$pidW" 2>/dev/null; fail_note "wedged server needed SIGKILL"; }
+        STOPPED_PIDS=""
+    fi
+    tm -L "$nL" kill-server >/dev/null 2>&1
+fi
+end_case
+
+# ═══════════════════════════════════════════════════════════════════════════
 # C11 — upgrade wiring
 # ═══════════════════════════════════════════════════════════════════════════
 begin_case "C11a: static wiring — update_tmux_conf defined and called immediately after update_global_claude_md"
@@ -572,8 +711,18 @@ upgrade_sandbox() {
 # the reload gate independent of tmux itself.
 make_fake_installer() {  # <libexec-root> <refresh-rc> <marker-file> <mode: normal|exit>
     mkdir -p "$1/installers"
-    if [ "$4" = exit ]; then
+    if [ "$4" = srcexit ]; then
+        # The installer dies while being SOURCED.
         printf '%s\n' 'echo "installer exploded" >&2' 'exit 7' > "$1/installers/install-claude-config.sh"
+    elif [ "$4" = exit ]; then
+        # The installer sources fine and DEFINES a reload that leaves a
+        # detectable marker, but the refresh dies (exit 7). A wrapper that
+        # reloaded on any failure would call the reload and drop the marker,
+        # so "no marker" is a falsifiable claim.
+        {
+            printf '%s\n' '_xaca1669_refresh_tmux_conf() { echo "installer exploded" >&2; exit 7; }'
+            printf '%s\n' '_xaca1669_reload_tmux_servers() { echo called > "'"$3"'"; echo "reloaded 9 server(s), 9 client(s)"; return 0; }'
+        } > "$1/installers/install-claude-config.sh"
     else
         {
             printf '%s\n' '_xaca1669_refresh_tmux_conf() { echo "fake refresh"; return '"$2"'; }'
@@ -602,19 +751,32 @@ else
     # the server must survive, proving source-file was not re-run).
     tm -L "$nU" set -g @xaca1669-marker "manual" >/dev/null 2>&1
     run_upd "$S/libexec" false
-    case "$OUT" in *"FUNC_RC=0"*"") ;; *) fail_note "second run rc: $OUT" ;; esac
+    case "$OUT" in *"FUNC_RC=0"*) ;; *) fail_note "second run rc: $OUT" ;; esac
+    # The 'manual' marker surviving is only meaningful if the second run really
+    # took the already-current path -- assert that from its OWN output, and that
+    # it printed no reload line.
+    case "$OUT" in *"SUCCESS: tmux.conf already current"*) ;; *) fail_note "second run did not report already-current: $OUT" ;; esac
+    case "$OUT" in *"refreshed"*|*"tmux: reloaded"*) fail_note "second run refreshed/reloaded: $OUT" ;; esac
     check "second upgrade run does NOT reload (rc 0 path)" test "$(tm -L "$nU" show -gqv @xaca1669-marker)" = manual
     tm -L "$nU" kill-server >/dev/null 2>&1
 fi
 end_case
 
 begin_case "C11c: update_tmux_conf always returns 0 — installer that exits non-zero, rc 1/3/4, missing installer"
+for mode in exit srcexit; do
+    upgrade_sandbox
+    make_fake_installer "$S/libexec" 0 "$S/marker" "$mode"
+    run_upd "$S/libexec" false
+    case "$OUT" in *"FUNC_RC=0"*) ;; *) fail_note "[$mode] installer exit 7 leaked through (no FUNC_RC=0): $OUT" ;; esac
+    case "$OUT" in *"WARNING: "*) ;; *) fail_note "[$mode] installer failure not surfaced as a warning: $OUT" ;; esac
+    check "[$mode] installer failure -> no reload (fake reload would drop a marker)" test ! -e "$S/marker"
+done
+# Self-check: the same fake DOES drop the marker when its refresh reports rc 2,
+# so the absence above is falsifiable (a vacuous harness would fail here).
 upgrade_sandbox
-make_fake_installer "$S/libexec" 0 "$S/marker" exit
+make_fake_installer "$S/libexec" 2 "$S/marker" normal
 run_upd "$S/libexec" false
-case "$OUT" in *"FUNC_RC=0"*) ;; *) fail_note "installer exit 7 leaked through (no FUNC_RC=0): $OUT" ;; esac
-case "$OUT" in *"WARNING: "*) ;; *) fail_note "installer failure not surfaced as a warning: $OUT" ;; esac
-check "installer failure -> no reload" test ! -e "$S/marker"
+check "sanity: the fake reload marker is detectable when a reload happens" test -f "$S/marker"
 for rcv in 1 3 4 9; do
     upgrade_sandbox
     command rm -f "$S/marker"

@@ -1,0 +1,48 @@
+# This file is the tracked source for ~/.tmux.conf.
+# Symlinked by deploy-to-production.sh during machine setup.
+# Edits here take effect after: tmux source-file ~/.tmux.conf
+
+# Enable mouse support
+set -g mouse on
+
+# Disable automatic window renaming
+set-option -g allow-rename off
+set-window-option -g automatic-rename off
+
+# Let tmux set a simple terminal title based on session name only
+set-option -g set-titles on
+set-option -g set-titles-string "#S"
+
+# Add to your tmux.conf for easier copying
+# Use vi-style keys in copy mode
+setw -g mode-keys vi
+
+# Better copy mode bindings
+bind-key -T copy-mode-vi v send-keys -X begin-selection
+bind-key -T copy-mode-vi y send-keys -X copy-selection
+bind-key -T copy-mode-vi r send-keys -X rectangle-toggle
+
+# ~/.tmux.conf
+bind-key b send-keys "source ~/.zshrc_ios_bridge" C-m
+bind-key e send-keys "source ~/.zshrc_ios_engineering" C-m
+bind-key m send-keys "source ~/.zshrc_ios_sickbay" C-m
+bind-key h send-keys "source ~/.zshrc_ios_holodeck" C-m
+bind-key o send-keys "source ~/.zshrc_ios_observation" C-m
+bind-key s send-keys "source ~/.zshrc_ios_stellar" C-m
+
+# Claude Code Agent Status Display
+set -g allow-passthrough on
+set -g status-right-length 150
+# Use @variables for session-specific values
+set -g status-right "🤖 #{@claude_agent} | #{@developer}  "
+
+# Window tab-bar: Claude Code vs idle-shell indicators
+# Detection: Claude Code renames the pane process to its semver string (e.g. 2.1.117),
+# OR in some environments the process is named "claude". Both are matched.
+# Active Claude windows get amber background (colour130) + "C " prefix.
+# Idle Claude windows inherit the dim style set by window-status-style (no explicit bg).
+# Non-Claude windows get two spaces as a neutral indent, matching the badge width.
+set -g window-status-format '#{?#{||:#{m/r:^[0-9]+\.[0-9]+\.[0-9]+$,#{pane_current_command}},#{==:#{pane_current_command},claude}},#[bg=colour130 fg=colour255]C ,#[default dim]  }#I:#W#[default]'
+set -g window-status-current-format '#{?#{||:#{m/r:^[0-9]+\.[0-9]+\.[0-9]+$,#{pane_current_command}},#{==:#{pane_current_command},claude}},#[bg=colour130 fg=colour255 bold]C ,#[default bold]  }#I:#W#[default]'
+set -g window-status-style "default dim"
+set -g window-status-current-style "bold"
