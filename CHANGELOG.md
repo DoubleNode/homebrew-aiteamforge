@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+
+## [0.21.9] - 2026-10-28
 - XACA-1674: Add AFC series, 7 Richmond personas and asset prompts (XACA-1674)
 - Tap files updated in this publish: `share/personas/richmond/agents/richmond_beard_architect_planner_persona.md`,`share/personas/richmond/agents/richmond_higgins_release_engineer_persona.md` `share/personas/richmond/agents/richmond_keeley_documentation_lead_persona.md`,`share/personas/richmond/agents/richmond_roy_lead_tester_persona.md` `share/personas/richmond/agents/richmond_sharon_bugfix_specialist_persona.md`,`share/personas/richmond/agents/richmond_ted_lead_feature_developer_persona.md` `share/personas/richmond/agents/richmond_trent_code_reviewer_persona.md`,`share/scripts/kb-init-team` (+1 more). Run `brew upgrade aiteamforge` to receive them.
 - XACA-1669 two-line touch-friendly tmux tab bar
@@ -8070,7 +8072,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.8...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.9...HEAD
+[0.21.9]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.8...v0.21.9
 [0.21.8]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.7...v0.21.8
 [0.21.7]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.6...v0.21.7
 [0.21.6]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.5...v0.21.6
