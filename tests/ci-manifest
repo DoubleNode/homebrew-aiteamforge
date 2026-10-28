@@ -171,3 +171,4 @@ test-xaca-1599-doctor-plugin-binaries.sh        plain-shell
 test-xaca-1599-plugin-tool-delivery.sh          plain-shell
 test-xaca-1625-extensionless-upgrade-coverage.sh  plain-shell
 test-xaca-1669-tmux-conf-upgrade-refresh.sh      plain-shell
+test-xaca-1669-tmux-theme-contrast.sh            plain-shell
