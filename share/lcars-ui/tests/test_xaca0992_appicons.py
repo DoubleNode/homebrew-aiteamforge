@@ -1176,5 +1176,38 @@ class TestPathPrefixesMembership(unittest.TestCase):
         )
 
 
+class TestServeAppiconRichmond(unittest.TestCase):
+    """XACA-1675-004: a running richmond team must be served ITS OWN icon set.
+
+    serve_appicon() silently falls back to academy when appicons/<team>/ is
+    absent (and returns 200), so status codes prove nothing: assert bytes
+    equal the richmond file and differ from academy's."""
+
+    def _fetch(self, team, filename):
+        with patch.object(server, "LCARS_TEAM", team):
+            handler, buf = _make_handler(f"/appicons/{filename}")
+            handler.serve_appicon(f"/appicons/{filename}")
+            return handler._response_code, buf.getvalue()
+
+    def test_all_7_richmond_icons_resolve_to_richmond_files_not_academy(self):
+        root = server.UI_DIR / "images" / "appicons"
+        names = sorted(server.LCARSHandler.APPICON_FILENAMES)
+        self.assertEqual(len(names), 7)
+        for filename in names:
+            with self.subTest(filename=filename):
+                rich_file = root / "richmond" / filename
+                self.assertTrue(
+                    rich_file.is_file(),
+                    f"MISSING FILE: lcars-ui/images/appicons/richmond/{filename}",
+                )
+                code, body = self._fetch("richmond", filename)
+                self.assertEqual(code, 200)
+                self.assertEqual(body, rich_file.read_bytes())
+                self.assertNotEqual(
+                    body, (root / "academy" / filename).read_bytes(),
+                    "richmond was served academy's icon (fallback)",
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1675: Add Richmond (AFC) avatars, logos and appicons (XACA-1675)
+- Tap files updated in this publish: `fleet-monitor/server/public/avatars/richmond_beard_avatar.png`,`fleet-monitor/server/public/avatars/richmond_beard_avatar_panel.png` `fleet-monitor/server/public/avatars/richmond_beard_avatar_thumb.png`,`fleet-monitor/server/public/avatars/richmond_clinic_logo.png` `fleet-monitor/server/public/avatars/richmond_clinic_logo_panel.png`,`fleet-monitor/server/public/avatars/richmond_higgins_avatar.png` `fleet-monitor/server/public/avatars/richmond_higgins_avatar_panel.png`,`fleet-monitor/server/public/avatars/richmond_higgins_avatar_thumb.png` (+38 more). Run `brew upgrade aiteamforge` to receive them.
 
 ## [0.21.9] - 2026-10-28
 - XACA-1674: Add AFC series, 7 Richmond personas and asset prompts (XACA-1674)
