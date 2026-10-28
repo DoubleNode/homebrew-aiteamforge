@@ -40,6 +40,8 @@
 #        servers on ~/.tmux.conf (default search or -f) are; #{config_files}
 #        unavailable -> skipped (fail safe)
 #   C10d symlinked ~/.tmux.conf (relative link) matches by link and by target
+#   C10g XACA-1669-029: a server started with a RELATIVE -f is never reloaded,
+#        even when the upgrade runs from the directory that relative name hits
 #   C10e XACA-1669-025: a server of ours that rejects the file is counted as
 #        failed to source (rc 3), reported next to the other buckets
 #   C11 upgrade wiring: static order checks + the REAL update_tmux_conf body
@@ -725,6 +727,41 @@ else
     check "unprovable servers skipped, none reloaded" test "$OUT" = "reloaded 0 server(s), 0 client(s); skipped: 4 not using ~/.tmux.conf"
     check "unprovable own server keeps its old config" test "$(tm -L "$nO" show -gqv @xaca1669-marker)" = reloaded
     for n in "$nO" "$nF" "$nX" "$nZ"; do tm -L "$n" kill-server >/dev/null 2>&1; done
+fi
+end_case
+
+# ═══════════════════════════════════════════════════════════════════════════
+# C10g — XACA-1669-029: a RELATIVE -f entry is never ours. tmux reports it as
+# typed (relative to that server's start dir, which we cannot know); resolving
+# it against the upgrade's cwd matched a personal project config whenever the
+# upgrade ran from a directory where that relative name hit ~/.tmux.conf.
+# ═══════════════════════════════════════════════════════════════════════════
+begin_case "C10g: server started with a RELATIVE -f is NOT reloaded even when the upgrade runs from \$HOME"
+if ! command -v tmux >/dev/null 2>&1; then
+    fail_note "tmux is not installed; refusing to skip into a vacuous pass"
+else
+    new_sandbox
+    printf 'set -g @xaca1669-marker "initial"\n' > "$LIVE"
+    mkdir -p "$HOME_T/proj"
+    printf 'set -g @xaca1669-who "project"\n' > "$HOME_T/proj/.tmux.conf"
+    nO="xaca1669o-own-$$"; nR="xaca1669r-relative-$$"
+    start_srv "$nO"                                   # default search -> ~/.tmux.conf
+    _c10g_back="$PWD"
+    cd "$HOME_T/proj" && start_srv "$nR" -f .tmux.conf   # personal project config, relative -f
+    cd "$_c10g_back" || fail_note "could not return to $_c10g_back"
+    check "precondition: relative-f server reports its config as typed (relative)" \
+        test "$(tm -L "$nR" display -p '#{config_files}' 2>/dev/null)" = ".tmux.conf"
+    check "precondition: project server loaded its own config" test "$(tm -L "$nR" show -gqv @xaca1669-who)" = project
+    printf 'set -g @xaca1669-marker "reloaded"\n' > "$LIVE"
+    # Run the reload FROM the sandbox HOME, where ".tmux.conf" resolves to ~/.tmux.conf.
+    cd "$HOME_T" || fail_note "could not cd to sandbox HOME"
+    run_fn _xaca1669_reload_tmux_servers
+    cd "$_c10g_back" || fail_note "could not return to $_c10g_back"
+    check_rc "reload" 0 "$RC"
+    check "own server reloaded" test "$(tm -L "$nO" show -gqv @xaca1669-marker)" = reloaded
+    check "relative-f project server NOT reloaded (marker absent)" test -z "$(tm -L "$nR" show -gqv @xaca1669-marker)"
+    check "summary: 1 reloaded, 1 not using ~/.tmux.conf" test "$OUT" = "reloaded 1 server(s), 0 client(s); skipped: 1 not using ~/.tmux.conf"
+    for n in "$nO" "$nR"; do tm -L "$n" kill-server >/dev/null 2>&1; done
 fi
 end_case
 

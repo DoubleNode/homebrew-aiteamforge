@@ -820,6 +820,13 @@ _xaca1669_canon_path() {
 
 # 0 if any comma-separated entry of $1 (a #{config_files} value) is the same
 # file as $2. Empty list -> 1.
+#
+# Only ABSOLUTE entries can match. tmux keeps a relative `-f` path exactly as
+# typed (`tmux -f .tmux.conf` reports `.tmux.conf`), relative to the directory
+# that server was started from -- which we cannot know. Resolving it against
+# the upgrade's own cwd would match a personal project config whenever the
+# upgrade happens to run from that server's start directory, and reload our
+# config into it (XACA-1669-029). An entry we cannot place is never ours.
 _xaca1669_config_files_include() {
     local list="$1" want entry i n
     local -a arr=()
@@ -831,7 +838,7 @@ _xaca1669_config_files_include() {
     while [[ "$i" -lt "$n" ]]; do
         entry="${arr[$i]}"
         i=$((i + 1))
-        [[ -n "$entry" ]] || continue
+        [[ "$entry" == /* ]] || continue
         [[ "$(_xaca1669_canon_path "$entry")" == "$want" ]] && return 0
     done
     return 1
