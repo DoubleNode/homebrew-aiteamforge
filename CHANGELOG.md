@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1674: Add AFC series, 7 Richmond personas and asset prompts (XACA-1674)
+- Tap files updated in this publish: `share/personas/richmond/agents/richmond_beard_architect_planner_persona.md`,`share/personas/richmond/agents/richmond_higgins_release_engineer_persona.md` `share/personas/richmond/agents/richmond_keeley_documentation_lead_persona.md`,`share/personas/richmond/agents/richmond_roy_lead_tester_persona.md` `share/personas/richmond/agents/richmond_sharon_bugfix_specialist_persona.md`,`share/personas/richmond/agents/richmond_ted_lead_feature_developer_persona.md` `share/personas/richmond/agents/richmond_trent_code_reviewer_persona.md`,`share/scripts/kb-init-team` (+1 more). Run `brew upgrade aiteamforge` to receive them.
 - XACA-1669 two-line touch-friendly tmux tab bar
 - Tap files updated in this publish: `share/templates/claude/tmux.conf`. Run `brew upgrade aiteamforge` to receive them.
 
