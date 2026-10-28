@@ -36,7 +36,14 @@
 #   C10 reload against throwaway tmux servers (-L, isolated TMUX_TMPDIR)
 #   C10b reload must stay bounded when a server is SIGSTOPped (wedged): that
 #       socket is skipped + reported, live servers still reload
+#   C10c XACA-1669-024: servers on -f <other conf> / -f /dev/null are NOT reloaded,
+#        servers on ~/.tmux.conf (default search or -f) are; #{config_files}
+#        unavailable -> skipped (fail safe)
+#   C10d symlinked ~/.tmux.conf (relative link) matches by link and by target
+#   C10e XACA-1669-025: a server of ours that rejects the file is counted as
+#        failed to source (rc 3), reported next to the other buckets
 #   C11 upgrade wiring: static order checks + the REAL update_tmux_conf body
+#       (C11f: warns when a server failed to source, still returns 0)
 #   C12 soft-fail paths (missing template, unwritable backup dir) -> rc 1
 #
 # ISOLATION (non-negotiable): every case builds its own mktemp HOME and
@@ -126,7 +133,19 @@ tm() {
         "$TMUX_BASE"/?*) ;;
         *) echo "tm: refusing to run tmux without an isolated TMUX_TMPDIR (TMUXB='${TMUXB:-}')" >&2; return 99 ;;
     esac
-    env -u TMUX TMUX_TMPDIR="$TMUXB" tmux "$@"
+    case "${HOME_T:-}" in
+        "$TEST_TMP_DIR"/?*) ;;
+        *) echo "tm: refusing to run tmux without a sandbox HOME (HOME_T='${HOME_T:-}')" >&2; return 99 ;;
+    esac
+    env -u TMUX HOME="$HOME_T" TMUX_TMPDIR="$TMUXB" tmux "$@"
+}
+
+# start_srv <name> [tmux flags e.g. -f FILE]: start a throwaway detached server.
+# With no -f it searches the sandbox HOME's ~/.tmux.conf, like a team server.
+start_srv() {
+    local n="$1"; shift
+    STARTED_SERVERS="$STARTED_SERVERS $TMUXB|$n"
+    tm -L "$n" "$@" new-session -d -s sess >/dev/null 2>&1 || fail_note "could not start throwaway server $n"
 }
 
 cleanup() {
@@ -545,8 +564,7 @@ else
     sdir="$TMUXB/tmux-$(id -u)"
     nA="xaca1669a-$$"; nB="xaca1669b-$$"; nS="xaca1669s-$$"
     for n in "$nA" "$nB" "$nS"; do
-        STARTED_SERVERS="$STARTED_SERVERS $TMUXB|$n"
-        tm -L "$n" -f /dev/null new-session -d -s sess >/dev/null 2>&1 || fail_note "could not start throwaway server $n"
+        start_srv "$n"
     done
     # Attached client on server A (control mode fed by a fifo we hold open).
     fifo="$S/ctl.fifo"; mkfifo "$fifo"
@@ -579,8 +597,8 @@ else
     # Config that fails to parse: rc 0, nothing counted, no error leaks.
     printf 'this-is-not-a-tmux-command\n' > "$LIVE"
     run_fn _xaca1669_reload_tmux_servers
-    check_rc "reload with a broken config" 0 "$RC"
-    check "broken config reloads 0 servers" test "$OUT" = "reloaded 0 server(s), 0 client(s)"
+    check_rc "reload with a broken config (rc 3 = servers failed to source)" 3 "$RC"
+    check "broken config reloads 0 servers, reported as failed to source" test "$OUT" = "reloaded 0 server(s), 0 client(s); skipped: 2 failed to source"
 
     # tmux not on PATH: fail-soft, servers untouched.
     printf 'set -g @xaca1669-marker "second"\n' > "$LIVE"
@@ -627,8 +645,7 @@ else
     new_sandbox
     nW="xaca1669a-wedged-$$"; nL="xaca1669b-live-$$"
     for n in "$nW" "$nL"; do
-        STARTED_SERVERS="$STARTED_SERVERS $TMUXB|$n"
-        tm -L "$n" -f /dev/null new-session -d -s sess >/dev/null 2>&1 || fail_note "could not start throwaway server $n"
+        start_srv "$n"
     done
     pidW="$(tm -L "$nW" display-message -p '#{pid}' 2>/dev/null)"
     case "$pidW" in ''|*[!0-9]*) fail_note "could not read the wedged server pid ('$pidW')"; pidW="" ;; esac
@@ -648,7 +665,7 @@ else
         RUN_LIMIT=40 XACA1669_TMUX_TIMEOUT=1 run_fn _xaca1669_reload_tmux_servers
         check_rc "reload with a stopped server" 0 "$RC"
         check "returned within a bounded time (<=20 s, took ${ELAPSED}s)" test "$ELAPSED" -le 20
-        check "stopped server reported as skipped, live server counted" test "$OUT" = "reloaded 1 server(s), 0 client(s), 1 unresponsive skipped"
+        check "stopped server reported as skipped, live server counted" test "$OUT" = "reloaded 1 server(s), 0 client(s); skipped: 1 unresponsive"
         check "live server (sorted AFTER the wedged one) still reloaded" test "$(tm -L "$nL" show -gqv @xaca1669-marker)" = reloaded
         check "no tmux client processes left behind by the reload" test -z "$(pgrep -f "tmux -S $TMUXB/tmux-$(id -u)/$nW" 2>/dev/null)"
         # Unwedge + stop it now (the trap is the backstop).
@@ -659,6 +676,97 @@ else
         STOPPED_PIDS=""
     fi
     tm -L "$nL" kill-server >/dev/null 2>&1
+fi
+end_case
+
+# ═══════════════════════════════════════════════════════════════════════════
+# C10c — XACA-1669-024: only servers that loaded ~/.tmux.conf are reloaded
+# ═══════════════════════════════════════════════════════════════════════════
+begin_case "C10c: server started on -f <other conf> / -f /dev/null is NOT reloaded; servers on ~/.tmux.conf (default search or -f) ARE"
+if ! command -v tmux >/dev/null 2>&1; then
+    fail_note "tmux is not installed; refusing to skip into a vacuous pass"
+else
+    new_sandbox
+    printf 'set -g @xaca1669-marker "initial"\n' > "$LIVE"
+    printf 'set -g @xaca1669-other "mine"\n' > "$S/other.conf"
+    nO="xaca1669o-own-$$"; nF="xaca1669f-flag-$$"; nX="xaca1669x-other-$$"; nZ="xaca1669z-null-$$"
+    start_srv "$nO"                       # default search -> ~/.tmux.conf
+    start_srv "$nF" -f "$LIVE"            # explicit -f on our file
+    start_srv "$nX" -f "$S/other.conf"    # someone else's config
+    start_srv "$nZ" -f /dev/null          # deliberately config-less
+    check "precondition: own server loaded the initial marker" test "$(tm -L "$nO" show -gqv @xaca1669-marker)" = initial
+    check "precondition: -f /dev/null server has no marker" test -z "$(tm -L "$nZ" show -gqv @xaca1669-marker)"
+    printf 'set -g @xaca1669-marker "reloaded"\n' > "$LIVE"
+    run_fn _xaca1669_reload_tmux_servers
+    check_rc "reload" 0 "$RC"
+    check "default-search server reloaded" test "$(tm -L "$nO" show -gqv @xaca1669-marker)" = reloaded
+    check "server started with -f ~/.tmux.conf reloaded" test "$(tm -L "$nF" show -gqv @xaca1669-marker)" = reloaded
+    check "server on -f <other conf> NOT reloaded (marker absent)" test -z "$(tm -L "$nX" show -gqv @xaca1669-marker)"
+    check "other-conf server kept its own option" test "$(tm -L "$nX" show -gqv @xaca1669-other)" = mine
+    check "-f /dev/null server NOT reloaded (marker absent)" test -z "$(tm -L "$nZ" show -gqv @xaca1669-marker)"
+    check "summary counts 2 reloaded, 2 not using ~/.tmux.conf" test "$OUT" = "reloaded 2 server(s), 0 client(s); skipped: 2 not using ~/.tmux.conf"
+    check "skipped servers still alive" test -n "$(tm -L "$nX" list-sessions 2>/dev/null)" -a -n "$(tm -L "$nZ" list-sessions 2>/dev/null)"
+
+    # Fail safe: when #{config_files} is unavailable (pre-3.2 tmux expands an
+    # unknown format to ""), a server we cannot PROVE is ours is skipped, even
+    # though it really is on ~/.tmux.conf. Shim tmux to blank only that query.
+    real_tmux="$(command -v tmux)"
+    mkdir -p "$S/shim"
+    {
+        printf '%s\n' '#!/bin/sh' 'for a in "$@"; do case "$a" in *config_files*) exit 0 ;; esac; done'
+        printf 'exec "%s" "$@"\n' "$real_tmux"
+    } > "$S/shim/tmux"
+    chmod +x "$S/shim/tmux"
+    printf 'set -g @xaca1669-marker "third"\n' > "$LIVE"
+    RUN_PATH="$S/shim:$PATH"
+    run_fn _xaca1669_reload_tmux_servers
+    RUN_PATH="$PATH"
+    check_rc "reload with #{config_files} unavailable" 0 "$RC"
+    check "unprovable servers skipped, none reloaded" test "$OUT" = "reloaded 0 server(s), 0 client(s); skipped: 4 not using ~/.tmux.conf"
+    check "unprovable own server keeps its old config" test "$(tm -L "$nO" show -gqv @xaca1669-marker)" = reloaded
+    for n in "$nO" "$nF" "$nX" "$nZ"; do tm -L "$n" kill-server >/dev/null 2>&1; done
+fi
+end_case
+
+begin_case "C10d: symlinked ~/.tmux.conf (relative link, dotfiles repo) still matches, by default search and by -f on the target"
+if ! command -v tmux >/dev/null 2>&1; then
+    fail_note "tmux is not installed; refusing to skip into a vacuous pass"
+else
+    new_sandbox
+    mkdir -p "$HOME_T/dotfiles"
+    printf 'set -g @xaca1669-marker "initial"\n' > "$HOME_T/dotfiles/tmux.conf"
+    ln -s dotfiles/tmux.conf "$LIVE"      # relative link, like a stow/dotfiles setup
+    nL="xaca1669l-link-$$"; nT="xaca1669t-target-$$"; nX="xaca1669x-other-$$"
+    start_srv "$nL"                                    # lists the literal ~/.tmux.conf link
+    start_srv "$nT" -f "$HOME_T/dotfiles/tmux.conf"    # lists the link TARGET
+    printf 'set -g @xaca1669-other "mine"\n' > "$S/other.conf"
+    start_srv "$nX" -f "$S/other.conf"
+    printf 'set -g @xaca1669-marker "reloaded"\n' > "$HOME_T/dotfiles/tmux.conf"
+    run_fn _xaca1669_reload_tmux_servers
+    check_rc "reload through a symlinked conf" 0 "$RC"
+    check "server listing the link path reloaded" test "$(tm -L "$nL" show -gqv @xaca1669-marker)" = reloaded
+    check "server listing the link TARGET reloaded" test "$(tm -L "$nT" show -gqv @xaca1669-marker)" = reloaded
+    check "unrelated server still skipped" test -z "$(tm -L "$nX" show -gqv @xaca1669-marker)"
+    check "summary" test "$OUT" = "reloaded 2 server(s), 0 client(s); skipped: 1 not using ~/.tmux.conf"
+    for n in "$nL" "$nT" "$nX"; do tm -L "$n" kill-server >/dev/null 2>&1; done
+fi
+end_case
+
+begin_case "C10e: a server that IS ours but rejects the file is counted as failed to source (rc 3), reported alongside the other buckets"
+if ! command -v tmux >/dev/null 2>&1; then
+    fail_note "tmux is not installed; refusing to skip into a vacuous pass"
+else
+    new_sandbox
+    printf 'set -g @xaca1669-marker "initial"\n' > "$LIVE"
+    printf 'set -g @xaca1669-other "mine"\n' > "$S/other.conf"
+    nO="xaca1669o-own-$$"; nF="xaca1669f-flag-$$"; nX="xaca1669x-other-$$"
+    start_srv "$nO"; start_srv "$nF" -f "$LIVE"; start_srv "$nX" -f "$S/other.conf"
+    printf 'set -g @xaca1669-marker "partial"\nthis-is-not-a-tmux-command\n' > "$LIVE"
+    run_fn _xaca1669_reload_tmux_servers
+    check_rc "reload where our servers reject the file" 3 "$RC"
+    check "failed servers counted, foreign one counted separately" test "$OUT" = "reloaded 0 server(s), 0 client(s); skipped: 2 failed to source, 1 not using ~/.tmux.conf"
+    check "foreign server untouched" test -z "$(tm -L "$nX" show -gqv @xaca1669-marker)"
+    for n in "$nO" "$nF" "$nX"; do tm -L "$n" kill-server >/dev/null 2>&1; done
 fi
 end_case
 
@@ -737,8 +845,8 @@ if ! command -v tmux >/dev/null 2>&1; then
 else
     upgrade_sandbox
     cp "$OLD_BYTES" "$LIVE"
-    nU="xaca1669u-$$"; STARTED_SERVERS="$STARTED_SERVERS $TMUXB|$nU"
-    tm -L "$nU" -f /dev/null new-session -d -s sess >/dev/null 2>&1 || fail_note "could not start throwaway server"
+    nU="xaca1669u-$$"
+    start_srv "$nU"
     run_upd "$S/libexec" false
     check_rc "update_tmux_conf process" 0 "$RC"
     case "$OUT" in *"FUNC_RC=0"*) ;; *) fail_note "function did not return 0: $OUT" ;; esac
@@ -747,6 +855,7 @@ else
     check "running server picked up the new config" test "$(tm -L "$nU" show -gqv @xaca1669-marker)" = v2
     case "$OUT" in *"SUCCESS: "*refreshed*) ;; *) fail_note "no success line: $OUT" ;; esac
     case "$OUT" in *"INFO: tmux: reloaded 1 server(s), 0 client(s)"*) ;; *) fail_note "no reload summary: $OUT" ;; esac
+    case "$OUT" in *"WARNING: "*) fail_note "healthy reload must not warn: $OUT" ;; esac
     # Second upgrade run: already current, NO reload (a manually-set option on
     # the server must survive, proving source-file was not re-run).
     tm -L "$nU" set -g @xaca1669-marker "manual" >/dev/null 2>&1
@@ -759,6 +868,31 @@ else
     case "$OUT" in *"refreshed"*|*"tmux: reloaded"*) fail_note "second run refreshed/reloaded: $OUT" ;; esac
     check "second upgrade run does NOT reload (rc 0 path)" test "$(tm -L "$nU" show -gqv @xaca1669-marker)" = manual
     tm -L "$nU" kill-server >/dev/null 2>&1
+fi
+end_case
+
+begin_case "C11f: update_tmux_conf (real body, real installer) WARNS when a server of ours fails to source the refreshed file, and still returns 0"
+if ! command -v tmux >/dev/null 2>&1; then
+    fail_note "tmux is not installed; refusing to skip into a vacuous pass"
+else
+    upgrade_sandbox
+    cp "$OLD_BYTES" "$LIVE"
+    nU="xaca1669u-$$"; nX="xaca1669x-other-$$"
+    printf 'set -g @xaca1669-other "mine"\n' > "$S/other.conf"
+    start_srv "$nU"
+    start_srv "$nX" -f "$S/other.conf"
+    # The shipped template renders fine (refresh succeeds, rc 2) but tmux
+    # rejects it at source time.
+    printf '# tmux.conf v3\nset -g @xaca1669-marker "v3"\nthis-is-not-a-tmux-command\n' > "$TMPL"
+    run_upd "$S/libexec" false
+    check_rc "update_tmux_conf process" 0 "$RC"
+    case "$OUT" in *"FUNC_RC=0"*) ;; *) fail_note "function did not return 0: $OUT" ;; esac
+    check "live refreshed to the (bad) template" same_bytes "$LIVE" "$TMPL"
+    case "$OUT" in *"INFO: tmux: reloaded 0 server(s), 0 client(s); skipped: 1 failed to source, 1 not using ~/.tmux.conf"*) ;; *) fail_note "summary line missing/wrong: $OUT" ;; esac
+    case "$OUT" in *"WARNING: tmux: 1 running server(s) failed to source"*"kept their OLD config"*) ;; *) fail_note "failed-to-source warning missing: $OUT" ;; esac
+    case "$OUT" in *"reload skipped"*) fail_note "must not take the generic reload-skipped path: $OUT" ;; esac
+    check "foreign server untouched" test -z "$(tm -L "$nX" show -gqv @xaca1669-marker)"
+    tm -L "$nU" kill-server >/dev/null 2>&1; tm -L "$nX" kill-server >/dev/null 2>&1
 fi
 end_case
 

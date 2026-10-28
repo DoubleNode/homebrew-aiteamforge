@@ -773,8 +773,69 @@ _xaca1669_refresh_tmux_conf() {
 # servers pick it up. Each team runs its own `tmux -L <team>` server, so
 # enumerate every socket in ${TMUX_TMPDIR:-/tmp}/tmux-<uid>/. Dead sockets and
 # "no server running" are skipped silently; nothing here can fail the caller.
-# Prints one summary line: "reloaded N server(s), M client(s)", plus
-# ", K unresponsive skipped" when a server timed out. Always rc 0.
+#
+# XACA-1669-024: a socket is reloaded ONLY if that server's own #{config_files}
+# (tmux >= 3.2) includes ~/.tmux.conf -- i.e. it was started on our file (the
+# default search path, or -f pointing at it / a symlink to it). A personal
+# server started with `-f other.conf` or `-f /dev/null` is never touched. We
+# cannot prove an old tmux (no #{config_files}) uses the file either, so it is
+# skipped too (fail safe: never layer our config onto a server we cannot prove
+# is ours); the new file still applies at that server's next start. Measured on
+# tmux 3.6a: a runtime `source-file` does NOT add to #{config_files}; with -f
+# only the -f file is listed; a default start lists the whole candidate search
+# list (system conf, ~/.tmux.conf, ~/.config/tmux/tmux.conf) whether or not
+# each exists -- so we match one entry, not "the list equals".
+#
+# Prints one summary line: "reloaded N server(s), M client(s)" plus, only when
+# non-zero, "; skipped: K unresponsive, F failed to source, O not using
+# ~/.tmux.conf". Returns 0, or 3 when F > 0 (a live server that IS ours kept
+# its old config because source-file failed) so the caller can warn. Never
+# aborts the upgrade: the caller treats every rc as non-fatal.
+
+# Canonical form of a path for comparison: follow file symlinks (bounded) and
+# resolve the directory with pwd -P. Pure bash 3.2 (no realpath/readlink -f on
+# older macOS). A path that cannot be resolved is returned unchanged, so it
+# simply fails to match.
+_xaca1669_canon_path() {
+    local p="$1" t d b hops=0
+    while [[ -L "$p" && "$hops" -lt 20 ]]; do
+        t="$(readlink "$p" 2>/dev/null)" || break
+        [[ -n "$t" ]] || break
+        case "$t" in
+            /*) p="$t" ;;
+            *)  case "$p" in */*) p="${p%/*}/$t" ;; *) p="$t" ;; esac ;;
+        esac
+        hops=$((hops + 1))
+    done
+    case "$p" in
+        */*) d="${p%/*}"; b="${p##*/}"; [[ -n "$d" ]] || d="/" ;;
+        *)   d="."; b="$p" ;;
+    esac
+    if d="$(cd -P "$d" 2>/dev/null && pwd -P)"; then
+        if [[ "$d" == "/" ]]; then echo "/${b}"; else echo "${d}/${b}"; fi
+    else
+        echo "$p"
+    fi
+}
+
+# 0 if any comma-separated entry of $1 (a #{config_files} value) is the same
+# file as $2. Empty list -> 1.
+_xaca1669_config_files_include() {
+    local list="$1" want entry i n
+    local -a arr=()
+    [[ -n "$list" ]] || return 1
+    want="$(_xaca1669_canon_path "$2")"
+    IFS=, read -r -a arr <<< "$list"
+    n="${#arr[@]}"
+    i=0
+    while [[ "$i" -lt "$n" ]]; do
+        entry="${arr[$i]}"
+        i=$((i + 1))
+        [[ -n "$entry" ]] || continue
+        [[ "$(_xaca1669_canon_path "$entry")" == "$want" ]] && return 0
+    done
+    return 1
+}
 
 # Run `tmux <args>` with a wall-clock limit (default 5 s, override with
 # XACA1669_TMUX_TIMEOUT). macOS has no timeout(1), and a SIGSTOPped or wedged
@@ -829,7 +890,7 @@ _xaca1669_tmux_bounded() {
 _xaca1669_reload_tmux_servers() {
     local conf="${HOME}/.tmux.conf"
     local dir="${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)"
-    local servers=0 clients=0 skipped=0 sock c rc clist
+    local servers=0 clients=0 skipped=0 failed=0 notours=0 sock c rc clist cfiles
     if ! command -v tmux >/dev/null 2>&1 || [[ ! -d "$dir" ]]; then
         echo "reloaded 0 server(s), 0 client(s)"
         return 0
@@ -843,10 +904,21 @@ _xaca1669_reload_tmux_servers() {
         _xaca1669_tmux_bounded -S "$sock" list-sessions >/dev/null || rc=$?
         if [[ "$rc" -eq 124 ]]; then skipped=$((skipped + 1)); continue; fi
         [[ "$rc" -eq 0 ]] || continue
+        # XACA-1669-024: only servers that loaded ~/.tmux.conf. An old tmux
+        # (format unknown -> empty), a server on -f /dev/null or another conf,
+        # or a failed query all land in "not using ~/.tmux.conf".
+        rc=0
+        cfiles="$(_xaca1669_tmux_bounded -S "$sock" display-message -p '#{config_files}')" || rc=$?
+        if [[ "$rc" -eq 124 ]]; then skipped=$((skipped + 1)); continue; fi
+        if [[ "$rc" -ne 0 ]] || ! _xaca1669_config_files_include "$cfiles" "$conf"; then
+            notours=$((notours + 1)); continue
+        fi
         rc=0
         _xaca1669_tmux_bounded -S "$sock" source-file "$conf" >/dev/null || rc=$?
         if [[ "$rc" -eq 124 ]]; then skipped=$((skipped + 1)); continue; fi
-        [[ "$rc" -eq 0 ]] || continue
+        # XACA-1669-025: a live server of ours that rejected the file is NOT
+        # "nothing to do" -- count it so the caller can say so.
+        if [[ "$rc" -ne 0 ]]; then failed=$((failed + 1)); continue; fi
         servers=$((servers + 1))
         rc=0
         clist="$(_xaca1669_tmux_bounded -S "$sock" list-clients -F '#{client_name}')" || rc=$?
@@ -862,11 +934,13 @@ _xaca1669_reload_tmux_servers() {
             fi
         done <<< "$clist"
     done
-    if [[ "$skipped" -gt 0 ]]; then
-        echo "reloaded ${servers} server(s), ${clients} client(s), ${skipped} unresponsive skipped"
-    else
-        echo "reloaded ${servers} server(s), ${clients} client(s)"
-    fi
+    local line="reloaded ${servers} server(s), ${clients} client(s)" parts=""
+    [[ "$skipped" -gt 0 ]] && parts="${skipped} unresponsive"
+    [[ "$failed" -gt 0 ]] && parts="${parts}${parts:+, }${failed} failed to source"
+    [[ "$notours" -gt 0 ]] && parts="${parts}${parts:+, }${notours} not using ~/.tmux.conf"
+    [[ -n "$parts" ]] && line="${line}; skipped: ${parts}"
+    echo "$line"
+    [[ "$failed" -gt 0 ]] && return 3
     return 0
 }
 

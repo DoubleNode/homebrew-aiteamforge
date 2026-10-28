@@ -6587,6 +6587,13 @@ update_tmux_conf() {
          )" && _xaca1669_reload_rc=0 || _xaca1669_reload_rc=$?
        if [ "$_xaca1669_reload_rc" -eq 0 ]; then
          print_info "tmux: ${_xaca1669_reload:-reload skipped}"
+       elif [ "$_xaca1669_reload_rc" -eq 3 ]; then
+         # XACA-1669-025: servers that use ~/.tmux.conf rejected the new file.
+         # Say so loudly (the summary alone reads like a quiet no-op); never fatal.
+         local _xaca1669_nfail=""
+         _xaca1669_nfail="$(printf '%s' "$_xaca1669_reload" | sed -n 's/.* \([0-9][0-9]*\) failed to source.*/\1/p')"
+         print_info "tmux: ${_xaca1669_reload:-reload incomplete}"
+         print_warning "tmux: ${_xaca1669_nfail:-some} running server(s) failed to source the refreshed ~/.tmux.conf and kept their OLD config (the new file is on disk and applies at their next start; check it with: tmux source-file ~/.tmux.conf)"
        else
          print_warning "tmux server reload skipped (non-fatal; new config applies on next tmux start)"
        fi
