@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1643: One fleet toolset - single plugin list, connector exceptions, PARITY check and fleet skills (XACA-1643)
+- Tap files updated in this publish: `share/scripts/kb-sync-plugins`,`share/scripts/plugins-manifest.json` `share/skills/RELNOTES Manager/SKILL.md`,`share/skills/Team Mission Status/SKILL.md`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1691: Merge develop into sync/hotfix-1.24.1-into-develop-2 (XACA-1691)
 - XACA-1641 release DEV exit skips cancelled items and honours explicit prExempt
 - XACA-1667 close-out no longer deadlocks on a CR closed outside close-out

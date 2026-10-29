@@ -2,9 +2,10 @@
 """kb-sync-plugins -- fleet-standard Claude Code plugin delivery (XACA-1599).
 
 Usage: kb-sync-plugins <subcommand> [args]
-Subcommands: list, check, sync, diff, sync-worktrees, binaries, managed-policy, help
+Subcommands: list, check, sync, diff, sync-worktrees, binaries, skills, managed-policy, help
 
-Source of truth: .claude/plugins-manifest.json (per-team enabledPlugins).
+Source of truth: .claude/plugins-manifest.json, schema 2 (XACA-1643): ONE `fleet.plugins`
+                 list, rendered per team by effective_team_cfg() minus recorded exceptions.
 Writes:          <session dir>/.claude/settings.json, keys `enabledPlugins` and
                  `extraKnownMarketplaces` ONLY. Every other key is preserved.
 
@@ -41,11 +42,13 @@ Runs on python3 >= 3.8, stdlib only (tap hosts have only the system python).
 """
 import argparse
 import contextlib
+import copy
 import difflib
 import fcntl
 import hashlib
 import json
 import os
+import posixpath
 import re
 import shlex
 import shutil
@@ -178,7 +181,7 @@ def git(args, cwd=None):
 
 def load_manifest():
     # An unreadable manifest is exit 3, never a pass.
-    return load_json(MANIFEST, "plugins manifest", code=3)  # GUARD:unverifiable
+    return expand_patterns(load_json(MANIFEST, "plugins manifest", code=3))  # GUARD:unverifiable
 
 
 def team_paths():
@@ -221,6 +224,67 @@ def working_dir(team):
     return None
 
 
+def registry_team_names():
+    """Names a team-pattern may expand to: the registry keys that own a working_dir (an `alias_of` entry
+    owns none, so an alias never expands). No registry (pure dev layout): the personas manifest teams.
+    Tolerant of a malformed entry on purpose; working_dir() is what rejects one when it is resolved."""
+    tp = team_paths()
+    if tp is not None:
+        return sorted(k for k, ent in tp["teams"].items()
+                      if isinstance(ent, dict) and isinstance(ent.get("working_dir"), str) and ent["working_dir"])
+    if os.path.exists(PERSONAS_MANIFEST):
+        pm = load_json(PERSONAS_MANIFEST, "personas manifest", code=3)
+        deps = pm.get("deployments", []) if isinstance(pm, dict) else []
+        if isinstance(deps, list):
+            return sorted({d["team"] for d in deps if isinstance(d, dict) and isinstance(d.get("team"), str)
+                           and isinstance(d.get("targetRepo"), str) and d["targetRepo"]})
+    return []
+
+
+# `teamTargetPatterns` (XACA-1643 round 1): one pattern target stands for every registry team whose key
+# starts with the prefix, so the shipped manifest names no client or project team. `<prefix>-*` only:
+# a literal prefix that ends in a dash, then a star.
+PATTERN_RE = re.compile(r"^([a-z0-9][a-z0-9-]*-)\*$")
+PATTERN_KEYS = {"mode", "sessionDirs", "worktreeRepos", "deliver", "deliverReason", "requiredBinaries", "group"}
+
+
+def expand_patterns(m):
+    """Expand `teamTargetPatterns` from the registry into plain `teamTargets` entries and into the
+    `teams` list of the group each pattern names. Returns a new dict (the input is not changed). A
+    malformed pattern is left for validate_patterns() to report; an expansion that lands on a name
+    already defined is recorded in `_patternExpansion.conflicts` for the same reason. Everything
+    downstream (validation, the connector floor, the resolver) then sees ordinary targets."""
+    pats = m.get("teamTargetPatterns") if isinstance(m, dict) else None
+    if not isinstance(pats, dict) or not pats or not isinstance(m.get("teamTargets"), dict):
+        return m
+    m = dict(m)
+    m["teamTargets"] = dict(m["teamTargets"])
+    groups = dict(m["teamGroups"]) if isinstance(m.get("teamGroups"), dict) else {}
+    m["teamGroups"] = groups
+    names = registry_team_names()
+    info = {"expanded": {}, "conflicts": []}
+    for glob in sorted(pats):
+        body = pats[glob]
+        mt = PATTERN_RE.match(glob) if isinstance(glob, str) else None
+        if not mt or not isinstance(body, dict):
+            continue
+        for n in names:
+            if not n.startswith(mt.group(1)):
+                continue
+            if n in m["teamTargets"] or n in info["expanded"]:
+                info["conflicts"].append((glob, n, info["expanded"].get(n)))
+                continue
+            info["expanded"][n] = glob
+            m["teamTargets"][n] = {k: copy.deepcopy(v) for k, v in body.items() if k != "group"}
+            g = body.get("group")
+            if isinstance(g, str) and isinstance(groups.get(g), dict):
+                ng = dict(groups[g])
+                ng["teams"] = sorted(set(x for x in (ng.get("teams") or []) if isinstance(x, str)) | {n})
+                groups[g] = ng
+    m["_patternExpansion"] = info
+    return m
+
+
 def no_hosted_teams(what):
     """Zero live targets means nothing was verified. Exit 3 (unverifiable), never 0."""
     err("NO_HOSTED_TEAMS: %s -- no manifest team resolves to an existing directory on this host; "
@@ -232,21 +296,33 @@ def any_live(dirs):
     return any(os.path.isdir(d) for d in dirs)
 
 
+# A dir spec may start with a registry reference. `${working_dir}` is THIS team's registry
+# working_dir; `${working_dir:<registry key>}` is another registry key's working_dir (a dir that has
+# its own registry entry but no team of its own, e.g. a second repo a team also works in). Nothing
+# else is a token: a literal path is still allowed, a stray `${...}` is a validation error.
+WD_REF_RE = re.compile(r"^\$\{working_dir(?::([A-Za-z0-9][A-Za-z0-9._-]*))?\}")
+
+
 def resolve_dirs(team, cfg, key="sessionDirs"):
-    """Resolve a team's dirs. Returns None when the team is not hosted here."""
+    """Resolve a team's dirs. Returns None when the team is not hosted here.
+
+    A keyed ref (`${working_dir:<key>}`) whose key this host's registry does not hold is DROPPED, not an
+    error: that dir lives on a host that has the repo, and the team's own dir decides hosting."""
     raw = cfg.get(key) or []
-    uses_token = any("${working_dir}" in d for d in raw)
-    wd = None
-    if uses_token:
-        wd = working_dir(team)
-        if wd is None:
-            return None
+    uses_self = False
     dirs = []
     for d in raw:
-        if "${working_dir}" in d:
-            d = d.replace("${working_dir}", wd)
+        mt = WD_REF_RE.match(d)
+        if mt:
+            wd = working_dir(mt.group(1) or team)
+            if wd is None:
+                if mt.group(1) is None:
+                    return None
+                continue
+            uses_self = uses_self or mt.group(1) is None
+            d = wd + d[mt.end():]
         dirs.append(os.path.abspath(expand(d)))
-    if not uses_token and key == "sessionDirs" and not any(os.path.isdir(d) for d in dirs):
+    if not uses_self and key == "sessionDirs" and not any(os.path.isdir(d) for d in dirs):
         return None
     return dirs
 
@@ -324,9 +400,57 @@ def _same_file(a, b):
 # Manifest validation (check --manifest)
 # ---------------------------------------------------------------------------
 
-TEAM_KEYS = {"mode", "sessionDirs", "worktreeRepos", "deliver", "enabledPlugins",
-             "retiredPlugins", "extraKnownMarketplaces", "requiredBinaries"}
-TOP_KEYS = {"schemaVersion", "lastUpdated", "minClaudeVersion", "baseline", "binaries", "teams"}
+SCHEMA_VERSION = 2
+TEAM_KEYS = {"mode", "sessionDirs", "worktreeRepos", "deliver", "deliverReason", "requiredBinaries"}
+TOP_KEYS = {"schemaVersion", "lastUpdated", "minClaudeVersion", "baseline", "binaries", "pluginClasses",
+            "fleet", "teamGroups", "exceptions", "liveOutOfScope", "skills", "unmanagedTeams", "teamTargets",
+            "teamTargetPatterns"}
+FLEET_KEYS = {"plugins", "retiredPlugins", "extraKnownMarketplaces"}
+PLUGIN_ENTRY_KEYS = {"class", "service", "localReason", "builtin", "minClaudeVersion"}
+EXCEPTION_KEYS = {"id", "appliesTo", "removeClasses", "removePlugins", "render", "reason", "decided"}
+PLUGIN_CLASSES = ("connector", "local")
+RENDER_MODES = ("false", "absent")
+# Teams that must sit in a `noConnectors` group whatever the manifest says (XACA-1643-010, user rule
+# "connectors stay off for personal-data and client-data teams"): the three personal teams by name and
+# every freelance-* target by prefix. A manifest edit that moves one out, or clears the flag, fails.
+NO_CONNECTOR_TEAMS = ("finance", "legal", "medical")
+NO_CONNECTOR_PREFIXES = ("freelance-",)
+CONNECTOR_ALLOWLIST_ID = "connector-allowlist"
+CONNECTOR_ALLOWLIST_REASON = ("connectors are opt-in per group: this team is in no teamGroups entry with "
+                              "allowConnectors: true, so its connector entries render as an enforced false")
+
+
+def is_floored_name(name):
+    """The ONE predicate for 'connectors stay off here' by NAME (XACA-1643 round 3): casefolded; an
+    exact finance/legal/medical, a `<that>-` prefix (finance-business), or a freelance- prefix. Target
+    validation, pattern validation and the allowlist render all call this, so the floors cannot
+    disagree (round 3 found the target floor exact-only while the pattern floor also took prefixes)."""
+    n = str(name).strip().casefold()
+    floored = n in NO_CONNECTOR_TEAMS or n.startswith(NO_CONNECTOR_PREFIXES) or any(n.startswith(t + "-") for t in NO_CONNECTOR_TEAMS)  # GUARD:floor-predicate
+    return floored
+
+
+def is_floored_pattern_prefix(prefix):
+    """A pattern `<prefix>*` can expand to a floored team iff `<prefix>x` is one."""
+    return is_floored_name(str(prefix) + "x")
+
+
+def is_connector_entry(ent):
+    return isinstance(ent, dict) and str(ent.get("class", "")).strip().casefold() == "connector"
+
+
+def connector_allowed_teams(m):
+    """Teams whose connector-class plugins may render TRUE: members of a group that explicitly says
+    `allowConnectors: true` (a real boolean, with a non-empty reason, and not also noConnectors) and
+    that the name floor does not exclude. EVERY other team renders connectors as an enforced false,
+    whatever the manifest says about exceptions (the guarantee holds by construction)."""
+    groups = m.get("teamGroups") if isinstance(m.get("teamGroups"), dict) else {}
+    allowed = set()
+    for g in groups.values():
+        if (isinstance(g, dict) and g.get("allowConnectors") is True
+                and g.get("noConnectors") is not True and nonempty_str(g.get("reason"))):
+            allowed.update(x for x in (g.get("teams") or []) if isinstance(x, str))
+    return {t for t in allowed if not is_floored_name(t)}
 
 
 BASELINE_KEYS = {"revision", "extraKnownMarketplaces", "blockedPlugins"}
@@ -409,14 +533,436 @@ def lsp_commands(entry):
     return []
 
 
+def nonempty_str(v):
+    return isinstance(v, str) and bool(v.strip())
+
+
+def validate_builtin_entry(where, pid, ent):
+    """A built-in plugin (compiled into the claude binary, XACA-1643-015): `builtin` is the boolean
+    true, the class is `local` (a built-in marked connector is rejected: connectors-off would then
+    need a decision this entry cannot carry), the id ends @builtin and `minClaudeVersion` names
+    the first claude that ships it. `minClaudeVersion` without `builtin: true` is also an error.
+    Because the id must end @builtin, the catalog check in validate_fleet (which only flags
+    unresolvable @claude-plugins-official ids) never applies to a built-in."""
+    errs = []
+    b = ent.get("builtin")
+    if "builtin" in ent and b is not True:  # GUARD:builtin-flag
+        errs.append("%s.builtin must be the boolean true (omit the key for a normal plugin)" % where)
+    if b is not True:
+        if "minClaudeVersion" in ent:
+            errs.append("%s.minClaudeVersion is only valid on a `builtin: true` entry" % where)
+        return errs
+    if ent.get("class") != "local":  # GUARD:builtin-local
+        errs.append("%s: a built-in plugin must be class local (it is part of the claude binary, "
+                    "not a connector)" % where)
+    if not pid.endswith("@builtin"):  # GUARD:builtin-id
+        errs.append("%s: a `builtin: true` plugin id must end @builtin" % where)
+    mv = ent.get("minClaudeVersion")
+    if not (isinstance(mv, str) and re.match(r"^\d+\.\d+\.\d+$", mv)):  # GUARD:builtin-min-version
+        errs.append("%s: a built-in needs minClaudeVersion like 2.1.287 (the first claude that ships it)" % where)
+    return errs
+
+
+def builtin_ids(m):
+    """{plugin id: minClaudeVersion string} of the manifest's built-in fleet plugins."""
+    fleet = m.get("fleet") if isinstance(m, dict) else None
+    plugins = fleet.get("plugins") if isinstance(fleet, dict) else None
+    return {pid: ent.get("minClaudeVersion") for pid, ent in (plugins or {}).items()
+            if isinstance(ent, dict) and ent.get("builtin") is True}
+
+
+def validate_fleet(m, binaries, blocked, catalog):
+    """Problems with `fleet` (schema 2). Every plugin carries a known class; a connector names
+    its service; the LSP / catalog / L1-block / retired checks that used to run per team run here."""
+    errs = []
+    fleet = m.get("fleet")
+    if not isinstance(fleet, dict):
+        return ["fleet must be an object {plugins, retiredPlugins, extraKnownMarketplaces}"]
+    for k in fleet:
+        if k not in FLEET_KEYS and not k.startswith("_"):
+            errs.append("fleet: unknown key %s" % k)
+    plugins = fleet.get("plugins")
+    if not isinstance(plugins, dict) or not plugins:
+        errs.append("fleet.plugins must be a non-empty object (an empty fleet would strip every team)")
+        plugins = {}
+    for sec in ("retiredPlugins", "extraKnownMarketplaces"):
+        if not isinstance(fleet.get(sec, {}), dict):
+            errs.append("fleet.%s must be an object" % sec)
+    rp = fleet.get("retiredPlugins", {}) if isinstance(fleet.get("retiredPlugins", {}), dict) else {}
+    for pid, ent in plugins.items():
+        where = "fleet.plugins[%s]" % pid
+        if not PLUGIN_ID_RE.match(pid):
+            errs.append("fleet.plugins: bad plugin id %r" % pid)
+        if not isinstance(ent, dict):
+            errs.append("%s must be an object {class, service?}" % where)
+            continue
+        for k in ent:
+            if k not in PLUGIN_ENTRY_KEYS and not k.startswith("_"):
+                errs.append("%s: unknown key %s" % (where, k))
+        cls = ent.get("class")
+        if cls not in PLUGIN_CLASSES:  # GUARD:class-required
+            errs.append("%s.class must be one of %s (an unclassified plugin could reach a "
+                        "personal-data team)" % (where, "|".join(PLUGIN_CLASSES)))
+        elif cls == "connector" and not nonempty_str(ent.get("service")):
+            errs.append("%s: a connector must name the external `service` it reaches" % where)
+        if "builtin" in ent or "minClaudeVersion" in ent:
+            errs.extend(validate_builtin_entry(where, pid, ent))
+        if pid in rp:
+            errs.append("fleet: %s is both enabled and retired" % pid)
+        if pid in blocked:
+            errs.append("fleet enables %s, which the L1 baseline blocks" % pid)
+        if pid.split("@")[0].endswith("-lsp") and pid not in binaries:
+            errs.append("fleet enables LSP plugin %s with no `binaries` entry" % pid)
+        if catalog is not None:
+            cent = catalog.get(pid)
+            if cent is None and pid.endswith("@claude-plugins-official"):
+                errs.append("fleet enables %s, which is not in the official catalog (unresolvable id)" % pid)
+            elif cent is not None and lsp_commands(cent) and pid not in binaries:
+                errs.append("fleet enables LSP plugin %s (catalog lspServers) with no `binaries` entry" % pid)
+    for pid in rp:
+        if not PLUGIN_ID_RE.match(pid):
+            errs.append("fleet.retiredPlugins: bad plugin id %r" % pid)
+    return errs
+
+
+def dir_token_problems(where, specs):
+    """A `${...}` in a dir spec must be a registry reference at the very start of the spec."""
+    errs = []
+    for d in specs:
+        if not isinstance(d, str) or "${" not in d:
+            continue
+        mt = WD_REF_RE.match(d)
+        if not mt or "${" in d[mt.end():]:
+            errs.append("%s: %r is not a supported reference (only a leading ${working_dir} or "
+                        "${working_dir:<registry key>}; a literal path is also accepted)" % (where, d))
+    return errs
+
+
+def dir_spec_key(team, d):
+    """Canonical identity of a dir spec, so two spellings of one dir compare equal. A literal path is
+    `~`-expanded and normalised; `${working_dir}` is the team's own registry key, so it equals a
+    keyed reference to that team's key."""
+    mt = WD_REF_RE.match(d)
+    if mt:
+        return ("ref", mt.group(1) or team, posixpath.normpath("/" + d[mt.end():]))
+    return ("path", os.path.abspath(expand(d)))
+
+
+def duplicate_dir_problems(teams):
+    """Static half of the one-dir-one-team guard (XACA-1643-016): two DIFFERENT teams naming the same
+    session dir (or the same worktree repo) is a validation error, whatever the spelling, because the
+    settings file is per directory while the connector exception is per team: the last write wins.
+    The host half (dir_collisions) catches what only a registry can show."""
+    errs = []
+    for field in ("sessionDirs", "worktreeRepos"):
+        seen = {}
+        for name in sorted(teams):
+            t = teams[name]
+            specs = t.get(field) if isinstance(t, dict) else None
+            if not isinstance(specs, list):
+                continue
+            for d in specs:
+                if not isinstance(d, str) or not d:
+                    continue
+                k = dir_spec_key(name, d)  # GUARD:dup-dir-static
+                if k in seen and seen[k] != name:
+                    errs.append("teamTargets.%s.%s and teamTargets.%s.%s resolve to the same directory (%s): a "
+                                "directory has ONE settings file, so two teams sharing it would overwrite "
+                                "each other's connector setting" % (seen[k], field, name, field, d))
+                else:
+                    seen.setdefault(k, name)
+    return errs
+
+
+def validate_patterns(m):
+    """`teamTargetPatterns` problems. A pattern's dirs must all be the team's OWN registry dir (every
+    expanded team would otherwise share one dir), its group must exist, and a pattern that could
+    produce a personal or client-data team must route to a noConnectors group (the same floor the
+    expanded names meet in validate_connector_rule, enforced here too because a host with no matching
+    registry team expands to nothing and the floor would never see it)."""
+    errs = []
+    pats = m.get("teamTargetPatterns")
+    if pats is None:
+        return errs
+    if not isinstance(pats, dict):
+        return ["teamTargetPatterns must be an object {<prefix>-*: {target}}"]
+    groups = m.get("teamGroups") if isinstance(m.get("teamGroups"), dict) else {}
+    for glob, body in pats.items():
+        if glob.startswith("_"):
+            continue
+        where = "teamTargetPatterns[%s]" % glob
+        mt = PATTERN_RE.match(glob)
+        if not mt:
+            errs.append("%s: a pattern is a literal prefix ending in a dash, then * (e.g. freelance-*)" % where)
+            continue
+        if not isinstance(body, dict):
+            errs.append("%s must be an object" % where)
+            continue
+        for k in body:
+            if k not in PATTERN_KEYS and not k.startswith("_"):
+                errs.append("%s: unknown key %s" % (where, k))
+        if body.get("mode") not in ("tracked", "deployed"):
+            errs.append("%s.mode must be tracked|deployed" % where)
+        for field in ("sessionDirs", "worktreeRepos"):
+            specs = body.get(field, [] if field == "worktreeRepos" else None)
+            if not (isinstance(specs, list) and (specs or field == "worktreeRepos")
+                    and all(isinstance(x, str) and x for x in specs)):
+                errs.append("%s.%s must be a %sstring list" % (where, field, "" if field == "worktreeRepos" else "non-empty "))
+                continue
+            for d in specs:
+                r = WD_REF_RE.match(d)
+                if not r or r.group(1) is not None or "${" in d[r.end():]:
+                    errs.append("%s.%s: %r must start with ${working_dir} (the expanded team's own registry "
+                                "dir); anything else would give every expanded team the same directory" % (where, field, d))
+        if not isinstance(body.get("deliver"), bool):
+            errs.append("%s.deliver must be a boolean" % where)
+        g = body.get("group")
+        if not (isinstance(g, str) and g in groups and isinstance(groups[g], dict)):
+            errs.append("%s.group must name a teamGroups entry (every team sits in a group)" % where)
+        else:
+            floored = is_floored_pattern_prefix(mt.group(1))
+            if floored and groups[g].get("noConnectors") is not True:  # GUARD:pattern-floor
+                errs.append("%s routes to group %r, which is not noConnectors: true; teams matching it are "
+                            "personal or client-data teams and connectors stay off for them" % (where, g))
+            if body.get("deliver") is False and groups[g].get("allowConnectors") is not True:
+                errs.append("%s: deliver=false would strip the enforced connector false entries from every "
+                            "team it expands to (group %r does not allow connectors)" % (where, g))
+    info = m.get("_patternExpansion") if isinstance(m.get("_patternExpansion"), dict) else {}
+    for glob, n, other in info.get("conflicts", []):
+        errs.append("teamTargetPatterns[%s] would create %r, which %s" % (
+            glob, n, "another pattern already created" if other else "is already defined in teamTargets"))
+    return errs
+
+
+def validate_targets(m):
+    """Problems with `teamTargets`. Returns (errs, names). A target never carries enabledPlugins:
+    its list is rendered, so a hand-written one would be a second copy that can disagree."""
+    errs = []
+    if "teams" in m:
+        errs.append("`teams` was renamed `teamTargets` in schema 2; move the blocks and drop their "
+                    "enabledPlugins/retiredPlugins/extraKnownMarketplaces")
+    teams = m.get("teamTargets")
+    if not isinstance(teams, dict) or not teams:
+        errs.append("teamTargets must be a non-empty object")
+        return errs, set()
+    for name, t in teams.items():
+        where = "teamTargets.%s" % name
+        if not isinstance(t, dict):
+            errs.append("%s must be an object" % where)
+            continue
+        if "enabledPlugins" in t:  # GUARD:no-team-enabled
+            errs.append("%s: enabledPlugins is not allowed in a team target (schema 2 renders it from "
+                        "fleet.plugins; remove it or record an exception)" % where)
+        for k in t:
+            if k not in TEAM_KEYS and k != "enabledPlugins" and not k.startswith("_"):
+                errs.append("%s: unknown key %s" % (where, k))
+        if t.get("mode") not in ("tracked", "deployed"):
+            errs.append("%s.mode must be tracked|deployed" % where)
+        sd = t.get("sessionDirs")
+        if not (isinstance(sd, list) and sd and all(isinstance(x, str) and x for x in sd)):
+            errs.append("%s.sessionDirs must be a non-empty string list" % where)
+        else:
+            errs.extend(dir_token_problems("%s.sessionDirs" % where, sd))
+        wr = t.get("worktreeRepos", [])
+        if not (isinstance(wr, list) and all(isinstance(x, str) for x in wr)):
+            errs.append("%s.worktreeRepos must be a string list" % where)
+        elif wr and t.get("mode") == "tracked":
+            errs.append("%s.worktreeRepos is deployed-mode only (tracked worktrees inherit by checkout)" % where)
+        if isinstance(wr, list):
+            errs.extend(dir_token_problems("%s.worktreeRepos" % where, wr))
+        if not isinstance(t.get("deliver"), bool):
+            errs.append("%s.deliver must be a boolean" % where)
+        elif t["deliver"] is False and not nonempty_str(t.get("deliverReason")):
+            errs.append("%s: deliver=false needs a non-empty deliverReason" % where)
+    errs.extend(duplicate_dir_problems(teams))
+    return errs, set(teams)
+
+
+def validate_groups_and_exceptions(m, targets, plugins):
+    """teamGroups + exceptions. Every group and every exception carries a non-empty reason."""
+    errs = []
+    groups = m.get("teamGroups", {})
+    if not isinstance(groups, dict):
+        errs.append("teamGroups must be an object")
+        groups = {}
+    pats = m.get("teamTargetPatterns") if isinstance(m.get("teamTargetPatterns"), dict) else {}
+    pattern_groups = {b.get("group") for k, b in pats.items() if isinstance(b, dict) and not k.startswith("_")}
+    for gname, g in groups.items():
+        where = "teamGroups.%s" % gname
+        if not isinstance(g, dict):
+            errs.append("%s must be an object {teams, reason}" % where)
+            continue
+        if not nonempty_str(g.get("reason")):  # GUARD:group-reason
+            errs.append("%s: needs a non-empty reason" % where)
+        gt = g.get("teams")
+        if gt is None and gname in pattern_groups:
+            continue  # filled from the registry by expand_patterns; empty on a host with no matching team
+        if not (isinstance(gt, list) and (gt or gname in pattern_groups) and all(isinstance(x, str) for x in gt)):
+            errs.append("%s.teams must be a non-empty string list" % where)
+            continue
+        for tn in gt:
+            if tn not in targets:
+                errs.append("%s names %r, which is not in teamTargets" % (where, tn))
+    excs = m.get("exceptions", [])
+    if not isinstance(excs, list):
+        errs.append("exceptions must be a list")
+        excs = []
+    seen = set()
+    for i, e in enumerate(excs):
+        where = "exceptions[%d]" % i
+        if not isinstance(e, dict):
+            errs.append("%s must be an object" % where)
+            continue
+        where = "exceptions[%s]" % (e.get("id") if nonempty_str(e.get("id")) else i)
+        if not nonempty_str(e.get("id")):
+            errs.append("%s: needs a non-empty id" % where)
+        elif e["id"] in seen:
+            errs.append("%s: duplicate exception id" % where)
+        else:
+            seen.add(e["id"])
+        for k in e:
+            if k not in EXCEPTION_KEYS and not k.startswith("_"):
+                errs.append("%s: unknown key %s" % (where, k))
+        if not nonempty_str(e.get("reason")):  # GUARD:exception-reason
+            errs.append("%s: needs a non-empty reason (an exception nobody explained is drift)" % where)
+        ap = e.get("appliesTo")
+        if not (isinstance(ap, str) and ":" in ap):
+            errs.append("%s.appliesTo must be 'group:<name>' or 'team:<name>'" % where)
+        else:
+            kind, _sep, ref = ap.partition(":")
+            if kind == "group" and ref not in groups:
+                errs.append("%s.appliesTo names unknown group %r" % (where, ref))
+            elif kind == "team" and ref not in targets:
+                errs.append("%s.appliesTo names unknown team %r" % (where, ref))
+            elif kind not in ("group", "team"):
+                errs.append("%s.appliesTo must start with group: or team:" % where)
+        rc = e.get("removeClasses", [])
+        rpl = e.get("removePlugins", [])
+        if not (isinstance(rc, list) and all(c in PLUGIN_CLASSES for c in rc)):
+            errs.append("%s.removeClasses must be a list drawn from %s" % (where, "|".join(PLUGIN_CLASSES)))
+            rc = []
+        if not isinstance(rpl, list):
+            errs.append("%s.removePlugins must be a list of fleet plugin ids" % where)
+            rpl = []
+        for pid in rpl:
+            if pid not in plugins:
+                errs.append("%s.removePlugins names %r, which is not in fleet.plugins" % (where, pid))
+        if not rc and not rpl:
+            errs.append("%s must remove something (removeClasses or removePlugins)" % where)
+        if e.get("render", "false") not in RENDER_MODES:
+            errs.append("%s.render must be one of %s" % (where, "|".join(RENDER_MODES)))
+    errs.extend(validate_connector_rule(m, groups, targets))
+    return errs
+
+
+def covers_no_connectors(exc):
+    """True for an exception that removes class `connector` and renders it an enforced false (an
+    absent render would let a stray user-scope setting re-enable the connector)."""
+    return (isinstance(exc, dict) and isinstance(exc.get("removeClasses"), list)
+            and "connector" in exc["removeClasses"] and exc.get("render", "false") == "false")  # GUARD:cover-render
+
+
+def validate_connector_rule(m, groups, targets):
+    """"Connectors stay off" for every team that is not explicitly allowed, fail closed (XACA-1643).
+
+    The guarantee is the ALLOWLIST in connector_allowed_teams()/exception_removals(): a connector
+    renders true only for a member of a group with `allowConnectors: true`. These checks keep the
+    manifest honest around it:
+    0. `allowConnectors` is a boolean; a group cannot set both it and noConnectors;
+    1. a group with `noConnectors: true` has every member covered by an exception that removes class
+       connector with render "false" (deleting the exception, or softening it to "absent", fails);
+    2. every team target belongs to at least one group, so a new team forces an explicit choice;
+    3. the floor (one shared predicate, is_floored_name): finance/legal/medical, their `<name>-`
+       prefixes and every freelance- target must be in a noConnectors group and in NO allowConnectors
+       group, so emptying the group, moving a member out or clearing the flag cannot turn them on;
+    4. deliver=false is rejected for a team whose connectors render false: sync would strip the
+       enforced false entries and let a user-scope true through."""
+    errs = []
+    excs = [e for e in (m.get("exceptions") or []) if isinstance(e, dict)]
+    nc_members = set()
+    allow_members = set()
+    in_group = set()
+    for gname, g in groups.items():
+        if not isinstance(g, dict):
+            continue
+        if "allowConnectors" in g and not isinstance(g["allowConnectors"], bool):  # GUARD:allow-bool
+            errs.append("teamGroups.%s.allowConnectors must be a boolean" % gname)
+        if g.get("allowConnectors") is True and g.get("noConnectors") is True:
+            errs.append("teamGroups.%s sets both allowConnectors and noConnectors" % gname)
+        flag = g.get("noConnectors", False)
+        if not isinstance(flag, bool):
+            errs.append("teamGroups.%s.noConnectors must be a boolean" % gname)
+            continue
+        members = [x for x in (g.get("teams") or []) if isinstance(x, str)]
+        in_group.update(members)
+        if g.get("allowConnectors") is True:
+            allow_members.update(members)
+        if not flag:
+            continue
+        nc_members.update(members)
+        for tn in members:
+            if tn in targets and not any(exception_applies(m, e, tn) and covers_no_connectors(e) for e in excs):  # GUARD:no-connector-cover
+                errs.append("teamGroups.%s is noConnectors but %r has no exception removing class connector "
+                            "with render \"false\" (record one; \"absent\" does not count)" % (gname, tn))
+    for tn in sorted(targets):  # GUARD:team-in-group
+        if tn not in in_group:
+            errs.append("teamTargets.%s belongs to no teamGroups entry (put it in a group so the connector "
+                        "decision is explicit: a noConnectors group, or an allowConnectors group)" % tn)
+    for tn in sorted(targets):  # GUARD:no-connector-floor
+        if not is_floored_name(tn):
+            continue
+        if tn not in nc_members:
+            errs.append("teamTargets.%s must stay in a teamGroups entry with noConnectors: true "
+                        "(connectors stay off for personal-data and client-data teams)" % tn)
+        if tn in allow_members:  # GUARD:floor-allow
+            errs.append("teamTargets.%s is in a group with allowConnectors: true; connectors stay off "
+                        "for personal-data and client-data teams" % tn)
+    plugins = (m.get("fleet") or {}).get("plugins") if isinstance(m.get("fleet"), dict) else None
+    if isinstance(plugins, dict) and any(is_connector_entry(e) for e in plugins.values()):
+        allowed = connector_allowed_teams(m)
+        tt = m.get("teamTargets") if isinstance(m.get("teamTargets"), dict) else {}
+        for tn in sorted(targets):
+            if tn not in allowed and isinstance(tt.get(tn), dict) and tt[tn].get("deliver") is False:  # GUARD:no-deliver-off
+                errs.append("teamTargets.%s: deliver=false is not allowed for a team whose connectors render "
+                            "false (sync would strip the enforced false entries); keep deliver=true or put "
+                            "the team in an allowConnectors group" % tn)
+    return errs
+
+
+def validate_misc(m):
+    errs = []
+    pc = m.get("pluginClasses")
+    if pc is not None and not isinstance(pc, dict):
+        errs.append("pluginClasses must be an object")
+    los = m.get("liveOutOfScope")
+    if los is not None:
+        if not isinstance(los, dict):
+            errs.append("liveOutOfScope must be an object {marketplaces, reason}")
+        else:
+            mk = los.get("marketplaces")
+            if not (isinstance(mk, list) and all(isinstance(x, str) and x for x in mk)):
+                errs.append("liveOutOfScope.marketplaces must be a string list")
+            if not nonempty_str(los.get("reason")):
+                errs.append("liveOutOfScope: needs a non-empty reason")
+    um = m.get("unmanagedTeams")
+    if um is not None:
+        if not isinstance(um, dict):
+            errs.append("unmanagedTeams must be an object {<registry key>: <reason>}")
+        else:
+            for k, v in um.items():
+                if not k.startswith("_") and not nonempty_str(v):
+                    errs.append("unmanagedTeams[%s]: needs a non-empty reason" % k)
+    return errs
+
+
 def validate_manifest(m, catalog=None):
     errs = []
     if not isinstance(m, dict):
         return ["manifest root is not an object"]
-    if m.get("schemaVersion") != 1:
-        errs.append("schemaVersion must be 1")
+    if m.get("schemaVersion") != SCHEMA_VERSION:
+        errs.append("schemaVersion must be %d" % SCHEMA_VERSION)
     for k in m:
-        if k not in TOP_KEYS and not k.startswith("_"):
+        if k not in TOP_KEYS and k != "teams" and not k.startswith("_"):
             errs.append("unknown top-level key: %s" % k)
     mv = m.get("minClaudeVersion")
     if mv is not None and not (isinstance(mv, str) and re.match(r"^\d+\.\d+\.\d+$", mv)):
@@ -435,58 +981,15 @@ def validate_manifest(m, catalog=None):
             if lk in b and not (isinstance(b[lk], list) and b[lk] and all(isinstance(x, str) for x in b[lk])):
                 errs.append("binaries[%s].%s must be a non-empty string list" % (pid, lk))
     errs.extend(baseline_problems(m.get("baseline")))
-    blocked = blocked_plugins(m)
-    teams = m.get("teams")
-    if not isinstance(teams, dict) or not teams:
-        errs.append("teams must be a non-empty object")
-        return errs
-    for name, t in teams.items():
-        where = "teams.%s" % name
-        if not isinstance(t, dict):
-            errs.append("%s must be an object" % where)
-            continue
-        for k in t:
-            if k not in TEAM_KEYS and not k.startswith("_"):
-                errs.append("%s: unknown key %s" % (where, k))
-        if t.get("mode") not in ("tracked", "deployed"):
-            errs.append("%s.mode must be tracked|deployed" % where)
-        sd = t.get("sessionDirs")
-        if not (isinstance(sd, list) and sd and all(isinstance(x, str) and x for x in sd)):
-            errs.append("%s.sessionDirs must be a non-empty string list" % where)
-        wr = t.get("worktreeRepos", [])
-        if not (isinstance(wr, list) and all(isinstance(x, str) for x in wr)):
-            errs.append("%s.worktreeRepos must be a string list" % where)
-        elif wr and t.get("mode") == "tracked":
-            errs.append("%s.worktreeRepos is deployed-mode only (tracked worktrees inherit by checkout)" % where)
-        if not isinstance(t.get("deliver"), bool):
-            errs.append("%s.deliver must be a boolean" % where)
-        for sec in ("enabledPlugins", "retiredPlugins", "extraKnownMarketplaces"):
-            if not isinstance(t.get(sec, {}), dict):
-                errs.append("%s.%s must be an object" % (where, sec))
-        ep = t.get("enabledPlugins", {}) if isinstance(t.get("enabledPlugins", {}), dict) else {}
-        rp = t.get("retiredPlugins", {}) if isinstance(t.get("retiredPlugins", {}), dict) else {}
-        if t.get("deliver") is False and ep:
-            errs.append("%s: deliver=false but enabledPlugins is not empty" % where)
-        for pid, v in ep.items():
-            if not PLUGIN_ID_RE.match(pid):
-                errs.append("%s.enabledPlugins: bad plugin id %r" % (where, pid))
-            if v is not True:
-                errs.append("%s.enabledPlugins[%s] must be true (opt-outs live in settings.local.json)" % (where, pid))
-            if pid in rp:
-                errs.append("%s: %s is both enabled and retired" % (where, pid))
-            if pid in blocked:
-                errs.append("%s enables %s, which the L1 baseline blocks" % (where, pid))
-            if pid.split("@")[0].endswith("-lsp") and pid not in binaries:
-                errs.append("%s enables LSP plugin %s with no `binaries` entry" % (where, pid))
-            if catalog is not None:
-                ent = catalog.get(pid)
-                if ent is None and pid.endswith("@claude-plugins-official"):
-                    errs.append("%s enables %s, which is not in the official catalog (unresolvable id)" % (where, pid))
-                elif ent is not None and lsp_commands(ent) and pid not in binaries:
-                    errs.append("%s enables LSP plugin %s (catalog lspServers) with no `binaries` entry" % (where, pid))
-        for pid in rp:
-            if not PLUGIN_ID_RE.match(pid):
-                errs.append("%s.retiredPlugins: bad plugin id %r" % (where, pid))
+    errs.extend(validate_fleet(m, binaries, blocked_plugins(m), catalog))
+    terrs, targets = validate_targets(m)
+    errs.extend(terrs)
+    errs.extend(validate_patterns(m))
+    fleet = m.get("fleet")
+    plugins = fleet.get("plugins") if isinstance(fleet, dict) and isinstance(fleet.get("plugins"), dict) else {}
+    errs.extend(validate_groups_and_exceptions(m, targets, plugins))
+    errs.extend(validate_misc(m))
+    errs.extend(validate_skills(m, targets))
     if catalog is not None:
         for pid, b in binaries.items():
             ent = catalog.get(pid)
@@ -496,6 +999,102 @@ def validate_manifest(m, catalog=None):
             if cmds and isinstance(b, dict) and b.get("command") not in cmds:
                 errs.append("binaries[%s].command %r != catalog lspServers command(s) %s" % (pid, b.get("command"), cmds))
     return errs
+
+
+# ---------------------------------------------------------------------------
+# The resolver: the ONLY producer of a team's rendered plugin block (XACA-1643)
+# ---------------------------------------------------------------------------
+
+def exception_applies(m, exc, team):
+    ap = exc.get("appliesTo") if isinstance(exc, dict) else None
+    if not isinstance(ap, str):
+        return False
+    kind, _sep, ref = ap.partition(":")
+    if kind == "team":
+        return ref == team
+    if kind == "group":
+        g = (m.get("teamGroups") or {}).get(ref)
+        return isinstance(g, dict) and team in (g.get("teams") or [])
+    return False
+
+
+def team_exceptions(m, team):
+    """The recorded exceptions that apply to `team`, in manifest order."""
+    return [e for e in (m.get("exceptions") or []) if exception_applies(m, e, team)]
+
+
+def exception_removals(m, team):
+    """{plugin id: {"mode": "false"|"absent", "by": [{"id", "reason"}]}} for every fleet plugin a
+    recorded exception removes from `team`. "false" beats "absent". The ONE place the exception
+    matching lives: effective_team_cfg() renders from it and the check paths (EXCEPTED,
+    EXCEPTION_BREACH) read it, so the two can never disagree."""
+    plugins = (m.get("fleet") or {}).get("plugins") or {}
+    removed = {}
+    allowed = connector_allowed_teams(m)
+    for exc in team_exceptions(m, team):
+        mode = exc.get("render", "false")
+        ids = set(exc.get("removePlugins") or [])
+        classes = set(exc.get("removeClasses") or [])
+        for pid, ent in plugins.items():
+            if pid in ids or (isinstance(ent, dict) and ent.get("class") in classes):  # GUARD:remove-plugins
+                r = removed.setdefault(pid, {"mode": mode, "by": []})
+                if mode == "false":
+                    r["mode"] = "false"
+                r["by"].append({"id": exc.get("id"), "reason": exc.get("reason")})
+    if team not in allowed:  # GUARD:allowlist-render
+        for pid, ent in plugins.items():
+            if is_connector_entry(ent):
+                r = removed.setdefault(pid, {"mode": "false", "by": []})
+                if r["mode"] != "false" or not r["by"]:
+                    r["mode"] = "false"
+                    r["by"].append({"id": CONNECTOR_ALLOWLIST_ID, "reason": CONNECTOR_ALLOWLIST_REASON})
+    return removed
+
+
+def effective_team_cfg(m, team):
+    """Render one team's block from fleet + groups + exceptions.
+
+    Returns the team target's own keys (mode, sessionDirs, worktreeRepos, deliver, ...) plus the
+    three sections the sync writes, so process_target()/plan_merge() and every reader see one
+    shape. enabledPlugins maps each fleet plugin to True, except plugins an exception removes:
+    those render False (an explicit project-scope false outranks a user-scope true, so the
+    exception is ENFORCED) or, with render "absent", are left out. `deliver` is NOT applied here:
+    plan_merge() and enabled_ids() own it. This is the only place a team's list is computed: no reader may read a raw
+    teamTargets block's enabledPlugins (it is rejected by validation)."""
+    cfg = dict(m["teamTargets"][team])
+    fleet = m.get("fleet") or {}
+    plugins = fleet.get("plugins") or {}
+    removed = exception_removals(m, team)
+    ep = {}
+    for pid in plugins:
+        mode = (removed.get(pid) or {}).get("mode")
+        if mode == "absent":
+            continue
+        ep[pid] = mode != "false"
+    cfg["enabledPlugins"] = ep  # GUARD:render
+    cfg["retiredPlugins"] = dict(fleet.get("retiredPlugins") or {})
+    cfg["extraKnownMarketplaces"] = dict(fleet.get("extraKnownMarketplaces") or {})
+    return cfg
+
+
+def enabled_ids(cfg):
+    """Plugin ids a rendered block turns ON: none when deliver=false, and an excepted plugin
+    (rendered False) is not one."""
+    if not cfg.get("deliver", True):
+        return set()
+    return {pid for pid, v in (cfg.get("enabledPlugins") or {}).items() if v is True}
+
+
+def load_valid_manifest(catalog=None):
+    """Load + validate. Any validation error is exit 3 BEFORE the caller writes anything."""
+    m = load_manifest()
+    problems = validate_manifest(m, catalog)
+    if problems:  # GUARD:validate-first
+        for p in problems:
+            err("manifest invalid: %s" % p)
+        raise ToolError("manifest has %d validation problem(s); nothing was written "
+                        "(run `%s check --manifest`)" % (len(problems), PROG), 3)
+    return m
 
 
 # ---------------------------------------------------------------------------
@@ -553,7 +1152,7 @@ def plan_merge(cur, cfg, written, force_owned=False):
     """Pure merge. Returns (new_obj, actions, new_written).
 
     cur      parsed target (dict) or None when the file is absent
-    cfg      the team's manifest block
+    cfg      the team's RENDERED block (effective_team_cfg), never a raw teamTargets block
     written  {section: {key: value}} this host's sync wrote previously
     actions  [(section, key, ACTION)] ACTION in ADDED UPDATED ADOPTED REMOVED CONFLICT
     """
@@ -631,6 +1230,11 @@ def read_target(path):
 
 def ensure_git_exclude(directory):
     """Deployed-mode targets inside a git repo go into .git/info/exclude (common dir)."""
+    return ensure_git_exclude_lines(directory, [EXCLUDE_LINE_TAIL])
+
+
+def ensure_git_exclude_lines(directory, tails):
+    """Add `<show-prefix><tail>` for each tail to .git/info/exclude. Returns the file when it changed."""
     rc, so, _se = git(["-C", directory, "rev-parse", "--git-common-dir"])
     if rc != 0:
         return None
@@ -639,19 +1243,21 @@ def ensure_git_exclude(directory):
         common = os.path.join(directory, common)
     rc, so, _se = git(["-C", directory, "rev-parse", "--show-prefix"])
     prefix = so.strip() if rc == 0 else ""
-    line = prefix + EXCLUDE_LINE_TAIL
     exclude = os.path.join(common, "info", "exclude")
     existing = ""
     if os.path.exists(exclude):
         with open(exclude, "r") as fh:
             existing = fh.read()
-    if line in existing.splitlines():
+    have = set(existing.splitlines())
+    lines = [prefix + t for t in tails if prefix + t not in have]
+    if not lines:
         return None
     os.makedirs(os.path.dirname(exclude), exist_ok=True)
     with open(exclude, "a") as fh:
         if existing and not existing.endswith("\n"):
             fh.write("\n")
-        fh.write(line + "\n")
+        for line in lines:
+            fh.write(line + "\n")
     return exclude
 
 
@@ -713,7 +1319,7 @@ def process_target(team, cfg, directory, state, dry_run=False, force_owned=False
 # ---------------------------------------------------------------------------
 
 def select_teams(m, team, all_flag):
-    teams = m["teams"]
+    teams = m["teamTargets"]
     if team:
         if team not in teams:
             raise ToolError("unknown team %r (manifest teams: %s)" % (team, ", ".join(sorted(teams))))
@@ -723,11 +1329,66 @@ def select_teams(m, team, all_flag):
     raise ToolError("specify a team or --all")
 
 
+def dir_identity(d):
+    """Identity of a dir for the collision check: (device, inode), so a symlink, a trailing slash, a
+    `..` spelling and a case-insensitive alias all compare equal (its realpath if it cannot be stat'd)."""
+    try:
+        st = os.stat(d)
+        return ("ino", st.st_dev, st.st_ino)
+    except OSError:
+        return ("path", os.path.realpath(d))
+
+
+def dir_collisions(m, names=None):
+    """[{dir, teams}] for every real directory that two or more DIFFERENT teams would write a settings
+    file or skill links into (session dirs and linked worktrees, after registry resolution, symlink
+    and `..` normalisation). `names` keeps only the collisions that involve one of those teams.
+
+    A team this host does not host (no registry working_dir) owns no directory and is skipped. That
+    is how a registry alias is handled: `mainevent` is `alias_of: command`, so it resolves to nothing
+    of its own and shares no write target with `command`. Giving an alias a dir of its own that equals
+    its target's dir would be reported, because then two teams do write the same file."""
+    owners = {}
+    shown = {}
+    for n in sorted(m["teamTargets"]):
+        cfg = effective_team_cfg(m, n)
+        dirs = resolve_dirs(n, cfg)
+        if dirs is None:
+            continue
+        cand = list(dirs)
+        repos = (resolve_dirs(n, cfg, key="worktreeRepos") or []) if cfg.get("mode") == "deployed" else dirs
+        for r in repos:
+            cand.extend(list_worktrees(r))
+        for d in cand:
+            if not os.path.isdir(d):
+                continue  # an absent dir is never written (DIR_ABSENT); the guard fires once it exists
+            k = dir_identity(d)
+            owners.setdefault(k, set()).add(n)
+            shown.setdefault(k, os.path.realpath(d))
+    hits = []
+    for k, teams in owners.items():
+        if len(teams) > 1 and (names is None or teams & set(names)):
+            hits.append({"dir": shown[k], "teams": sorted(teams)})
+    return sorted(hits, key=lambda h: h["dir"])
+
+
+def guard_dir_collisions(m, names):
+    """Exit 3 before any write when a selected team shares a real directory with another team."""
+    hits = dir_collisions(m, names)
+    if hits:  # GUARD:dir-collision
+        for h in hits:
+            err("DIR_COLLISION: %s is the session dir or linked worktree of more than one team (%s)"
+                % (h["dir"], ", ".join(h["teams"])))
+        raise ToolError("%d directory collision(s): teams cannot share a directory (one settings file per "
+                        "directory, last write wins, so a connector could be switched on for a personal team); "
+                        "nothing was written" % len(hits), 3)
+
+
 def session_targets(m, names):
     """[(team, cfg, dir)] for hosted teams' session dirs."""
     res = []
     for n in names:
-        cfg = m["teams"][n]
+        cfg = effective_team_cfg(m, n)
         dirs = resolve_dirs(n, cfg)
         if dirs is None:
             continue
@@ -740,7 +1401,7 @@ def worktree_targets(m, names):
     """[(team, cfg, dir)] for linked worktrees of deployed teams' worktreeRepos."""
     res = []
     for n in names:
-        cfg = m["teams"][n]
+        cfg = effective_team_cfg(m, n)
         if cfg.get("mode") != "deployed":
             continue
         repos = resolve_dirs(n, cfg, key="worktreeRepos") or []
@@ -757,6 +1418,489 @@ def guard_not_worktree(directory):
 
 
 # ---------------------------------------------------------------------------
+# Skills (XACA-1643-006, design D6): shared / dev-host / group classes
+# ---------------------------------------------------------------------------
+# shared    machine-wide on every host (the sync-tap.sh mirrored list ships these to consumers)
+# devHost   machine-wide on hosts with a dev-team clone only (NOT-MIRRORED, each with a reason)
+# group     project-scope symlinks <session dir>/.claude/skills/<name> -> <owner repo>/<name>, written
+#           by this tool into the group's session dirs and linked worktrees. Distribution only: the
+#           owning repo is never written into, only symlinks are created or removed.
+
+SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._'-]*$")
+SKILLS_KEYS = {"ignore", "unmanagedLocal", "shared", "devHost", "sourceRoots", "groups"}
+GROUP_SKILL_KEYS = {"owner", "reason"}
+DEV_TEAM_TOKEN = "${dev_team}"
+SKILLS_SRC = os.environ.get("KBSPL_SKILLS_SRC") or os.path.join(DEV_TEAM, "skills")
+SKILLS_STATE_KEY = "skillLinks"
+
+
+def skill_name_ok(n):
+    return isinstance(n, str) and n == n.strip() and bool(SKILL_NAME_RE.match(n)) and ".." not in n
+
+
+def validate_skills(m, targets):
+    """`skills` block problems. Every group skill needs an owner with a source root; every dev-host
+    entry, every unmanaged entry and every group needs a reason (a silent exception cannot be reviewed)."""
+    errs = []
+    sk = m.get("skills")
+    if sk is None:
+        return errs
+    if not isinstance(sk, dict):
+        return ["skills must be an object"]
+    for k in sk:
+        if k not in SKILLS_KEYS and not k.startswith("_"):
+            errs.append("skills: unknown key %s" % k)
+    claimed = {}
+
+    def claim(name, label):
+        if name in claimed:
+            errs.append("skills: %r is classified twice (%s and %s)" % (name, claimed[name], label))
+        else:
+            claimed[name] = label
+
+    ig = sk.get("ignore", [])
+    if not (isinstance(ig, list) and all(isinstance(x, str) and x for x in ig)):
+        errs.append("skills.ignore must be a string list")
+        ig = []
+    for n in ig:
+        claim(n, "ignore")
+    um = sk.get("unmanagedLocal", {})
+    if not isinstance(um, dict):
+        errs.append("skills.unmanagedLocal must be an object {<name>: <reason>}")
+        um = {}
+    for n, why in um.items():
+        if n.startswith("_"):
+            continue
+        if not nonempty_str(why):
+            errs.append("skills.unmanagedLocal[%s]: needs a non-empty reason" % n)
+        claim(n, "unmanagedLocal")
+    sh = sk.get("shared", [])
+    if not isinstance(sh, list):
+        errs.append("skills.shared must be a list of skill names")
+        sh = []
+    for n in sh:
+        if not skill_name_ok(n):
+            errs.append("skills.shared: bad skill name %r" % (n,))
+        else:
+            claim(n, "shared")
+    dh = sk.get("devHost", {})
+    if not isinstance(dh, dict):
+        errs.append("skills.devHost must be an object {<name>: {reason}}")
+        dh = {}
+    for n, ent in dh.items():
+        if n.startswith("_"):
+            continue
+        if not skill_name_ok(n):
+            errs.append("skills.devHost: bad skill name %r" % n)
+        elif not isinstance(ent, dict) or not nonempty_str(ent.get("reason")):
+            errs.append("skills.devHost[%s]: needs a non-empty reason (why it is NOT-MIRRORED)" % n)
+        claim(n, "devHost")
+    roots = sk.get("sourceRoots", {})
+    if not isinstance(roots, dict):
+        errs.append("skills.sourceRoots must be an object {<owner>: <dir>}")
+        roots = {}
+    for o, tpl in roots.items():
+        if o.startswith("_"):
+            continue
+        if not nonempty_str(tpl):
+            errs.append("skills.sourceRoots[%s] must be a non-empty path" % o)
+        elif "${" in tpl:
+            rest = tpl[len(DEV_TEAM_TOKEN):] if tpl.startswith(DEV_TEAM_TOKEN) else None
+            if rest is None:
+                r = WD_REF_RE.match(tpl)
+                rest = tpl[r.end():] if r and r.group(1) else None
+            if rest is None or "${" in rest:
+                errs.append("skills.sourceRoots[%s]: %r is not a supported reference (a leading ${dev_team} or "
+                            "${working_dir:<registry key>}, or a literal path)" % (o, tpl))
+    groups = sk.get("groups", {})
+    if not isinstance(groups, dict):
+        errs.append("skills.groups must be an object")
+        groups = {}
+    for gname, g in groups.items():
+        if gname.startswith("_"):
+            continue
+        where = "skills.groups.%s" % gname
+        if not isinstance(g, dict):
+            errs.append("%s must be an object" % where)
+            continue
+        if not nonempty_str(g.get("reason")):
+            errs.append("%s: needs a non-empty reason" % where)
+        teams = g.get("teams")
+        if not (isinstance(teams, list) and teams and all(isinstance(t, str) for t in teams)):
+            errs.append("%s.teams must be a non-empty string list" % where)
+        else:
+            for t in teams:
+                if t not in targets:
+                    errs.append("%s.teams: %r is not in teamTargets" % (where, t))
+        gs = g.get("skills")
+        if not (isinstance(gs, dict) and any(not k.startswith("_") for k in gs)):
+            errs.append("%s.skills must be a non-empty object" % where)
+            continue
+        for n, ent in gs.items():
+            if n.startswith("_"):
+                continue
+            if not skill_name_ok(n):
+                errs.append("%s.skills: bad skill name %r" % (where, n))
+                continue
+            claim(n, "group:%s" % gname)
+            if not isinstance(ent, dict):
+                errs.append("%s.skills[%s] must be an object {owner, reason?}" % (where, n))
+                continue
+            for k in ent:
+                if k not in GROUP_SKILL_KEYS and not k.startswith("_"):
+                    errs.append("%s.skills[%s]: unknown key %s" % (where, n, k))
+            owner = ent.get("owner")
+            if not nonempty_str(owner):  # GUARD:skill-owner
+                errs.append("%s.skills[%s]: needs an `owner` (who maintains the source)" % (where, n))
+            elif owner not in roots:
+                errs.append("%s.skills[%s]: owner %r has no entry in skills.sourceRoots, so the "
+                            "source cannot be resolved" % (where, n, owner))
+            elif DEV_TEAM_TOKEN in str(roots[owner]) and not nonempty_str(ent.get("reason")):
+                errs.append("%s.skills[%s]: a dev-team-tracked skill is NOT-MIRRORED and needs a "
+                            "non-empty reason" % (where, n))
+    return errs
+
+
+def skills_cfg(m):
+    sk = m.get("skills")
+    return sk if isinstance(sk, dict) else {}
+
+
+def skill_source_root(m, owner):
+    tpl = str((skills_cfg(m).get("sourceRoots") or {}).get(owner) or "")
+    mt = WD_REF_RE.match(tpl)
+    if mt and mt.group(1):
+        wd = working_dir(mt.group(1))
+        # A key this host's registry lacks resolves to a path that cannot hold a SKILL.md, so every
+        # skill under it plans SOURCE_ABSENT (named in the detail) instead of guessing a location.
+        tpl = (wd if wd is not None else "/.unresolved-registry-key/" + mt.group(1)) + tpl[mt.end():]
+    return os.path.abspath(expand(tpl.replace(DEV_TEAM_TOKEN, DEV_TEAM)))
+
+
+def group_skill_map(m):
+    """{skill name: {group, owner, source}} for every group skill (names are unique: validated)."""
+    res = {}
+    for gname, g in sorted((skills_cfg(m).get("groups") or {}).items()):
+        if gname.startswith("_") or not isinstance(g, dict):
+            continue
+        for n, ent in sorted((g.get("skills") or {}).items()):
+            if n.startswith("_") or not isinstance(ent, dict):
+                continue
+            res[n] = {"group": gname, "owner": ent.get("owner"),
+                      "source": os.path.join(skill_source_root(m, ent.get("owner")), n)}
+    return res
+
+
+def team_skills(m, team):
+    """The group skills a team receives: those of every group listing it."""
+    res = {}
+    gm = group_skill_map(m)
+    for gname, g in sorted((skills_cfg(m).get("groups") or {}).items()):
+        if gname.startswith("_") or not isinstance(g, dict) or team not in (g.get("teams") or []):  # GUARD:skill-group-scope
+            continue
+        for n in (g.get("skills") or {}):
+            if n in gm:
+                res[n] = gm[n]
+    return res
+
+
+def skill_link_records(state):
+    recs = state.get(SKILLS_STATE_KEY)
+    return recs if isinstance(recs, dict) else {}
+
+
+def guard_skill_dir(directory):
+    """Refuse a skills dir that is, or leads into, a link: a symlinked .claude/skills could be the
+    machine-wide ~/.claude/skills, and a link written through it would defeat the whole point."""
+    claude = os.path.join(directory, ".claude")
+    skills = os.path.join(claude, "skills")
+    if os.path.islink(claude) or os.path.islink(skills):  # GUARD:skills-symlinked
+        raise ToolError("refusing %s: .claude or .claude/skills is a symlink; the skills writer never "
+                        "creates anything through a link" % skills)
+    user_dir = os.path.join(os.path.expanduser("~"), ".claude")
+    if _same_file(claude, user_dir) or os.path.realpath(claude).casefold() == os.path.realpath(user_dir).casefold():  # GUARD:skills-home
+        raise ToolError("refusing %s: it is the user-scope ~/.claude/skills, which is machine-wide" % skills)
+
+
+def plan_skill_dir(m, team, cfg, directory, state):
+    """Pure plan for one dir: [{skill, link, action, source, detail}].
+    Actions: ADD UPDATE ADOPT OK REMOVE FORGET CONFLICT SOURCE_ABSENT ERROR."""
+    plan = []
+    desired = team_skills(m, team) if cfg.get("deliver", True) else {}
+    recs = skill_link_records(state)
+    skills_dir = os.path.join(directory, ".claude", "skills")
+    mine = {l: r for l, r in recs.items() if os.path.dirname(l) == skills_dir}
+    if not desired and not mine:
+        return plan
+    try:
+        guard_skill_dir(directory)
+    except ToolError as exc:
+        return [{"skill": "-", "link": skills_dir, "action": "ERROR", "source": None, "detail": str(exc)}]
+
+    def add(name, link, action, source, detail=""):
+        plan.append({"skill": name, "link": link, "action": action, "source": source, "detail": detail})
+
+    for name, ent in sorted(desired.items()):
+        link = os.path.join(skills_dir, name)
+        src = ent["source"]
+        if os.path.realpath(skills_dir).startswith(os.path.realpath(src) + os.sep):  # GUARD:skills-self
+            add(name, link, "ERROR", src, "skills dir lies inside the source skill dir")
+            continue
+        if not os.path.isfile(os.path.join(src, "SKILL.md")):
+            add(name, link, "SOURCE_ABSENT", src, "source %s has no SKILL.md" % src)
+            continue
+        rec = mine.get(link)
+        if os.path.islink(link):
+            cur = os.readlink(link)
+            if cur == src or os.path.realpath(link) == os.path.realpath(src):
+                add(name, link, "OK" if rec else "ADOPT", src)
+            elif rec and rec.get("target") == cur:  # GUARD:skill-repointed
+                add(name, link, "UPDATE", src, "stale link -> %s" % cur)
+            elif rec:
+                add(name, link, "CONFLICT", src, "owned link was repointed to %s by someone else" % cur)
+            else:
+                add(name, link, "CONFLICT", src, "foreign symlink -> %s" % cur)
+        elif os.path.lexists(link):  # GUARD:skill-conflict-real
+            kind = "dir" if os.path.isdir(link) else "file"
+            add(name, link, "CONFLICT", src, "a real %s is in the way; the sync never replaces one" % kind)
+        else:
+            add(name, link, "ADD", src)
+    for link, rec in sorted(mine.items()):
+        name = os.path.basename(link)
+        if name in desired:
+            continue
+        if not os.path.lexists(link):
+            add(name, link, "FORGET", rec.get("target"), "recorded link is already gone")
+        elif os.path.islink(link) and os.readlink(link) == rec.get("target"):  # GUARD:skill-owned
+            add(name, link, "REMOVE", rec.get("target"), "no longer in this team's group")
+        else:
+            add(name, link, "CONFLICT", rec.get("target"), "recorded as ours, but it is no longer our symlink; left alone")
+    return plan
+
+
+def apply_skill_plan(team, directory, plan, state):
+    """Apply a plan. Only symlinks are created or removed, and nothing is opened inside a source dir."""
+    recs = state.setdefault(SKILLS_STATE_KEY, {})
+    skills_dir = os.path.join(directory, ".claude", "skills")
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    excl = []
+    for p in plan:
+        act, link, src = p["action"], p["link"], p["source"]
+        if act in ("ADD", "UPDATE"):
+            os.makedirs(skills_dir, exist_ok=True)
+            if act == "ADD":
+                try:
+                    os.symlink(src, link)  # GUARD:skill-symlink
+                except FileExistsError:
+                    p["action"], p["detail"] = "CONFLICT", "appeared while syncing; left alone"
+                    continue
+            else:
+                tmp = os.path.join(skills_dir, ".%s.kbspl-tmp" % p["skill"])
+                if os.path.lexists(tmp):
+                    os.unlink(tmp)
+                os.symlink(src, tmp)
+                os.replace(tmp, link)
+        if act in ("ADD", "UPDATE", "ADOPT"):
+            recs[link] = {"team": team, "skill": p["skill"], "target": src, "syncedAt": now}
+            excl.append(".claude/skills/%s" % p["skill"])
+        elif act == "REMOVE":
+            if os.path.islink(link):
+                os.unlink(link)  # GUARD:skill-unlink
+            recs.pop(link, None)
+        elif act == "FORGET":
+            recs.pop(link, None)
+    if not recs:
+        state.pop(SKILLS_STATE_KEY, None)
+    # Add an exclude line only for a link git does not already ignore (the Main Event repos ignore
+    # `.claude/*` themselves, so nothing is written into their .git there). rc 1 = not ignored.
+    excl = [t for t in excl if git(["-C", directory, "check-ignore", "-q", "--", t])[0] == 1]
+    if excl:
+        ensure_git_exclude_lines(directory, excl)
+
+
+SKILL_ACTION_LABEL = {"ADD": "ADDED", "UPDATE": "UPDATED", "REMOVE": "REMOVED", "ADOPT": "ADOPTED",
+                      "FORGET": "FORGOT", "CONFLICT": "CONFLICT", "SOURCE_ABSENT": "SOURCE_ABSENT",
+                      "ERROR": "ERROR"}
+
+
+def process_skill_dir(m, team, cfg, directory, state, dry_run=False):
+    """Plan (and unless dry_run, apply) one dir's group skills. None when there is nothing to say."""
+    if not os.path.isdir(directory):
+        return None
+    plan = plan_skill_dir(m, team, cfg, directory, state)
+    if not plan:
+        return None
+    skills_dir = os.path.join(directory, ".claude", "skills")
+    res = {"team": team, "dir": directory, "path": skills_dir, "mode": None, "kind": "skills",
+           "actions": [], "changed": False, "status": "OK", "error": None}
+    if not dry_run:
+        try:
+            apply_skill_plan(team, directory, plan, state)
+        except (OSError, ToolError) as exc:
+            res["status"] = "ERROR"
+            res["error"] = str(exc)
+            return res
+    res["actions"] = [{"section": "skills", "key": p["skill"], "action": SKILL_ACTION_LABEL[p["action"]]}
+                      for p in plan if p["action"] != "OK"]
+    bad = [p for p in plan if p["action"] in ("ERROR", "SOURCE_ABSENT")]
+    if bad:
+        res["status"] = "ERROR"
+        res["error"] = "; ".join("%s: %s" % (p["skill"], p["detail"]) for p in bad)
+    elif any(p["action"] == "CONFLICT" for p in plan):
+        res["status"] = "CONFLICT"
+        res["error"] = "; ".join("%s: %s" % (p["skill"], p["detail"]) for p in plan if p["action"] == "CONFLICT")
+    elif any(p["action"] in ("ADD", "UPDATE", "REMOVE") for p in plan):
+        res["status"] = "DRIFT" if dry_run else "SYNCED"
+    res["changed"] = any(p["action"] in ("ADD", "UPDATE", "REMOVE") for p in plan)
+    return res
+
+
+def skill_targets(m, names, state, sessions=True, worktrees=True):
+    """[(team, cfg, dir)] where group skills are (or were) delivered: group members' session dirs and
+    linked worktrees, plus any other team's dir that still holds a link this tool owns."""
+    recs = skill_link_records(state)
+    owners = {r.get("team") for r in recs.values() if isinstance(r, dict)}
+    res = []
+    for n in names:
+        cfg = effective_team_cfg(m, n)
+        if not cfg.get("deliver", True) or (not team_skills(m, n) and n not in owners):
+            continue
+        dirs = resolve_dirs(n, cfg)
+        if dirs is None:
+            continue
+        if sessions:
+            res.extend((n, cfg, d) for d in dirs)
+        if worktrees:
+            repos = (resolve_dirs(n, cfg, key="worktreeRepos") or []) if cfg.get("mode") == "deployed" else dirs
+            for r in repos:
+                res.extend((n, cfg, wt) for wt in list_worktrees(r))
+    return res
+
+
+def skill_results(m, names, state, dry_run, sessions=True, worktrees=True):
+    res = []
+    for t, c, d in skill_targets(m, names, state, sessions, worktrees):
+        r = process_skill_dir(m, t, c, d, state, dry_run)
+        if r is not None:
+            res.append(r)
+    return res
+
+
+def skill_rows(m, team, cfg, directory, state):
+    """check / check --host rows for one dir's group skills (problems only)."""
+    rows = []
+    if not os.path.isdir(directory):
+        return rows
+    for p in plan_skill_dir(m, team, cfg, directory, state):
+        act = p["action"]
+        if act in ("OK", "ADOPT", "FORGET"):
+            continue
+        if act in ("ADD", "UPDATE", "SOURCE_ABSENT"):
+            status = "SKILL_GROUP_MISSING"  # GUARD:skill-group-missing
+            actual = {"ADD": "absent", "UPDATE": p["detail"], "SOURCE_ABSENT": p["detail"]}[act]
+        elif act == "REMOVE":
+            status, actual = "SKILL_GROUP_LEAK", "stale owned link (team left the group)"
+        elif act == "CONFLICT":
+            status, actual = "CONFLICT", p["detail"]
+        else:
+            status, actual = "FILE_DRIFT", p["detail"]
+        rows.append({"team": team, "dir": directory, "plugin": p["skill"], "kind": "skill",
+                     "expected": "linked" if act != "REMOVE" else "not linked", "actual": actual, "status": status})
+    return rows
+
+
+def tracked_skill_names(src):
+    """Top-level names git tracks under <src> (an untracked link into another repo is not ours)."""
+    rc, so, _se = run(["git", "-C", src, "ls-files", "-z", "--", "."])
+    if rc == 0 and so:
+        return {p.split("/", 1)[0] for p in so.split("\0") if p}
+    return {n for n in os.listdir(src) if not os.path.islink(os.path.join(src, n))}
+
+
+def expected_machine_skills(m):
+    """(kind, names, problem). Dev host: tracked skills/ minus group names. Consumer: the tap's
+    share/skills listing. problem is set when neither source is readable (never a quiet pass)."""
+    tap = os.environ.get("KBSPL_TAP_SKILLS")
+    if not tap and not os.path.isdir(SKILLS_SRC):
+        cands = []
+        if os.environ.get("AITEAMFORGE_DIR"):
+            cands.append(os.path.join(os.environ["AITEAMFORGE_DIR"], "share", "skills"))
+        cands.append(os.path.join(DEV_TEAM, "share", "skills"))
+        for cand in cands:
+            if os.path.isdir(cand):
+                tap = cand
+                break
+    if tap:
+        if not os.path.isdir(tap):
+            return "consumer", set(), "tap skills listing %s is not a directory" % tap
+        return "consumer", {n for n in os.listdir(tap) if not n.startswith(".")}, None
+    if os.path.isdir(SKILLS_SRC):
+        return "dev", tracked_skill_names(SKILLS_SRC) - set(group_skill_map(m)), None
+    return "none", set(), "no dev-team skills/ at %s and no tap share/skills listing" % SKILLS_SRC
+
+
+def machine_skill_rows(m):
+    """check --host rows for the machine-wide ~/.claude/skills (design D6)."""
+    sk = skills_cfg(m)
+    if not isinstance(sk.get("shared"), list):
+        return []  # no skills classes declared: nothing to compare against
+    mdir = os.path.join(os.path.expanduser("~"), ".claude", "skills")
+    rows = []
+
+    def add(name, expected, actual, status):
+        rows.append({"team": "-", "dir": mdir, "plugin": name, "kind": "skill", "expected": expected,
+                     "actual": actual, "status": status})
+
+    _kind, expected, problem = expected_machine_skills(m)
+    if problem:
+        add("-", "expected skill set", problem, "SKILLS_UNVERIFIABLE")
+        return rows
+    ignore = set(sk.get("ignore") or [])
+    unmanaged = {k for k in (sk.get("unmanagedLocal") or {}) if not k.startswith("_")}
+    groups = group_skill_map(m)
+    expected = expected - ignore
+    try:
+        present = set(os.listdir(mdir)) if os.path.isdir(mdir) else set()
+    except OSError as exc:
+        add("-", "readable skills dir", str(exc), "SKILLS_UNVERIFIABLE")
+        return rows
+    for name in sorted(expected):
+        p = os.path.join(mdir, name)
+        if not os.path.lexists(p):
+            add(name, "present", "absent", "SKILL_MISSING")  # GUARD:skill-missing
+        elif os.path.islink(p) and not os.path.exists(p):
+            add(name, "present", "dangling link", "SKILL_MISSING")
+    for name in sorted(present):
+        if name in ignore:  # GUARD:skill-ignore
+            continue
+        if name in groups:  # GUARD:skill-group-leak
+            add(name, "not machine-wide (group:%s)" % groups[name]["group"], "present", "SKILL_GROUP_LEAK")
+        elif name in expected:
+            continue
+        elif name in unmanaged:
+            add(name, "unmanaged local", "present", "UNMANAGED_LOCAL")
+        else:
+            add(name, "not expected", "present", "SKILL_EXTRA")  # GUARD:skill-extra
+    return rows
+
+
+def do_skills(args):
+    m = load_valid_manifest()
+    gm = group_skill_map(m)
+    if args.action == "group-names":
+        for n in sorted(gm):
+            out(n)
+        return 0
+    sk = skills_cfg(m)
+    rows = [(n, "shared") for n in sk.get("shared") or []]
+    rows += [(n, "dev-host") for n in sorted(k for k in (sk.get("devHost") or {}) if not k.startswith("_"))]
+    rows += [(n, "group:%s (owner %s)" % (e["group"], e["owner"])) for n, e in sorted(gm.items())]
+    for n, c in rows:
+        out("%s\t%s" % (n, c))
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # Subcommands
 # ---------------------------------------------------------------------------
 
@@ -766,14 +1910,119 @@ def fmt_action_line(r):
     return "  %-9s %s -- %s%s" % (r["status"], r["path"], acts, extra)
 
 
-def do_list(args):
-    m = load_manifest()
+def local_enabled_map(directory):
+    """The enabledPlugins object of <dir>/.claude/settings.local.json, or {}."""
+    try:
+        with open(os.path.join(directory, ".claude", "settings.local.json"), "r") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    ep = doc.get("enabledPlugins") if isinstance(doc, dict) else None
+    return ep if isinstance(ep, dict) else {}
+
+
+def local_optouts(directory):
+    """Plugin ids the PERSON switched off in <dir>/.claude/settings.local.json (docs section 10)."""
+    return {k for k, v in local_enabled_map(directory).items() if v is False}
+
+
+def local_enables(directory):
+    """Plugin ids the person switched ON in settings.local.json (local outranks project scope)."""
+    return {k for k, v in local_enabled_map(directory).items() if v is True}
+
+
+def parity_rows(m, team, cfg, directory, state):
+    """PARITY / EXCEPTED / OPT_OUT rows for one existing dir (XACA-1643-005, design D5).
+
+    PARITY compares the on-disk project file with the RENDERED list and never reads the live
+    plugin list. It reports only keys the rendered list lacks: a true nobody recorded (hand-added
+    for one team) or a false nobody recorded (an unrecorded team opt-out). A rendered key that is
+    missing or changed is FILE_DRIFT / CONFLICT from plan_merge, and a key the sync wrote earlier
+    or the manifest retired is REMOVED/CONFLICT there too, so neither is reported twice."""
     rows = []
-    for n in sorted(m["teams"]):
-        cfg = m["teams"][n]
+    if not os.path.isdir(directory):
+        return rows
+
+    def add(plugin, expected, actual, status, detail=None):
+        row = {"team": team, "dir": directory, "plugin": plugin, "expected": expected,
+               "actual": actual, "status": status}
+        if detail is not None:
+            row["detail"] = detail
+        rows.append(row)
+
+    local_on = local_enables(directory)
+    for pid, rem in sorted(exception_removals(m, team).items()):  # GUARD:excepted
+        why = "; ".join("%s: %s" % (b.get("id"), b.get("reason")) for b in rem["by"])
+        if rem["mode"] == "false" and pid in local_on:  # GUARD:local-breach
+            add(pid, "excepted (off)", "enabled (settings.local.json)", "EXCEPTION_BREACH",
+                "settings.local.json turns it on and outranks the enforced project false; " + why)
+            continue
+        add(pid, "excepted", "excepted", "EXCEPTED", why)
+    for pid in sorted(enabled_ids(cfg) & local_optouts(directory)):  # GUARD:optout
+        add(pid, "enabled", "opted out (settings.local.json)", "OPT_OUT",
+            "person-level opt-out in settings.local.json")
+    if not cfg.get("deliver", True):
+        return rows  # nothing is delivered here, so there is no rendered list to compare with
+    path = target_path(directory)
+    try:
+        guard_target(path)
+        cur = read_target(path)
+    except ToolError:
+        return rows  # process_target() already reports an unreadable/refused file
+    ep = cur.get("enabledPlugins") if cur is not None else None
+    if not isinstance(ep, dict):
+        return rows
+    rendered = cfg.get("enabledPlugins") or {}
+    retired = cfg.get("retiredPlugins") or {}
+    prior = ((state.get(path) or {}).get("written") or {}).get("enabledPlugins") or {}
+    for k in sorted(ep):
+        if k in rendered or k in retired or k in prior:
+            continue
+        if ep[k] is True:  # GUARD:parity-true
+            add(k, "not in rendered list", "true (hand-added)", "PARITY")
+        elif ep[k] is False:  # GUARD:parity-false
+            add(k, "not in rendered list", "false (unrecorded opt-out)", "PARITY")
+    return rows
+
+
+def unmanaged_rows(m):
+    """UNMANAGED_TEAM rows: a registry team whose working_dir exists on this host, matches no
+    teamTargets session dir and is not listed in unmanagedTeams (E9)."""
+    tp = team_paths()
+    if tp is None:
+        return []
+    covered = set()
+    for name in m["teamTargets"]:
+        for d in resolve_dirs(name, effective_team_cfg(m, name)) or []:
+            covered.add(os.path.realpath(d))
+    declared = set(k for k in (m.get("unmanagedTeams") or {}) if not k.startswith("_"))
+    rows = []
+    for key, ent in sorted(tp["teams"].items()):
+        if key in declared:
+            continue
+        if not isinstance(ent, dict) or not isinstance(ent.get("working_dir", ""), str):
+            raise ToolError("team-paths registry %s: teams.%s must be an object whose working_dir "
+                            "is a string (nothing can be verified)" % (TEAM_PATHS_JSON, key), 3)
+        if not ent.get("working_dir"):
+            continue  # an alias_of entry owns no dir
+        d = expand(ent["working_dir"])
+        if not os.path.isdir(d) or os.path.realpath(d) in covered:  # GUARD:unmanaged
+            continue
+        rows.append({"team": key, "dir": d, "plugin": "-",
+                     "expected": "in teamTargets or unmanagedTeams", "actual": "unmanaged",
+                     "status": "UNMANAGED_TEAM"})
+    return rows
+
+
+def do_list(args):
+    m = load_valid_manifest()
+    rows = []
+    for n in sorted(m["teamTargets"]):
+        cfg = effective_team_cfg(m, n)
         dirs = resolve_dirs(n, cfg)
         rows.append({"team": n, "mode": cfg.get("mode"), "deliver": cfg.get("deliver", True),
-                     "plugins": sorted((cfg.get("enabledPlugins") or {}).keys()),
+                     "plugins": sorted(enabled_ids(cfg)),
+                     "excluded": sorted(set(cfg.get("enabledPlugins") or {}) - enabled_ids(cfg)),
                      "hosted": dirs is not None, "dirs": dirs or []})
     if args.json:
         out(json.dumps({"manifest": MANIFEST, "teams": rows}, indent=2))
@@ -794,27 +2043,41 @@ def do_check(args):
         return check_manifest(args)
     if args.host:
         return check_host(args)
-    m = load_manifest()
+    m = load_valid_manifest()
     names = select_teams(m, args.team, args.all)
+    guard_dir_collisions(m, names)
     state = load_state()
     targets = session_targets(m, names) + worktree_targets(m, names)
     results = [process_target(t, c, d, state, dry_run=True) for t, c, d in targets]
-    return report_check(results, args.json)
+    parity = []
+    for t, c, d in targets:
+        parity.extend(parity_rows(m, t, c, d, state))
+    for t, c, d in skill_targets(m, names, state):  # XACA-1643-006: group skills
+        parity.extend(skill_rows(m, t, c, d, state))
+    if args.all:  # the whole registry is needed to find a team the manifest does not cover
+        parity.extend(unmanaged_rows(m))
+    return report_check(results, args.json, parity)
 
 
-def report_check(results, as_json):
+def report_check(results, as_json, parity=None):
+    parity = parity or []
     drift = [r for r in results if r["status"] in ("DRIFT", "CONFLICT", "ERROR")]
+    p_drift = [r for r in parity if r["status"] in DRIFT_STATUSES]
+    n_drift = len(drift) + len(p_drift)
     if as_json:
         for r in results:
             r.pop("_new_obj", None)
-        out(json.dumps({"results": results, "drift": len(drift)}, indent=2))
+        out(json.dumps({"results": results, "parity": parity, "drift": n_drift}, indent=2))
     else:
         for r in results:
             if r["status"] not in ("OK",):
                 out("[%s]" % r["team"])
                 out(fmt_action_line(r))
-        out("checked=%d drift=%d" % (len(results), len(drift)))
-    if drift:
+        for r in p_drift:
+            out("[%s]" % r["team"])
+            out("  %-14s %s -- %s: %s" % (r["status"], r["dir"], r["plugin"], r["actual"]))
+        out("checked=%d drift=%d" % (len(results), n_drift))
+    if n_drift:
         return 1
     if not any(r["status"] != "DIR_ABSENT" for r in results):  # GUARD:zero-targets
         return no_hosted_teams("check")
@@ -835,11 +2098,13 @@ def check_manifest(args):
     if errs:
         out("manifest: %d problem(s)" % len(errs))
         return 1
-    out("manifest: OK (%d teams)" % len(m["teams"]))
+    out("manifest: OK (%d teams)" % len(m["teamTargets"]))
     return 0
 
 
 def do_sync(args):
+    m0 = load_valid_manifest(load_catalog())  # validate BEFORE the lock: an invalid manifest creates nothing at all
+    guard_dir_collisions(m0, select_teams(m0, args.team, args.all))  # ... and so does a collision
     if args.dry_run:
         return _do_sync(args)
     with state_lock():
@@ -847,8 +2112,9 @@ def do_sync(args):
 
 
 def _do_sync(args):
-    m = load_manifest()
+    m = load_valid_manifest(load_catalog())
     names = select_teams(m, args.team, args.all)
+    guard_dir_collisions(m, names)
     state = load_state()
     results = []
     targets = session_targets(m, names)
@@ -862,7 +2128,7 @@ def _do_sync(args):
         r = process_target(t, c, d, state, args.dry_run, args.force_owned)
         results.append(r)
         if args.install_missing and r["status"] not in ("ERROR", "CONFLICT", "DIR_ABSENT"):
-            rows, problem = ensure_installed(c, d, args.dry_run)
+            rows, problem = ensure_installed(c, d, args.dry_run, set(builtin_ids(m)))
             r["installs"] = rows
             if problem:
                 r["status"] = "ERROR"
@@ -870,10 +2136,14 @@ def _do_sync(args):
     if args.all:
         for t, c, d in worktree_targets(m, names):
             results.append(process_target(t, c, d, state, args.dry_run, args.force_owned))
+    # group skills: session dirs always, linked worktrees with --all (the same reach as the plugins)
+    results.extend(skill_results(m, names, state, args.dry_run, sessions=True, worktrees=bool(args.all)))
     return finish_sync(results, state, args)
 
 
 def do_sync_worktrees(args):
+    m0 = load_valid_manifest(load_catalog())  # validate first: nothing is written on any problem
+    guard_dir_collisions(m0, select_teams(m0, args.team, args.all))
     if args.dry_run:
         return _do_sync_worktrees(args)
     with state_lock():
@@ -881,15 +2151,17 @@ def do_sync_worktrees(args):
 
 
 def _do_sync_worktrees(args):
-    m = load_manifest()
+    m = load_valid_manifest(load_catalog())
     names = select_teams(m, args.team, args.all)
+    guard_dir_collisions(m, names)
     state = load_state()
     results = []
     for n in names:
-        if m["teams"][n].get("mode") == "tracked" and not args.json:
+        if m["teamTargets"][n].get("mode") == "tracked" and not args.json:
             out("%s: tracked mode -- worktrees inherit the committed file by checkout" % n)
     for t, c, d in worktree_targets(m, names):
         results.append(process_target(t, c, d, state, args.dry_run, args.force_owned))
+    results.extend(skill_results(m, names, state, args.dry_run, sessions=False, worktrees=True))
     return finish_sync(results, state, args)
 
 
@@ -937,7 +2209,7 @@ def finish_sync(results, state, args):
 
 
 def do_diff(args):
-    m = load_manifest()
+    m = load_valid_manifest()
     names = select_teams(m, args.team, False)
     state = load_state()
     rc = 0
@@ -967,9 +2239,15 @@ def do_diff(args):
 
 
 DRIFT_STATUSES = ("MISSING", "NOT_INSTALLED", "BLOCKED_LOADED", "FILE_DRIFT", "CONFLICT",
-                  "POLICY_ABSENT", "POLICY_STALE", "POLICY_SKIPPED")
-WARN_STATUSES = ("EXTRA",)
-UNVERIFIABLE_STATUSES = ("VERSION_UNVERIFIED", "LIST_UNREADABLE", "CLAUDE_UNRUNNABLE", "PROBE_UNVERIFIABLE")
+                  "POLICY_ABSENT", "POLICY_STALE", "POLICY_SKIPPED",
+                  "PARITY", "UNMANAGED_TEAM", "EXCEPTION_BREACH")  # GUARD:drift-statuses
+DRIFT_STATUSES = DRIFT_STATUSES + ("SKILL_MISSING", "SKILL_GROUP_LEAK", "SKILL_GROUP_MISSING",
+                                  "DIR_COLLISION")  # GUARD:skill-drift-statuses
+# Informational rows: counted in no total (not warn, not drift, not unverifiable).
+INFO_STATUSES = ("OK", "OUT_OF_SCOPE", "EXCEPTED", "OPT_OUT", "UNMANAGED_LOCAL")
+WARN_STATUSES = ("EXTRA", "SKILL_EXTRA", "BUILTIN_UNAVAILABLE")  # GUARD:builtin-warn
+UNVERIFIABLE_STATUSES = ("VERSION_UNVERIFIED", "LIST_UNREADABLE", "CLAUDE_UNRUNNABLE", "PROBE_UNVERIFIABLE",
+                         "SKILLS_UNVERIFIABLE")
 
 
 def parse_version(text):
@@ -980,6 +2258,16 @@ def parse_version(text):
 def claude_version():
     rc, so, _se = run([CLAUDE_BIN, "--version"], timeout=30)
     return parse_version(so) if rc == 0 else None
+
+
+_VERSION_CACHE = {}
+
+
+def claude_version_cached():
+    """One `claude --version` per process for the per-directory BUILTIN rows."""
+    if CLAUDE_BIN not in _VERSION_CACHE:
+        _VERSION_CACHE[CLAUDE_BIN] = claude_version()
+    return _VERSION_CACHE[CLAUDE_BIN]
 
 
 def live_plugin_list(directory):
@@ -1085,7 +2373,7 @@ def host_policy(m, probe):
     return row, info
 
 
-def host_rows_for_dir(team, cfg, directory, blocked, state):
+def host_rows_for_dir(m, team, cfg, directory, blocked, state):
     rows = []
 
     def add(plugin, expected, actual, status):
@@ -1103,8 +2391,27 @@ def host_rows_for_dir(team, cfg, directory, blocked, state):
         if a["action"] == "ADOPTED":
             continue
         add(a["key"], "per manifest", a["action"], "CONFLICT" if a["action"] == "CONFLICT" else "FILE_DRIFT")
+    prows = parity_rows(m, team, cfg, directory, state)
+    rows.extend(prows)
+    optout = {r["plugin"] for r in prows if r["status"] == "OPT_OUT"}
+    excepted = set(exception_removals(m, team))
+    oos = set((m.get("liveOutOfScope") or {}).get("marketplaces") or [])
     # Live level: what claude actually loads from this cwd.
-    expected = dict(cfg.get("enabledPlugins") or {}) if cfg.get("deliver", True) else {}
+    expected = {pid: True for pid in enabled_ids(cfg)}  # an excepted (false) plugin is not expected on
+    # Built-ins never appear in `claude plugin list` (XACA-1643-015): judge them by claude's version.
+    for pid, minv in sorted(builtin_ids(m).items()):  # GUARD:builtin-live
+        if pid not in expected:
+            continue
+        expected.pop(pid)
+        have, need = claude_version_cached(), parse_version(minv or "")
+        if have is not None and need is not None and have >= need:  # GUARD:builtin-version
+            rows.append({"team": team, "dir": directory, "plugin": pid, "kind": "builtin",
+                         "expected": ">=%s" % minv, "actual": ".".join(str(x) for x in have), "status": "OK"})
+        else:
+            rows.append({"team": team, "dir": directory, "plugin": pid, "kind": "builtin",
+                         "expected": ">=%s" % minv,
+                         "actual": ".".join(str(x) for x in have) if have else "claude --version failed",
+                         "status": "BUILTIN_UNAVAILABLE"})
     plist = live_plugin_list(directory)
     if plist is None:
         add("-", "plugin list", "unreadable", "LIST_UNREADABLE")
@@ -1114,6 +2421,8 @@ def host_rows_for_dir(team, cfg, directory, blocked, state):
         by_id[e.get("id")] = e
     for pid in sorted(expected):
         ent = by_id.get(pid)
+        if pid in optout:
+            continue  # the person switched it off; the OPT_OUT row above is the whole story
         if ent is None:
             # `plugin list` omits enabled-but-uninstalled ids (also catches unresolvable ids).
             add(pid, "enabled", "not installed", "NOT_INSTALLED")  # GUARD:not-installed
@@ -1127,7 +2436,12 @@ def host_rows_for_dir(team, cfg, directory, blocked, state):
             add(pid, "blocked", "enabled", "BLOCKED_LOADED")
     for pid, ent in sorted(by_id.items(), key=lambda kv: str(kv[0])):
         if ent.get("enabled") is True and pid not in expected and pid not in blocked:
-            add(str(pid), "not expected", "enabled", "EXTRA")
+            if pid in excepted:  # GUARD:exception-breach
+                add(str(pid), "excepted (off)", "enabled", "EXCEPTION_BREACH")
+            elif str(pid).rpartition("@")[2] in oos:  # GUARD:out-of-scope
+                add(str(pid), "not the toolset", "enabled", "OUT_OF_SCOPE")
+            else:
+                add(str(pid), "not expected", "enabled", "EXTRA")
     return rows
 
 
@@ -1154,8 +2468,8 @@ def check_host(args):
     dirs_seen = 0
     dirs_live = 0
     if version is not None:
-        for name in sorted(m["teams"]):
-            cfg = m["teams"][name]
+        for name in sorted(m["teamTargets"]):
+            cfg = effective_team_cfg(m, name)
             dirs = resolve_dirs(name, cfg)
             if dirs is None:
                 continue
@@ -1166,7 +2480,15 @@ def check_host(args):
             for d in targets:
                 dirs_seen += 1
                 dirs_live += 1 if os.path.isdir(d) else 0
-                rows.extend(host_rows_for_dir(name, cfg, d, blocked, state))
+                rows.extend(host_rows_for_dir(m, name, cfg, d, blocked, state))
+    for h in dir_collisions(m):  # GUARD:host-dir-collision
+        rows.append({"team": ",".join(h["teams"]), "dir": h["dir"], "plugin": "-",
+                     "expected": "one team per dir", "actual": "shared by %d teams" % len(h["teams"]),
+                     "status": "DIR_COLLISION"})
+    rows.extend(unmanaged_rows(m))
+    rows.extend(machine_skill_rows(m))  # XACA-1643-006: machine-wide ~/.claude/skills
+    for t, c, d in skill_targets(m, sorted(m["teamTargets"]), state):
+        rows.extend(skill_rows(m, t, c, d, state))
     can_probe = version is not None and not (floor is not None and version < floor)
     prow, pinfo = host_policy(m, bool(args.probe) and can_probe)
     if prow is not None:
@@ -1175,9 +2497,11 @@ def check_host(args):
     n_warn = sum(1 for r in rows if r["status"] in WARN_STATUSES)
     n_unv = sum(1 for r in rows if r["status"] in UNVERIFIABLE_STATUSES)
     host = os.environ.get("KBSPL_HOST") or os.uname()[1]
-    summary = {"teams": teams_seen, "dirs": dirs_seen, "drift": n_drift, "warn": n_warn, "unverifiable": n_unv}
+    n_info = sum(1 for r in rows if r["status"] in INFO_STATUSES and r["status"] != "OK")
+    summary = {"teams": teams_seen, "dirs": dirs_seen, "drift": n_drift, "warn": n_warn, "unverifiable": n_unv,
+               "info": n_info}
     # Drift is a definite finding and wins; unverifiable is never folded into 0.
-    rc = 1 if n_drift else (3 if n_unv else 0)
+    rc = 1 if n_drift else (3 if n_unv else 0)  # GUARD:exit-precedence
     if rc == 0 and dirs_live == 0:  # GUARD:host-zero-targets
         rc = no_hosted_teams("check --host")
         summary["status"] = "NO_HOSTED_TEAMS"
@@ -1189,8 +2513,8 @@ def check_host(args):
         return rc
     cur_team = None
     for r in rows:
-        if r["status"] == "OK":
-            continue
+        if r["status"] in INFO_STATUSES:
+            continue  # info rows are in --json (rows, summary.info), never in the drift table
         if r["team"] != cur_team:
             cur_team = r["team"]
             out("[%s]" % cur_team)
@@ -1215,14 +2539,14 @@ def probe_binary(b):
 
 def binary_rows(m, args):
     binaries = m.get("binaries") or {}
-    if args.team and args.team not in m["teams"]:
-        raise ToolError("unknown team %r (manifest teams: %s)" % (args.team, ", ".join(sorted(m["teams"]))))
-    names = [args.team] if args.team else sorted(m["teams"])
+    if args.team and args.team not in m["teamTargets"]:
+        raise ToolError("unknown team %r (manifest teams: %s)" % (args.team, ", ".join(sorted(m["teamTargets"]))))
+    names = [args.team] if args.team else sorted(m["teamTargets"])
     wanted = {}
     required = {}
     hosted = 0
     for n in names:
-        cfg = m["teams"][n]
+        cfg = effective_team_cfg(m, n)
         if not args.team:
             dirs = resolve_dirs(n, cfg)
             if dirs is None or not any_live(dirs):
@@ -1230,7 +2554,7 @@ def binary_rows(m, args):
         hosted += 1
         if not cfg.get("deliver", True):
             continue
-        for pid in cfg.get("enabledPlugins") or {}:
+        for pid in sorted(enabled_ids(cfg)):  # an excepted plugin needs no binary on this team
             wanted.setdefault(pid, []).append(n)
         for cmd in cfg.get("requiredBinaries") or []:
             required.setdefault(cmd, []).append(n)
@@ -1539,14 +2863,14 @@ def install_argv(pid):
     return [CLAUDE_BIN, "plugin", "install", pid, "--scope", "project"]  # GUARD:install-scope
 
 
-def ensure_installed(cfg, directory, dry_run):
+def ensure_installed(cfg, directory, dry_run, builtin=()):
     """Install, from `directory`, every enabled plugin that `plugin list --json` does not show.
     Returns (rows, problem). A plugin that is installed but disabled needs nothing: the project
     `true` enables it (XACA-1599-008)."""
     rows = []
     if not cfg.get("deliver", True) or not os.path.isdir(directory):
         return rows, None
-    want = sorted(pid for pid, v in (cfg.get("enabledPlugins") or {}).items() if v is True)
+    want = sorted(pid for pid in enabled_ids(cfg) if pid not in builtin)  # GUARD:install-skips-builtin
     if not want:
         return rows, None
     plist = live_plugin_list(directory)
@@ -1610,6 +2934,10 @@ def build_parser():
                            help="also run `claude plugin install <id> --scope project` (never user/local) from "
                                 "each session dir for enabled plugins that `plugin list` does not show")
         p.set_defaults(fn=fn, install_missing=False)
+
+    p = sub.add_parser("skills", help="skill classes (XACA-1643): group-names | classes")
+    p.add_argument("action", choices=("group-names", "classes"))
+    p.set_defaults(fn=do_skills)
 
     p = sub.add_parser("diff", help="unified diff of what sync would change")
     p.add_argument("team")

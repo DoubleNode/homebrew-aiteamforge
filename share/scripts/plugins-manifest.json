@@ -1,8 +1,9 @@
 {
-  "schemaVersion": 1,
-  "lastUpdated": "2026-10-24",
+  "schemaVersion": 2,
+  "lastUpdated": "2026-10-28",
   "minClaudeVersion": "2.1.267",
-  "_minClaudeVersionNote": "Floor = the lowest claude version measured on a fleet host in XACA-1599-001 (M1Mini 2.1.267; M1Pro was upgraded to 2.1.310). `kb-sync-plugins check --host --probe` is the per-host behavioural probe: it asks a `claude -p` session for the L1 marker and exits 3 when it cannot verify. Record each host's probe result (host, claude version, date, verdict) in kanban/plans/XACA-1599/XACA-1599_006_probe_results.md at rollout. Raise the floor only if a host at the floor fails the probe.",
+  "_minClaudeVersionNote": "Floor = the lowest claude version measured on a fleet host in XACA-1599-001 (2.1.267, the oldest host at that time). `kb-sync-plugins check --host --probe` is the per-host behavioural probe: it asks a `claude -p` session for the L1 marker and exits 3 when it cannot verify. Record each host's probe result (host, claude version, date, verdict) in kanban/plans/XACA-1599/XACA-1599_006_probe_results.md at rollout. Raise the floor only if a host at the floor fails the probe.",
+  "_schemaNote": "Schema 2 (XACA-1643): ONE fleet plugin list (`fleet.plugins`) rendered into every team in `teamTargets` by kb-sync-plugins `effective_team_cfg()`. A team block never carries `enabledPlugins` (validation rejects it). A team leaves the fleet list only through an entry in `exceptions`, which must carry a reason. `teams` was renamed `teamTargets` on purpose: a schema-1 script that meets this file fails closed (KeyError, exit 70, nothing written) instead of stripping every owned plugin. Design record: kanban/plans/XACA-1643/XACA-1643_one_fleet_toolset.md.",
   "baseline": {
     "_note": "L1 managed policy, rendered by `kb-sync-plugins managed-policy --print` into managed-settings.d/50-aiteamforge.json. Bump `revision` with every change: it is the AITEAMFORGE_MANAGED_POLICY marker the probe looks for. L1 only blocks (false); it never force-enables a plugin.",
     "revision": "1599.1",
@@ -39,75 +40,133 @@
       "install": "brew install --cask kotlin-lsp"
     }
   },
-  "teams": {
-    "academy": {
-      "mode": "tracked",
-      "sessionDirs": ["${working_dir}"],
-      "deliver": true,
-      "enabledPlugins": {
-        "frontend-design@claude-plugins-official": true,
-        "atlassian@claude-plugins-official": true,
-        "firebase@claude-plugins-official": true,
-        "swift-lsp@claude-plugins-official": true
-      },
-      "retiredPlugins": {},
-      "extraKnownMarketplaces": {}
+  "pluginClasses": {
+    "connector": "Reaches an external service with the user's account or data, whatever the transport (http MCP, stdio CLI, ...)",
+    "local": "Everything else: LSPs, prompt-only plugins, local tools, built-ins"
+  },
+  "fleet": {
+    "_note": "The one fleet plugin list. Every entry MUST carry a `class` (an unclassified entry is a validation error, so a new SaaS plugin cannot reach a personal-data team by being forgotten). A `connector` entry MUST name its `service`. Classification is a recorded human decision: no heuristic can tell firebase (connector) from playwright (local), both are stdio npx MCPs.",
+    "plugins": {
+      "frontend-design@claude-plugins-official": { "class": "local" },
+      "atlassian@claude-plugins-official": { "class": "connector", "service": "Atlassian Cloud (http MCP mcp.atlassian.com)" },
+      "firebase@claude-plugins-official": { "class": "connector", "service": "Firebase (stdio firebase-tools mcp)" },
+      "swift-lsp@claude-plugins-official": { "class": "local" },
+      "cc-plugin-you-should-know@builtin": { "class": "local", "builtin": true, "minClaudeVersion": "2.1.287" }
     },
-    "command": {
-      "mode": "tracked",
-      "sessionDirs": ["${working_dir}"],
-      "deliver": true,
-      "enabledPlugins": {
-        "frontend-design@claude-plugins-official": true,
-        "atlassian@claude-plugins-official": true,
-        "firebase@claude-plugins-official": true,
-        "swift-lsp@claude-plugins-official": true
-      },
-      "retiredPlugins": {},
-      "extraKnownMarketplaces": {}
+    "retiredPlugins": {},
+    "extraKnownMarketplaces": {}
+  },
+  "teamGroups": {
+    "personal": {
+      "teams": ["finance", "legal", "medical"],
+      "noConnectors": true,
+      "reason": "Personal-data teams (user decision 2026-10-25)"
     },
+    "freelance": {
+      "noConnectors": true,
+      "reason": "Freelance client work: every registry team matched by the freelance-* pattern in teamTargetPatterns, filled in at load time (user decision 2026-10-28)"
+    },
+    "platform": {
+      "allowConnectors": true,
+      "teams": ["academy", "dns", "spacedock", "mainevent", "richmond"],
+      "reason": "Platform/infra teams, and richmond (XACA-1676: fleet-standard set, connectors included): full fleet list incl. connectors (user decision 2026-10-25). Every team target must sit in a group, so a new team forces an explicit connector decision; the other code teams are in the mainevent group below."
+    },
+    "mainevent": {
+      "allowConnectors": true,
+      "teams": ["ios", "android", "firebase", "command"],
+      "reason": "The mainevent code teams (user decision 2026-10-28). The `mainevent` coordination team has its own teamTargets entry and is deliberately not a member of this PLUGIN group; it does receive the mainevent skills (skills.groups.mainevent, XACA-1643-006)."
+    }
+  },
+  "exceptions": [
+    {
+      "id": "personal-no-connectors",
+      "appliesTo": "group:personal",
+      "removeClasses": ["connector"],
+      "render": "false",
+      "reason": "External-service connectors stay off for personal-data teams (finance, legal, medical)",
+      "decided": "user 2026-10-25"
+    },
+    {
+      "id": "freelance-no-connectors",
+      "appliesTo": "group:freelance",
+      "removeClasses": ["connector"],
+      "render": "false",
+      "reason": "Client data: external-service connectors stay off for freelance teams, the same rule as the personal teams",
+      "decided": "user 2026-10-28"
+    }
+  ],
+  "liveOutOfScope": {
+    "marketplaces": ["inline"],
+    "reason": "Mods layer (CLAUDE_CODE_PLUGIN_DIRS today, a user-scope marketplace later under XACA-1605): not the team toolset"
+  },
+  "skills": {
+    "_note": "Skill classes (XACA-1643-006, design record D6). `shared` skills are machine-wide on every host and are exactly the sync-tap.sh mirrored list (tests/test-xaca-1643-skills.sh enforces it both ways). `devHost` skills are machine-wide only on hosts with a dev-team clone and stay NOT-MIRRORED, each with its reason. A `groups.<g>` skill is NOT machine-wide: kb-sync-plugins writes project-scope symlinks <session dir>/.claude/skills/<name> -> <owner source root>/<name> into the group's teams' session dirs and linked worktrees (untracked; it never writes inside the owning repo, and removes only symlinks it recorded). `owner` picks the source root from `sourceRoots`; a root is a literal path, `${dev_team}/...`, or `${working_dir:<registry key>}/...` (the registry key's working_dir on this host); skills owned outside this repo are distribution only. deploy-to-production.sh skips every group skill (it reads skills.groups itself; `kb-sync-plugins skills group-names` prints the same list and a test pins that), so a group skill never lands in the machine-wide user skills dir.",
+    "ignore": ["synced", ".trash", ".DS_Store"],
+    "unmanagedLocal": {
+      "graphify": "adoption decision belongs to XACA-1598"
+    },
+    "shared": [
+      "amb",
+      "Code-Graph-RAG",
+      "git-worktree",
+      "Kanban Manager",
+      "LightRAG",
+      "Project Planner",
+      "RAG Orchestrator",
+      "RAG-Anything",
+      "RELNOTES Manager",
+      "Team Mission Status",
+      "Workflow Description"
+    ],
+    "devHost": {
+      "Release Manager": { "reason": "Hard-codes a personal absolute path to a dev-host config file (SKILL.md ~L435): that must not ship. Mirror it after the path is removed (spin-out candidate)." },
+      "LCARS Styling": { "reason": "Guides edits to canonical fleet-monitor CSS, which the tap publisher overwrites, and carries organisation-specific panel examples (SKILL.md 580-639)." },
+      "Initialize Team": { "reason": "Provisions canonical dev-team infra files through kb-init-team (14 sites; aiteamforge_paths.py is a mirrored canonical file), so it only means something against a dev-team clone." }
+    },
+    "sourceRoots": {
+      "academy": "${dev_team}/skills",
+      "mainevent": "${working_dir:mainevent-dev-team}/skills"
+    },
+    "groups": {
+      "mainevent": {
+        "reason": "These skills reach only the mainevent teams (user decisions 2026-10-25 and 2026-10-28): a machine-wide copy would hand them to academy, dns and the personal teams.",
+        "teams": ["ios", "android", "firebase", "command", "mainevent"],
+        "skills": {
+          "cab-workflow-audit": { "owner": "academy", "reason": "Publishes to a customer-specific Confluence space (SKILL.md ~L156): that change-control process belongs to the mainevent teams. Academy-owned, so it stays NOT-MIRRORED and is delivered to the group only." },
+          "Bitrise Build Status": { "owner": "mainevent" },
+          "Captain's Log Status Report Generator": { "owner": "mainevent" },
+          "Center Management App Update": { "owner": "mainevent" },
+          "Create Center": { "owner": "mainevent" },
+          "Main Event CR": { "owner": "mainevent" },
+          "Main Event RELNOTES Manager": { "owner": "mainevent" },
+          "Main Event Weekly Reports": { "owner": "mainevent" },
+          "Marketing Summary": { "owner": "mainevent" },
+          "Scrum of Scrums ME APP": { "owner": "mainevent" },
+          "Weekly Email Newsletter": { "owner": "mainevent" },
+          "Weekly Product Owner Report": { "owner": "mainevent" },
+          "Weekly Stakeholder Update": { "owner": "mainevent" }
+        }
+      }
+    }
+  },
+  "unmanagedTeams": {
+    "_note": "Registry teams deliberately outside the toolset, as {<registry key>: <reason>}. None today: the freelance teams and the second ios repo are managed targets (user decision 2026-10-28)."
+  },
+  "teamTargetPatterns": {
+    "_note": "One pattern stands for every registry team whose key starts with the prefix, expanded at load time by kb-sync-plugins expand_patterns() into ordinary teamTargets entries (and into the `teams` of the group named here), so this file names no client or project team. A pattern's dirs must all be `${working_dir}` (each expanded team's own registry dir). A pattern that can match a personal or client-data team must route to a noConnectors group (validation enforces it, and the same hard floor applies to every expanded name).",
+    "freelance-*": { "mode": "deployed", "sessionDirs": ["${working_dir}"], "worktreeRepos": [], "deliver": true, "group": "freelance" }
+  },
+  "teamTargets": {
+    "academy": { "mode": "tracked", "sessionDirs": ["${working_dir}"], "deliver": true },
+    "command": { "mode": "tracked", "sessionDirs": ["${working_dir}"], "deliver": true },
     "ios": {
       "mode": "deployed",
-      "sessionDirs": ["${working_dir}"],
+      "sessionDirs": ["${working_dir}", "${working_dir:mainevent-maineventwrapper-ios}"],
       "worktreeRepos": ["${working_dir}/DEV"],
-      "deliver": true,
-      "enabledPlugins": {
-        "frontend-design@claude-plugins-official": true,
-        "atlassian@claude-plugins-official": true,
-        "firebase@claude-plugins-official": true,
-        "swift-lsp@claude-plugins-official": true
-      },
-      "retiredPlugins": {},
-      "extraKnownMarketplaces": {}
+      "deliver": true
     },
-    "android": {
-      "mode": "deployed",
-      "sessionDirs": ["${working_dir}"],
-      "worktreeRepos": ["${working_dir}/develop"],
-      "deliver": true,
-      "enabledPlugins": {
-        "frontend-design@claude-plugins-official": true,
-        "atlassian@claude-plugins-official": true,
-        "firebase@claude-plugins-official": true,
-        "swift-lsp@claude-plugins-official": true
-      },
-      "retiredPlugins": {},
-      "extraKnownMarketplaces": {}
-    },
-    "firebase": {
-      "mode": "deployed",
-      "sessionDirs": ["${working_dir}"],
-      "worktreeRepos": ["${working_dir}/develop"],
-      "deliver": true,
-      "enabledPlugins": {
-        "frontend-design@claude-plugins-official": true,
-        "atlassian@claude-plugins-official": true,
-        "firebase@claude-plugins-official": true,
-        "swift-lsp@claude-plugins-official": true
-      },
-      "retiredPlugins": {},
-      "extraKnownMarketplaces": {}
-    },
+    "android": { "mode": "deployed", "sessionDirs": ["${working_dir}"], "worktreeRepos": ["${working_dir}/develop"], "deliver": true },
+    "firebase": { "mode": "deployed", "sessionDirs": ["${working_dir}"], "worktreeRepos": ["${working_dir}/develop"], "deliver": true },
     "dns": {
       "mode": "deployed",
       "sessionDirs": [
@@ -116,70 +175,13 @@
         "${working_dir}/DNSFramework-Android"
       ],
       "worktreeRepos": [],
-      "deliver": true,
-      "enabledPlugins": {
-        "frontend-design@claude-plugins-official": true,
-        "atlassian@claude-plugins-official": true,
-        "firebase@claude-plugins-official": true,
-        "swift-lsp@claude-plugins-official": true
-      },
-      "retiredPlugins": {},
-      "extraKnownMarketplaces": {}
+      "deliver": true
     },
-    "spacedock": {
-      "mode": "deployed",
-      "sessionDirs": ["${working_dir}"],
-      "worktreeRepos": [],
-      "deliver": true,
-      "enabledPlugins": {
-        "frontend-design@claude-plugins-official": true,
-        "atlassian@claude-plugins-official": true,
-        "firebase@claude-plugins-official": true,
-        "swift-lsp@claude-plugins-official": true
-      },
-      "retiredPlugins": {},
-      "extraKnownMarketplaces": {}
-    },
-    "richmond": {
-      "mode": "deployed",
-      "sessionDirs": ["${working_dir}"],
-      "worktreeRepos": [],
-      "deliver": true,
-      "enabledPlugins": {
-        "frontend-design@claude-plugins-official": true,
-        "atlassian@claude-plugins-official": true,
-        "firebase@claude-plugins-official": true,
-        "swift-lsp@claude-plugins-official": true
-      },
-      "retiredPlugins": {},
-      "extraKnownMarketplaces": {}
-    },
-    "finance": {
-      "mode": "deployed",
-      "sessionDirs": ["~/finance/personal"],
-      "worktreeRepos": [],
-      "deliver": false,
-      "enabledPlugins": {},
-      "retiredPlugins": {},
-      "extraKnownMarketplaces": {}
-    },
-    "legal": {
-      "mode": "deployed",
-      "sessionDirs": ["~/legal/coparenting"],
-      "worktreeRepos": [],
-      "deliver": false,
-      "enabledPlugins": {},
-      "retiredPlugins": {},
-      "extraKnownMarketplaces": {}
-    },
-    "medical": {
-      "mode": "deployed",
-      "sessionDirs": ["~/medical/general"],
-      "worktreeRepos": [],
-      "deliver": false,
-      "enabledPlugins": {},
-      "retiredPlugins": {},
-      "extraKnownMarketplaces": {}
-    }
+    "spacedock": { "mode": "deployed", "sessionDirs": ["${working_dir}"], "worktreeRepos": [], "deliver": true },
+    "mainevent": { "mode": "deployed", "sessionDirs": ["${working_dir}"], "worktreeRepos": [], "deliver": true },
+    "richmond": { "mode": "deployed", "sessionDirs": ["${working_dir}"], "worktreeRepos": [], "deliver": true },
+    "finance": { "mode": "deployed", "sessionDirs": ["${working_dir:finance-personal}"], "worktreeRepos": [], "deliver": true },
+    "legal": { "mode": "deployed", "sessionDirs": ["${working_dir:legal-coparenting}"], "worktreeRepos": [], "deliver": true },
+    "medical": { "mode": "deployed", "sessionDirs": ["${working_dir:medical-general}"], "worktreeRepos": [], "deliver": true }
   }
 }
