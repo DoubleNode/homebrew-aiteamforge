@@ -290,7 +290,8 @@ def test_no_resolvable_root_returns_500_naming_every_root_and_never_runs_zsh(env
     zsh_calls = MagicMock(name="subprocess.run")
 
     with patch.dict(os.environ, {"AITEAMFORGE_DIR": str(empty_env_root)}), \
-         patch.object(server.subprocess, "run", zsh_calls):
+         patch.object(server.subprocess, "run", zsh_calls), \
+         patch.object(server, "_run_shell_group", zsh_calls):   # XACA-1662-023: the zsh run's new entry point
         # The pre-rename alias exists before AND after the fix, so a pre-fix
         # run fails on behavior (zsh invoked / roots not named), not a name.
         roots = [str(r) for r in HANDLER_CLS._cr_schema_validator_candidate_roots()]

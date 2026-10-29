@@ -128,6 +128,32 @@ CANONICAL_FACTS: Dict[str, Dict[str, Any]] = {
                         "source": "CR activity log, one row per transition (row count == transition count, § 12.4)",
                         "example": "[{\"state\": \"cr-submitted\", \"verb\": \"submit\", ...}]",
                         "kinds": ["cr-record"]},
+    "cr.state": {"type": "string", "source": "CR record `crState` (board), else `state`; empty with no CR",
+                 "example": "cr-submitted", "kinds": ["cr-record"]},
+    # ---- status.* / release.* living-page facts (XACA-1662-001) ----------
+    "status.stage": {"type": "string", "source": "release record `currentStage`/`stage`; `unknown` if neither is set",
+                     "example": "DEV", "kinds": ["cr-record"]},
+    "status.cr": {"type": "string",
+                  "source": "`<cr.id> (<cr.state>)` for the current CR; `No open CR` when the release has linked CRs but none is current (all closed/superseded/held); `No CR yet` when it has none",
+                  "example": "CR-0107 (cr-submitted)", "kinds": ["cr-record"]},
+    "status.testingLog": {"type": "string",
+                          "source": "`links.testingLog`, else the release `wikiPages[testing-log].url`; `not yet published` if neither exists",
+                          "example": "https://wiki.example/x/123", "kinds": ["cr-record"]},
+    "status.updatedAtUTC": {"type": "string", "source": "the assembly instant (`now`), UTC, `YYYY-MM-DD HH:MM UTC`",
+                            "example": "2026-10-27 18:04 UTC", "kinds": ["cr-record"]},
+    "release.stageHistory": {"type": "array of {name, enteredAtCT, completedAtCT, status}",
+                             "source": "release record `stages` in stage order, timestamps in the team timezone (the display form of `release.stages`); a stage never entered has empty timestamps",
+                             "example": "[{\"name\": \"DEV\", \"enteredAtCT\": \"Oct 20 2026 09:00 AM CDT\", ...}]",
+                             "kinds": ["cr-record"]},
+    "release.linkedCrs": {"type": "array of {id, title, state, label, current, requestUrl}",
+                          "source": "the `linked_crs` the caller passes (every CR linked to the release, any state): `label` is `Held (GAMMA failure)` for a GAMMA-held CR, `Superseded` for a closed CR whose log says it was superseded, else empty; `current` is true for `cr.id`; `requestUrl` is the DPD2 CR Request page (`links.crRequestPage` or `wikiPages[cr].url`). Empty when none passed",
+                          "example": "[{\"id\": \"CR-0107\", \"state\": \"cr-submitted\", ...}]", "kinds": ["cr-record"]},
+    "release.crHistory": {"type": "array of {crId, state, verb, actor, timestampCT, note}",
+                          "source": "append-style: every transition of EVERY linked CR (superseded and GAMMA-held included), oldest first across CRs, each CR's own order kept for ties; an unparseable timestamp sorts last. Falls back to the current CR's own log when no `linked_crs` are passed",
+                          "example": "[{\"crId\": \"CR-0107\", \"state\": \"cr-submitted\", ...}]", "kinds": ["cr-record"]},
+    "release.earlierRecords": {"type": "array of {crId, url}",
+                               "source": "linked CRs whose `wikiPages[cr-record]` points at a page other than the release's own (frozen legacy per-CR pages, design 017 section 3); empty when the release has no handle yet",
+                               "example": "[{\"crId\": \"CR-0099\", \"url\": \"https://wiki.example/x/9\"}]", "kinds": ["cr-record"]},
     # ---- links.* / prod.* ------------------------------------------------
     "links.testingLog": {"type": "string (URL)",
                          "source": "release/CR record `links.testingLog` (stored at publish, § 8.3 step 5)",
@@ -246,6 +272,10 @@ ROW_SHAPES: Dict[str, List[str]] = {
     "release.items": ["id", "title"],
     "release.stages": ["name", "enteredAt", "completedAt", "status"],
     "cr.stateHistory": ["state", "verb", "actor", "timestampCT", "note"],
+    "release.stageHistory": ["name", "enteredAtCT", "completedAtCT", "status"],
+    "release.linkedCrs": ["id", "title", "state", "label", "current", "requestUrl"],
+    "release.crHistory": ["crId", "state", "verb", "actor", "timestampCT", "note"],
+    "release.earlierRecords": ["crId", "url"],
     "stage.tests": ["n", "timestampCT", "type", "env", "test", "result", "runBy", "notes",
                     "notesWithShaAndSuperseded", "notesWithEvidence"],
     "stage.testsCurrent": ["n", "timestampCT", "type", "env", "test", "result", "runBy", "notes",
@@ -739,11 +769,82 @@ def _soak(release: Dict[str, Any], which: str) -> str:
     return "pending"
 
 
+def _page_url(rec: Optional[Dict[str, Any]], doc: str) -> str:
+    """``rec.wikiPages[doc].url`` or '' (tolerant; same contract as release_cr_facts.wiki_page_url, which
+    this module cannot import: that module imports this one)."""
+    pages = (rec or {}).get("wikiPages")
+    page = pages.get(doc) if isinstance(pages, dict) else None
+    url = page.get("url") if isinstance(page, dict) else None
+    return url.strip() if isinstance(url, str) else ""
+
+
+def _page_id(rec: Optional[Dict[str, Any]], doc: str) -> str:
+    pages = (rec or {}).get("wikiPages")
+    page = pages.get(doc) if isinstance(pages, dict) else None
+    pid = page.get("pageId") if isinstance(page, dict) else None
+    return pid.strip() if isinstance(pid, str) else ""
+
+
+def _cr_log_rows(cr: Dict[str, Any], tz: str, label: str) -> List[Dict[str, Any]]:
+    """One display row per transition in a CR's ``activity_log`` (the shape cr.stateHistory uses)."""
+    return [{"state": e.get("to", e.get("state", "")), "verb": e.get("verb", ""), "actor": e.get("actor", ""),
+             "timestampCT": _fmt_ts(e.get("ts"), tz), "note": str(e.get("note") or ""),
+             "_ts": e.get("ts")}
+            for e in _rows(_get(cr, "activity_log", "activityLog", default=None), label)]
+
+
+def _cr_state(cr: Dict[str, Any]) -> str:
+    return str(_get(cr, "crState", "state"))
+
+
+def _cr_label(cr: Dict[str, Any], log: List[Dict[str, Any]]) -> str:
+    g = cr.get("gammaFailure")
+    if _cr_state(cr) == "cr-held" and isinstance(g, dict) and g.get("at"):
+        return "Held (GAMMA failure)"
+    if _cr_state(cr) == "cr-closed" and any("supersed" in (r["note"] or "").lower() for r in log):
+        return "Superseded"
+    return ""
+
+
+def _linked_cr_facts(linked: List[Dict[str, Any]], cr: Dict[str, Any], rel: Dict[str, Any],
+                     tz: str) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """(linkedCrs rows, crHistory rows, earlierRecords rows) for the living release status page."""
+    cur_id = cr.get("id", "")
+    rel_page = _page_id(rel, "cr-record")
+    rows, hist, earlier = [], [], []
+    for i, lc in enumerate(linked):
+        lc = _obj(lc, "linked_crs[%d]" % i)
+        log = _cr_log_rows(lc, tz, "linked_crs[%d].activity_log" % i)
+        lk = _obj(lc.get("links"), "linked_crs[%d].links" % i)
+        cid = lc.get("id", "")
+        rows.append({"id": cid, "title": lc.get("title", ""), "state": _cr_state(lc),
+                     "label": _cr_label(lc, log), "current": bool(cid) and cid == cur_id,
+                     "requestUrl": str(_get(lk, "crRequestPage", default="") or _page_url(lc, "cr"))})
+        for n, r in enumerate(log):
+            hist.append(dict(r, crId=cid, _n=(i, n)))
+        pid = _page_id(lc, "cr-record")
+        if rel_page and pid and pid != rel_page:
+            earlier.append({"crId": cid, "url": _page_url(lc, "cr-record")})
+
+    def key(r):
+        dt = _parse_iso(r["_ts"]) if isinstance(r["_ts"], str) else None
+        return (dt is None, dt or datetime.max.replace(tzinfo=timezone.utc), r["_n"])
+
+    hist.sort(key=key)
+    return rows, [{k: r[k] for k in ROW_SHAPES["release.crHistory"]} for r in hist], earlier
+
+
 def build_fact_set(release_record: Dict[str, Any], cr_record: Optional[Dict[str, Any]] = None, *,
                    content: Optional[Dict[str, Any]] = None, tz: str = DEFAULT_TZ,
                    platform_name: str = "", now: Optional[datetime] = None,
-                   excluded_from_scope: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                   excluded_from_scope: Optional[Dict[str, Any]] = None,
+                   linked_crs: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     """Assemble the fact set a template renders against.
+
+    ``linked_crs`` (XACA-1662): every CR linked to the release, in the same adapted shape as
+    ``cr_record`` (release_cr_facts.cr_record_for_facts, with ``activity_log`` rows). It feeds the living
+    release status page (``release.linkedCrs`` / ``release.crHistory`` / ``release.earlierRecords``) so
+    superseded and GAMMA-held CRs stay on the one page. None / [] is valid (a release with no CR yet).
 
     ``release_record`` is required; ``cr_record`` may be None (a release with no CR
     yet), in which case every ``cr.*`` string is empty and ``cr.stateHistory`` is [].
@@ -779,6 +880,22 @@ def build_fact_set(release_record: Dict[str, Any], cr_record: Optional[Dict[str,
         "timestampCT": _fmt_ts(e.get("ts"), tz), "note": str(e.get("note") or ""),
     } for e in _rows(_get(cr, "activity_log", "activityLog", default=None), "cr.activity_log")]
 
+    if linked_crs is not None and not isinstance(linked_crs, list):
+        raise FactSetError("linked_crs is %s, expected an array" % type(linked_crs).__name__)
+    linked_rows, cr_hist, earlier = _linked_cr_facts(linked_crs or [], cr, rel, tz)
+    if not linked_crs and cr.get("id"):  # no list passed: the one CR we do have
+        cr_hist = [dict(h, crId=cr["id"]) for h in history]
+    testing_url = str(_get(cr_links, "testingLog", default=_get(rel_links, "testingLog"))
+                      or _page_url(rel, "testing-log"))
+    request_url = str(_get(cr_links, "crRequestPage", default=_get(rel_links, "crRequestPage"))
+                      or _page_url(cr, "cr"))
+    if cr.get("id"):
+        cr_summary = "%s (%s)" % (cr["id"], _cr_state(cr) or "state unknown")
+    elif linked_rows:
+        cr_summary = "No open CR"
+    else:
+        cr_summary = "No CR yet"
+
     waivers = []
     for sname, st in _stages(rel).items():
         w = _waiver(st, sname)
@@ -802,6 +919,11 @@ def build_fact_set(release_record: Dict[str, Any], cr_record: Optional[Dict[str,
                         "completedAt": _stages(rel)[n].get("completedAt") or "",
                         "status": _stages(rel)[n].get("status", "")}
                        for n in _stage_names(rel) if n in _stages(rel)],
+            "stageHistory": [{"name": n, "enteredAtCT": _fmt_ts(_stages(rel)[n].get("enteredAt"), tz),
+                              "completedAtCT": _fmt_ts(_stages(rel)[n].get("completedAt"), tz),
+                              "status": _stages(rel)[n].get("status", "")}
+                             for n in _stage_names(rel) if n in _stages(rel)],
+            "linkedCrs": linked_rows, "crHistory": cr_hist, "earlierRecords": earlier,
             "dateMMMDDYYYY": _fmt_date(window, tz) or now.astimezone(_tzinfo(tz)).strftime("%b %d %Y"),
             "releaseType": str(_get(rel, "releaseType", default="Release")).title(),
             "briefTitle": str(_get(rel, "briefTitle", "name")),
@@ -815,10 +937,16 @@ def build_fact_set(release_record: Dict[str, Any], cr_record: Optional[Dict[str,
             "approvalBasis": _get(cr, "approval_basis", "approvalBasis"),
             "approvalExpectedAt": _fmt_ts(_get(cr, "cr_approval_expected_at", "approvalExpectedAt", default=None), tz),
             "stateHistory": history,
+            "state": _cr_state(cr),
+        },
+        "status": {
+            "stage": current or "unknown", "cr": cr_summary,
+            "testingLog": testing_url or "not yet published",
+            "updatedAtUTC": now.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
         },
         "links": {
-            "testingLog": _get(cr_links, "testingLog", default=_get(rel_links, "testingLog")),
-            "crRequestPage": _get(cr_links, "crRequestPage", default=_get(rel_links, "crRequestPage")),
+            "testingLog": testing_url,
+            "crRequestPage": request_url,
         },
         "prod": {
             "deployedSha": stage_sha.get("GAMMA", ""),

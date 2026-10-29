@@ -82,6 +82,56 @@ _KANBAN_HOOKS_DIR = str(Path(__file__).parent.parent / "kanban-hooks")
 if _KANBAN_HOOKS_DIR not in sys.path:
     sys.path.insert(0, _KANBAN_HOOKS_DIR)
 
+# XACA-1662-004: zsh -c scripts that call kb-cr's internal state writers (_kb_cr_stamp_state_entry,
+# _kb_cr_stamp_assumed_approval) bypass the kb-cr() dispatcher, which is where scripts/kb-cr.sh flushes the
+# "CR changed" marks into one living-page refresh. They install this EXIT trap right after sourcing kb-cr.sh so the
+# flush runs on every exit path (the script's own exit status is preserved by zsh; the flush can never change it).
+# `typeset -f` keeps a kb-cr.sh that predates the flush working. A failed refresh only warns on stderr: the state
+# change stands and `kb-cr publish-record <REL-ID>` re-runs it.
+_CR_RECORD_FLUSH_TRAP = (
+    "trap 'typeset -f _kb_cr_record_flush >/dev/null 2>&1 && "
+    "{ _kb_cr_record_flush >/dev/null || echo \"cr-record refresh failed (rerun: kb-cr publish-record)\" >&2; }; "
+    "true' EXIT"
+)
+# stderr markers that mean the flush did NOT publish: every failure/refusal line in kb-cr.sh's flush carries the
+# first, the trap above prints the second. A clean skip ("cr-record page skipped: ...") carries neither.
+_CR_RECORD_FAIL_MARKERS = ("WARNING: cr-record page", "cr-record refresh failed")
+# The flush runs the publisher, so a script that carries it needs more than the 30 s the bare state write used to.
+# The publisher itself is NOT bounded to 180 s on this shell path (that limit lives only in
+# _refresh_release_cr_record's own subprocess.run): it can wait up to 120 s for the per-release lock and then make
+# several 30 s wiki calls. 210 s is therefore a ceiling we enforce from outside, not a promise the publisher keeps,
+# which is why a timeout here kills the whole process group (_run_shell_group) and never decides the HTTP status of
+# a write that has already committed (XACA-1662-023).
+_CR_RECORD_FLUSH_TIMEOUT = 210
+
+
+def _run_shell_group(argv, *, env, timeout, grace=5):
+    """XACA-1662-023: subprocess.run(capture_output, text) with the child in its OWN session/process group, and on
+    timeout the WHOLE group is terminated (SIGTERM, then SIGKILL after `grace` s) before TimeoutExpired is
+    re-raised. subprocess.run only kills the direct child (zsh), which orphaned the python publisher still holding
+    the per-release lock. Normal behaviour is unchanged: same pipes, same CompletedProcess, same exit status."""
+    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
+                            start_new_session=True)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.killpg(proc.pid, sig)
+            except (ProcessLookupError, PermissionError):
+                break
+            try:
+                proc.wait(timeout=grace)
+                break
+            except subprocess.TimeoutExpired:
+                continue
+        try:
+            proc.communicate(timeout=grace)   # reap and drain; a stray holder of the pipes must not hang us
+        except Exception:  # noqa: BLE001
+            pass
+        raise
+    return subprocess.CompletedProcess(argv, proc.returncode, out, err)
+
 # Import team path config from shared module (XACA-0168)
 try:
     from aiteamforge_paths import (  # noqa: PLC0415
@@ -8932,6 +8982,12 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 # §1.5 — the manifest is never the source of truth.
                 manifest_item['status'] = self._resolve_item_status(board_item)
                 manifest_item['statusResolution'] = 'resolved'
+                # XACA-1641-012: a completed item with no PR passes DEV exit only via an explicit prExempt;
+                # surface its reason so the release view shows why. Rule lives in release_gate (no JS mirror).
+                manifest_item.pop('prExemptReason', None)
+                if (_release_gate is not None and not board_item.get('prMerged')
+                        and not _release_gate.item_blocks_dev_exit(board_item)):
+                    manifest_item['prExemptReason'] = _release_gate.pr_exempt_reason(board_item)
                 if 'title' in board_item:
                     manifest_item['title'] = board_item['title']
                 if 'priority' in board_item:
@@ -9257,12 +9313,19 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     "createdAt": self._get_timestamp()
                 })
 
+            # XACA-1662-004: a DEV-first board BORN at DEV never gets a PLANNED -> DEV promote, so this is the
+            # only stage write that starts its living Release & CR Status page. Board lock is released (above).
+            # A PLANNED birth is skipped: the publisher would skip it anyway and the page starts at the promote.
+            extra = {}
+            if born_stage != 'PLANNED':
+                extra['crRecord'] = self._refresh_release_cr_record(release_id, LCARS_TEAM, 'create:%s' % born_stage)
+
             self.send_response(201)
             self.send_header('Content-Type', 'application/json')
             self._send_cors_headers()
             self.end_headers()
             # versionResolution is response-only (not persisted): how each platform's version was chosen.
-            self.wfile.write(json.dumps(dict(release, versionResolution=resolution), indent=2).encode())
+            self.wfile.write(json.dumps(dict(release, versionResolution=resolution, **extra), indent=2).encode())
 
         except _DeferredResponse as deferred:
             # emitted OUTSIDE the board lock (XACA-0890-022); must stay ABOVE the generic except
@@ -9775,7 +9838,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             ra = it.get('releaseAssignment') if isinstance(it, dict) else None
             if isinstance(ra, dict) and ra.get('releaseId') == release_id:
                 items.append({"id": it.get('id'), "status": it.get('status'),
-                              "prMerged": it.get('prMerged')})
+                              "prMerged": it.get('prMerged'),
+                              "prExempt": it.get('prExempt')})
         ctx = {"items": items, "other_releases": data.get('releases') or [],
                "now": self._get_timestamp(), "deploy_confirmed": bool(deploy_confirmed)}
         head = self._release_branch_head(release, team)
@@ -9836,13 +9900,18 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             return None, None
         return root / 'kanban-helpers.sh', root / 'scripts' / 'kb-cr.sh'
 
-    def _persist_assumed_approvals_before_promote(self, release_id, team):
+    def _persist_assumed_approvals_before_promote(self, release_id, team, defer_refresh=False):
         """XACA-1349-014: before a NON-dryRun promote takes the board lock, let kb-cr durably stamp
         any due assumed approval on the release's open linked CRs. kb-cr stays the single writer of
         the board stamp AND its activity event (no Python copy of either). Returns the stamped CR ids.
         rc 0 = stamped, rc 3 = nothing due (both fine); anything else, a timeout or a missing kb-cr
         is logged and IGNORED: the promote never fails on it (the feed under the lock re-derives the
-        same deterministic stamp on a copy, so a skipped persist is not fail-open)."""
+        same deterministic stamp on a copy, so a skipped persist is not fail-open).
+
+        defer_refresh (XACA-1662-024): the caller OWES the page refresh for a non-empty return (the promote's own
+        refresh, or on any refused/failed exit the finally in _promote_release_attempt), so the stamp script skips
+        its flush. If the stamp script ends in any UNCLEAN way (timeout, error, rc != 0, where some stamps may have
+        committed without being reported) this method refreshes the page itself, because the caller cannot know."""
         try:
             if _approval_providers is None:
                 return []
@@ -9864,13 +9933,21 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             script = "\n".join([
                 "source %s || exit 97" % shlex.quote(str(helpers)),
                 "source %s || exit 97" % shlex.quote(str(kbcr)),
+                _CR_RECORD_FLUSH_TRAP,  # XACA-1662-004: a stamp changes CR state; refresh the page
                 "for id in %s; do" % ' '.join(shlex.quote(i) for i in ids),
                 '  _kb_cr_stamp_assumed_approval "$id" %s >/dev/null 2>&1' % shlex.quote(str(board_file)),
                 '  echo "$id $?"',
                 "done",
             ])
             run_env = dict(os.environ, KB_TEAM=team, KB_TERMINAL="agent", KB_CR_ACTOR="lcars-release-gate")
-            r = subprocess.run(["zsh", "-c", script], capture_output=True, text=True, timeout=30, env=run_env)
+            if defer_refresh:
+                # XACA-1662-024: the caller refreshes the page itself once the promote has run (see
+                # _promote_release_attempt), so skip the stamp script's own flush: a second full page refresh would
+                # add up to 210 s before the board lock. The stamps are still written; only the refresh is deferred.
+                run_env["KB_CR_RECORD_NOFLUSH"] = "1"
+            run_env.pop("TMUX", None)
+            run_env.pop("TMUX_PANE", None)
+            r = _run_shell_group(["zsh", "-c", script], timeout=_CR_RECORD_FLUSH_TIMEOUT, env=run_env)
             stamped = []
             for line in (r.stdout or '').splitlines():
                 cid, _, rc = line.partition(' ')
@@ -9880,12 +9957,61 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     print(f"[LCARS] WARNING: assumed-approval stamp for {cid} returned rc={rc} (ignored)")
             if r.returncode != 0:
                 print(f"[LCARS] WARNING: assumed-approval stamping exited rc={r.returncode} (ignored)")
+                if defer_refresh:
+                    self._refresh_release_cr_record(release_id, team, "assumed-approval-stamp")
             return stamped
         except subprocess.TimeoutExpired:
             print(f"[LCARS] WARNING: assumed-approval stamping timed out for {release_id} (ignored)")
+            if defer_refresh:
+                self._refresh_release_cr_record(release_id, team, "assumed-approval-stamp")
         except Exception as e:  # noqa: BLE001 - never fail a promote on the persist step
             print(f"[LCARS] WARNING: assumed-approval stamping skipped for {release_id}: {e}")
+            if defer_refresh:
+                self._refresh_release_cr_record(release_id, team, "assumed-approval-stamp")
         return []
+
+    def _refresh_release_cr_record(self, release_id, team, reason):
+        """XACA-1662-002: refresh the release's living "Release & CR Status" wiki page after a stage move.
+        Runs kanban-hooks/release_cr_record_publish.py (the single renderer/publisher/handle writer): it creates
+        the page when the release has none and is past PLANNED, else updates it, and skips cleanly when the
+        team has no wiki / CR support. MUST be called AFTER the board write lock is released (the publisher
+        takes the board lock itself for its handle write; flock is per open file, so calling it inside the
+        transaction would deadlock) and never on a dryRun. Returns the verdict dict; NEVER raises and never
+        changes the caller's HTTP status. KB_WIKI_DENY_DOCS=cr is exported so a mis-wire can never publish the
+        CR Request page."""
+        rerun = "kb-cr publish-record %s" % release_id
+        try:
+            board_file = self._get_board_file(team)
+            script = Path(_KANBAN_HOOKS_DIR) / "release_cr_record_publish.py"
+            if not script.is_file():
+                print(f"[LCARS] WARNING: cr-record refresh skipped for {release_id}: {script} not found. "
+                      f"re-run: {rerun}")
+                return {"status": "skipped", "reason": "publisher script not found", "rerun": rerun}
+            run_env = dict(os.environ, KB_TEAM=team, KB_WIKI_DENY_DOCS="cr")
+            run_env.pop("TMUX", None)
+            r = subprocess.run([sys.executable, str(script), "--board", str(board_file), "--team", team,
+                                "--release-id", release_id, "--reason", reason],
+                               capture_output=True, text=True, timeout=180, env=run_env)
+            try:
+                verdict = json.loads((r.stdout or "").strip().splitlines()[-1])
+                if not isinstance(verdict, dict):
+                    raise ValueError("not an object")
+            except (ValueError, IndexError):
+                verdict = {"status": "failed", "reason": "publisher exit %d, no verdict: %s"
+                           % (r.returncode, (r.stderr or "").strip()[-200:])}
+            verdict.setdefault("rerun", rerun)
+            if verdict.get("status") == "failed":
+                print(f"[LCARS] WARNING: cr-record refresh failed for {release_id} ({reason}): "
+                      f"{verdict.get('reason', '')}. re-run: {verdict['rerun']}")
+            else:
+                print(f"[LCARS] cr-record refresh for {release_id} ({reason}): {verdict.get('status')}")
+            return verdict
+        except subprocess.TimeoutExpired:
+            print(f"[LCARS] WARNING: cr-record refresh timed out for {release_id} ({reason}). re-run: {rerun}")
+            return {"status": "failed", "reason": "timed out after 180s", "rerun": rerun}
+        except Exception as e:  # noqa: BLE001 - a wiki refresh must never fail or alter a promote/regress
+            print(f"[LCARS] WARNING: cr-record refresh errored for {release_id} ({reason}): {e}. re-run: {rerun}")
+            return {"status": "failed", "reason": "%s: %s" % (type(e).__name__, e), "rerun": rerun}
 
     @staticmethod
     def _archive_close_out_for_regress(release, frm, to, now):
@@ -10147,6 +10273,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     def _promote_release_attempt(self, release_id, precut):
         """One locked evaluation of handle_promote_release (see its docstring). precut is None on the first
         pass and the unlocked cut's outcome on the second; only the first may raise _CutNeeded."""
+        refresh_owed = False   # XACA-1662-024: set once the deferred assumed-approval stamps exist
         try:
             if precut is None:
                 if self._gate_unavailable():
@@ -10196,7 +10323,12 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             # XACA-1349-014: BEFORE the board lock (kb-cr takes it itself) let kb-cr durably stamp due
             # assumed approvals. dryRun: no shell-out, no writes. Failures are logged and ignored.
             persisted_stamped = precut["persisted"] if precut is not None else (
-                [] if dry_run else self._persist_assumed_approvals_before_promote(release_id, LCARS_TEAM))
+                [] if dry_run else self._persist_assumed_approvals_before_promote(
+                    release_id, LCARS_TEAM, defer_refresh=True))
+            # XACA-1662-024: the stamps above skipped their own page refresh; WE owe one on every exit. The success
+            # path pays it below (refresh_owed cleared first); a refused/failed/error exit pays it in the finally.
+            # _CutNeeded is control flow, not an exit: the second attempt inherits the stamps via precut.
+            refresh_owed = bool(persisted_stamped)
             feed_stamped = []
             with self._board_write_transaction():
                 data = self._load_releases_config(_lock_held=True)
@@ -10436,9 +10568,13 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 # XACA-1375-018: IN ADDITION to the normal entry: a release left a CR that no longer exists
                 self._log_release_activity(release_id, 'crSupportDisabledWhileAtCR', cur, eff_target,
                                            actor=actor, mode=mode, via='promote')
+            # XACA-1662-002: the living Release & CR Status page follows the stage. After the board lock is
+            # released (above), never on dryRun (returned earlier), and it never changes the HTTP status.
+            refresh_owed = False   # this refresh covers the deferred stamps too
+            cr_record = self._refresh_release_cr_record(release_id, LCARS_TEAM, 'promote:%s->%s' % (cur, eff_target))
             return self._send_json_response(dict(
                 base, allowed=True, release=snapshot,
-                success=True, previousEnvironment=cur, newEnvironment=eff_target))
+                success=True, previousEnvironment=cur, newEnvironment=eff_target, crRecord=cr_record))
 
         except _DeferredResponse as deferred:
             # XACA-0890-022: emitted HERE, outside the _board_write_transaction block, so the
@@ -10449,7 +10585,14 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             deferred.emit(self)
             return
         except _CutNeeded:
+            refresh_owed = False   # the second attempt owns the deferred stamps (precut["persisted"])
             raise  # XACA-1435: control flow for handle_promote_release, never a 500
+        finally:
+            if refresh_owed:
+                # XACA-1662-024: stamps were written but the promote did not reach its own refresh (refused, 404,
+                # error). The page must still show the stamped approval. Runs after any response was sent and
+                # after the board lock was released; it never raises and never changes the response.
+                self._refresh_release_cr_record(release_id, LCARS_TEAM, 'assumed-approval-stamp')
 
     def _regress_release_core(self, release_id, to, reason, actor, reconcile_ok=False, reset_status=False):
         """Shared backward-move path for /regress and /plan. Regress rules are ALWAYS enforced
@@ -10521,8 +10664,11 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         if stranded_before:
             self._log_release_activity(release_id, 'crSupportDisabledWhileAtCR', cur, landed,
                                        actor=actor, via='regress')
+        # XACA-1662-002: a regress changes the stage the living status page shows. Lock already released.
+        cr_record = self._refresh_release_cr_record(release_id, LCARS_TEAM, 'regress:%s->%s' % (cur, landed))
         payload = {"allowed": True, "from": cur, "to": landed, "release": snapshot,
-                   "strandedInCR": stranded, **({"configWarning": cr_warn} if cr_warn else {})}
+                   "strandedInCR": stranded, "crRecord": cr_record,
+                   **({"configWarning": cr_warn} if cr_warn else {})}
         if landed != to:
             payload["requestedTo"] = to
             payload["appliedPendingSha"] = applied_sha
@@ -10960,7 +11106,14 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             self._log_release_activity(release_id, 'release_new_sha', summary['from'], summary['to'],
                                        actor=(actor or '').strip() or None, reason=reason, sha=sha,
                                        outcome=summary['action'], superseded=len(summary['superseded']))
-            return self._send_json_response({"ok": True, "summary": summary})
+            # XACA-1662-004: a 'restart' moves release.stage (release_supersede.apply_new_sha), so the living
+            # status page must follow. Lock released above; noop / pending-cleared / rerun-current keep the
+            # stage and refresh nothing. Never changes the HTTP status.
+            payload = {"ok": True, "summary": summary}
+            if summary.get('to') != summary.get('from'):
+                payload["crRecord"] = self._refresh_release_cr_record(
+                    release_id, LCARS_TEAM, 'new-sha:%s->%s' % (summary['from'], summary['to']))
+            return self._send_json_response(payload)
         except _DeferredResponse as deferred:
             deferred.emit(self)
             return
@@ -17023,7 +17176,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     @staticmethod
     def _build_cr_transition_shell_parts(board_file_str, cr_id, target_state,
                                          helpers_root=None, approval_waiver=None,
-                                         actor=None):
+                                         actor=None, close_override_reason=None):
         """
         Assemble the shell commands that perform a CR state transition.
 
@@ -17094,6 +17247,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         parts = [
             f"source {shlex.quote(root + '/kanban-helpers.sh')}",
             f"source {shlex.quote(root + '/scripts/kb-cr.sh')}",
+            _CR_RECORD_FLUSH_TRAP,  # XACA-1662-004: refresh the living status page on any exit path
             # Find CR index
             f'cr_idx=$(_kb_jq_read "{board_file_str}" \'.crs | to_entries[] '
             f'| select(.value.id == "{cr_id}") | .key\' -r 2>/dev/null)',
@@ -17127,12 +17281,16 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 f'{shlex.quote(str(waiver_actor))}'
                 f' || {{ echo "approval waiver write failed for {cr_id}" >&2; exit 4; }}'
             )
+        # XACA-1667-004: the optional 6th argument is the close-guard override reason (5th, the evidence `force`, stays
+        # empty: it is never passed from here). Absent -> the call is byte-for-byte what it was.
+        _ovr_args = (f' "" {shlex.quote(str(close_override_reason))}'
+                     if close_override_reason is not None else '')
         parts.append(
             # State transition + entry timestamp via the SHARED helper. It also
             # emits the cr_state_changed activity event, which is why this
             # endpoint no longer appends its own.
             f'_kb_cr_stamp_state_entry "{board_file_str}" "$cr_idx" '
-            f'{shlex.quote(cr_id)} {shlex.quote(target_state)}'
+            f'{shlex.quote(cr_id)} {shlex.quote(target_state)}{_ovr_args}'
             f' || {{ echo "state write failed for {cr_id}" >&2; exit 3; }}'
         )
         return parts
@@ -17211,11 +17369,17 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             if not isinstance(body.get("actor", "lcars-ui"), str):
                 self._send_json_response({"ok": False, "error": "actor must be a string"}, status=400)
                 return
+            # XACA-1667-004: {"override": true, "reason": "..."} closes a CR a release's close-out still has to close.
+            if not isinstance(body.get("override", False), bool) or not isinstance(body.get("reason", ""), str):
+                self._send_json_response({"ok": False, "error": "override must be a boolean and reason a string"}, status=400)
+                return
 
             target_state     = body.get("targetState", "").strip()
             expected_updated = body.get("expectedUpdatedAt", "")
             fields           = body.get("fields") or {}
             actor            = body.get("actor", "lcars-ui").strip() or "lcars-ui"
+            close_override   = body.get("override", False) is True
+            close_reason     = body.get("reason", "").strip()
 
             # ── Validate CR-ID format ──────────────────────────────────────────
             if not re.match(r"^CR-[A-Z]+-\d{8}-\d+\Z", cr_id):
@@ -17316,6 +17480,33 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     )
                     return
 
+            # ── Close guard (XACA-1667-004) ────────────────────────────────────
+            # Closing a CR a release's close-out still has to close strands the release at GAMMA. The RULE is
+            # approval_providers.cr_close_block, the same function the shell closers consult through kb-cr.sh
+            # _kb_cr_close_guard (this endpoint does not grow its own copy). 409 + the server's message, which the EDIT
+            # STATE shows verbatim; {"override": true, "reason": "..."} passes it, recorded as cr_close_override by the
+            # shell writer. The shell guard re-checks inside the write, so a race cannot slip past this pre-check.
+            close_override_reason = None
+            if target_state == "cr-closed":
+                if _approval_providers is None:
+                    block = {"releaseId": "", "message": "cannot check whether a release waits on %s (approval_providers "
+                                                          "unavailable); refusing" % cr_id}
+                else:
+                    block = _approval_providers.cr_close_block(board_data, cr_id)
+                if block:
+                    if close_override and not close_reason:
+                        self._send_json_response(
+                            {"ok": False, "error": "An override needs a non-empty reason."}, status=400)
+                        return
+                    if not (close_override and close_reason):
+                        self._send_json_response(
+                            {"ok": False, "conflict": True, "closeBlocked": True,
+                             "releaseId": block.get("releaseId", ""), "error": block.get("message", "")},
+                            status=409,
+                        )
+                        return
+                    close_override_reason = close_reason
+
             # ── Per-CR pre-check for approval_waiver (XACA-1239, D3/D5) ────────
             # _kb_cr_waive_approval itself refuses a wrong-state waiver, a
             # second waiver, or a waiver over a real approval — but
@@ -17409,6 +17600,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 shell_parts = self._build_cr_transition_shell_parts(
                     board_file_str, cr_id, target_state,
                     approval_waiver=approval_waiver_reason, actor=actor,
+                    close_override_reason=close_override_reason,
                 )
             except LcarsHelpersNotFound as e:
                 # XACA-1245: fail closed BEFORE zsh runs, naming every searched
@@ -17479,14 +17671,37 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             shell_script = "\n".join(shell_parts)
 
-            env = {**os.environ, "KB_CR_ACTOR": actor}
-            result = subprocess.run(
-                ["zsh", "-c", shell_script],
-                capture_output=True,
-                text=True,
-                env=env,
-                timeout=30,
-            )
+            # XACA-1662-022: this script has no kb-cr() dispatcher preamble, so the team that the EXIT-trap flush
+            # publishes under must come from the environment: the team that owns THIS board (derived above from the
+            # CR-ID, the same key the board file was resolved with), never an ambient tmux session. TMUX/TMUX_PANE
+            # are removed so _kb_detect_context cannot fall through to an untargeted `tmux display-message`.
+            env = {**os.environ, "KB_CR_ACTOR": actor, "KB_TEAM": team, "KB_TERMINAL": "agent"}
+            env.pop("TMUX", None)
+            env.pop("TMUX_PANE", None)
+            try:
+                result = _run_shell_group(["zsh", "-c", shell_script], env=env, timeout=_CR_RECORD_FLUSH_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                # XACA-1662-023: the state write must not depend on the page refresh. _run_shell_group already
+                # killed the whole process group (no orphaned publisher holding the release lock). If the board
+                # shows the CR at the target state the write committed: answer 200 with a failed-refresh warning.
+                # If it did not, the write itself failed or never finished: keep the 500.
+                committed_cr = None
+                try:
+                    with open(board_file, "r", encoding="utf-8") as f:
+                        committed_cr = next((c for c in json.load(f).get("crs", []) if c.get("id") == cr_id), None)
+                except (OSError, ValueError):
+                    committed_cr = None
+                if committed_cr is None or committed_cr.get("crState") != target_state:
+                    raise
+                rerun_id = (committed_cr.get("releaseAssignment") or {}).get("releaseId") or cr_id
+                print(f"[LCARS] WARNING: CR transition for {cr_id} -> {target_state} committed but the status-page "
+                      f"refresh timed out after {_CR_RECORD_FLUSH_TIMEOUT}s; re-run: kb-cr publish-record {rerun_id}")
+                self._send_json_response({
+                    "ok": True, "cr": committed_cr,
+                    "crRecord": {"status": "failed", "reason": "timeout",
+                                 "rerun": "kb-cr publish-record %s" % rerun_id},
+                })
+                return
 
             if result.returncode == 5:
                 # kb-cr's v2 guard refused (see _build_cr_transition_shell_parts).
@@ -17497,6 +17712,14 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     {"ok": False, "error": stderr or "kb-cr refused this transition (v2 lifecycle)"},
                     status=400,
                 )
+                return
+
+            if result.returncode == 3 and "kb-cr: refused to close" in (result.stderr or ""):
+                # XACA-1667-004: the shell close guard refused inside the write (the board changed after the pre-check).
+                msg = next((ln.split("refused to close", 1)[1].split(": ", 1)[-1].strip()
+                            for ln in result.stderr.splitlines() if "kb-cr: refused to close" in ln), "")
+                self._send_json_response(
+                    {"ok": False, "conflict": True, "closeBlocked": True, "error": msg or result.stderr.strip()}, status=409)
                 return
 
             if result.returncode != 0:
@@ -17518,7 +17741,17 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 self._send_json_response({"ok": False, "error": "CR vanished after write"}, status=500)
                 return
 
-            self._send_json_response({"ok": True, "cr": updated_cr})
+            payload = {"ok": True, "cr": updated_cr}
+            if any(m in (result.stderr or "") for m in _CR_RECORD_FAIL_MARKERS):
+                # XACA-1662-022: the EXIT-trap flush reported a refused/failed page refresh on stderr (script rc is
+                # still 0 because the write committed). Say so instead of leaving the page silently stale.
+                # XACA-1662-025: match the failure markers only; a clean skip ("cr-record page skipped") also
+                # writes to stderr and must not be reported as a failure.
+                rerun_id = (updated_cr.get("releaseAssignment") or {}).get("releaseId") or cr_id
+                print(f"[LCARS] WARNING: cr-record refresh for {cr_id} did not publish: {result.stderr.strip()[-300:]}")
+                payload["crRecord"] = {"status": "failed", "reason": "refresh did not publish",
+                                       "rerun": "kb-cr publish-record %s" % rerun_id}
+            self._send_json_response(payload)
 
         except json.JSONDecodeError as e:
             self._send_json_response({"ok": False, "error": f"Invalid JSON body: {e}"}, status=400)

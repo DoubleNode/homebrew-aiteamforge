@@ -463,6 +463,38 @@ def _cr_closed_by_close_out(release, cr):
     return isinstance(rec, dict) and rec.get("status") == "done"
 
 
+def _cr_closed_after_completion(cr):
+    """XACA-1667-003: the GAMMA-exit CR condition for a release whose CR was closed OUTSIDE close-out (LCARS EDIT STATE,
+    `kb-cr close`) AFTER it genuinely reached cr-completed. Unlike _cr_closed_by_close_out it needs no closeOut: the
+    CR's own evidence is the proof. The feed (approval_providers.release_cr_feed) reads each linked cr-closed CR through
+    cr_closed_after_completion (cr_completed_at present and <= cr_closed_at, no revert after it) AND cr_closed_bound_to_build (the CR's SHA is
+    stageSha.CR / it completed in the current GAMMA entry; XACA-1667-012) and reports the fact as
+    `closedAfterCompletion`. A CR closed without ever completing, or reverted after completing, leaves it False. Only a
+    literal True counts (a truthy non-bool does not), and a non-dict feed never satisfies it."""
+    return isinstance(cr, dict) and cr.get("closedAfterCompletion") is True
+
+
+def pr_exempt_reason(item):
+    """XACA-1641: the item's explicit PR exemption reason (non-blank str inside a prExempt dict), else None.
+    Never inferred: absent or malformed means no exemption (fail-closed)."""
+    pe = item.get("prExempt") if isinstance(item, dict) else None
+    reason = pe.get("reason") if isinstance(pe, dict) else None
+    return reason.strip() if isinstance(reason, str) and reason.strip() else None
+
+
+def deliverable_items(items):
+    """XACA-1641: items that count toward DEV exit. Only status == "cancelled" (exactly) leaves the set."""
+    return [it for it in (items or []) if not (isinstance(it, dict) and it.get("status") == "cancelled")]
+
+
+def item_blocks_dev_exit(item):
+    """XACA-1641: False iff completed AND (PR merged OR a valid explicit prExempt); True otherwise (fail-closed).
+    Shared by the gate, release_resume and trunk mode; lcars-ui/server.py calls it for the release view (no JS copy)."""
+    if not isinstance(item, dict) or item.get("status") != "completed":
+        return True
+    return not (item.get("prMerged") or pr_exempt_reason(item))
+
+
 def _exit_conditions(release, cur, cr_on, ctx):
     """Stage-specific unmet conditions for leaving `cur` (spec 3.2), all collected."""
     r = Reasons()
@@ -500,11 +532,15 @@ def _exit_conditions(release, cur, cr_on, ctx):
         if items is None:
             r.append("DEV: cannot verify item completion (context.items absent)")
         else:
+            deliverable = deliverable_items(items)
             if not items:
                 r.append("DEV: no items assigned")
-            for it in items:
-                if it.get("status") != "completed" or not it.get("prMerged"):
-                    r.append("DEV: item %s is not completed with its PR merged into the release branch" % it.get("id"))
+            elif not deliverable:
+                r.append("DEV: no deliverable items: all %d assigned items are cancelled" % len(items))
+            for it in deliverable:
+                if item_blocks_dev_exit(it):
+                    r.append("DEV: item %s is not completed with its PR merged into the release branch "
+                             "(or an explicit prExempt reason)" % it.get("id"))
         head = ctx.get("branch_head")
         if not head:
             r.append("DEV: cannot verify DEV deploy SHA == branch HEAD (context.branch_head absent)")
@@ -548,8 +584,12 @@ def _exit_conditions(release, cur, cr_on, ctx):
             r.append("CR: release branch HEAD %s != stageSha.CR %s (branch moved or unknown)" % (head, sha))
     if cur == "GAMMA" and cr_on:
         _cr = release.get("cr") or {}
-        if _cr.get("state") != "cr-completed" and not _cr_closed_by_close_out(release, _cr):
-            r.append("GAMMA: CR must be cr-completed")
+        if _cr.get("state") != "cr-completed" and not _cr_closed_by_close_out(release, _cr) \
+                and not _cr_closed_after_completion(_cr):
+            # XACA-1667-003: when the CRs are all closed, say WHY the closure does not count (never completed /
+            # reverted after completing) instead of the bare condition, so the operator is not left guessing.
+            _why = [w for w in (_cr.get("closedNotCompleted") or []) if isinstance(w, str)]
+            r.append("GAMMA: CR must be cr-completed" + (" (%s)" % "; ".join(_why) if _why else ""))
     if cur == "GAMMA" and release.get("gammaFailure") is not None:
         # XACA-1349-005 QA (spec 13.3): a build that failed in GAMMA and was rolled back is never promoted to PROD, even
         # when every expected test reads PASS (the lead may have declared the failure with no FAIL record, or waived

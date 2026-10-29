@@ -1977,6 +1977,8 @@ start_lcars_server() {
 # 1. Calls set-lcars-profile-browser.py to update the "LCARS Web" Dynamic
 #    Profile URL. Errors are printed loudly (no 2>/dev/null) so misconfigurations
 #    are immediately visible. Returns non-zero on failure.
+#    XACA-1661: passes --verify; on mismatch (3) or unverifiable (4) it warns
+#    loudly on stderr but STILL opens the tab (only a write failure returns 1).
 #
 # 2. Creates an iTerm2 tab using the "LCARS Web" profile via iterm2_window_manager.py,
 #    with up to 3 retries on failure.
@@ -2011,13 +2013,44 @@ open_lcars_tab() {
     # which caused the LCARS tab to open on a stale URL with no indication of
     # why. If the setter fails — missing profile file, wrong GUID, etc. — we
     # need to know about it immediately.
-    if ! python3 "${setter_script}" "${lcars_url}"; then
-        echo "🚨 LCARS profile setter FAILED for ${lcars_url}" >&2
-        echo "   Script: ${setter_script}" >&2
-        echo "   Check that the 'LCARS Web' Dynamic Profile exists in iTerm2." >&2
-        echo "   Without this, the LCARS tab will open on the wrong URL." >&2
-        return 1
-    fi
+    #
+    # XACA-1661: --verify makes the setter read the URL back from the profile
+    # file AND from iTerm2's live in-memory profile (iTerm2 3.7 can keep serving
+    # a stale URL, i.e. another team's board). Exit codes: 0 ok, 3 mismatch,
+    # 4 could not verify, 1/other write failure. The `|| setter_rc=$?` form
+    # captures the code without tripping `set -e` in callers.
+    local setter_rc=0
+    python3 "${setter_script}" "${lcars_url}" --verify || setter_rc=$?
+
+    case "${setter_rc}" in
+        0)
+            ;;
+        3)
+            # Still open the tab: refusing would strand the user with no LCARS
+            # tab at all, and the setter has already printed the file/memory
+            # URL detail above. The warning below must be unmissable.
+            echo "" >&2
+            echo "🚨🚨 LCARS PROFILE URL MISMATCH -- the LCARS tab will open the WRONG team's board!" >&2
+            echo "   Expected: ${lcars_url}" >&2
+            echo "   iTerm2 is serving a stale 'LCARS Web' profile URL (see details above)." >&2
+            echo "   Fix: inspect (dry-run):  ${_atf_base}/scripts/iterm2-lcars-profile-repair.sh" >&2
+            echo "        then QUIT iTerm2 and run:  ${_atf_base}/scripts/iterm2-lcars-profile-repair.sh --apply" >&2
+            echo "   Opening the tab anyway so you are not left without one." >&2
+            echo "" >&2
+            ;;
+        4)
+            echo "    ⚠️  Could not verify the LCARS profile URL for ${lcars_url} (iTerm2 API unavailable or profile not found)." >&2
+            echo "       The URL is UNVERIFIED -- the tab may or may not show the right board." >&2
+            echo "       If it looks wrong: ${_atf_base}/scripts/iterm2-lcars-profile-repair.sh (dry-run), then quit iTerm2 and --apply." >&2
+            ;;
+        *)
+            echo "🚨 LCARS profile setter FAILED for ${lcars_url} (exit ${setter_rc})" >&2
+            echo "   Script: ${setter_script}" >&2
+            echo "   Check that the 'LCARS Web' Dynamic Profile exists in iTerm2." >&2
+            echo "   Without this, the LCARS tab will open on the wrong URL." >&2
+            return 1
+            ;;
+    esac
 
     # ---- Step 2: Create the LCARS Web tab in iTerm2 ----
     #

@@ -1405,6 +1405,27 @@ kb-cr activity record '{cr_id}' cr_approval_candidate_detected \\
     return True
 
 
+# XACA-1662-020: kb-cr's dispatcher flushes a status-page refresh after EVERY state command and returns
+# KB_CR_RECORD_FAIL_RC (6) when only that refresh failed -- the state write already COMMITTED. The poller's shell
+# snippets are bash `set -e` scripts, so a bare `kb-cr submit` / `kb-cr approve` would abort on 6 and report a
+# committed transition as failed (and skip the audit event that follows). This guard runs right after the call
+# (the caller has set `_kb_rc` errexit-safely): 0 and 6 continue, anything else exits with kb-cr's own rc.
+# Format field: {verb} (a constant; the CR id is deliberately NOT interpolated into the shell echo).
+_RC6_SHELL_GUARD = """\
+if (( _kb_rc == 6 )); then
+    echo "cr-confluence-poller: kb-cr {verb}: state committed; status page not refreshed (kb-cr rc 6)" >&2
+elif (( _kb_rc != 0 )); then
+    exit "$_kb_rc"
+fi"""
+
+
+def _log_refresh_warning(team: str, cr_id: str, verb: str, stderr: str) -> None:
+    """Surface kb-cr's 'state committed, page refresh failed' warning (rc 6 was tolerated) in the poller log."""
+    if stderr and ("WARNING: cr-record page" in stderr or "status page not refreshed" in stderr):
+        log(f"[{team}][{cr_id}] kb-cr {verb}: state change COMMITTED but the status page was not refreshed "
+            f"(re-run: kb-cr publish-record <REL-ID>): {stderr.strip()[:400]}")
+
+
 def _auto_approve_cr(team: str, cr_id: str, approver: str) -> bool:
     """
     Call kb-cr approve to transition cr-submitted → cr-approved.
@@ -1420,6 +1441,7 @@ def _auto_approve_cr(team: str, cr_id: str, approver: str) -> bool:
     safe_team = shlex.quote(team)
     safe_cr_id = shlex.quote(cr_id)
     safe_approver = shlex.quote(approver)
+    rc6_guard = _RC6_SHELL_GUARD.format(verb="approve")
     bash_cmd = f"""
 set -euo pipefail
 source '{KANBAN_HELPERS}' 2>/dev/null
@@ -1433,11 +1455,14 @@ _kb_detect_context() {{ echo {safe_team}; }}
 export -f _kb_detect_context 2>/dev/null || true
 
 APPROVER_NAME={safe_approver}
+# XACA-1662-020: kb-cr rc 6 = "state change COMMITTED, status-page refresh failed" -- NOT a failed approval.
+# Capture the rc (errexit-safe) and only a rc other than 0/6 is a failure.
 if [[ "$APPROVER_NAME" == "unknown" ]]; then
-    kb-cr approve {safe_cr_id}
+    kb-cr approve {safe_cr_id} && _kb_rc=0 || _kb_rc=$?
 else
-    kb-cr approve {safe_cr_id} --approver-name "$APPROVER_NAME"
+    kb-cr approve {safe_cr_id} --approver-name "$APPROVER_NAME" && _kb_rc=0 || _kb_rc=$?
 fi
+{rc6_guard}
 """
     rc, stdout, stderr = _run_shell(bash_cmd, env=_poller_env())
     if rc != 0:
@@ -1447,6 +1472,7 @@ fi
         if stderr:
             log(f"  stderr: {stderr[:400]}")
         return False
+    _log_refresh_warning(team, cr_id, "approve", stderr)
 
     log(
         f"[{team}][{cr_id}] AUTO-APPROVED: cr-submitted → cr-approved. "
@@ -1521,6 +1547,7 @@ def transition_cr(
     #   - _kb_cr_find_container returns the numeric index into .crs[]
     #   - We then use that index with _kb_jq_update to set cr_proper_url
     #   - This mirrors how _kb_cr_lifecycle_advance writes timestamps
+    rc6_guard = _RC6_SHELL_GUARD.format(verb="submit")
     bash_cmd = f"""
 set -euo pipefail
 source '{KANBAN_HELPERS}' 2>/dev/null
@@ -1552,7 +1579,10 @@ _kb_detect_context() {{ echo '{team}'; }}
 export -f _kb_detect_context 2>/dev/null || true
 
 # Transition {source_state} → cr-submitted (kb-cr submit validates the predecessor)
-kb-cr submit '{cr_id}'
+# XACA-1662-020: rc 6 = state COMMITTED, status-page refresh failed. It must NOT abort here (set -e would skip the
+# cr_proper_detected audit event below, losing it permanently). Capture the rc (errexit-safe); only 0/6 continue.
+kb-cr submit '{cr_id}' && _kb_rc=0 || _kb_rc=$?
+{rc6_guard}
 
 # Record activity event
 kb-cr activity record '{cr_id}' cr_proper_detected \\
@@ -1569,6 +1599,7 @@ kb-cr activity record '{cr_id}' cr_proper_detected \\
             log(f"  stderr: {stderr[:400]}")
         return False
 
+    _log_refresh_warning(team, cr_id, "submit", stderr)
     log(f"[{team}][{cr_id}] {source_state} → cr-submitted. cr_proper_url={cr_proper_url!r}")
     if stdout:
         vlog(f"[{team}][{cr_id}] shell output: {stdout[:200]}")

@@ -1183,6 +1183,14 @@ input[type="datetime-local"].cr-sc-input::-webkit-calendar-picker-indicator {
     color: #000;
 }
 
+/* XACA-1667-016: "Reason required" text for the CLOSE ANYWAY box. Meaningful text, so readable size and the error
+   box's own colour (not the faint generic .cr-sc-hint); linked via aria-describedby, shown on an empty submit. */
+.cr-sc-override-hint {
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    color: inherit;
+}
+
 /* Inline buttons inside error div (RELOAD / RETRY) */
 .cr-sc-btn-inline {
     font-size: 10px;

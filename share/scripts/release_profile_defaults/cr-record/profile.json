@@ -1,14 +1,16 @@
 {
   "kind": "cr-record",
   "audience": "auditors and release owners",
-  "detailLevel": "complete: full history of the change request",
-  "titlePattern": "v<Ver> - <RelId> - <CrId>",
+  "detailLevel": "complete: the release's status plus the full history of every change request linked to it",
+  "titlePattern": "v<Ver> - <RelId> - <Platform> Release & CR Status",
   "requiredSections": [
+    {"id": "status", "label": "Status", "required": true},
     {"id": "header", "label": "Header", "required": true},
     {"id": "links", "label": "Links", "required": true},
+    {"id": "stageHistory", "label": "Release stage history", "required": true},
+    {"id": "changeRequests", "label": "Change Requests", "required": true},
     {"id": "stateHistory", "label": "CR state history", "required": true},
-    {"id": "noticeReceipts", "label": "Notice receipts", "required": true},
-    {"id": "prod", "label": "PROD deployment", "required": true}
+    {"id": "noticeReceipts", "label": "Notice receipts", "required": true}
   ],
   "wiki": {"docType": "cr-record"}
 }

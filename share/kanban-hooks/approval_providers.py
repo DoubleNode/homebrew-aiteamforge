@@ -455,13 +455,101 @@ def is_engine_managed(cr):
         return True
 
 
-def _fail_closed_feed(reason, ids=(), stale=None, all_closed=False):
+def cr_closed_after_completion(cr):
+    """XACA-1667-003: (ok, why) for ONE cr-closed CR -- did it genuinely reach cr-completed before it was closed?
+
+    ok is True ONLY when ALL of: crState is cr-closed, timestamps.cr_completed_at and cr_closed_at are both present
+    and parse, cr_completed_at is not later than cr_closed_at, and no revert_history[] entry is stamped after
+    cr_completed_at (a revert after completion withdrew it; `kb-cr revert` also strips cr_completed_at, so a reverted
+    then re-closed CR normally fails the first test already). Anything unreadable fails closed with a reason, so a
+    CR closed without ever completing (an abandoned one) can never satisfy the GAMMA exit by being closed."""
+    try:
+        cid = cr.get("id") if isinstance(cr, dict) else None
+        if not isinstance(cr, dict) or cr.get("crState") != "cr-closed":
+            return False, "%s is not cr-closed" % cid
+        done, closed = cr_ts(cr, "cr_completed_at"), cr_ts(cr, "cr_closed_at")
+        if not done:
+            return False, "%s was closed without ever reaching cr-completed (no timestamps.cr_completed_at)" % cid
+        if not closed:
+            return False, "%s has no timestamps.cr_closed_at to order against cr_completed_at" % cid
+        t_done, t_closed = parse_iso(done, "cr_completed_at"), parse_iso(closed, "cr_closed_at")
+        if t_done > t_closed:
+            return False, "%s cr_completed_at (%s) is later than cr_closed_at (%s)" % (cid, done, closed)
+        hist = cr.get("revert_history")
+        if hist is not None and not isinstance(hist, list):
+            return False, "%s revert_history is malformed" % cid
+        for ent in hist or []:
+            ts = ent.get("ts") if isinstance(ent, dict) else None
+            if not ts or parse_iso(ts, "revert_history.ts") > t_done:
+                return False, "%s was reverted after it completed (%s)" % (cid, ts or "unreadable revert entry")
+        return True, ""
+    except Exception as e:  # noqa: BLE001 - fail closed, whatever went wrong
+        return False, "completion of CR could not be verified (%s: %s)" % (type(e).__name__, e)
+
+
+def cr_closed_bound_to_build(cr, release):
+    """XACA-1667-012: (ok, why) -- is this cr-closed CR the release's CURRENT build's CR, not an earlier one's?
+
+    cr_closed_after_completion only says the CR completed before it closed. That alone would let a CR that completed
+    for an EARLIER build (closed "superseded" by cr-stage) satisfy the GAMMA exit for the build being shipped. So it is
+    bound to the build with the SAME comparison the close-out binding uses (release_closeout.binding_gap): the CR's
+    recorded build SHA (cr_stamped_sha) against the release's current stageSha.CR (else stages.CR.sha).
+      0. A present but unreadable recorded SHA refuses (never falls through to the time rule).
+      1. A recorded SHA must equal the current stageSha.CR. No current stageSha.CR to compare to -> refuse.
+      2. No recorded SHA -> fall back to time: cr_completed_at must be at or after the release's most recent entry
+         into GAMMA (stages.GAMMA.enteredAt); neither established -> refuse.
+      3. Whenever stages.GAMMA.enteredAt is readable, cr_completed_at must also be at or after it (a CR that completed
+         before a rollback and re-entry is not this GAMMA's CR even if the SHA still matches); a present but unparseable
+         enteredAt refuses.
+    Fails closed: anything unreadable is a refusal with a reason naming the binding that failed."""
+    try:
+        cid = cr.get("id") if isinstance(cr, dict) else None
+        stamp = cr_stamped_sha(cr)
+        if stamp is None and is_engine_managed(cr):
+            # a present-but-malformed stamp (a number, an object) is an engine stamp we cannot read: never fall
+            # back to the weaker time rule for it
+            return False, "%s has a recorded build SHA that is unreadable, so it cannot be bound to the current build" % cid
+        sha = (release.get("stageSha") or {}).get("CR") or ((release.get("stages") or {}).get("CR") or {}).get("sha")
+        sha = sha.strip() if isinstance(sha, str) and sha.strip() else None
+        entered = (((release.get("stages") or {}).get("GAMMA") or {}).get("enteredAt"))
+        t_entered = None
+        if entered:
+            try:
+                t_entered = parse_iso(entered, "stages.GAMMA.enteredAt")
+            except ProviderError:
+                return False, "%s: stages.GAMMA.enteredAt (%r) is unreadable, so the CR cannot be bound to this GAMMA entry" % (cid, entered)
+        if stamp:
+            if not sha:
+                return False, "%s: release has no stageSha.CR to bind the CR's recorded SHA %s to" % (cid, stamp[:12])
+            if stamp.lower() != sha.lower():
+                return False, ("%s superseded: recorded SHA %s != stageSha.CR %s (it completed for an earlier build)"
+                               % (cid, stamp[:12], sha[:12]))
+        elif t_entered is None:
+            return False, ("%s has no recorded build SHA and the release has no stages.GAMMA.enteredAt, so it cannot be "
+                           "bound to the current build" % cid)
+        if t_entered is not None:
+            done = cr_ts(cr, "cr_completed_at")
+            if parse_iso(done, "cr_completed_at") < t_entered:
+                return False, ("%s completed (%s) before the release's current GAMMA entry (%s), so it is not this "
+                               "build's completion" % (cid, done, entered))
+        return True, ""
+    except Exception as e:  # noqa: BLE001 - fail closed
+        return False, "binding of CR to the current build could not be verified (%s: %s)" % (type(e).__name__, e)
+
+
+def _fail_closed_feed(reason, ids=(), stale=None, all_closed=False, closed_after_completion=False, closed_not_completed=()):
     # state None: release_gate reports "CR state is 'None', must be cr-approved" and refuses.
     # `stale` (XACA-1349 F1) carries the distinct stale-approval reason release_gate also prints.
     # `allClosed` (XACA-1353-016): True ONLY when every CR linked to the release is cr-closed (and there is >= 1).
     # It is a FACT about the board, never an approval: the gate lets it satisfy the GAMMA exit only together with a
     # close-out bound to the current build whose crClose step is done (release_gate._cr_closed_by_close_out).
-    return {"allClosed": bool(all_closed), "state": None, "approvedAt": None, "deployWindowPlanned": None, "crIds": list(ids),
+    # `closedAfterCompletion` (XACA-1667-003) is the same kind of FACT: at least one linked CR is cr-closed AND
+    # genuinely completed first (cr_closed_after_completion); `closedNotCompleted` lists why the others are not, so the
+    # gate can say so. The gate lets the first satisfy the GAMMA CR condition (release_gate._cr_closed_after_completion).
+    # Since XACA-1667-012 "genuinely completed" also means bound to the CURRENT build (cr_closed_bound_to_build).
+    return {"allClosed": bool(all_closed), "closedAfterCompletion": bool(closed_after_completion),
+            "closedNotCompleted": list(closed_not_completed), "state": None, "approvedAt": None,
+            "deployWindowPlanned": None, "crIds": list(ids),
             "crStatus": None, "cr_approved_at": None, "cr_approval_expected_at": None,
             "stageSha": None, "approvalAssumed": False, "stamped": [], "refusals": [],
             "staleApproval": stale, "error": reason}
@@ -592,6 +680,85 @@ def close_out_cr_preflight(board, release):
         return ["linked CR preflight failed (%s: %s); refusing" % (type(e).__name__, e)]
 
 
+# XACA-1667-004: closing a CR that is linked to a release whose close-out has not closed its CRs is refused, because the
+# close belongs to `kb-release close-out` (its crClose step). ONE rule, used by every closer: the shell paths
+# (`kb-cr close`, `kb-cr transition <CR> cr-closed`, via kb-cr.sh `_kb_cr_close_guard` -> the `cr-close-block` CLI below)
+# and the LCARS transition endpoint (server.py imports this function). Nothing else re-implements it.
+def cr_close_block(board, cr_id):
+    """None when `cr_id` may be closed now, else {"releaseId": <REL>, "message": <text>} naming the release and the command
+    to run instead. Linkage is THE rule (_cr_linked_to), so an assigned CR and a linkedCRs[]-only CR are both covered.
+
+    Allowed (returns None): the CR is not on the board (the caller reports that), is already cr-closed (idempotent), or is
+    cr-rejected (closing a rejected CR is the routine retire, spec 8.3); its release is not on the board, is at PROD or
+    finished (nothing left to strand), or its close-out already completed crClose; the release has ANOTHER open
+    (not closed/rejected) linked CR, so this close cannot leave it without one (the supersede flow); or -- the sanctioned pass for
+    close-out's OWN crClose -- the release has a close-out record that is BOUND to its current build (a stale record
+    does not count) with a crClose step that is not yet done. The pass is keyed to that board state, never to a flag
+    the caller can set: nobody can name their way past the rule without a live, bound close-out.
+
+    FAILS CLOSED: any unreadable shape yields a block with releaseId "" and the reason, so an unevaluable board cannot
+    be read as "no release is waiting"."""
+    try:
+        if not isinstance(board, dict):
+            return {"releaseId": "", "message": "cannot evaluate which release waits on CR %s: board is not an object" % cr_id}
+        cr = next((c for c in (board.get("crs") or []) if isinstance(c, dict) and c.get("id") == cr_id), None)
+        if cr is None or cr.get("crState") in ("cr-closed", "cr-rejected"):
+            return None
+        releases = board.get("releases")
+        if releases is None:
+            return None
+        if not isinstance(releases, list):
+            raise TypeError("releases is not a list")
+        import release_closeout as _rc  # noqa: PLC0415 - pure stdlib, lazy like the other cross-module imports
+        import release_gate as _rg  # noqa: PLC0415
+        assigned = _assignment_rid(cr)
+        for rel in releases:
+            if not isinstance(rel, dict):
+                continue
+            rid = rel.get("id")
+            if not _cr_linked_to(cr_id, assigned, rid, _listed_cr_ids(rel)):
+                continue
+            if _rg.current_stage(rel) == "PROD" or (rel.get("status") or "") in ("completed", "cancelled", "closed"):
+                continue
+            co = rel.get("closeOut")
+            steps = co.get("steps") if isinstance(co, dict) else None
+            crclose = steps.get("crClose") if isinstance(steps, dict) else None
+            if isinstance(crclose, dict) and crclose.get("status") == "done":
+                continue
+            if isinstance(co, dict) and co.get("crTeam") is True and isinstance(crclose, dict) \
+                    and _rc.binding_gap(rel) is None:
+                continue   # close-out's own crClose, in progress and bound to this build
+            # Only the LAST open CR can strand a release: another live linked CR keeps the GAMMA exit satisfiable (the
+            # feed ignores retired CRs), which is exactly the supersede flow -- `kb-release cr-stage` creates and links
+            # the new CR, THEN closes the GAMMA-held one.
+            if any(c.get("id") != cr_id and c.get("crState") not in _CR_RETIRED for c in _linked_crs(board, rel)[0]):
+                continue
+            return {"releaseId": str(rid),
+                    "message": ("CR %s is linked to release %s, whose close-out has not closed its CRs yet. Closing it here "
+                                "would strand the release (its GAMMA gate wants the CR cr-completed): run "
+                                "`kb-release close-out %s` instead. To close it anyway, override with a reason "
+                                "(`--force-close --reason \"<why>\"`, or override+reason in the LCARS EDIT STATE); the "
+                                "override is recorded in the CR activity log." % (cr_id, rid, rid))}
+        return None
+    except Exception as e:  # noqa: BLE001 - fail closed
+        return {"releaseId": "", "message": "cannot evaluate which release waits on CR %s (%s: %s); refusing" % (
+            cr_id, type(e).__name__, e)}
+
+
+def _cr_close_block_cli(args):
+    """`cr-close-block --board B --cr-id C` (XACA-1667-004): prints {"blocked": false} or {"blocked": true, "releaseId",
+    "message"} and exits 0; exit 2 when the board cannot be read at all (callers fail closed on any non-zero)."""
+    try:
+        with open(args.board, encoding="utf-8") as fh:
+            board = json.load(fh)
+    except (OSError, ValueError) as e:
+        sys.stderr.write("approval_providers cr-close-block: %s\n" % e)
+        return 2
+    blk = cr_close_block(board, args.cr_id)
+    sys.stdout.write(json.dumps({"blocked": False} if blk is None else dict(blk, blocked=True)) + "\n")
+    return 0
+
+
 def _release_at_cr(release):
     """True when the release is at CR by the GATE's own derivation (release_gate.current_stage: explicit
     stage, else furthest stages{}.enteredAt, else legacy platform environments). FAILS CLOSED: if the
@@ -641,8 +808,24 @@ def release_cr_feed(board, release, now, actor="lcars-release-gate"):
         crs = [c for c in crs if c.get("crState") not in _CR_RETIRED]
         ids = [c.get("id") for c in crs]
         if not crs:
+            # XACA-1667-003: a CR closed OUTSIDE close-out after it completed is a legitimate end state, not a
+            # stranded release. At least one linked cr-closed CR must have genuinely completed first; the rest
+            # (superseded / abandoned siblings, as the stale-SHA remedy tells the operator to close) are retired and
+            # ignored exactly as they are when another CR is still open. None completed -> not satisfied, with reasons.
+            # XACA-1667-012: a completed closed CR counts only when it is bound to the CURRENT build
+            # (cr_closed_bound_to_build); an earlier build's superseded CR must not satisfy this build's GAMMA exit.
+            verdicts = []
+            for c in all_linked:
+                if c.get("crState") != "cr-closed":
+                    continue
+                ok, why = cr_closed_after_completion(c)
+                if ok:
+                    ok, why = cr_closed_bound_to_build(c, release)
+                verdicts.append((ok, why))
             return _fail_closed_feed("every CR linked to this release is closed or rejected", ids,
-                                     all_closed=bool(all_linked) and all(c.get("crState") == "cr-closed" for c in all_linked))
+                                     all_closed=bool(all_linked) and all(c.get("crState") == "cr-closed" for c in all_linked),
+                                     closed_after_completion=any(ok for ok, _ in verdicts),
+                                     closed_not_completed=[why for ok, why in verdicts if not ok])
         work = {"teamConfig": board.get("teamConfig"), "crs": copy.deepcopy(crs)}
         events, refusals = [], []
         stamped = stamp_assumed_approvals(work, now, actor=actor, cr_ids=ids, events=events,
@@ -683,11 +866,12 @@ def release_cr_feed(board, release, now, actor="lcars-release-gate"):
                 stamp = cr_stamped_sha(c)
                 if stamp is None or stamp.lower() != str(sha).lower():
                     why = ("CR %s approved SHA %s != stageSha.CR %s: close it superseded "
-                           "(kb-cr close %s --reason \"superseded by new SHA %s\") and re-run cr-stage"
+                           "(kb-cr close %s --reason \"superseded by new SHA %s\" --force-close) and re-run cr-stage"
                            % (c.get("id"), (stamp[:12] if stamp else "<none stamped>"), str(sha)[:12], c.get("id"),
                               str(sha)[:12]))
                     return _fail_closed_feed(why, ids, stale=why)
-        return {"allClosed": False, "state": state, "approvedAt": approved, "deployWindowPlanned": window,
+        return {"allClosed": False, "closedAfterCompletion": False, "closedNotCompleted": [],
+                "state": state, "approvedAt": approved, "deployWindowPlanned": window,
                 "crIds": ids, "crStatus": state, "cr_approved_at": approved,
                 "cr_approval_expected_at": _latest(_ts("cr_approval_expected_at"), False),
                 "stageSha": sha or None, "staleApproval": None,
@@ -812,6 +996,9 @@ def main(argv=None):
     lk = sub.add_parser("linked-crs")   # XACA-1353-018: the shell close-out reads THE linkage from here
     lk.add_argument("--board", required=True)
     lk.add_argument("--release-id", required=True)
+    cb = sub.add_parser("cr-close-block")   # XACA-1667-004: the shell close paths ask THE rule (cr_close_block)
+    cb.add_argument("--board", required=True)
+    cb.add_argument("--cr-id", required=True)
     r = sub.add_parser("is-engine-managed")
     r.add_argument("--board", required=True)
     g = r.add_mutually_exclusive_group(required=True)
@@ -821,6 +1008,8 @@ def main(argv=None):
     try:
         if args.mode == "linked-crs":
             return _linked_crs_cli(args)
+        if args.mode == "cr-close-block":
+            return _cr_close_block_cli(args)
         if args.mode == "is-engine-managed":
             return _managed_cli(args)
         if args.mode in ("stamp-board", "set-expected"):

@@ -599,10 +599,22 @@ def _read_attachments(args):
     return data
 
 
+DENY_DOCS_VAR = "KB_WIKI_DENY_DOCS"  # XACA-1662: comma list of doc types a write verb refuses in this context
+
+
+def _check_doc_not_denied(doc):
+    """Runtime deny for write verbs. The living-page refresh paths export KB_WIKI_DENY_DOCS=cr so a mis-wired
+    refresh can never publish the CR Request page (that page is the approver's frozen artifact). Reads unaffected."""
+    denied = {d.strip() for d in os.environ.get(DENY_DOCS_VAR, "").split(",") if d.strip()}
+    if doc in denied:
+        raise _Usage(f"refused: doc '{doc}' is denied in this context ({DENY_DOCS_VAR})")
+
+
 def _run(args):
     import release_wiki as rw
     team = _team_of(args)
     is_patch = args.command == "patch-section"
+    _check_doc_not_denied(args.doc)
     _check_page_id(args)
     versioned = args.stored_version is not None or args.expect_version is not None
     if args.page_id is not None and not versioned:
@@ -716,11 +728,13 @@ def _run_read(args):
 
 # ---------------------------------------------------------------- doctor
 
-TITLE_SHAPES = {"testing-log": ("ver", "relId", "platform"), "cr-record": ("ver", "relId", "crId")}
+TITLE_SHAPES = {"testing-log": ("ver", "relId", "platform"), "cr-record": ("ver", "relId", "platform")}
 # Spec 12.1 shapes, in XACA-1343's <Name> template syntax (the plan's {ver}
 # notation is not a syntax XACA-1343 implements); the shipped defaults carry these.
+# XACA-1662: cr-record is the release-scoped living status page, so its title carries
+# no <CrId> (no CR exists at PLANNED->DEV); <Platform> keeps it unique per shared space.
 EXPECTED_TITLE = {"testing-log": "v<Ver> - <RelId> - <Platform> Testing Log",
-                  "cr-record": "v<Ver> - <RelId> - <CrId>"}
+                  "cr-record": "v<Ver> - <RelId> - <Platform> Release & CR Status"}
 NEEDS_JSONSCHEMA = "validator unavailable (jsonschema not installed)"
 _SAFE_HOST = re.compile(r"[A-Za-z0-9.-]{1,253}(?![\s\S])")
 _SAFE_DOC = re.compile(r"[a-z][a-z0-9-]{0,31}(?![\s\S])")

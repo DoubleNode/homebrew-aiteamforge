@@ -1952,7 +1952,7 @@
                 `<div id="cr-state-cond-fields" class="cr-sc-cond-fields">` +
                     `<div class="cr-sc-no-fields">Select a target state above.</div>` +
                 `</div>` +
-                `<div id="cr-sc-error" class="cr-sc-error" style="display:none"></div>` +
+                `<div id="cr-sc-error" class="cr-sc-error" role="alert" style="display:none"></div>` +
                 `<div class="cr-sc-actions">` +
                     `<button class="cr-sc-btn cr-sc-cancel" id="cr-sc-cancel">CANCEL</button>` +
                     `<button class="cr-sc-btn cr-sc-submit" id="cr-sc-submit" disabled data-waiver-mode="0">SUBMIT</button>` +
@@ -2195,6 +2195,19 @@
         }
         return data.error;
     }
+
+    /**
+     * XACA-1667-014: UI wording for the close-guard 409. The server's `error` is the CLI text (it names
+     * `kb-release close-out` and `--force-close`, which mean nothing in this dialog); build the sentence from the
+     * structured `releaseId` instead. No releaseId (the guard failed closed and could not say which release) keeps the
+     * server's own message, so the operator still sees why.
+     */
+    function _crCloseBlockedMessage(data) {
+        const rid = data && typeof data.releaseId === 'string' ? data.releaseId.trim() : '';
+        if (!rid) return _crTransition409Message(data);
+        return 'Linked to ' + rid + ', whose close-out has not run. Run close-out instead, or give a reason and ' +
+               'CLOSE ANYWAY \u2014 recorded in the CR activity log.';
+    }
     // ── _crTransition409Message:end ──
 
     /**
@@ -2215,9 +2228,19 @@
 
         const url = apiUrl('/api/kanban/cr/' + encodeURIComponent(crId) + '/transition');
 
-        function _showError(msg, withReload, withRetry) {
+        // XACA-1667-004: closeBlocked = the server refused to close a CR a release's close-out still has to close (409
+        // with closeBlocked). Worded for the UI from releaseId (_crCloseBlockedMessage); instead of RELOAD (nothing is stale) the operator is offered
+        // the audited override: a required reason, resubmitted as {override: true, reason}.
+        function _showError(msg, withReload, withRetry, closeBlocked) {
             errorDiv.innerHTML = escapeHtml(msg) +
-                (withReload
+                (closeBlocked
+                    ? ` <input type="text" class="cr-sc-input" id="cr-sc-override-reason" maxlength="500" ` +
+                      `placeholder="Reason for closing anyway (required)" aria-label="Reason for closing this CR outside close-out" ` +
+                      `aria-describedby="cr-sc-override-hint">` +
+                      ` <span class="cr-sc-override-hint" id="cr-sc-override-hint" style="display:none">Reason required</span>` +
+                      ` <button class="cr-sc-btn cr-sc-btn-inline lcars-btn-danger" id="cr-sc-override-btn">CLOSE ANYWAY</button>`
+                    : '') +
+                (withReload && !closeBlocked
                     ? ` <button class="cr-sc-btn cr-sc-btn-inline cr-sc-reload" id="cr-sc-reload-btn">RELOAD</button>`
                     : '') +
                 (withRetry
@@ -2259,6 +2282,30 @@
                 });
             }
 
+            const overrideBtn = errorDiv.querySelector('#cr-sc-override-btn');
+            if (overrideBtn) {
+                const reasonEl = errorDiv.querySelector('#cr-sc-override-reason');
+                const submitOverride = () => {
+                    const reason = reasonEl ? reasonEl.value.trim() : '';
+                    if (!reason) {
+                        // XACA-1667-016: say it in text (aria-describedby on the box), not only with aria-invalid
+                        const hintEl = errorDiv.querySelector('#cr-sc-override-hint');
+                        if (hintEl) hintEl.style.display = 'inline';
+                        if (reasonEl) { reasonEl.setAttribute('aria-invalid', 'true'); reasonEl.focus(); }
+                        return;
+                    }
+                    errorDiv.style.display = 'none';
+                    _doSubmitTransition(crId, Object.assign({}, payload, { override: true, reason: reason }),
+                                        submitBtn, errorDiv, view);
+                };
+                overrideBtn.addEventListener('click', submitOverride);
+                if (reasonEl) {
+                    reasonEl.addEventListener('keydown', (ev) => {
+                        if (ev && ev.key ==='Enter') { ev.preventDefault(); submitOverride(); }
+                    });
+                }
+            }
+
             const retryBtn = errorDiv.querySelector('#cr-sc-retry-btn');
             if (retryBtn) {
                 retryBtn.addEventListener('click', () => {
@@ -2276,7 +2323,8 @@
         .then(r => {
             if (r.status === 409) {
                 return r.json().then(data => {
-                    _showError(_crTransition409Message(data), true, false);
+                    const blocked = !!(data && data.closeBlocked);
+                    _showError(blocked ? _crCloseBlockedMessage(data) : _crTransition409Message(data), true, false, blocked);
                 }).catch(() => {
                     _showError(_crTransition409Message(null), true, false);
                 });

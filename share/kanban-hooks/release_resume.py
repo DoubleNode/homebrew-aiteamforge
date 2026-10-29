@@ -107,16 +107,31 @@ def resume_plan(release, *, flow_config, cr_support_enabled, items=None, other_r
         return done("planned", "fix-planning", "PLANNED: the DEV promote would be refused.",
                     *["unmet: " + r for r in v["reasons"]])
     if cur == "DEV":
-        bad = [it for it in (items or []) if it.get("status") != "completed" or not it.get("prMerged")]
-        if items is None or not items or bad:
-            lines = ["cannot read the assigned items" if items is None else
-                     ("no items are assigned" if not items else "open items (work them in their own item sessions):")]
+        deliv = G.deliverable_items(items)
+        bad = [it for it in deliv if G.item_blocks_dev_exit(it)]
+        exempt = [it for it in deliv if not G.item_blocks_dev_exit(it) and not it.get("prMerged")]
+        notes = ["PR-exempt: %s -- %s" % (it.get("id"), G.pr_exempt_reason(it)) for it in exempt]
+        if items is None or not deliv or bad:
+            if items is None:
+                head = "cannot read the assigned items"
+            elif not items:
+                head = "no items are assigned"
+            elif not deliv:
+                head = "no deliverable items: all %d assigned items are cancelled" % len(items)
+            else:
+                head = "open items (work them in their own item sessions):"
+            lines = [head]
             lines += ["  %s [%s] %s  PR merged into release branch: %s" % (
                 it.get("id"), it.get("status"), it.get("title", ""), "yes" if it.get("prMerged") else "no") for it in bad]
-            return done("dev-items-open", "report-items", "DEV: items are still open.", *lines)
+            # A completed item blocks only for want of a PR record: name the two ways to supply one.
+            lines += ["  fix %s: kb-backlog pr-merged %s <PR#>  (it has a merged PR)  OR  "
+                      "kb-backlog no-pr %s --reason \"<evidence>\"  (it never had one)" % ((it.get("id"),) * 3)
+                      for it in bad if it.get("status") == "completed" and not it.get("prMerged")]
+            return done("dev-items-open", "report-items", "DEV: items are still open.", *(lines + notes))
         if not sha:
             return done("dev-deploy-pending", "offer-dev-deploy",
-                        "DEV: every item is completed and merged, but no DEV deploy is recorded.",
+                        "DEV: every item is completed and either merged or exempted from a PR, but no DEV deploy is recorded."
+                        + ("  [%s]" % "; ".join(notes) if notes else ""),   # headline, not lines: exempt items are not "open"
                         "Offer the DEV deploy from the release branch (the lead confirms), then run the DEV tests.")
     if cur == "CR":
         return _cr_row(release, plan, done, promote_offer, cr, branch_head, flow_config, cr_support_enabled, now)
@@ -266,7 +281,8 @@ def load_plan(kanban_dir, release_id, repo_dir=None, now=None):
     cr_on = isinstance(cs, dict) and cs.get("enabled") is True
     now = now or datetime.now(timezone.utc)
     cur = G.current_stage(rel)
-    items = [{"id": it.get("id"), "title": it.get("title"), "status": it.get("status"), "prMerged": it.get("prMerged")}
+    items = [{"id": it.get("id"), "title": it.get("title"), "status": it.get("status"), "prMerged": it.get("prMerged"),
+              "prExempt": it.get("prExempt")}
              for it in board.get("backlog") or []
              if isinstance(it.get("releaseAssignment"), dict) and it["releaseAssignment"].get("releaseId") == release_id]
     head = None

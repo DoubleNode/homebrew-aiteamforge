@@ -325,7 +325,8 @@ def _post_transition(tmp_path, cr_state, target, v2=True):
     h._send_json_response = lambda payload, status=200: sent.update(payload=payload, status=status)
     run = MagicMock(side_effect=RuntimeError("stub: shell-out reached"))
     with patch.dict(server.TEAM_KANBAN_DIRS, {"zzxaca": kdir}), \
-         patch.object(server.subprocess, "run", run):
+         patch.object(server.subprocess, "run", run), \
+         patch.object(server, "_run_shell_group", run):   # XACA-1662-023: the zsh run's new entry point
         h.handle_cr_transition("CR-ZZXACA-20261002-1")
     return sent, run
 

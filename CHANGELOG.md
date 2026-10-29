@@ -6,6 +6,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1691: Merge develop into sync/hotfix-1.24.1-into-develop-2 (XACA-1691)
+- XACA-1641 release DEV exit skips cancelled items and honours explicit prExempt
+- XACA-1667 close-out no longer deadlocks on a CR closed outside close-out
+- XACA-1662 cr-record becomes the living release & CR status page
+- XACA-1661 LCARS profile URL verify, no live iTerm2 plist writes, profile repair
+- Tap files updated in this publish: `share/kanban-hooks/approval_providers.py`,`share/kanban-hooks/cr_exclusions.py` `share/kanban-hooks/release_cr_record_publish.py`,`share/kanban-hooks/release_cr_stage.py` `share/kanban-hooks/release_gate.py`,`share/kanban-hooks/release_resume.py` `share/lcars-ui/css/lcars-cr-tab.css`,`share/lcars-ui/css/lcars.css` (+18 more). Run `brew upgrade aiteamforge` to receive them.
 - XACA-1676: Register the richmond (AFC) team across repo-side sites (XACA-1676)
 - Tap files updated in this publish: `share/kanban-hooks/aiteamforge_paths.py`,`share/lcars-ui/server.py` `share/lcars-ui/tests/test_xaca0992_appicons.py`,`share/lcars-ui/tests/test_xaca1676_richmond_server_registration.py` `share/scripts/display-agent-avatar.sh`,`share/scripts/lcars-health-check.sh` `share/scripts/lcars-tmp-dir.sh`,`share/scripts/plugins-manifest.json` (+1 more). Run `brew upgrade aiteamforge` to receive them.
 - XACA-1675: Add Richmond (AFC) avatars, logos and appicons (XACA-1675)

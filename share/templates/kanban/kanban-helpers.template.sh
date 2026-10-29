@@ -2025,7 +2025,7 @@ EOF_PRE
 # leaves the rejected CR on the release, `kb-cr close` accepts it and records reason "rejected"); anything else fails
 # closed. Verified by re-reading the board.
 _kb_co_close_crs() {
-    local board_file="${1-}" release_id="${2-}" version="${3-}" list line cid cst n=0 after reason
+    local board_file="${1-}" release_id="${2-}" version="${3-}" list line cid cst n=0 after reason crc first_closed=""
     list=$(_kb_co_linked_crs "$board_file" "$release_id") \
         || { _kb_co_fail "$release_id" crClose "cannot read the CRs linked to the release"; return 1; }
     [[ -n "$list" ]] || { _kb_co_fail "$release_id" crClose "no CR is linked to $release_id (releaseAssignment, or linkedCRs[] for an unassigned CR); a CR team's GAMMA needs a cr-completed CR"; return 1; }
@@ -2034,13 +2034,22 @@ _kb_co_close_crs() {
         [[ -n "$line" ]] || continue
         cid="${line%%$'\t'*}"; cst="${line#*$'\t'}"
         case "$cst" in
-            cr-closed) echo "  crClose: $cid already closed"; continue ;;
+            cr-closed)
+                echo "  crClose: $cid already closed"
+                [[ -n "$first_closed" ]] || first_closed="$cid"   # XACA-1667-003: remembered for the status-page refresh below
+                continue ;;
             cr-completed) reason="release ${release_id} (v${version}) closed out" ;;
             cr-rejected) reason="rejected; release ${release_id} (v${version}) closed out" ;;
             *) _kb_co_fail "$release_id" crClose "CR $cid is '$cst', not cr-completed or cr-rejected; resolve it, then re-run"; return 1 ;;
         esac
-        kb-cr close "$cid" --reason "$reason" \
-            || { _kb_co_fail "$release_id" crClose "kb-cr close $cid failed"; return 1; }
+        # XACA-1662-020: kb-cr rc 6 = "state change COMMITTED, status-page refresh failed" -- the close happened, so it
+        # is success-with-warning (the re-read below still verifies the state). Any other non-zero rc fails as before.
+        kb-cr close "$cid" --reason "$reason" && crc=0 || crc=$?
+        if (( crc == 6 )); then
+            echo "  crClose: WARNING: $cid closed, but its Release & CR Status page was not refreshed (kb-cr close exit 6); re-run: kb-cr publish-record $release_id" >&2
+        elif (( crc != 0 )); then
+            _kb_co_fail "$release_id" crClose "kb-cr close $cid failed"; return 1
+        fi
         after=$(_kb_jq_read "$board_file" '[.crs[]? | select(.id == $c) | .crState] | first // ""' -r --arg c "$cid")
         [[ "$after" == "cr-closed" ]] \
             || { _kb_co_fail "$release_id" crClose "kb-cr close $cid returned success but the CR is '$after' (CR support off?)"; return 1; }
@@ -2048,6 +2057,13 @@ _kb_co_close_crs() {
     done <<EOF_CRS
 $list
 EOF_CRS
+    # XACA-1667-003: a CR closed OUTSIDE close-out never went through `kb-cr close` here, so nothing refreshed the
+    # Release & CR Status page for this release. When this run closed no CR itself (a close we ran is flushed by the
+    # kb-cr() dispatcher), refresh it now via the ONE re-run command. Warning only: the state is already committed.
+    if (( n == 0 )) && [[ -n "$first_closed" ]]; then
+        kb-cr publish-record "$first_closed" && crc=0 || crc=$?
+        (( crc == 0 )) || echo "  crClose: WARNING: the Release & CR Status page was not refreshed (kb-cr publish-record exit $crc); re-run: kb-cr publish-record $release_id" >&2
+    fi
     _kb_release_close_out_set "$release_id" crClose done \
         || { echo "Error: crClose succeeded but could not be recorded; re-run to resume (idempotent)" >&2; return 1; }
     echo "  crClose: $n CR(s) closed"
@@ -5357,6 +5373,99 @@ _kb_pr_merged_record() {
         || return 1
     echo "✓ Recorded prMerged on [$item]: PR #$pr ${sha:0:8} ($repo)"
     _kb_log_activity "field_update" "$item" "item" "prMerged" "${cur_pr:+PR #$cur_pr}" "PR #$pr" "" 2>/dev/null
+    return 0
+}
+
+# _kb_no_pr_record <ITEM-ID> <reason>   (XACA-1641-011)
+# Declare an explicit "no PR" exemption: item.prExempt = {reason, by, at}. The release gate accepts a
+# completed item with no prMerged only when this record is present and its reason is non-empty. Never
+# inferred - this verb is the only writer. Refuses (rc 1, nothing written) when: reason empty/whitespace,
+# item not found, item not completed, item.prMerged already exists, a PR names the id as a whole token
+# in its head branch or title (the fix is then
+# `kb-backlog pr-merged`), or gh is missing/fails (fail-closed: an unverifiable "no PR" is not a claim we record).
+_kb_no_pr_record() {
+    local item="${1-}" reason="${2-}"
+    local trimmed="${reason//[[:space:]]/}"
+    if [[ -z "$item" ]]; then
+        echo "Usage: kb-backlog no-pr <ITEM-ID> --reason \"<evidence pointer>\"" >&2
+        return 1
+    fi
+    if [[ -z "$trimmed" ]]; then
+        echo "Error: --reason is required and must be non-empty (cite the evidence that no PR exists)" >&2
+        return 1
+    fi
+    _kb_ensure_jq || return 1
+    _kb_is_subitem_id "$item" 2>/dev/null && { echo "Error: prExempt lives on a top-level item, not subitem $item" >&2; return 1; }
+    item=$(printf '%s' "$item" | tr '[:lower:]' '[:upper:]')
+
+    local context team board_file idx
+    context=$(_kb_detect_context 2>/dev/null) || { echo "Error: cannot detect kanban team context" >&2; return 1; }
+    team="${context%%:*}"
+    board_file=$(_kb_get_board_file "$team") && [[ -f "$board_file" ]] \
+        || { echo "Error: no kanban board for team '$team'" >&2; return 1; }
+    idx=$(_kb_find_by_id "$board_file" "$item")
+    if [[ -z "$idx" || "$idx" == "-1" ]]; then
+        echo "Error: item $item not found on the $team board" >&2
+        return 1
+    fi
+
+    local has_merged
+    has_merged=$(_kb_jq_read "$board_file" ".backlog[$idx] | (.prMerged // empty) | tojson" -r 2>/dev/null)
+    if [[ -n "$has_merged" ]]; then
+        echo "Error: [$item] already has prMerged - it is not PR-exempt" >&2
+        return 1
+    fi
+
+    # Status gate: an exemption only makes sense for finished work (the gate reads completed items).
+    local cur_status
+    cur_status=$(_kb_jq_read "$board_file" ".backlog[$idx].status // empty" -r 2>/dev/null)
+    if [[ "$cur_status" != "completed" ]]; then
+        echo "Error: [$item] is '${cur_status:-unknown}', not completed - finish the item first, then declare it PR-exempt" >&2
+        return 1
+    fi
+
+    command -v gh >/dev/null 2>&1 || { echo "Error: 'gh' not found on PATH - cannot verify that no PR exists for $item" >&2; return 1; }
+    # Pin the repo explicitly (never trust the cwd's implicit repo): unresolvable -> refuse (fail-closed).
+    local repo
+    repo=$(_kb_ci_priority_resolve_repo "$item" "$board_file" "$idx" 2>/dev/null)
+    [[ "$repo" == */* ]] || { echo "Error: could not resolve the repository for $item - cannot verify that no PR exists (refusing, fail-closed)" >&2; return 1; }
+    # TWO fetches, concatenated, because neither alone is sound. `--search` is fuzzy full-text (it
+    # matches PR bodies and numerically-similar ids) but does NOT index head-branch names, so a PR that
+    # names the id only in its branch never comes back from it; the plain listing (newest 1000, no
+    # --search) does carry headRefName but is bounded, so it can miss an old PR the search finds by
+    # title. Ownership is then decided here, never by gh: the id as a whole token in the head branch
+    # or title (case-insensitive; XACA-165 does not match XACA-1653; XACA-1653-001 does). Bodies never
+    # count. Either call failing or returning unreadable output refuses (fail-closed).
+    local found_s found_l combined
+    found_s=$(gh pr list --repo "$repo" --state all --search "$item" --json number,title,headRefName --limit 100 2>/dev/null) \
+        || { echo "Error: 'gh pr list' (search) failed - cannot verify that no PR exists for $item (refusing, fail-closed)" >&2; return 1; }
+    found_l=$(gh pr list --repo "$repo" --state all --json number,title,headRefName --limit 1000 2>/dev/null) \
+        || { echo "Error: 'gh pr list' (full listing) failed - cannot verify that no PR exists for $item (refusing, fail-closed)" >&2; return 1; }
+    combined=$(printf '%s\n%s\n' "$found_s" "$found_l" | jq -s 'if length == 2 and all(.[]; type == "array") then add else error("not an array") end' 2>/dev/null) \
+        || { echo "Error: unreadable 'gh pr list' output - refusing (fail-closed)" >&2; return 1; }
+    local owners
+    owners=$(printf '%s' "$combined" | jq -r --arg id "$item" '
+        ($id | ascii_downcase) as $t
+        | ("(^|[^a-z0-9])" + $t + "($|[^0-9])") as $re
+        | [ .[] | select(((.headRefName // "") | ascii_downcase | test($re))
+                      or ((.title // "") | ascii_downcase | test($re))) | .number ] | unique | map("#" + tostring) | join(" ")' 2>/dev/null) \
+        || owners="__unreadable__"
+    [[ "$owners" != "__unreadable__" ]] || { echo "Error: unreadable 'gh pr list' output - refusing (fail-closed)" >&2; return 1; }
+    if [[ -n "$owners" ]]; then
+        echo "Error: PR(s) $owners in $repo name $item in the branch or title - use 'kb-backlog pr-merged $item <PR#>' instead of an exemption" >&2
+        return 1
+    fi
+
+    local by ts
+    by="${CLAUDE_AGENT_HANDLE:-${CLAUDE_CODENAME:-${LCARS_SESSION_NAME:-}}}"
+    [[ -n "$by" ]] || by="${team}:${KB_TERMINAL:-${USER:-unknown}}"
+    ts=$(_kb_get_timestamp)
+    _kb_jq_update "$board_file" \
+        '.backlog[$idx].prExempt = {reason: $reason, by: $by, at: $ts} | .backlog[$idx].updatedAt = $ts | .lastUpdated = $ts' \
+        --argjson idx "$idx" --arg reason "$reason" --arg by "$by" --arg ts "$ts" \
+        || return 1
+    echo "✓ Recorded prExempt on [$item]: $reason"
+    _kb_log_activity "field_update" "$item" "item" "prExempt" "" "$reason" "" 2>/dev/null
     return 0
 }
 
@@ -10883,6 +10992,26 @@ kb-backlog() {
             return $?
             ;;
 
+        no-pr)
+            # XACA-1641-011: declare an explicit no-PR exemption (item.prExempt). See _kb_no_pr_record.
+            #   kb-backlog no-pr <ITEM-ID> --reason "<evidence pointer>"
+            local np_item="${1-}" np_reason=""
+            shift 2>/dev/null
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --reason) np_reason="${2-}"; shift 2 2>/dev/null || shift ;;
+                    --reason=*) np_reason="${1#--reason=}"; shift ;;
+                    *) echo "Error: unknown argument '$1'" >&2; return 1 ;;
+                esac
+            done
+            if [[ -z "$np_item" ]]; then
+                echo "Usage: kb-backlog no-pr <ITEM-ID> --reason \"<evidence pointer>\"   Declare item has no PR (release-gate exemption)"
+                return 1
+            fi
+            _kb_no_pr_record "$np_item" "$np_reason"
+            return $?
+            ;;
+
         unestimated)
             # XACA-0822-008: list all open items that have no effort estimate,
             # ported from canonical (XACA-0624). Read-only reporter — exit 0 always.
@@ -12936,6 +13065,7 @@ else:
             echo "  remove <index>                     Remove item by index"
             echo "  unpick <index>                     Clear actively working flag"
             echo "  demote <id> [--reason \"..\"]        Move item back to todo (alias: todo)"
+            echo "  no-pr <id> --reason \"..\"         Declare a completed item has no PR (prExempt)"
             echo "  cleanup                            Clear orphaned items for current window"
             echo "  cleanup-all                        Clear ALL orphaned items"
             echo "  sub <cmd> [args...]                Manage subitems"
@@ -29539,11 +29669,29 @@ kb-release-close-out() {
     bf=$(_kb_get_board_file "$team") || { echo "Error: no board for team '$team'" >&2; return 1; }
     rj=$(_kb_release_close_out_release_json "$bf" "$release_id")
     [[ -n "$rj" ]] || { echo "Error: release '$release_id' not found" >&2; return 1; }
-    if (( ! opt_dry )) && ! printf '%s' "$rj" | jq -e '.closeOut | type == "object"' >/dev/null 2>&1; then
+    if ! printf '%s' "$rj" | jq -e '.closeOut | type == "object"' >/dev/null 2>&1; then
         # fresh start: the gate must agree the release is otherwise ready (its bound stage passed). Fail closed.
         # XACA-1353-017: and a CR team's linked CRs must all be ones crClose can handle (named per CR, before the gate).
-        _kb_co_cr_preflight "$bf" "$release_id" || return 1
-        _kb_release_close_out_ready "$release_id" || return 1
+        # XACA-1667-002: --dry-run runs the SAME two checks (both read-only: a CR-state read and a promote dryRun) and
+        # reports a refusal as "[dry-run] would refuse:" + the real run's reasons with the real run's rc (1), instead of
+        # printing a clean plan for a close-out that would be refused. A resumed close-out (record is an object) skips
+        # them in both modes, exactly as the real run does.
+        if (( opt_dry )); then
+            local _co_errf _co_rc
+            _co_errf=$(mktemp "${TMPDIR:-/tmp}/kb-co-dry.XXXXXX") || return 1
+            { _kb_co_cr_preflight "$bf" "$release_id" && _kb_release_close_out_ready "$release_id"; } 2>"$_co_errf"
+            _co_rc=$?
+            if (( _co_rc != 0 )); then
+                echo "[dry-run] would refuse:" >&2
+                cat "$_co_errf" >&2
+                rm "$_co_errf"
+                return 1
+            fi
+            rm "$_co_errf"
+        else
+            _kb_co_cr_preflight "$bf" "$release_id" || return 1
+            _kb_release_close_out_ready "$release_id" || return 1
+        fi
     fi
     local -a args=(--repo "$opt_repo")
     (( opt_dry )) && args+=(--dry-run)

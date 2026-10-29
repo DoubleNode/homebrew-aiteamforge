@@ -12264,6 +12264,16 @@ function resolveReleaseItemStatusDisplay(item) {
 /**
  * Load items for a release
  */
+// XACA-1641-012: the PR-EXEMPT tag for a release row. The reason is free text typed into
+// `kb-backlog no-pr --reason`, so it is untrusted: escapeAttr for the quoted title attribute
+// (escapeHtml does not escape `"`), escapeHtml for the text node. Built by concatenation so the
+// escaper-context gate sees each escaper in its true context.
+function buildReleaseItemExemptTag(reason) {
+    if (!reason) return '';
+    const label = 'PR-EXEMPT: ' + escapeHtml(reason);
+    return `<span class="release-item-pr-exempt" title="${escapeAttr(reason)}">` + label + '</span>';
+}
+
 async function loadReleaseItems(releaseId) {
     const itemsContainer = document.getElementById(`release-items-${releaseId}`);
     if (!itemsContainer) return;
@@ -12291,11 +12301,15 @@ async function loadReleaseItems(releaseId) {
             // are self-explanatory from the label and get no tooltip.
             const statusTitleAttr = statusTitle ? ` title="${escapeHtml(statusTitle)}"` : '';
 
+            // XACA-1641-012: explicit PR exemption (server applies release_gate.item_blocks_dev_exit) -- show why
+            const exemptTag = buildReleaseItemExemptTag(item.prExemptReason);
+
             return `
             <div class="release-item ${stateClass}" data-item-id="${escapeHtml(item.itemId)}" onclick="navigateToBacklogItemById('${jsAttrEscape(item.itemId)}')">
                 <span class="release-item-id" role="button" tabindex="0" title="Click to copy item ID to clipboard" aria-label="Item ID: ${escapeHtml(item.itemId)}. Click to copy." onclick="event.stopPropagation(); copyToClipboard('${jsAttrEscape(item.itemId)}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();event.stopPropagation();copyToClipboard('${jsAttrEscape(item.itemId)}');}">${escapeHtml(item.itemId)}</span>
                 <span class="release-item-status status-${statusClass}"${statusTitleAttr}>${escapeHtml(statusLabel)}</span>
                 <span class="release-item-title">${escapeHtml(item.title)}</span>
+                ${exemptTag}
                 <button class="release-item-docs" data-item-id="${item.itemId}" onclick="event.stopPropagation(); showPlanDocModal('${item.itemId}', this.getAttribute('data-retro-exists') === 'true', this.getAttribute('data-cr-exists') === 'true')" title="View Plan Document" style="display:none">DOCS</button>
                 <button class="release-item-remove" onclick="event.stopPropagation(); removeItemFromRelease('${releaseId}', '${item.itemId}')" title="Remove from release">✕</button>
             </div>

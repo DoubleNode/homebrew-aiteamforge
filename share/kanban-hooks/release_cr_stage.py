@@ -186,7 +186,17 @@ def get_wiki_handle(record: Optional[Dict[str, Any]], doc: str) -> Optional[Dict
             or isinstance(h.get("version"), bool)):
         raise CrStageError("%s.wikiPages[%r] is malformed (need string pageId, string url, integer version)"
                            % ((record or {}).get("id", "?"), doc), RC_REFUSED)
-    return {"pageId": h["pageId"], "url": h["url"], "version": h["version"]}
+    out = {"pageId": h["pageId"], "url": h["url"], "version": h["version"]}
+    for opt in _HANDLE_OPTIONAL:  # XACA-1662-017: adopted legacy key / mirror back-pointer; absent stays absent
+        v = h.get(opt)
+        if isinstance(v, str) and v.strip():
+            out[opt] = v
+    return out
+
+
+# Optional string fields a wiki handle may carry beyond {pageId, url, version} (XACA-1662-017): `key` is the
+# kb-wiki key of an ADOPTED legacy page (absent = the release id); `releaseId` marks a CR-side mirror.
+_HANDLE_OPTIONAL = ("key", "releaseId")
 
 
 def set_wiki_handle(board_file: str, collection: str, record_id: str, doc: str, handle: Dict[str, Any], *,
@@ -195,6 +205,10 @@ def set_wiki_handle(board_file: str, collection: str, record_id: str, doc: str, 
     """Store ``wikiPages[doc] = {pageId, url, version}`` (plus optional ``links.<k> = url`` on the same record,
     plus any ``also`` edits) in one locked write. ``collection`` is "releases" or "crs"."""
     clean = {"pageId": str(handle["pageId"]), "url": str(handle["url"]), "version": int(handle["version"])}
+    for opt in _HANDLE_OPTIONAL:
+        v = handle.get(opt)
+        if isinstance(v, str) and v.strip():
+            clean[opt] = v
     if not clean["pageId"].strip() or not clean["url"].strip():
         raise CrStageError("refusing to store an empty wiki page handle for %s %s" % (doc, record_id), RC_FAILED)
 
@@ -233,6 +247,12 @@ def _find_script(name: str) -> str:
     raise ToolError("cannot find %s (looked next to kanban-hooks/, in scripts/, and on PATH)" % name, 2)
 
 
+# XACA-1662-020: scripts/kb-cr.sh's dispatcher returns this after a state command whose Release & CR Status page
+# refresh failed (the state is already committed) and prints a stderr line containing the marker below.
+KB_CR_RECORD_FAIL_RC = 6
+_REFRESH_WARNING_MARK = "WARNING: cr-record page"
+
+
 class ShellTools:
     """The real tools: kb-cr (a zsh function, so each call sources kanban-helpers.sh), kb-wiki, kb-notify, git."""
 
@@ -240,6 +260,7 @@ class ShellTools:
                  terminal: str = "agent", actor: str = "kb-release cr-stage"):
         self.team, self.kanban_dir, self.repo_dir, self.helpers = team, kanban_dir, repo_dir, helpers
         self.run, self.terminal, self.actor = run, terminal, actor
+        self.warnings: List[str] = []   # XACA-1662-020: kb-cr "committed, page refresh failed" (rc 6) notes
 
     # -- kb-cr
     def _kb_cr(self, *args: str) -> str:
@@ -248,6 +269,16 @@ class ShellTools:
         cmd = ["zsh", "-c", 'source "$1" >/dev/null 2>&1 || exit 97; shift; kb-cr "$@"', "kb-cr", self.helpers, *args]
         env = _clean_env({"KB_TEAM": self.team, "KB_TERMINAL": self.terminal, "KB_CR_ACTOR": self.actor})
         r = self.run(cmd, capture_output=True, text=True, env=env)
+        if r.returncode == KB_CR_RECORD_FAIL_RC and _REFRESH_WARNING_MARK in (r.stderr or ""):
+            # XACA-1662-020: rc 6 = "state change COMMITTED, Release & CR Status page refresh failed". The write the
+            # caller asked for succeeded; treating it as a failure stops the stage on a CR that is already submitted /
+            # held / closed and prints a false message. Success-with-warning: keep it, surface it, carry on. The
+            # stderr marker (not the bare rc) is the test, so a 6 from anything else still fails as before.
+            note = "kb-cr %s: state committed; status page not refreshed: %s" % (
+                args[0] if args else "", ((r.stderr or "") + (r.stdout or "")).strip()[-400:])
+            self.warnings.append(note)
+            sys.stderr.write("WARNING: %s\n" % note)
+            return r.stdout or ""
         if r.returncode != 0:
             raise ToolError("kb-cr %s failed (exit %d): %s" % (args[0] if args else "", r.returncode,
                                                                ((r.stderr or "") + (r.stdout or "")).strip()[-600:]),
@@ -721,7 +752,7 @@ class CrStage:
             else:
                 raise CrStageError(
                     "CR %s (%s) was prepared for SHA %s but the release is now at %s: it does not "
-                    "describe this code. Close it: kb-cr close %s --reason \"superseded by new SHA %s\", then "
+                    "describe this code. Close it: kb-cr close %s --reason \"superseded by new SHA %s\" --force-close, then "
                     "re-run cr-stage to create a fresh CR" % (self.cr_id, crec.get("crState"),
                                                               (stamp[:12] if stamp else "<none stamped>"), head[:12],
                                                               self.cr_id, head), RC_REFUSED)
@@ -935,14 +966,20 @@ class CrStage:
                                % (len(viol), "; ".join("%s: %s" % (v.rule, v.detail) for v in viol[:6])), RC_DRAFT_INVALID)
         return body, title
 
-    def _step_testing_log(self, only: bool = False) -> Tuple[str, str]:
-        board, rel, cr = self._load()
-        if get_wiki_handle(rel, "testing-log"):
-            return "skipped", "Testing Log already published"
-        facts = self._facts(board, rel, cr, content=cr.get("draftContent"))
+    def _publish_testing_log(self, cr: Optional[Dict[str, Any]], *, update: bool,
+                             mirror_cr_ids: Optional[List[str]] = None) -> Dict[str, Any]:
+        """Render + publish (or, with ``update``, re-publish in place) the release's Testing Log and store the
+        handle on the release (links.testingLog on the release and on every CR in ``mirror_cr_ids``).
+        ``cr`` may be None: the log is release-scoped and renders strictly valid with zero test records
+        (XACA-1662-002; the living status page creates it at DEV, before any CR exists)."""
+        board, rel, _ = self._load()
+        stored = get_wiki_handle(rel, "testing-log")
+        if stored and not update:
+            return {"action": "skipped", "handle": stored}
+        facts = self._facts(board, rel, cr, content=(cr or {}).get("draftContent"))
         body, title = self._compose_testing_log(facts, rel, self._tz(board))
         atts = self._testing_log_attachments(rel, self._tz(board))
-        handle = self._publish_page("testing-log", self.rel_id, title, body, None, atts)
+        handle = self._publish_page("testing-log", self.rel_id, title, body, stored, atts)
         url = handle["url"]
 
         def cr_links(r: Dict[str, Any]) -> None:
@@ -951,9 +988,21 @@ class CrStage:
                 lk = r["links"] = {}
             lk["testingLog"] = url
 
+        ids = list(mirror_cr_ids if mirror_cr_ids is not None else ([cr["id"]] if cr else []))
         set_wiki_handle(self.board_file, "releases", self.rel_id, "testing-log", handle, links={"testingLog": url},
-                        also=[("crs", cr["id"], cr_links)])
-        return "done", "published %s (v%d)" % (url, handle["version"])
+                        also=[("crs", cid, cr_links) for cid in ids])
+        return {"action": "updated" if stored else "created", "handle": handle}
+
+    def _step_testing_log(self, only: bool = False) -> Tuple[str, str]:
+        # XACA-1662-002: the log now exists from DEV (the living status page links it), so an existing log is
+        # RE-PUBLISHED in place here until the CR page is out: the CR Request must link a current log, not one
+        # frozen at DEV time. After that a re-run stays a no-op.
+        board, rel, cr = self._load()
+        if get_wiki_handle(rel, "testing-log") and cr.get("crState") in _AT_LEAST_PUBLISHED:
+            return "skipped", "Testing Log already published and the CR page is out (a finished CR's re-run is a no-op)"
+        res = self._publish_testing_log(cr, update=True)
+        h = res["handle"]
+        return "done", "%s %s (v%d)" % ("refreshed" if res["action"] == "updated" else "published", h["url"], h["version"])
 
     # -- step 6 -----------------------------------------------------------------------------------
     def _step_publish(self, only: bool = False) -> Tuple[str, str]:
@@ -1066,6 +1115,17 @@ class CrStage:
 
 
 # ---------------------------------------------------------------------------------------- CLI
+
+def publish_testing_log(board_file: str, rel_id: str, team: str, kanban_dir: str, tools: Any, *, update: bool = False,
+                        mirror_cr_ids: Optional[List[str]] = None,
+                        resolve: Optional[Callable[..., Dict[str, Any]]] = None,
+                        now: Optional[Callable[[], datetime]] = None) -> Dict[str, Any]:
+    """Publish the release's Testing Log with NO CR required (XACA-1662-002). Returns
+    ``{"action": "created"|"updated"|"skipped", "handle": {pageId,url,version}}``. ``update=False`` skips when a
+    handle is already stored; ``update=True`` re-publishes in place. Raises CrStageError / ToolError."""
+    st = CrStage(rel_id, tools, board_file, kanban_dir, team, resolve=resolve, now=now, say=lambda _m: None)
+    return st._publish_testing_log(None, update=update, mirror_cr_ids=mirror_cr_ids)
+
 
 def _locate_board(kanban_dir: str, team: str, release_id: str, explicit: Optional[str]) -> str:
     if explicit:

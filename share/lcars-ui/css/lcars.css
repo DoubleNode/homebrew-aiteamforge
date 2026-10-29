@@ -9696,6 +9696,23 @@ body {
     box-shadow: 0 0 8px rgba(255, 204, 0, 0.5);
 }
 
+/* XACA-1641 (UX): sibling of .release-item-title, NOT nested in it, so a long title cannot
+   truncate the reason away. Exempt items are always completed, so opt out of the strike-through
+   and muted colour the completed row would otherwise cascade onto the tag. */
+.release-item-pr-exempt {
+    flex: 0 1 auto;
+    min-width: 6em;
+    max-width: 45%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 11px;
+    font-style: italic;
+    font-weight: 600;
+    text-decoration: none;
+    color: var(--lcars-text);
+}
+
 .release-item-status {
     font-size: 9px;
     font-weight: 700;

@@ -111,7 +111,8 @@ fi
 #   kb-cr add-item     <CR-ID> <item-id>
 #   kb-cr remove-item  <CR-ID> <item-id>
 #   kb-cr list         [--state <state>] [--platform <name>]
-#   kb-cr transition   <CR-ID> <new-state>
+#   kb-cr transition   <CR-ID> <new-state> [--force] [--force-close --reason "<why>"]
+#   kb-cr close        <CR-ID> [--reason "<text>"] [--force-close]   (XACA-1667-004: refused while a release's close-out has yet to close it)
 #   kb-cr show         <CR-ID>           [shows local md path + cr_confluence_url]
 #   kb-cr attach <item-id> --to <CR-ID>  [item-perspective alias for add-item]
 #   kb-cr detach <item-id>               [item-perspective alias for remove-item]
@@ -1034,6 +1035,56 @@ _kb_cr_v2_publish_guard() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# XACA-1667-004: closing a CR that a release is still waiting on.
+#
+# `kb-release close-out` closes its CRs itself (crClose). A CR closed anywhere else while its release waits on that
+# close-out used to deadlock the release at GAMMA (XACA-1667). The RULE lives in ONE place, the python function
+# approval_providers.cr_close_block, shared with the LCARS endpoint (server.py imports it); this is only the shell
+# caller, so the CLI paths and the endpoint cannot drift.
+#
+#   _kb_cr_close_guard <board_file> <cr_id> [override_reason]
+#     rc 0  allowed. When it was allowed ONLY by the override, _KB_CR_CLOSE_OVERRIDE_REL is the release id (else empty):
+#           the caller records it with _kb_cr_close_override_log AFTER the close commits.
+#     rc 1  refused; the message (names the release and `kb-release close-out <REL>`) is on stderr.
+#   close-out's own crClose passes WITHOUT any flag: cr_close_block allows a close while the release has a close-out
+#   record bound to its current build whose crClose step is not done (board state, not a caller-settable variable).
+#   Fails closed: a rule that cannot be evaluated refuses (an override with a reason is still honoured).
+# ─────────────────────────────────────────────────────────────────────────────
+_kb_cr_close_guard() {
+    local board_file="${1-}" cr_id="${2-}" reason="${3-}" _bs _ap out blocked rel msg
+    _KB_CR_CLOSE_OVERRIDE_REL=""
+    _bs=$(_kb_board_settings_script) || { echo "kb-cr: cannot locate kanban-hooks/ to check whether a release waits on $cr_id; refusing" >&2; return 1; }
+    _ap="$(dirname "$_bs")/approval_providers.py"
+    if [[ -f "$_ap" ]] && out=$(python3 "$_ap" cr-close-block --board "$board_file" --cr-id "$cr_id" 2>/dev/null); then
+        blocked=$(printf '%s' "$out" | jq -r '.blocked' 2>/dev/null)
+        rel=$(printf '%s' "$out" | jq -r '.releaseId // ""' 2>/dev/null)
+        msg=$(printf '%s' "$out" | jq -r '.message // ""' 2>/dev/null)
+        [[ "$blocked" == "false" ]] && return 0
+    else
+        blocked="true"; rel=""
+        msg="cannot evaluate whether a release waits on $cr_id (approval_providers.py cr-close-block failed); refusing"
+    fi
+    [[ -n "$msg" ]] || msg="CR $cr_id is linked to a release whose close-out has not closed its CRs; run kb-release close-out <REL-ID>"
+    if [[ -n "${reason//[[:space:]]/}" ]]; then
+        _KB_CR_CLOSE_OVERRIDE_REL="${rel:-unknown}"
+        return 0
+    fi
+    echo "kb-cr: refused to close $cr_id: $msg" >&2
+    return 1
+}
+
+# _kb_cr_close_override_log <board_file> <cr_id> <release_id> <reason> -- the audit trail of an override (best effort,
+# like every activity append: the close has already committed). Event cr_close_override; actor = KB_CR_ACTOR.
+_kb_cr_close_override_log() {
+    local board_file="${1-}" cr_id="${2-}" rel="${3-}" reason="${4-}" evt
+    evt=$(_kb_cr_activity_event "cr_close_override" "to_state=cr-closed" "release_id=$rel" "note=$reason" 2>/dev/null || echo "")
+    [[ -n "$evt" ]] && _kb_cr_activity_append "$board_file" "$cr_id" "$evt" 2>/dev/null
+    echo "kb-cr: WARNING: closed $cr_id over the close-out guard for release ${rel:-?}; recorded as cr_close_override (reason: $reason)" >&2
+    return 0
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # _kb_cr_stamp_state_entry — force-write <new_state> AND stamp its entry
 # timestamp, preserving any timestamp already present.
 #
@@ -1083,6 +1134,9 @@ _kb_cr_stamp_state_entry() {
     local cr_id="$3"
     local new_state="$4"
     local force_flag="${5:-}"
+    # XACA-1667-004: optional 6th arg = the override reason for closing a CR a release still waits on (see
+    # _kb_cr_close_guard). Only consulted for new_state=cr-closed.
+    local close_override_reason="${6:-}"
 
     local ts_field
     ts_field=$(_kb_cr_state_entry_ts_field "$new_state")
@@ -1097,6 +1151,13 @@ _kb_cr_stamp_state_entry() {
     local _g_from
     _g_from=$(_kb_cr_container_get_state "$board_file" "$cr_idx" 2>/dev/null || echo "")
     _kb_cr_v2_guard "$board_file" "$cr_idx" "$cr_id" "transition" "$_g_from" "$new_state" || return 1
+
+    # XACA-1667-004: the LCARS endpoint and `kb-cr transition` both land here, so the close guard lives here too.
+    local _close_ovr_rel=""
+    if [[ "$new_state" == "cr-closed" ]]; then
+        _kb_cr_close_guard "$board_file" "$cr_id" "$close_override_reason" || return 1
+        _close_ovr_rel="$_KB_CR_CLOSE_OVERRIDE_REL"
+    fi
 
     local now
     now=$(_kb_cr_timestamp)
@@ -1227,6 +1288,7 @@ _kb_cr_stamp_state_entry() {
         _kb_cr_lifecycle_advance "$board_file" "$cr_idx" "$cr_id" \
             "$new_state" "$ts_field" "$now" || return 1
     fi
+    [[ -n "$_close_ovr_rel" ]] && _kb_cr_close_override_log "$board_file" "$cr_id" "$_close_ovr_rel" "$close_override_reason"
     return 0
 }
 
@@ -1353,7 +1415,7 @@ _kb_cr_activity_event() {
     local -a jq_args=(--arg ts "$ts" --arg type "$type" --arg actor "$actor")
 
     # Parse optional key=value pairs
-    local from_state="" to_state="" field="" old_value="" new_value="" note=""
+    local from_state="" to_state="" field="" old_value="" new_value="" note="" release_id=""
     local kv key val
     for kv in "$@"; do
         key="${kv%%=*}"
@@ -1365,6 +1427,7 @@ _kb_cr_activity_event() {
             old_value)  old_value="$val"  ;;
             new_value)  new_value="$val"  ;;
             note)       note="$val"       ;;
+            release_id) release_id="$val" ;;
         esac
     done
 
@@ -1375,6 +1438,7 @@ _kb_cr_activity_event() {
     [[ -n "$old_value"  ]] && jq_filter+=' | . + { old_value: $old_value }'   && jq_args+=(--arg old_value "$old_value")
     [[ -n "$new_value"  ]] && jq_filter+=' | . + { new_value: $new_value }'   && jq_args+=(--arg new_value "$new_value")
     [[ -n "$note"       ]] && jq_filter+=' | . + { note: $note }'             && jq_args+=(--arg note "$note")
+    [[ -n "$release_id" ]] && jq_filter+=' | . + { release_id: $release_id }'     && jq_args+=(--arg release_id "$release_id")
 
     jq -n "${jq_args[@]}" "$jq_filter"
 }
@@ -1388,6 +1452,14 @@ _kb_cr_activity_append() {
     local board_file="$1"
     local cr_id="$2"
     local event_json="$3"
+
+    # XACA-1662-003: a CR state event (changed / reverted / created) queues a Release & CR Status page
+    # refresh; the kb-cr() dispatcher flushes it once at the end of the command. Marked before the append
+    # so a failed activity write (always best-effort) still refreshes the page for a committed state write.
+    local _kb_cr_evt_re='"type"[[:space:]]*:[[:space:]]*"(cr_state_changed|cr_state_reverted|cr_created)"'
+    if [[ "$event_json" =~ $_kb_cr_evt_re ]]; then
+        _kb_cr_record_mark_dirty "$board_file" "$cr_id"
+    fi
 
     local activity_file
     activity_file=$(_kb_cr_activity_path "$board_file" "$cr_id")
@@ -2178,23 +2250,32 @@ _kb_cr_container_reschedule_approval() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# cr-record wiki page (XACA-1349-006, spec 12.2 / 3.2 GAMMA)
+# cr-record wiki page = the living "Release & CR Status" page (XACA-1349-006, reshaped by XACA-1662-003)
 #
-#   complete <CR>        publishes the cr-record page   (kb-wiki publish --doc cr-record)
-#   close <CR>           RE-publishes the SAME page     (--page-id/--stored-version; never a 2nd page)
-#   publish-record <CR>  re-run path: create-or-update from the stored handle
+# ONE page per release, refreshed after every kb-cr command that changed a CR's state or release link:
 #
-# Rendering + the kb-wiki call live in kanban-hooks/release_cr_record_publish.py (it never writes
-# the board). This shell owns only the locked handle write: .crs[].wikiPages["cr-record"] =
-# {pageId,url,version}. (release_cr_stage.py is adding the same accessors in parallel; consolidate.)
+#   _kb_cr_activity_append -> _kb_cr_record_mark_dirty   (cr_state_changed / cr_state_reverted / cr_created)
+#   kb-cr() dispatcher     -> _kb_cr_record_flush        (ONCE at the end of the command, one publish per
+#                                                         release however many writes the command made)
+#   publish-record <CR-ID|REL-ID>                         the re-run / backfill command (valid from DEV on)
 #
-# FAILURE SEMANTICS (spec 8.3: a failure leaves the CR in its last good state): the state change
-# has ALREADY committed when this runs. A publish failure never undoes it; it prints a loud
-# warning with the re-run command and returns KB_CR_RECORD_FAIL_RC (6). A skip (wiki not
-# configured / cr-record not mapped / no linked release / close with no page ever published) is
-# a notice, rc 0.
+# Rendering, the kb-wiki call AND the handle write (release handle + mirrors on linked CRs) all live in
+# kanban-hooks/release_cr_record_publish.py. This shell never writes the handle and NEVER publishes the CR
+# Request page (--doc cr): the publisher exports KB_WIKI_DENY_DOCS=cr.
+#
+# FAILURE SEMANTICS (spec 8.3: a failure leaves the CR in its last good state): the state change has ALREADY
+# committed when the flush runs. A publish failure never undoes it; it prints a loud warning with the re-run
+# command and returns KB_CR_RECORD_FAIL_RC (6). A skip (wiki not configured / cr-record not mapped / no
+# linked release / release still PLANNED) is a notice on stderr, rc 0.
+#
+# Guards: KB_CR_RECORD_NOFLUSH=1 (exported to the publisher's children) turns the flush into a no-op so a
+# kb-cr call made BY the publisher can never re-enter it; the dirty list is a shell global, so a
+# `$(...)`/pipeline subshell that marks a CR dirty loses the mark (never undoes the state).
 # ─────────────────────────────────────────────────────────────────────────────
 KB_CR_RECORD_FAIL_RC=6
+(( ${+_KB_CR_RECORD_DIRTY} )) || typeset -ga _KB_CR_RECORD_DIRTY
+_KB_CR_RECORD_DIRTY=()
+typeset -g _KB_CR_VERB=""
 
 _kb_cr_record_py() {
     local _bs _py
@@ -2204,108 +2285,163 @@ _kb_cr_record_py() {
     printf '%s\n' "$_py"
 }
 
-# _kb_cr_publish_record <verb> <board> <team> <cr_id> <create-or-update|update-only>
-_kb_cr_publish_record() {
-    local verb="$1" board="$2" team="$3" cr_id="$4" mode="$5"
-    local rerun="kb-cr publish-record $cr_id"
+# _kb_cr_record_excluded <board> <cr_id> -- rc 0 when the CR is in teamConfig.migration.excludeCrIds (spec 15.1,
+# XACA-1348-006's list). A missing/non-list value is "not excluded" HERE (jq cannot fail closed usefully in a
+# mark); the publisher re-reads the list with the strict reader and reports a malformed list as a failure.
+_kb_cr_record_excluded() {
+    local hit
+    hit=$(_kb_jq_read "$1" '(.teamConfig.migration.excludeCrIds // []) | if type == "array" then (index($id) != null) else false end' \
+        --arg id "$2" -r 2>/dev/null)
+    [[ "$hit" == "true" ]]
+}
 
-    # close: no stored page means complete never published one -> nothing to re-publish (quiet).
-    if [[ "$mode" == "update-only" ]]; then
-        local have
-        have=$(_kb_jq_read "$board" \
-            '(.crs[]? | select(.id == $id) | .wikiPages["cr-record"].pageId // "") ' \
-            --arg id "$cr_id" -r 2>/dev/null)
-        if [[ -z "$have" ]]; then
-            # XACA-1349-007: a CR that COMPLETED but whose cr-record publish failed (rc 6) has no page yet;
-            # close must write it now rather than silently drop the record. A CR that never completed
-            # (withdrawn / rejected) still has nothing to re-publish.
-            local done_at
-            done_at=$(_kb_jq_read "$board" \
-                '(.crs[]? | select(.id == $id) | (.timestamps.cr_completed_at // .cr_completed_at // ""))' \
-                --arg id "$cr_id" -r 2>/dev/null)
-            [[ -z "$done_at" ]] && return 0
-            mode="create-or-update"
-        fi
-    fi
+# _kb_cr_record_mark_dirty <board> <cr_id>  -- queue a refresh; the team comes from the caller's _cr_team
+# (zsh dynamic scope) and falls back to context detection at flush time.
+_kb_cr_record_mark_dirty() {
+    local board="${1:-}" cr_id="${2:-}"
+    [[ -n "$board" && -n "$cr_id" ]] || return 0
+    _kb_cr_record_excluded "$board" "$cr_id" && return 0   # spec 15.1: never enqueued, so no publisher spawn
+    _KB_CR_RECORD_DIRTY+=("${board}|${cr_id}|${_cr_team:-}")
+    return 0
+}
+
+# _kb_cr_record_refresh <verb> <board> <team> <cr_id> <rel_id|""> <reason> [mode]
+# One publisher call -> rc 0 (published / clean skip) or KB_CR_RECORD_FAIL_RC.
+_kb_cr_record_refresh() {
+    local verb="$1" board="$2" team="$3" cr_id="$4" rel_id="${5:-}" reason="${6:-kb-cr}" mode="${7:-create-or-update}"
+    local rerun="kb-cr publish-record ${rel_id:-$cr_id}"
 
     local py verdict prc
     py=$(_kb_cr_record_py) || {
         echo "kb-cr $verb: WARNING: cr-record page NOT published (publisher script missing). Re-run: $rerun" >&2
         return $KB_CR_RECORD_FAIL_RC
     }
-    verdict=$(python3 "$py" --board "$board" --cr-id "$cr_id" --team "$team" --mode "$mode" \
-        --activity-file "$(_kb_cr_activity_path "$board" "$cr_id")")
+    verdict=$(KB_CR_RECORD_NOFLUSH=1 python3 "$py" --board "$board" --cr-id "$cr_id" --team "$team" \
+        --reason "$reason" --mode "$mode" --activity-file "$(_kb_cr_activity_path "$board" "$cr_id")")
     prc=$?
 
-    local pr_status pr_reason
-    pr_status=$(printf '%s' "$verdict" | jq -r '.status // ""' 2>/dev/null)
-    pr_reason=$(printf '%s' "$verdict" | jq -r '.reason // ""' 2>/dev/null)
-
-    case "$pr_status" in
-        published)
-            local ts h_json
-            ts=$(_kb_cr_timestamp)
-            h_json=$(printf '%s' "$verdict" | jq -c '.handle')
-            if ! _kb_jq_update "$board" '
-                    .crs[$cidx].wikiPages = ((.crs[$cidx].wikiPages // {}) + {"cr-record": $h}) |
-                    .crs[$cidx].updatedAt = $ts | .lastUpdated = $ts
-                ' --argjson cidx "$(_kb_cr_find_container "$board" "$cr_id")" --argjson h "$h_json" --arg ts "$ts"; then
-                echo "kb-cr $verb: WARNING: cr-record page WAS published but its handle could not be stored on the CR: $h_json" >&2
-                echo "  Do NOT re-run publish-record (a second create is refused). Store it by hand, then re-run." >&2
-                return $KB_CR_RECORD_FAIL_RC
-            fi
-            echo "kb-cr $verb: cr-record page $(printf '%s' "$verdict" | jq -r '.mode') ok ($(printf '%s' "$h_json" | jq -r '.url') v$(printf '%s' "$h_json" | jq -r '.version'))"
-            return 0
-            ;;
-        skipped)
-            echo "kb-cr $verb: cr-record page skipped: $pr_reason" >&2
-            return 0
-            ;;
-        *)
-            echo "kb-cr $verb: WARNING: cr-record page NOT published: ${pr_reason:-publisher exit $prc, no verdict}" >&2
-            echo "  The CR state change was NOT undone. Re-run:  $rerun   (exit code $KB_CR_RECORD_FAIL_RC = publish failed)" >&2
-            return $KB_CR_RECORD_FAIL_RC
-            ;;
-    esac
+    _kb_cr_record_report "$verb" "$verdict" "$prc" "$rerun"
 }
 
-# kb-cr publish-record <CR-ID> -- (re)publish the cr-record page from the stored handle.
-# Only for a CR that has reached cr-completed or cr-closed (the record is the finished history).
+# _kb_cr_record_team_owns_board <team> <board> -- rc 0 only when <team> is a real team id whose board file is
+# <board> (both canonicalised with zsh :A, which resolves symlinks). Empty/ERROR team or unresolvable board = rc 1.
+_kb_cr_record_team_owns_board() {
+    local team="${1:-}" board="${2:-}" tboard
+    [[ -n "$team" && "$team" != "ERROR" && -n "$board" ]] || return 1
+    tboard=$(_kb_get_board_file "$team" 2>/dev/null) || return 1
+    [[ -n "$tboard" && "${tboard:A}" == "${board:A}" ]]
+}
+
+# _kb_cr_record_flush -- refresh once per (board, release) among the CRs marked dirty, then clear the list.
+# Returns 0, or KB_CR_RECORD_FAIL_RC if any refresh failed. Never touches CR state.
+_kb_cr_record_flush() {
+    (( ${#_KB_CR_RECORD_DIRTY[@]} )) || return 0
+    local -a entries
+    entries=("${_KB_CR_RECORD_DIRTY[@]}")
+    _KB_CR_RECORD_DIRTY=()
+    [[ -n "${KB_CR_RECORD_NOFLUSH:-}" ]] && return 0
+
+    local entry board rest cr_id team rel key seen="|" worst=0 ctx
+    for entry in "${entries[@]}"; do
+        board="${entry%%|*}"; rest="${entry#*|}"
+        cr_id="${rest%%|*}"; team="${rest#*|}"
+        if [[ -z "$team" ]]; then
+            ctx=$(_kb_detect_context 2>/dev/null)
+            team="${ctx%%:*}"
+        fi
+        rel=$(_kb_jq_read "$board" '(.crs[]? | select(.id == $id) | .releaseAssignment.releaseId // "")' \
+            --arg id "$cr_id" -r 2>/dev/null)
+        key="${board}|${rel:-$cr_id}"
+        [[ "$seen" == *"|${key}|"* ]] && continue
+        seen+="${key}|"
+        # XACA-1662-022: NEVER publish with a guessed team. The team picks the wiki config and space, so a wrong
+        # one files this board's page into ANOTHER team's wiki. The resolved team must own the dirty entry's board.
+        if ! _kb_cr_record_team_owns_board "$team" "$board"; then
+            echo "kb-cr: WARNING: cr-record page NOT published: cannot resolve the team for ${board}" \
+                 "(resolved '${team:-<none>}'). Re-run: kb-cr publish-record ${rel:-$cr_id}" >&2
+            worst=$KB_CR_RECORD_FAIL_RC
+            continue
+        fi
+        _kb_cr_record_refresh "${_KB_CR_VERB:-kb-cr}" "$board" "$team" "$cr_id" "$rel" "kb-cr:${_KB_CR_VERB:-kb-cr}" \
+            || worst=$KB_CR_RECORD_FAIL_RC
+    done
+    return $worst
+}
+
+# kb-cr publish-record <CR-ID|REL-ID> -- the ONE re-run / backfill command for the Release & CR Status page.
+# CR-ID refreshes the release that CR belongs to; REL-ID refreshes that release directly. Valid from DEV on
+# (the page no longer waits for cr-completed / cr-closed); a PLANNED release is a clean skip.
 _kb_cr_container_publish_record() {
-    local cr_id="${1:-}"
-    if [[ -z "$cr_id" ]]; then
-        echo "Usage: kb-cr publish-record <CR-ID>" >&2
+    local target="${1:-}"
+    if [[ -z "$target" ]]; then
+        echo "Usage: kb-cr publish-record <CR-ID|REL-ID>" >&2
         return 1
     fi
     local _cr_team _cr_board _cr_enabled
     _kb_cr_board_preamble || return 1
     [[ "$_cr_enabled" != "true" ]] && { _kb_cr_disabled_exit "$_cr_team"; return 0; }
-    local cr_idx
-    cr_idx=$(_kb_cr_find_container "$_cr_board" "$cr_id")
-    if [[ "$cr_idx" == "-1" ]]; then
-        echo "kb-cr publish-record: CR '$cr_id' not found on board '$_cr_team'." >&2
-        return 1
+
+    local py verdict prc
+    local rerun="kb-cr publish-record $target"
+    if [[ "$target" == CR-* ]] && _kb_cr_record_excluded "$_cr_board" "$target"; then
+        echo "kb-cr publish-record: $target is listed in teamConfig.migration.excludeCrIds (spec 15.1); skipped, no status page is published for it." >&2
+        return 0
     fi
-    local st
-    st=$(_kb_cr_container_get_state "$_cr_board" "$cr_idx")
-    case "$st" in
-        cr-completed|cr-closed) ;;
-        cr-held)
-            # XACA-1349-005: a CR held by a GAMMA failure (`kb-release gamma-fail` stamps .gammaFailure on it)
-            # gets its record now, so the failure is visible before the superseding close. Any other hold waits.
-            local gf
-            gf=$(_kb_jq_read "$_cr_board" ".crs[$cr_idx].gammaFailure.at // \"\"" -r 2>/dev/null)
-            if [[ -z "$gf" ]]; then
-                echo "kb-cr publish-record: CR '$cr_id' is held, but not by a GAMMA failure; the cr-record page is published at cr-completed / cr-closed." >&2
-                return 1
-            fi
-            ;;
-        *)
-            echo "kb-cr publish-record: CR '$cr_id' is in state '$st'; the cr-record page is published at cr-completed / cr-closed (or cr-held by a GAMMA failure)." >&2
+    py=$(_kb_cr_record_py) || {
+        echo "kb-cr publish-record: WARNING: cr-record page NOT published (publisher script missing). Re-run: $rerun" >&2
+        return $KB_CR_RECORD_FAIL_RC
+    }
+    if [[ "$target" == REL-* ]]; then
+        local have_rel
+        have_rel=$(_kb_jq_read "$_cr_board" '[.releases[]? | select(.id == $id)] | length' --arg id "$target" -r 2>/dev/null)
+        if [[ "${have_rel:-0}" == "0" ]]; then
+            echo "kb-cr publish-record: release '$target' not found on board '$_cr_team'." >&2
             return 1
-            ;;
+        fi
+        verdict=$(KB_CR_RECORD_NOFLUSH=1 python3 "$py" --board "$_cr_board" --release-id "$target" --team "$_cr_team" \
+            --reason "kb-cr:publish-record")
+        prc=$?
+    else
+        local cr_idx
+        cr_idx=$(_kb_cr_find_container "$_cr_board" "$target")
+        if [[ "$cr_idx" == "-1" ]]; then
+            echo "kb-cr publish-record: CR '$target' not found on board '$_cr_team'." >&2
+            return 1
+        fi
+        verdict=$(KB_CR_RECORD_NOFLUSH=1 python3 "$py" --board "$_cr_board" --cr-id "$target" --team "$_cr_team" \
+            --reason "kb-cr:publish-record" --activity-file "$(_kb_cr_activity_path "$_cr_board" "$target")")
+        prc=$?
+    fi
+    _kb_cr_record_report "publish-record" "$verdict" "$prc" "$rerun"
+}
+
+# _kb_cr_record_report <verb> <verdict-json> <publisher-rc> <fallback-rerun>  (shared verdict -> rc mapping)
+_kb_cr_record_report() {
+    local verb="$1" verdict="$2" prc="$3" rerun="$4"
+    local pr_reason pr_rerun pr_unstored h_json
+    pr_reason=$(printf '%s' "$verdict" | jq -r '.reason // ""' 2>/dev/null)
+    pr_rerun=$(printf '%s' "$verdict" | jq -r '.rerun // ""' 2>/dev/null)
+    pr_unstored=$(printf '%s' "$verdict" | jq -r '.handleUnstored // false' 2>/dev/null)
+    [[ -n "$pr_rerun" ]] && rerun="$pr_rerun"
+    if [[ "$pr_unstored" == "true" ]]; then
+        h_json=$(printf '%s' "$verdict" | jq -c '.handle' 2>/dev/null)
+        echo "kb-cr $verb: WARNING: cr-record page WAS published but its handle could not be stored on the board: $h_json" >&2
+        echo "  Do NOT re-run publish-record (a second create is refused). Store it by hand, then re-run." >&2
+        return $KB_CR_RECORD_FAIL_RC
+    fi
+    case "$prc" in
+        0)
+            h_json=$(printf '%s' "$verdict" | jq -c '.handle // {}' 2>/dev/null)
+            echo "kb-cr $verb: cr-record page $(printf '%s' "$verdict" | jq -r '.recordMode // "published"') ok ($(printf '%s' "$h_json" | jq -r '.url // ""') v$(printf '%s' "$h_json" | jq -r '.version // ""'))"
+            return 0 ;;
+        10)
+            echo "kb-cr $verb: cr-record page skipped: ${pr_reason:-nothing to publish}" >&2
+            return 0 ;;
+        *)
+            echo "kb-cr $verb: WARNING: cr-record page NOT published: ${pr_reason:-publisher exit $prc, no verdict}" >&2
+            echo "  The CR state change was NOT undone. Re-run:  $rerun   (exit code $KB_CR_RECORD_FAIL_RC = publish failed)" >&2
+            return $KB_CR_RECORD_FAIL_RC ;;
     esac
-    _kb_cr_publish_record "publish-record" "$_cr_board" "$_cr_team" "$cr_id" "create-or-update"
 }
 
 # kb-cr complete <CR-ID>   (XACA-1348) — deployed-prod -> cr-completed, or
@@ -2369,9 +2505,9 @@ _kb_cr_container_complete() {
     ts=$(_kb_cr_timestamp)
     _kb_cr_lifecycle_advance "$_cr_board" "$cr_idx" "$cr_id" "cr-completed" "cr_completed_at" "$ts" || return 1
     echo "kb-cr complete: [$cr_id] $current_state -> cr-completed (cr_completed_at=$ts)"
-    # XACA-1349-006: publish the cr-record page. The state change above is final; a publish
-    # failure returns rc 6 but never undoes it.
-    _kb_cr_publish_record "complete" "$_cr_board" "$_cr_team" "$cr_id" "create-or-update"
+    # XACA-1662-003: no explicit publish here. _kb_cr_lifecycle_advance marked the CR dirty and the
+    # kb-cr() dispatcher flushes ONE status-page refresh at the end of the command (rc 6 on failure,
+    # the state change above is never undone).
 }
 
 # kb-cr reject <CR-ID> [--reason "<text>"]
@@ -2737,26 +2873,34 @@ _kb_cr_container_sweep_assumed_approvals() {
     return $failed
 }
 
-# kb-cr close <CR-ID> [--reason "<text>"]
+# kb-cr close <CR-ID> [--reason "<text>"] [--force-close]
 # Transitions a CR to the terminal state cr-closed from any non-closed state.
+# XACA-1667-004: REFUSED while a release's close-out has yet to close this CR (see _kb_cr_close_guard); run
+# `kb-release close-out <REL-ID>`, or override with `--force-close --reason "<why>"` (reason mandatory, audited).
 # Does NOT increment pushback_count — this is manual archival, not a rejection.
 _kb_cr_container_close() {
     local cr_id="${1:-}"
     shift 2>/dev/null
 
     if [[ -z "$cr_id" ]]; then
-        echo "Usage: kb-cr close <CR-ID> [--reason \"<text>\"]" >&2
+        echo "Usage: kb-cr close <CR-ID> [--reason \"<text>\"] [--force-close]" >&2
         return 1
     fi
 
-    local reason=""
+    local reason="" force_close=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --reason)   reason="${2:-}"; shift 2 ;;
             --reason=*) reason="${1#--reason=}"; shift ;;
+            --force-close) force_close=1; shift ;;   # XACA-1667-004
             *) shift ;;
         esac
     done
+    # XACA-1667-004: the override needs a non-empty reason (it doubles as the close reason and the audit text).
+    if (( force_close )) && [[ -z "${reason//[[:space:]]/}" ]]; then
+        echo "kb-cr close: --force-close requires a non-empty --reason \"<why>\"." >&2
+        return 1
+    fi
 
     local _cr_team _cr_board _cr_enabled
     _kb_cr_board_preamble || return 1
@@ -2784,10 +2928,18 @@ _kb_cr_container_close() {
         reason="rejected"
     fi
 
+    # XACA-1667-004: refuse to close a CR a release's close-out still has to close, unless overridden (--force-close
+    # --reason). Close-out's own crClose passes the guard on board state alone.
+    local _close_ovr_rel="" _close_ovr_reason=""
+    (( force_close )) && _close_ovr_reason="$reason"
+    _kb_cr_close_guard "$_cr_board" "$cr_id" "$_close_ovr_reason" || return 1
+    _close_ovr_rel="$_KB_CR_CLOSE_OVERRIDE_REL"
+
     local ts
     ts=$(_kb_cr_timestamp)
 
     _kb_cr_lifecycle_advance "$_cr_board" "$cr_idx" "$cr_id" "cr-closed" "cr_closed_at" "$ts" || return 1
+    [[ -n "$_close_ovr_rel" ]] && _kb_cr_close_override_log "$_cr_board" "$cr_id" "$_close_ovr_rel" "$reason"
     # XACA-1348: held_from is meaningful only while held; its history is the
     # cr_state_changed event (from_state) in the activity log.
     if [[ "$current_state" == "cr-held" ]]; then
@@ -2809,8 +2961,7 @@ _kb_cr_container_close() {
     local reason_msg=""
     [[ -n "$reason" ]] && reason_msg=" reason=\"$reason\""
     echo "kb-cr close: [$cr_id] $current_state -> cr-closed (cr_closed_at=$ts${reason_msg})"
-    # XACA-1349-006: re-publish the SAME cr-record page (only if complete published one).
-    _kb_cr_publish_record "close" "$_cr_board" "$_cr_team" "$cr_id" "update-only"
+    # XACA-1662-003: the status-page refresh is flushed by the kb-cr() dispatcher (see complete).
 }
 
 # kb-cr deploy-dev <CR-ID>
@@ -3775,6 +3926,7 @@ kb-cr() {
 
     local subcmd="${1:-help}"
     shift 2>/dev/null
+    _KB_CR_VERB="$subcmd"
 
     case "$subcmd" in
         # ── CR Container (v2.0 schema) ────────────────────────────────────────
@@ -3909,9 +4061,9 @@ kb-cr() {
         sweep-assumed-approvals) _kb_cr_container_sweep_assumed_approvals "$@" ;;
         publish-record)
             case "${1:-}" in
-                CR-*) _kb_cr_container_publish_record "$@" ;;
+                CR-*|REL-*) _kb_cr_container_publish_record "$@" ;;
                 *)
-                    echo "kb-cr publish-record: requires a CR-ID (e.g. CR-TEAM-YYYYMMDD-0001), not an item-id." >&2
+                    echo "kb-cr publish-record: requires a CR-ID (e.g. CR-TEAM-YYYYMMDD-0001) or a REL-ID, not an item-id." >&2
                     return 1 ;;
             esac ;;
         reschedule-approval)
@@ -3971,6 +4123,13 @@ kb-cr() {
             return 1
             ;;
     esac
+    # XACA-1662-003: ONE Release & CR Status refresh per command, after every state write has committed.
+    # The command's own rc wins; a refresh failure (6) only surfaces when the command itself succeeded.
+    local _kb_cr_rc=$?
+    _kb_cr_record_flush
+    local _kb_cr_frc=$?
+    (( _kb_cr_rc != 0 )) && return $_kb_cr_rc
+    return $_kb_cr_frc
 }
 
 # Route show to container show (CR-ID) or legacy item show (item-ID).
@@ -4110,7 +4269,10 @@ _kb_cr_container_assign_release() {
 
     # Delegate to the shared write function in kanban-helpers.sh.
     # _kb_cr_release_link validates CR and release existence, handles re-link.
-    _kb_cr_release_link "$_cr_board" "$_cr_team" "$cr_id" "$rel_id"
+    _kb_cr_release_link "$_cr_board" "$_cr_team" "$cr_id" "$rel_id" || return $?
+    # XACA-1662-003: a link writes no activity event, but it fills the page's CR fields -> refresh.
+    _kb_cr_record_mark_dirty "$_cr_board" "$cr_id"
+    return 0
 }
 
 # kb-cr unassign-release <CR-ID>
@@ -5099,21 +5261,30 @@ _kb_cr_container_transition() {
     # XACA-0924 (F1): --force is the explicit opt-in for a transition that skips
     # ranks with no supporting evidence. Scanned out of the args first so it can
     # appear in any position; the two remaining positionals keep their meaning.
-    local force_flag="" _t_arg
+    local force_flag="" _t_arg _t_force_close=0 _t_reason="" _t_want_reason=0
     local -a _t_pos=()
     for _t_arg in "$@"; do
+        if (( _t_want_reason )); then _t_reason="$_t_arg"; _t_want_reason=0; continue; fi
         case "$_t_arg" in
             --force) force_flag="force" ;;
+            --force-close) _t_force_close=1 ;;     # XACA-1667-004
+            --reason)      _t_want_reason=1 ;;
+            --reason=*)    _t_reason="${_t_arg#--reason=}" ;;
             *)       _t_pos+=("$_t_arg") ;;
         esac
     done
     set -- "${_t_pos[@]:-}"
+    # XACA-1667-004: --force-close (close a CR a release still waits on) needs a non-empty --reason; it is the audit text.
+    if (( _t_force_close )) && [[ -z "${_t_reason//[[:space:]]/}" ]]; then
+        echo "kb-cr transition: --force-close requires a non-empty --reason \"<why>\"." >&2
+        return 1
+    fi
 
     local cr_id="${1:-}"
     local new_state="${2:-}"
 
     if [[ -z "$cr_id" || -z "$new_state" ]]; then
-        echo "Usage: kb-cr transition <CR-ID> <new-state> [--force]" >&2
+        echo "Usage: kb-cr transition <CR-ID> <new-state> [--force] [--force-close --reason \"<why>\"]" >&2
         echo "Valid states: cr-drafted, cr-published, cr-submitted, cr-approved," >&2
         echo "              cr-rejected, cr-held, implementing, deployed-dev," >&2
         echo "              deployed-prod, emergency-deployed, cr-completed, cr-closed" >&2
@@ -5159,7 +5330,9 @@ _kb_cr_container_transition() {
             ".crs[$cr_idx].timestamps[\"$ts_field\"] // \"\"" -r 2>/dev/null)
     fi
 
-    _kb_cr_stamp_state_entry "$_cr_board" "$cr_idx" "$cr_id" "$new_state" "$force_flag" || {
+    local _t_ovr=""
+    (( _t_force_close )) && _t_ovr="$_t_reason"
+    _kb_cr_stamp_state_entry "$_cr_board" "$cr_idx" "$cr_id" "$new_state" "$force_flag" "$_t_ovr" || {
         echo "kb-cr transition: refused — CR [$cr_id] stays in state '$old_state'." >&2
         return 1
     }
@@ -7414,6 +7587,11 @@ _kb_cr_help() {
     echo "              needs cr_submitted_at + cr_approved_at."
     echo "              --force overrides the refusal and records a"
     echo "              cr_evidence_override event in the CR activity log."
+    echo "              To cr-closed (and 'kb-cr close'): REFUSED while a release's"
+    echo "              close-out has yet to close the CR (XACA-1667); run"
+    echo "              'kb-release close-out <REL-ID>' instead, or override with"
+    echo "              --force-close --reason \"<why>\" (reason required, recorded as"
+    echo "              a cr_close_override event naming the release)."
     echo "              A transition from cr-submitted (or later) DOWN to cr-drafted/"
     echo "              cr-published sets poller_submit_suppressed (as revert/undo do)."
     echo "              A force-write TO cr-submitted does NOT clear it: only"
@@ -7435,15 +7613,15 @@ _kb_cr_help() {
     echo "              v2 CRs: deployed-prod -> cr-completed (or emergency-deployed,"
     echo "              after the retroactive 'kb-cr approve <CR-ID> --by <who>')."
     echo "              (complete <item-id> is the unchanged legacy per-item stamp.)"
-    echo "              [XACA-1349-006] Then publishes the cr-record wiki page (kb-wiki publish"
-    echo "              --doc cr-record) and stores wikiPages[\"cr-record\"]. close <CR-ID>"
-    echo "              re-publishes that SAME page (never a second one). A publish failure"
-    echo "              does NOT undo the state change: it warns loudly and exits 6."
-    echo "              Wiki not configured / no linked release = skip notice, exit 0."
-    echo "  publish-record <CR-ID>  [XACA-1349-006]"
-    echo "              Re-run path for the cr-record page (cr-completed / cr-closed CRs, or a"
-    echo "              cr-held CR carrying a GAMMA-failure marker, XACA-1349-005):"
-    echo "              creates it if no page is stored, else updates the stored page."
+    echo "              [XACA-1662] The release's \"Release & CR Status\" wiki page (kb-wiki doc"
+    echo "              cr-record) is refreshed ONCE at the end of every kb-cr command that"
+    echo "              changed a CR state or release link (never the CR Request page). A refresh"
+    echo "              failure does NOT undo the state change: it warns loudly and exits 6."
+    echo "              Wiki not configured / no linked release / PLANNED release = skip, exit 0."
+    echo "  publish-record <CR-ID|REL-ID>  [XACA-1349-006, XACA-1662]"
+    echo "              The one re-run / backfill command for the status page: refreshes the"
+    echo "              release's page (a CR-ID resolves to its release); valid from DEV onward."
+    echo "              Creates it if no page is stored, else updates (adopting a legacy page)."
     echo "              Exit 0 = published or skipped; exit 6 = publish failed (retry later)."
     echo "  v2 lifecycle: new CRs carry cr_lifecycle=v2 (stamped by create). For them"
     echo "              start-dev/start-test/deploy-dev are refused, deploy-prod needs"
