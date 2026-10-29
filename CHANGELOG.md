@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1676: Register the richmond (AFC) team across repo-side sites (XACA-1676)
+- Tap files updated in this publish: `share/kanban-hooks/aiteamforge_paths.py`,`share/lcars-ui/server.py` `share/lcars-ui/tests/test_xaca0992_appicons.py`,`share/lcars-ui/tests/test_xaca1676_richmond_server_registration.py` `share/scripts/display-agent-avatar.sh`,`share/scripts/lcars-health-check.sh` `share/scripts/lcars-tmp-dir.sh`,`share/scripts/plugins-manifest.json` (+1 more). Run `brew upgrade aiteamforge` to receive them.
 - XACA-1675: Add Richmond (AFC) avatars, logos and appicons (XACA-1675)
 - Tap files updated in this publish: `fleet-monitor/server/public/avatars/richmond_beard_avatar.png`,`fleet-monitor/server/public/avatars/richmond_beard_avatar_panel.png` `fleet-monitor/server/public/avatars/richmond_beard_avatar_thumb.png`,`fleet-monitor/server/public/avatars/richmond_clinic_logo.png` `fleet-monitor/server/public/avatars/richmond_clinic_logo_panel.png`,`fleet-monitor/server/public/avatars/richmond_higgins_avatar.png` `fleet-monitor/server/public/avatars/richmond_higgins_avatar_panel.png`,`fleet-monitor/server/public/avatars/richmond_higgins_avatar_thumb.png` (+38 more). Run `brew upgrade aiteamforge` to receive them.
 

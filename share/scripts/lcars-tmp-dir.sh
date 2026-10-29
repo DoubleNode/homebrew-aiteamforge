@@ -120,6 +120,7 @@ _get_team_kanban_dir_for_tmp() {
         legal-coparenting)                     echo "${HOME}/legal/coparenting/kanban" ;;
         finance-personal)                      echo "${HOME}/finance/personal/kanban" ;;
         spacedock)                      echo "${HOME}/.aiteamforge/spacedock/kanban" ;;
+        richmond)                echo "${HOME}/richmond/kanban" ;;
         medical|medical-general)               echo "${HOME}/medical/general/kanban" ;;
 
         # Unknown team — fall back to academy kanban (safe default)

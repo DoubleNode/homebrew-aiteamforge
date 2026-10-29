@@ -291,7 +291,8 @@ def get_config_path() -> Path:
 #                    guard (_kb_knowledge_host_affinity_guard in
 #                    kanban-helpers.sh) fails OPEN on absence and an empty
 #                    string would be indistinguishable from a host named "".
-#                    Populated ONLY for the three PII teams today; the registry
+#                    Populated for the three PII teams and richmond (M1 Mini
+#                    only, XACA-1676); spacedock is deliberately absent. The registry
 #                    lists every team the fleet knows about, so team membership
 #                    alone has never implied ownership — this field is what
 #                    makes ownership expressible (XACA-0779 stranded a legal
@@ -440,6 +441,21 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "lcars_port_base": 8380,
         "lcars_port_range": 10,
         "lcars_port": 8380,
+    },
+
+    # ── Richmond (AFC) — XACA-1676 / EPIC-0075 ────────────────────────────
+    # AFC Richmond (Ted Lasso) team: the first non-Star-Trek team. Authored on
+    # the M1 Mini only, so primary_host is set (contrast Space Dock above, which
+    # lives on every machine and therefore must NOT declare one). Band 8620 is
+    # clear of 8600, which EPIC-0063 (home) reserves.
+    "richmond": {
+        "team_code": "AFC",
+        "kanban_dir": f"{_HOME}/richmond/kanban",
+        "working_dir": f"{_HOME}/richmond",
+        "lcars_port_base": 8620,
+        "lcars_port_range": 10,
+        "lcars_port": 8620,
+        "primary_host": "darren-m1-mini",
     },
     # ── Aliases (backward-compat, mirrors kanban_utils.py) ────────────────
     # NOTE (XACA-0463): mainevent moves from 8234 → 8400 to resolve the existing
@@ -2757,7 +2773,7 @@ def apply_primary_host(config: dict) -> dict:
 
     STRICTLY ADDITIVE, mirroring apply_board_less_markers:
       - Adds ONLY `primary_host`, and ONLY to teams DEFAULT_TEAMS declares a host
-        for (today: the three PII teams).
+        for (today: the three PII teams and richmond).
       - Never touches any other team and never touches any other field.
       - Never overwrites an existing `primary_host`, even an empty one — key
         presence is the migration marker, and an operator's explicit value wins.

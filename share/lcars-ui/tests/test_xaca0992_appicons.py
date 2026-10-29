@@ -1114,6 +1114,7 @@ class TestPathPrefixesMembership(unittest.TestCase):
         # without adding it here fails this test by design; that is the gate
         # working, not a broken test. Keep the two in lockstep.
         '/spacedock',
+        '/richmond',
     }
 
     def test_fixed_prefixes_match_exactly(self):

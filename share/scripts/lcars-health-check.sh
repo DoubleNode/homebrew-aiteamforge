@@ -212,6 +212,7 @@ declare -a _LCARS_INFRA=(
     "0:legal-coparenting:legal:legal-coparenting-lcars"
     "0:medical-general:medical:medical-general-lcars"
     "0:spacedock:spacedock:spacedock-lcars"
+    "0:richmond:richmond:richmond-lcars"
 )
 
 # Derive lcars_port for each team from the team-paths registry at runtime via the

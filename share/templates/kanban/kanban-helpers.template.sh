@@ -234,6 +234,10 @@ PYEOF
             # never git-tracked — deliberately NOT under $AITEAMFORGE_DIR.
             echo "${HOME}/.aiteamforge/spacedock/kanban"
             ;;
+        richmond)
+            # XACA-1676: AFC Richmond team (EPIC-0075). Fixed per-user location.
+            echo "${HOME}/richmond/kanban"
+            ;;
         legal-*)
             local _suffix="${team#legal-}"
             echo "${HOME}/legal/${_suffix}/kanban"
@@ -3478,6 +3482,7 @@ _kb_get_team_code() {
                     legal-coparenting)  _builtin_code="LCP" ;;
                     medical-general)    _builtin_code="MED" ;;
                     finance-personal)   _builtin_code="FIN" ;;
+                    richmond)          _builtin_code="AFC" ;;
                 esac
                 if [[ -n "$_builtin_code" && "$_memo_code" != "$_builtin_code" ]]; then
                     echo "[overlay] WARNING: team-paths.json's team_code for core team '${team}' is '${_memo_code}', which disagrees with the built-in code '${_builtin_code}'. Using the overlay value (it is authoritative) -- check $(_kb_overlay_config_path) for a typo or a duplicated entry if this is unintended." >&2
@@ -3544,6 +3549,7 @@ _kb_get_team_code() {
             legal-coparenting)  _builtin_code="LCP" ;;
             medical-general)    _builtin_code="MED" ;;
             finance-personal)   _builtin_code="FIN" ;;
+            richmond)          _builtin_code="AFC" ;;
         esac
         if [[ -n "$_builtin_code" && "$_ovl_code" != "$_builtin_code" ]]; then
             echo "[overlay] WARNING: team-paths.json's team_code for core team '${team}' is '${_ovl_code}', which disagrees with the built-in code '${_builtin_code}'. Using the overlay value (it is authoritative) -- check $(_kb_overlay_config_path) for a typo or a duplicated entry if this is unintended." >&2
@@ -3586,6 +3592,7 @@ _kb_get_team_code() {
         legal-coparenting)                 _builtin="LCP" ;;
         medical-general)                   _builtin="MED" ;;
         finance-personal)                  _builtin="FIN" ;;
+        richmond)                          _builtin="AFC" ;;
         *)
             # XACA-1058: NO derivation fallback here (deliberately removed —
             # this used to call a "smart" first-letter + compound-code
@@ -3672,6 +3679,7 @@ _kb_get_team_from_code() {
         LCP) echo "legal-coparenting" ;;
         MED) echo "medical-general" ;;
         FIN) echo "finance-personal" ;;
+        AFC) echo "richmond" ;;
         *)   echo "" ;;  # Unknown code
     esac
 }
@@ -13642,6 +13650,17 @@ _kb_get_persona_delegation_guide() {
             guide+="| Legal Research / Precedent | lawclerk | Legal Researcher |\n"
             guide+="| Settlement / Negotiation | mediator | Mediation Specialist |\n"
             guide+="| Evidence / Investigation | paralegal | Discovery Specialist |"
+            ;;
+        richmond)
+            guide+="| Work Type | subagent_type | Persona |\n"
+            guide+="|---|---|---|\n"
+            guide+="| Feature Development | ted | Ted Lasso |\n"
+            guide+="| Architecture / Planning | beard | Coach Beard |\n"
+            guide+="| Bug Fixing | sharon | Sharon |\n"
+            guide+="| Testing / QA | roy | Roy Kent |\n"
+            guide+="| Code Review | trent | Trent Crimm |\n"
+            guide+="| Documentation | keeley | Keeley Jones |\n"
+            guide+="| Release / CI/CD | higgins | Higgins |"
             ;;
         medical*)
             guide+="| Work Type | subagent_type | Persona |\n"
@@ -26477,6 +26496,7 @@ _kb_team_lcars_port() {
         # collision left over before the 8234→8400 renumber.
         mainevent)                              _port="8400" ;;
         spacedock)                           _port="8380" ;;
+        richmond)                            _port="8620" ;;
         *)                                      _port="" ;;
     esac
 

@@ -338,6 +338,9 @@ def _hardcoded_team_kanban_dirs() -> dict:
         # see docs/architecture/team-id-contract.md. Not parameterized, so it
         # is NOT in _PARAMETERIZED_TEMPLATES and needs no instance suffix.
         "spacedock": _home / ".aiteamforge" / "spacedock" / "kanban",
+        # XACA-1676: AFC Richmond is a fixed, single-instance team (like
+        # academy/command/dns/spacedock): not parameterized, no instance suffix.
+        "richmond": _home / "richmond" / "kanban",
     }
 
 
@@ -488,6 +491,8 @@ def _build_item_prefix_to_team() -> dict:
         # added one at a different line, which git merged CLEANLY into two entries
         # in this same dict. Python silently keeps the last. Do not re-add.
         'XSDK': 'spacedock',
+        # XACA-1676: AFC Richmond (team_code AFC). Mirrors DEFAULT_TEAMS.
+        'XAFC': 'richmond',
         # Freelance per-client/project prefixes (XFSW/XFAP/.../XBWA/XBWD) are NOT
         # listed here — they live only in the per-machine overlay (XACA-0628). The
         # runtime path derives them from build_team_code_map() (merged overlay), so
@@ -2087,6 +2092,7 @@ _BASE_BRAND_SHORT_NAMES = {
     'mainevent': 'MainEvent',
     'freelance': 'Freelance',
     'spacedock': 'Space Dock',
+    'richmond': 'Richmond',
 }
 
 # XACA-0992: hard cap enforced on the FALLBACK path only (a base brand not
@@ -5232,7 +5238,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     PATH_PREFIXES = (
         ['/academy', '/firebase', '/dns', '/command', '/ios', '/android',
          '/mainevent', '/legal-coparenting', '/medical-general', '/finance-personal',
-         '/spacedock']
+         '/spacedock', '/richmond']
         + sorted(
             '/' + _t for _t in TEAM_KANBAN_DIRS
             if _t.startswith('freelance-')

@@ -182,6 +182,17 @@ display_agent_avatar() {
         # or `Montgomery "Scotty" Scott` depending on the generating path.
         spacedock:Montgomery\ *Scotty*\ Scott) avatar_codename="scotty" ;;
 
+        # Richmond (AFC) team (XACA-1676). Codenames match the shipped
+        # richmond_<codename>_avatar.png files (XACA-1675). The lcars station
+        # has no crew member, so it has no arm. No amb_handle: distinct crew.
+        "richmond:Ted Lasso") avatar_codename="ted" ;;
+        "richmond:Coach Beard") avatar_codename="beard" ;;
+        "richmond:Leslie Higgins") avatar_codename="higgins" ;;
+        "richmond:Keeley Jones") avatar_codename="keeley" ;;
+        "richmond:Roy Kent") avatar_codename="roy" ;;
+        "richmond:Dr. Sharon Fieldstone") avatar_codename="sharon" ;;
+        "richmond:Trent Crimm") avatar_codename="trent" ;;
+
         *)
             # Never return early (XACA-1220): write the panel with an empty
             # avatar, which agent-panel.html renders as initials. Warn only for
