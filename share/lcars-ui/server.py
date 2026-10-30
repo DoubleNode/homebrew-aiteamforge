@@ -9976,7 +9976,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         return []
 
     def _refresh_release_cr_record(self, release_id, team, reason, refresh_testing_log=False,
-                                   testing_log_update_only=False, record_mode=None):
+                                   testing_log_update_only=False, record_mode=None, testing_log_create=False):
         """XACA-1662-002: refresh the release's living "Release & CR Status" wiki page after a stage move.
         Runs kanban-hooks/release_cr_record_publish.py (the single renderer/publisher/handle writer): it creates
         the page when the release has none and is past PLANNED, else updates it, and skips cleanly when the
@@ -9991,7 +9991,11 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         ``testing_log_update_only`` a release that has no Testing Log handle is a clean skip instead of a first
         publish, so a record-driven refresh can never create a page. Same non-blocking verdict either way.
         ``record_mode="update-only"`` (XACA-1668-011) additionally makes the status page itself update-only, so a
-        background re-publish can never turn a FAILED synchronous create into a second, racing create."""
+        background re-publish can never turn a FAILED synchronous create into a second, racing create.
+
+        XACA-1701: ``testing_log_create`` is passed ONLY by a promote whose destination is GAMMA. It makes the
+        publisher create a NON-CR team's Testing Log (spec 12.2 / G10) when wiki.json maps testing-log; CR teams
+        ignore it. A failed create's re-run hint comes from the publisher verdict (a non-CR team has no kb-cr)."""
         rerun = "kb-cr publish-record %s" % release_id
         try:
             board_file = self._get_board_file(team)
@@ -10006,6 +10010,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                                 "--release-id", release_id, "--reason", reason]
                                + (["--refresh-testing-log"] if refresh_testing_log else [])
                                + (["--testing-log-update-only"] if testing_log_update_only else [])
+                               + (["--testing-log-create"] if testing_log_create else [])
                                + (["--mode", record_mode] if record_mode else []),
                                capture_output=True, text=True, timeout=180, env=run_env)
             try:
@@ -10632,7 +10637,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             # XACA-1668-001/-011: a successful promote also re-publishes the Testing Log in place (spec 12.2). The
             # sync refresh still creates a missing log (first publish at PLANNED -> DEV); the in-place re-publish
             # runs on the background scheduler so it never stretches the promote past client timeouts.
-            cr_record = self._refresh_release_cr_record(release_id, LCARS_TEAM, 'promote:%s->%s' % (cur, eff_target))
+            # XACA-1701: entering GAMMA is the one moment a non-CR team's Testing Log is CREATED (spec 12.2 / G10).
+            # The kwarg is passed only at GAMMA entry, so every other promote calls the refresh exactly as before.
+            cr_record = self._refresh_release_cr_record(release_id, LCARS_TEAM, 'promote:%s->%s' % (cur, eff_target),
+                                                        **({'testing_log_create': True} if eff_target == 'GAMMA' else {}))
             self._schedule_testing_log_refresh(release_id, LCARS_TEAM, 'promote:%s->%s' % (cur, eff_target),
                                                record_mode="update-only")
             return self._send_json_response(dict(

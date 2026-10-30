@@ -8,7 +8,7 @@ kb-cr, the LCARS promote endpoint and the backfill all call it.
 
     release_cr_record_publish.py --board B --team T (--release-id REL | --cr-id CR) --reason <event>
                                  [--mode create-or-update|update-only] [--activity-file F] [--refresh-testing-log]
-                                 [--testing-log-update-only]
+                                 [--testing-log-update-only] [--testing-log-create]
 
     --cr-id CR     resolves CR -> releaseAssignment.releaseId (back-compat for ``kb-cr publish-record <CR>``)
     --mode         create-or-update (default) | update-only. A create is SKIPPED while the release is PLANNED.
@@ -20,6 +20,14 @@ stdout is ONE JSON object:
      "rerun": "kb-cr publish-record <REL-ID>"}
 Exit codes:  0 published | 10 skipped (nothing to do: wiki unconfigured, cr-record unmapped, no release, release
 still PLANNED, CR support off, update-only with no page) -- a skip is NOT an error | 11 failed.
+
+Non-CR teams (XACA-1701, spec 12.2 / G10): a team with no CR support and no CR linked to the release has no
+cr-record page, ever. When its wiki.json maps ``testing-log`` the publisher runs a Testing-Log-ONLY branch that
+returns before any cr-record code: ``--testing-log-create`` CREATES the log (stage GAMMA or later; the LCARS promote
+passes it only when the destination is GAMMA), and ``--refresh-testing-log`` re-publishes an EXISTING log in place
+and never creates. Recovery for a failed GAMMA-entry create:
+    python3 <this script> --board B --team T --release-id REL --testing-log-create
+Not mapped / no flag -> a clean skip (kanban only). wiki.json need not map ``cr-record`` for this branch.
 
 Order (all under a per-release flock, so a promote racing a CR transition cannot race the version guard):
   1. resolve the handle: the release's own (``wikiPages["cr-record"]``, kb-wiki key = ``handle.key`` else the
@@ -104,7 +112,7 @@ def _config_dir(team: str) -> Path:
         raise _Skip("no kanban config dir resolvable for team '%s'" % team) from None
 
 
-def _wiki_json(cfg: Path) -> Dict[str, Any]:
+def _wiki_json(cfg: Path, need: str = DOC) -> Dict[str, Any]:
     p = cfg / "wiki.json"
     if not p.is_file():
         raise _Skip("wiki not configured for this team (no %s)" % p)
@@ -112,9 +120,19 @@ def _wiki_json(cfg: Path) -> Dict[str, Any]:
     if not isinstance(cfg_obj, dict):
         raise _Fail("wiki.json must be a JSON object")
     doc_types = cfg_obj.get("docTypes")
-    if not isinstance(doc_types, dict) or DOC not in doc_types:
-        raise _Skip("wiki.json does not map doc type '%s'" % DOC)
+    if not isinstance(doc_types, dict) or need not in doc_types:
+        raise _Skip("wiki.json does not map doc type '%s'" % need)
     return cfg_obj
+
+
+def _is_non_cr(board: Dict[str, Any], release: Dict[str, Any]) -> bool:
+    """XACA-1701: no CR support AND no CR linked to the release (the same test the CR-support skip applies)."""
+    if _cr_support_enabled(board):
+        return False
+    try:
+        return not _linked(board, release)
+    except _Fail:  # unreadable linkage: not provably non-CR, so the existing CR-path rules (and their error) apply
+        return False
 
 
 def _activity_path(board_path: str, cr_id: str) -> Path:
@@ -476,7 +494,7 @@ def _mirror_edit(rel_id: str, handle: Dict[str, Any], release_page_ids: set):
 def refresh(board_path: str, team: str, *, release_id: Optional[str] = None, cr_id: Optional[str] = None,
             reason: str = "", mode: str = "create-or-update", activity_file: Optional[str] = None,
             refresh_testing_log: bool = False, testing_log_update_only: bool = False,
-            now: Optional[datetime] = None) -> Tuple[int, Dict[str, Any]]:
+            testing_log_create: bool = False, now: Optional[datetime] = None) -> Tuple[int, Dict[str, Any]]:
     """Run one refresh. Returns (exit code, verdict dict). Never raises."""
     verdict: Dict[str, Any] = {}
     rel_label = release_id or ""
@@ -506,14 +524,24 @@ def refresh(board_path: str, team: str, *, release_id: Optional[str] = None, cr_
         # ONLY kb-wiki call site (nested CrStage tools route through it too); the old global write leaked into
         # every in-process caller ("doc 'cr' is denied" in unrelated suites).
         cfg = _config_dir(team)
-        wiki = _wiki_json(cfg)
+        wiki = None
+        if _is_non_cr(board, release):
+            try:  # XACA-1701: a non-CR team need only map testing-log (it has no cr-record page)
+                wiki = _wiki_json(cfg, need=TESTING_LOG_DOC)
+            except _Skip:
+                wiki = None  # unmapped: fall through to the unchanged rules below (same skips as before)
+        if wiki is None:
+            wiki = _wiki_json(cfg)
         with _release_lock(board_path, rel_label):
             board = _load_json(Path(board_path), "board")  # fresh, now that we hold the lock
             release = _find_release(board, rel_label)
             if release is None:
                 raise _Skip("release '%s' is not on this board" % rel_label)
+            if not _is_non_cr(board, release):  # XACA-1701-011: a CR linked since the pre-lock read needs cr-record
+                wiki = _wiki_json(cfg)
             return _refresh_locked(board_path, board, release, team, cfg, wiki, cr_id, mode, activity_file,
-                                   refresh_testing_log, now, verdict, testing_log_update_only)
+                                   refresh_testing_log, now, verdict, testing_log_update_only,
+                                   testing_log_create)
     except _Skip as exc:
         verdict.update(status="skipped", reason=str(exc))
         return EXIT_SKIPPED, verdict
@@ -526,7 +554,8 @@ def refresh(board_path: str, team: str, *, release_id: Optional[str] = None, cr_
 
 
 def _refresh_locked(board_path, board, release, team, cfg, wiki, cr_id, mode, activity_file, refresh_testing_log,
-                    now, verdict, testing_log_update_only=False) -> Tuple[int, Dict[str, Any]]:
+                    now, verdict, testing_log_update_only=False,
+                    testing_log_create=False) -> Tuple[int, Dict[str, Any]]:
     from release_cr_stage import CrStageError, ToolError, get_wiki_handle, publish_testing_log, set_wiki_handle
     rel_id = str(release["id"])
     stage = _stage_of(release)
@@ -534,11 +563,15 @@ def _refresh_locked(board_path, board, release, team, cfg, wiki, cr_id, mode, ac
     stored = _handle_of(release)
     # XACA-1668-015: with a Testing Log refresh requested, a missing status page must not skip the log too; the
     # status-page half is skipped later (after the log step), by the same update-only rule.
-    if stored is None and mode == "update-only" and not refresh_testing_log:
+    if stored is None and mode == "update-only" and not refresh_testing_log \
+            and not (testing_log_create and _is_non_cr(board, release)):
         raise _Skip("no cr-record page was ever published for %s; nothing to re-publish" % rel_id)
     excluded = _excluded(board)  # spec 15.1: listed on the page, but never mirrored onto (handles are not written)
     cr_team = _cr_support_enabled(board)
     if not cr_team and not linked:
+        if TESTING_LOG_DOC in (wiki.get("docTypes") or {}) and (refresh_testing_log or testing_log_create):
+            return _testing_log_only(board_path, release, team, cfg, stage, refresh_testing_log,
+                                     testing_log_create, verdict)
         raise _Skip("CR support is not enabled for this team and %s has no linked CR" % rel_id)
     if stored is None and stage not in _STAGES[1:]:
         raise _Skip("release %s is %s; the status page is created at PLANNED -> DEV"
@@ -631,6 +664,37 @@ def _refresh_locked(board_path, board, release, team, cfg, wiki, cr_id, mode, ac
     return EXIT_PUBLISHED, verdict
 
 
+def _testing_log_only(board_path, release, team, cfg, stage, refresh_testing_log, testing_log_create,
+                      verdict) -> Tuple[int, Dict[str, Any]]:
+    """XACA-1701 (spec 12.2 / G10): the non-CR team's Testing Log. Runs INSTEAD of the CR-path steps and returns
+    before any cr-record code, so a non-CR team can never get a cr-record page (and ``cr`` is denied anyway).
+    ``testing_log_create`` makes the FIRST page (GAMMA or later; the promote passes it only at GAMMA entry);
+    ``refresh_testing_log`` alone re-publishes a page that already has a stored handle and never creates one.
+    A failure is the same failed verdict (exit 11) as the CR path; a skip is a clean exit 10."""
+    from release_cr_stage import CrStageError, ToolError, get_wiki_handle, publish_testing_log
+    rel_id = str(release["id"])
+    # the cr-record re-run hint is meaningless here (kb-cr is off for this team): name the runnable recovery
+    verdict["rerun"] = "python3 %s --board %s --team %s --release-id %s --testing-log-create" % (
+        Path(__file__).resolve(), board_path, team, rel_id)
+    verdict["testingLog"] = {"status": "skipped"}
+    if stage not in _STAGES[1:]:
+        raise _Skip("release %s is %s; a non-CR Testing Log is created at GAMMA entry" % (rel_id, stage or "at no known stage"))
+    have = get_wiki_handle(release, TESTING_LOG_DOC)
+    if have is None and not (testing_log_create and stage in _STAGES[_STAGES.index("GAMMA"):]):
+        raise _Skip("no Testing Log page exists for %s; a non-CR team's log is created at GAMMA entry and "
+                    "refreshes are update-only" % rel_id)
+    try:
+        res = publish_testing_log(board_path, rel_id, team, str(cfg.parent), _TestingLogTools(team),
+                                  update=bool(have), mirror_cr_ids=[])
+    except (CrStageError, ToolError, _Fail) as exc:
+        verdict["testingLog"] = {"status": "failed", "reason": str(exc)[:400]}
+        verdict.update(status="failed", reason="the Testing Log was not published: %s" % str(exc)[:400])
+        return EXIT_FAILED, verdict
+    verdict["testingLog"] = {"status": res["action"], "handle": res["handle"]}
+    verdict["status"] = "published"
+    return EXIT_PUBLISHED, verdict
+
+
 def publish(board_path: str, cr_id: str, team: str, mode: str, activity_file: Optional[str]) -> int:
     """Back-compat CLI shim (``--cr-id``): refresh the release the CR belongs to, print the verdict."""
     code, v = refresh(board_path, team, cr_id=cr_id, mode=mode, activity_file=activity_file)
@@ -652,10 +716,14 @@ def main(argv: Optional[list] = None) -> int:
                     help="also re-publish an EXISTING Testing Log (stage-boundary refresh; off by default)")
     ap.add_argument("--testing-log-update-only", action="store_true",
                     help="XACA-1668: never CREATE the Testing Log; a release with no stored handle is a clean skip")
+    ap.add_argument("--testing-log-create", action="store_true",
+                    help="XACA-1701: non-CR teams only - CREATE the Testing Log (GAMMA or later); also the recovery "
+                         "flag for a failed GAMMA-entry create. Ignored for CR teams.")
     a = ap.parse_args(argv)
     code, verdict = refresh(a.board, a.team, release_id=a.release_id, cr_id=a.cr_id, reason=a.reason, mode=a.mode,
                             activity_file=a.activity_file, refresh_testing_log=a.refresh_testing_log,
-                            testing_log_update_only=a.testing_log_update_only)
+                            testing_log_update_only=a.testing_log_update_only,
+                            testing_log_create=a.testing_log_create)
     print(json.dumps(verdict, sort_keys=True))
     return code
 
