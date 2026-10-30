@@ -10021,11 +10021,14 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 verdict = {"status": "failed", "reason": "publisher exit %d, no verdict: %s"
                            % (r.returncode, (r.stderr or "").strip()[-200:])}
             verdict.setdefault("rerun", rerun)
+            # XACA-1701-012: a non-CR team has no cr-record page; its run publishes only the Testing Log (G10)
+            what = ("Testing Log publish (non-CR, G10)" if verdict.get("scope") == "testing-log"
+                    else "cr-record refresh")
             if verdict.get("status") == "failed":
-                print(f"[LCARS] WARNING: cr-record refresh failed for {release_id} ({reason}): "
+                print(f"[LCARS] WARNING: {what} failed for {release_id} ({reason}): "
                       f"{verdict.get('reason', '')}. re-run: {verdict['rerun']}")
             else:
-                print(f"[LCARS] cr-record refresh for {release_id} ({reason}): {verdict.get('status')}")
+                print(f"[LCARS] {what} for {release_id} ({reason}): {verdict.get('status')}")
             return verdict
         except subprocess.TimeoutExpired:
             print(f"[LCARS] WARNING: cr-record refresh timed out for {release_id} ({reason}). re-run: {rerun}")

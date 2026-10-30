@@ -677,6 +677,7 @@ def _testing_log_only(board_path, release, team, cfg, stage, refresh_testing_log
     verdict["rerun"] = "python3 %s --board %s --team %s --release-id %s --testing-log-create" % (
         Path(__file__).resolve(), board_path, team, rel_id)
     verdict["testingLog"] = {"status": "skipped"}
+    verdict["scope"] = TESTING_LOG_DOC  # XACA-1701-012: callers label the run by what it published (no cr-record)
     if stage not in _STAGES[1:]:
         raise _Skip("release %s is %s; a non-CR Testing Log is created at GAMMA entry" % (rel_id, stage or "at no known stage"))
     have = get_wiki_handle(release, TESTING_LOG_DOC)
