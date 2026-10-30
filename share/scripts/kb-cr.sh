@@ -2371,6 +2371,8 @@ _kb_cr_record_flush() {
 # kb-cr publish-record <CR-ID|REL-ID> -- the ONE re-run / backfill command for the Release & CR Status page.
 # CR-ID refreshes the release that CR belongs to; REL-ID refreshes that release directly. Valid from DEV on
 # (the page no longer waits for cr-completed / cr-closed); a PLANNED release is a clean skip.
+# XACA-1668-003: it also re-publishes the Testing Log in place, so this is the re-run that repairs a failed
+# promote/regress/GAMMA-record Testing Log refresh (same page: the publisher updates the stored handle).
 _kb_cr_container_publish_record() {
     local target="${1:-}"
     if [[ -z "$target" ]]; then
@@ -2399,7 +2401,7 @@ _kb_cr_container_publish_record() {
             return 1
         fi
         verdict=$(KB_CR_RECORD_NOFLUSH=1 python3 "$py" --board "$_cr_board" --release-id "$target" --team "$_cr_team" \
-            --reason "kb-cr:publish-record")
+            --reason "kb-cr:publish-record" --refresh-testing-log)
         prc=$?
     else
         local cr_idx
@@ -2409,7 +2411,8 @@ _kb_cr_container_publish_record() {
             return 1
         fi
         verdict=$(KB_CR_RECORD_NOFLUSH=1 python3 "$py" --board "$_cr_board" --cr-id "$target" --team "$_cr_team" \
-            --reason "kb-cr:publish-record" --activity-file "$(_kb_cr_activity_path "$_cr_board" "$target")")
+            --reason "kb-cr:publish-record" --refresh-testing-log \
+            --activity-file "$(_kb_cr_activity_path "$_cr_board" "$target")")
         prc=$?
     fi
     _kb_cr_record_report "publish-record" "$verdict" "$prc" "$rerun"

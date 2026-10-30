@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1668 Testing Log stays current - re-publish on promote, regress and every GAMMA record
+- Tap files updated in this publish: `share/kanban-hooks/release_cr_record_publish.py`,`share/kanban-hooks/release_gamma_failure.py` `share/lcars-ui/server.py`,`share/lcars-ui/tests/test_xaca1676_richmond_server_registration.py` `share/scripts/kb-cr.sh`. Run `brew upgrade aiteamforge` to receive them.
 
 ## [0.21.10] - 2026-10-29
 - XACA-1693: Add description frontmatter to amb and LCARS skills (XACA-1693)

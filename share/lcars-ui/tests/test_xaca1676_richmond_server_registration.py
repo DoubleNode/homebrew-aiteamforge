@@ -74,15 +74,34 @@ class RichmondServerRegistration(unittest.TestCase):
                              "richmond")
 
 
+def _load_kb_sync_plugins(manifest):
+    """Import scripts/kb-sync-plugins (no .py suffix) with MANIFEST pinned to THIS checkout's manifest; it is
+    resolved at import time, so KBSPL_MANIFEST must be set before the module executes."""
+    from importlib.machinery import SourceFileLoader
+    from importlib.util import module_from_spec, spec_from_loader
+    loader = SourceFileLoader("kb_sync_plugins_xaca1676", str(REPO_ROOT / "scripts" / "kb-sync-plugins"))
+    mod = module_from_spec(spec_from_loader(loader.name, loader))
+    with patch.dict(os.environ, {"KBSPL_MANIFEST": str(manifest)}):
+        loader.exec_module(mod)
+    return mod
+
+
 class RichmondPluginsManifest(unittest.TestCase):
     def test_fleet_standard_plugin_set(self):
-        m = json.loads((REPO_ROOT / ".claude" / "plugins-manifest.json").read_text())
-        teams = m["teams"]
-        self.assertIn("richmond", teams)
-        self.assertTrue(teams["richmond"]["deliver"])
-        self.assertEqual(teams["richmond"]["enabledPlugins"],
-                         teams["academy"]["enabledPlugins"])
-        self.assertTrue(teams["richmond"]["enabledPlugins"])
+        # XACA-1643 replaced the per-team `teams` lists with one fleet list rendered per team by
+        # kb-sync-plugins' effective_team_cfg() (the only place a team's list is computed), so the
+        # XACA-1676 intent -- richmond is delivered the fleet-standard set, same as academy -- is
+        # asserted through that renderer rather than on raw manifest keys.
+        manifest = REPO_ROOT / ".claude" / "plugins-manifest.json"
+        ksp = _load_kb_sync_plugins(manifest)
+        m = ksp.load_manifest()
+        self.assertIn("richmond", m["teamTargets"])
+        self.assertTrue(m["teamTargets"]["richmond"]["deliver"])
+        richmond = ksp.effective_team_cfg(m, "richmond")["enabledPlugins"]
+        academy = ksp.effective_team_cfg(m, "academy")["enabledPlugins"]
+        self.assertEqual(richmond, academy)
+        self.assertTrue(richmond)
+        self.assertTrue(all(richmond.values()), "richmond must not lose any fleet plugin to an exception")
 
 
 if __name__ == "__main__":

@@ -103,6 +103,11 @@ _CR_RECORD_FAIL_MARKERS = ("WARNING: cr-record page", "cr-record refresh failed"
 # which is why a timeout here kills the whole process group (_run_shell_group) and never decides the HTTP status of
 # a write that has already committed (XACA-1662-023).
 _CR_RECORD_FLUSH_TIMEOUT = 210
+# XACA-1668-002: per-release coalescing for the GAMMA record -> Testing Log refresh. A release id maps to "running"
+# (a refresh is in flight) or "dirty" (more records landed meanwhile: run once more when it finishes). The publisher
+# renders from the board at run time, so one trailing run covers every record that arrived while one was in flight.
+_TESTING_LOG_REFRESH_LOCK = threading.Lock()
+_TESTING_LOG_REFRESH_STATE = {}
 
 
 def _run_shell_group(argv, *, env, timeout, grace=5):
@@ -9970,7 +9975,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 self._refresh_release_cr_record(release_id, team, "assumed-approval-stamp")
         return []
 
-    def _refresh_release_cr_record(self, release_id, team, reason):
+    def _refresh_release_cr_record(self, release_id, team, reason, refresh_testing_log=False,
+                                   testing_log_update_only=False, record_mode=None):
         """XACA-1662-002: refresh the release's living "Release & CR Status" wiki page after a stage move.
         Runs kanban-hooks/release_cr_record_publish.py (the single renderer/publisher/handle writer): it creates
         the page when the release has none and is past PLANNED, else updates it, and skips cleanly when the
@@ -9978,7 +9984,14 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         takes the board lock itself for its handle write; flock is per open file, so calling it inside the
         transaction would deadlock) and never on a dryRun. Returns the verdict dict; NEVER raises and never
         changes the caller's HTTP status. KB_WIKI_DENY_DOCS=cr is exported so a mis-wire can never publish the
-        CR Request page."""
+        CR Request page.
+
+        XACA-1668-001/-003: ``refresh_testing_log`` (default False; create/assumed-approval/CR-transition keep their
+        old behaviour) also re-publishes the release's EXISTING Testing Log in place (spec 12.2). With
+        ``testing_log_update_only`` a release that has no Testing Log handle is a clean skip instead of a first
+        publish, so a record-driven refresh can never create a page. Same non-blocking verdict either way.
+        ``record_mode="update-only"`` (XACA-1668-011) additionally makes the status page itself update-only, so a
+        background re-publish can never turn a FAILED synchronous create into a second, racing create."""
         rerun = "kb-cr publish-record %s" % release_id
         try:
             board_file = self._get_board_file(team)
@@ -9990,7 +10003,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             run_env = dict(os.environ, KB_TEAM=team, KB_WIKI_DENY_DOCS="cr")
             run_env.pop("TMUX", None)
             r = subprocess.run([sys.executable, str(script), "--board", str(board_file), "--team", team,
-                                "--release-id", release_id, "--reason", reason],
+                                "--release-id", release_id, "--reason", reason]
+                               + (["--refresh-testing-log"] if refresh_testing_log else [])
+                               + (["--testing-log-update-only"] if testing_log_update_only else [])
+                               + (["--mode", record_mode] if record_mode else []),
                                capture_output=True, text=True, timeout=180, env=run_env)
             try:
                 verdict = json.loads((r.stdout or "").strip().splitlines()[-1])
@@ -10012,6 +10028,48 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         except Exception as e:  # noqa: BLE001 - a wiki refresh must never fail or alter a promote/regress
             print(f"[LCARS] WARNING: cr-record refresh errored for {release_id} ({reason}): {e}. re-run: {rerun}")
             return {"status": "failed", "reason": "%s: %s" % (type(e).__name__, e), "rerun": rerun}
+
+    def _schedule_testing_log_refresh(self, release_id, team, reason, record_mode="update-only"):
+        """XACA-1668-002/-003/-011: re-publish the release's EXISTING Testing Log in place after a GAMMA record
+        write, promote or regress. Both pages are update-only by default (record_mode): a background run never
+        creates, so it can never retry a FAILED synchronous create behind the caller's back
+        (every manual answer is one post, every automated batch and soak check is one post: a post = one refresh).
+        Runs on a daemon thread: a wiki publish can outlast the 30 s the record poster waits, and a poster that
+        timed out after the write committed would re-post (a duplicate record). Coalesced per release (a refresh
+        already in flight gets exactly one trailing re-run). Update-only (never makes a page), non-blocking (all
+        failures are logged with the re-run hint by _refresh_release_cr_record, which never raises), and it must be
+        called AFTER the board write lock is released. KB_WIKI_DENY_DOCS=cr is set by the shared refresh."""
+        with _TESTING_LOG_REFRESH_LOCK:
+            if release_id in _TESTING_LOG_REFRESH_STATE:
+                _TESTING_LOG_REFRESH_STATE[release_id] = "dirty"
+                return False
+            _TESTING_LOG_REFRESH_STATE[release_id] = "running"
+
+        extra = {"record_mode": record_mode} if record_mode else {}
+
+        def _run():
+            while True:
+                try:
+                    self._refresh_release_cr_record(release_id, team, reason, refresh_testing_log=True,
+                                                    testing_log_update_only=True, **extra)
+                except Exception as e:  # noqa: BLE001 - belt and braces; the refresh itself never raises
+                    print(f"[LCARS] WARNING: testing-log refresh errored for {release_id} ({reason}): {e}. "
+                          f"re-run: kb-cr publish-record {release_id}")
+                with _TESTING_LOG_REFRESH_LOCK:
+                    if _TESTING_LOG_REFRESH_STATE.get(release_id) == "dirty":
+                        _TESTING_LOG_REFRESH_STATE[release_id] = "running"
+                        continue
+                    _TESTING_LOG_REFRESH_STATE.pop(release_id, None)
+                    return
+        try:
+            threading.Thread(target=_run, name="testing-log-refresh-%s" % release_id, daemon=True).start()
+        except Exception as e:  # noqa: BLE001 - e.g. thread exhaustion: the record is already committed; never 500 it
+            with _TESTING_LOG_REFRESH_LOCK:
+                _TESTING_LOG_REFRESH_STATE.pop(release_id, None)   # else "running" sticks and every later refresh is lost
+            print(f"[LCARS] WARNING: testing-log refresh could not start for {release_id} ({reason}): {e}. "
+                  f"re-run: kb-cr publish-record {release_id}")
+            return False
+        return True
 
     @staticmethod
     def _archive_close_out_for_regress(release, frm, to, now):
@@ -10571,7 +10629,12 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             # XACA-1662-002: the living Release & CR Status page follows the stage. After the board lock is
             # released (above), never on dryRun (returned earlier), and it never changes the HTTP status.
             refresh_owed = False   # this refresh covers the deferred stamps too
+            # XACA-1668-001/-011: a successful promote also re-publishes the Testing Log in place (spec 12.2). The
+            # sync refresh still creates a missing log (first publish at PLANNED -> DEV); the in-place re-publish
+            # runs on the background scheduler so it never stretches the promote past client timeouts.
             cr_record = self._refresh_release_cr_record(release_id, LCARS_TEAM, 'promote:%s->%s' % (cur, eff_target))
+            self._schedule_testing_log_refresh(release_id, LCARS_TEAM, 'promote:%s->%s' % (cur, eff_target),
+                                               record_mode="update-only")
             return self._send_json_response(dict(
                 base, allowed=True, release=snapshot,
                 success=True, previousEnvironment=cur, newEnvironment=eff_target, crRecord=cr_record))
@@ -10665,7 +10728,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             self._log_release_activity(release_id, 'crSupportDisabledWhileAtCR', cur, landed,
                                        actor=actor, via='regress')
         # XACA-1662-002: a regress changes the stage the living status page shows. Lock already released.
+        # XACA-1668-001/-011: and so does a successful regress; the Testing Log re-publish runs in the background.
         cr_record = self._refresh_release_cr_record(release_id, LCARS_TEAM, 'regress:%s->%s' % (cur, landed))
+        self._schedule_testing_log_refresh(release_id, LCARS_TEAM, 'regress:%s->%s' % (cur, landed),
+                                           record_mode="update-only")
         payload = {"allowed": True, "from": cur, "to": landed, "release": snapshot,
                    "strandedInCR": stranded, "crRecord": cr_record,
                    **({"configWarning": cr_warn} if cr_warn else {})}
@@ -11000,6 +11066,9 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             self._mirror_release_manifest(snapshot)
             self._log_release_activity(release_id, 'release_tests_recorded', cur, stage,
                                        actor='pipeline', count=len(ids), first=ids[:1], last=ids[-1:], resolvedPlaceholders=resolved)
+            # XACA-1668-002: spec 12.2 - the Testing Log follows every GAMMA record. After the board lock is released.
+            if stage == 'GAMMA' and ids:
+                self._schedule_testing_log_refresh(release_id, LCARS_TEAM, 'gamma-record:%s..%s' % (ids[0], ids[-1]))
             return self._send_json_response({"ok": True, "ids": ids})
         except _DeferredResponse as deferred:
             deferred.emit(self)

@@ -581,21 +581,31 @@ class GammaFailure:
         notes: List[str] = []
         cr = rcs._find(board, "crs", m.get("cr")) if m.get("cr") else None
         if "testing-log" not in rec:
-            handle = rcs.get_wiki_handle(rel, "testing-log")
-            if handle is None:
-                # Never create a page here (spec: use the stored handle). CR teams published it at the CR stage.
-                notes.append("no Testing Log page was ever published for this release; not creating one now")
-                rec["testing-log"] = "none"
-            else:
-                cs = self._crstage()
-                facts = cs._facts(board, rel, cr, content=(cr or {}).get("draftContent"))
-                body, title = cs._compose_testing_log(facts, rel, cs._tz(board))
-                atts = cs._testing_log_attachments(rel, cs._tz(board))
-                h = cs._publish_page("testing-log", self.rel_id, title, body, handle, atts)
-                rcs.set_wiki_handle(self.board_file, "releases", self.rel_id, "testing-log", h, links={"testingLog": h["url"]})
-                rec["testing-log"] = self._ts()
-                self._set_marker(recorded=dict(rec))
-                notes.append("Testing Log re-published (v%d)" % h["version"])
+            # XACA-1668-013: hold the publisher's per-release lock and re-read the handle under it, so this publish
+            # serializes with the LCARS promote/regress/GAMMA-record refreshes instead of racing their version bump.
+            import release_cr_record_publish as rcrp  # noqa: PLC0415 -- the lock owner; imported only when needed
+            try:
+                with rcrp._release_lock(self.board_file, self.rel_id):
+                    board, rel = self._load()
+                    cr = rcs._find(board, "crs", m.get("cr")) if m.get("cr") else None
+                    handle = rcs.get_wiki_handle(rel, "testing-log")
+                    if handle is None:
+                        # Never create a page here (spec: use the stored handle). CR teams published it at the CR stage.
+                        notes.append("no Testing Log page was ever published for this release; not creating one now")
+                        rec["testing-log"] = "none"
+                    else:
+                        cs = self._crstage()
+                        facts = cs._facts(board, rel, cr, content=(cr or {}).get("draftContent"))
+                        body, title = cs._compose_testing_log(facts, rel, cs._tz(board))
+                        atts = cs._testing_log_attachments(rel, cs._tz(board))
+                        h = cs._publish_page("testing-log", self.rel_id, title, body, handle, atts)
+                        rcs.set_wiki_handle(self.board_file, "releases", self.rel_id, "testing-log", h,
+                                            links={"testingLog": h["url"]})
+                        rec["testing-log"] = self._ts()
+                        self._set_marker(recorded=dict(rec))
+                        notes.append("Testing Log re-published (v%d)" % h["version"])
+            except rcrp._Fail as exc:
+                raise CrStageError("the Testing Log was not re-published: %s. Re-run." % exc, rcs.RC_FAILED)
         if m.get("cr") and "cr-record" not in rec:
             try:
                 self.tools.cr_publish_record(m["cr"])

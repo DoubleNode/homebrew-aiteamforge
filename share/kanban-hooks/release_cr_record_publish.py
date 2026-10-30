@@ -8,6 +8,7 @@ kb-cr, the LCARS promote endpoint and the backfill all call it.
 
     release_cr_record_publish.py --board B --team T (--release-id REL | --cr-id CR) --reason <event>
                                  [--mode create-or-update|update-only] [--activity-file F] [--refresh-testing-log]
+                                 [--testing-log-update-only]
 
     --cr-id CR     resolves CR -> releaseAssignment.releaseId (back-compat for ``kb-cr publish-record <CR>``)
     --mode         create-or-update (default) | update-only. A create is SKIPPED while the release is PLANNED.
@@ -474,7 +475,8 @@ def _mirror_edit(rel_id: str, handle: Dict[str, Any], release_page_ids: set):
 
 def refresh(board_path: str, team: str, *, release_id: Optional[str] = None, cr_id: Optional[str] = None,
             reason: str = "", mode: str = "create-or-update", activity_file: Optional[str] = None,
-            refresh_testing_log: bool = False, now: Optional[datetime] = None) -> Tuple[int, Dict[str, Any]]:
+            refresh_testing_log: bool = False, testing_log_update_only: bool = False,
+            now: Optional[datetime] = None) -> Tuple[int, Dict[str, Any]]:
     """Run one refresh. Returns (exit code, verdict dict). Never raises."""
     verdict: Dict[str, Any] = {}
     rel_label = release_id or ""
@@ -511,7 +513,7 @@ def refresh(board_path: str, team: str, *, release_id: Optional[str] = None, cr_
             if release is None:
                 raise _Skip("release '%s' is not on this board" % rel_label)
             return _refresh_locked(board_path, board, release, team, cfg, wiki, cr_id, mode, activity_file,
-                                   refresh_testing_log, now, verdict)
+                                   refresh_testing_log, now, verdict, testing_log_update_only)
     except _Skip as exc:
         verdict.update(status="skipped", reason=str(exc))
         return EXIT_SKIPPED, verdict
@@ -524,13 +526,15 @@ def refresh(board_path: str, team: str, *, release_id: Optional[str] = None, cr_
 
 
 def _refresh_locked(board_path, board, release, team, cfg, wiki, cr_id, mode, activity_file, refresh_testing_log,
-                    now, verdict) -> Tuple[int, Dict[str, Any]]:
+                    now, verdict, testing_log_update_only=False) -> Tuple[int, Dict[str, Any]]:
     from release_cr_stage import CrStageError, ToolError, get_wiki_handle, publish_testing_log, set_wiki_handle
     rel_id = str(release["id"])
     stage = _stage_of(release)
     linked = _linked(board, release)
     stored = _handle_of(release)
-    if stored is None and mode == "update-only":
+    # XACA-1668-015: with a Testing Log refresh requested, a missing status page must not skip the log too; the
+    # status-page half is skipped later (after the log step), by the same update-only rule.
+    if stored is None and mode == "update-only" and not refresh_testing_log:
         raise _Skip("no cr-record page was ever published for %s; nothing to re-publish" % rel_id)
     excluded = _excluded(board)  # spec 15.1: listed on the page, but never mirrored onto (handles are not written)
     cr_team = _cr_support_enabled(board)
@@ -546,7 +550,11 @@ def _refresh_locked(board_path, board, release, team, cfg, wiki, cr_id, mode, ac
     if cr_team and stage in _STAGES[1:] and TESTING_LOG_DOC in (wiki.get("docTypes") or {}):
         try:
             have = get_wiki_handle(release, TESTING_LOG_DOC)
-            if have is None or refresh_testing_log:
+            if have is None and testing_log_update_only:
+                # XACA-1668-003: a record-driven refresh (promote/regress/GAMMA record) only ever re-publishes a
+                # page that already has a stored handle; it never makes the FIRST page, so it can never make a second.
+                tl = {"status": "skipped", "reason": "no Testing Log page was ever published; refresh is update-only"}
+            elif have is None or refresh_testing_log:
                 res = publish_testing_log(board_path, rel_id, team, str(cfg.parent), _TestingLogTools(team),
                                           update=bool(have),
                                           mirror_cr_ids=[str(c["id"]) for c in linked
@@ -575,6 +583,10 @@ def _refresh_locked(board_path, board, release, team, cfg, wiki, cr_id, mode, ac
     adopt_cur = current if current is not None and str(current.get("id")) not in excluded else None
     handle, key, rmode = _resolve_handle(release, adoptable, adopt_cur, title, team, pv)
     if handle is None and mode == "update-only":
+        if tl_failed:   # XACA-1668-015: the log's failure is still a failure (rc 11 + re-run), never a quiet skip
+            verdict.update(status="failed", reason="no status page to re-publish, and the Testing Log was not "
+                           "re-published: %s" % tl.get("reason", ""))
+            return EXIT_FAILED, verdict
         raise _Skip("no cr-record page was ever published for %s; nothing to re-publish" % rel_id)
 
     with tempfile.TemporaryDirectory(prefix="kb-cr-record-") as tmp:
@@ -638,9 +650,12 @@ def main(argv: Optional[list] = None) -> int:
     ap.add_argument("--activity-file")
     ap.add_argument("--refresh-testing-log", action="store_true",
                     help="also re-publish an EXISTING Testing Log (stage-boundary refresh; off by default)")
+    ap.add_argument("--testing-log-update-only", action="store_true",
+                    help="XACA-1668: never CREATE the Testing Log; a release with no stored handle is a clean skip")
     a = ap.parse_args(argv)
     code, verdict = refresh(a.board, a.team, release_id=a.release_id, cr_id=a.cr_id, reason=a.reason, mode=a.mode,
-                            activity_file=a.activity_file, refresh_testing_log=a.refresh_testing_log)
+                            activity_file=a.activity_file, refresh_testing_log=a.refresh_testing_log,
+                            testing_log_update_only=a.testing_log_update_only)
     print(json.dumps(verdict, sort_keys=True))
     return code
 
