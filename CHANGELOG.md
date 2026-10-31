@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1709 URL setter pushes via the iTerm2 API on every call
+- Tap files updated in this publish: `share/scripts/set-lcars-profile-browser.py`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1707 push the LCARS URL into iTerm2 via its API when iTerm2 3.7 ignores the profile file
 - Tap files updated in this publish: `share/scripts/iterm2-lcars-profile-repair.sh`,`share/scripts/iterm2_venv_bootstrap.py` `share/scripts/lcars-launch-helpers.sh`,`share/scripts/set-lcars-profile-browser.py`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1702 bound the promote/regress cr-record lock wait so clients don't time out

@@ -25,7 +25,12 @@ copy of the profile even though the DynamicProfiles file is correct, which
 opens another team's board in the LCARS tab. The file-level readback in
 _update_dynamic_profile_url cannot see that; --verify can. The poll is
 bounded by the (clamped) LCARS_PROFILE_RELOAD_WAIT value. Without --verify
-nothing here imports iterm2 and behaviour/exit codes are unchanged.
+behaviour/exit codes are unchanged.
+
+XACA-1709: without --verify the setter still attempts the same API push
+(best effort, one read, exit code never changed) whenever iTerm2 is
+running, because the 26 *-connect/*-disconnect callers do not pass
+--verify. With iTerm2 not running and no --verify, nothing imports iterm2.
 
 XACA-1707: iTerm2 3.7.6 does not reload DynamicProfiles/ while running at
 all, so on a mismatch --verify pushes <url> into the in-memory LCARS Web
@@ -457,6 +462,37 @@ def _verify(url: str, timeout: float) -> int:
     return EXIT_VERIFY_MISMATCH
 
 
+def _best_effort_push(url: str) -> None:
+    """No-flag path (XACA-1709): push url into iTerm2 if it is stale.
+
+    The *-connect.sh / *-disconnect.sh callers run without --verify and with
+    stderr discarded; on iTerm2 3.7.6 the file write alone never reaches the
+    running app. Best effort: never changes the exit code. Skipped entirely
+    (no iterm2 import) when iTerm2 is not running.
+    """
+    if not _iterm2_running():
+        return
+    try:
+        have = _read_inmemory_url()
+        if have == url:
+            return
+        _push_inmemory_url(url)
+        now = _read_inmemory_url()
+    except _VerifyUnavailable as exc:
+        print(f"⚠️  LCARS Web URL not pushed to iTerm2: {exc}", file=sys.stderr)
+        return
+    if now == url:
+        print(
+            f"repaired: iTerm2 ignored the profile file (was {have}); "
+            f"set LCARS Web Initial URL = {url} via the iTerm2 API"
+        )
+    else:
+        print(
+            f"⚠️  LCARS Web URL push did not take: iTerm2 still has {now}",
+            file=sys.stderr,
+        )
+
+
 def main(url: str, verify: bool = False) -> int:
     _strip_stale_plist_entry()
     if not _update_dynamic_profile_url(url):
@@ -466,6 +502,7 @@ def main(url: str, verify: bool = False) -> int:
     print(f"LCARS Web profile: url={url}")
     if verify:
         return _verify(url, delay)
+    _best_effort_push(url)
     return EXIT_OK
 
 
@@ -474,11 +511,13 @@ if __name__ == "__main__":
     verify = "--verify" in args
     args = [a for a in args if a != "--verify"]
     url = args[0] if args else "http://localhost:8080"
-    if verify:
+    if verify or _iterm2_running():
         # XACA-1661-015: under system python3 the bootstrap re-execs this whole
         # script into the venv that has iterm2. Do it BEFORE main() so the
         # re-exec happens ahead of any side effect (write, reload wait, output)
-        # instead of repeating them. Without --verify nothing is imported.
+        # instead of repeating them. XACA-1709: the no-flag path pushes too,
+        # so it bootstraps whenever iTerm2 runs; with iTerm2 not running and
+        # no --verify, nothing is imported.
         try:
             sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
             import iterm2_venv_bootstrap  # noqa: F401
