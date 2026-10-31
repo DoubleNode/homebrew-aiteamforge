@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1702 bound the promote/regress cr-record lock wait so clients don't time out
+- Tap files updated in this publish: `share/kanban-hooks/release_chain.py`,`share/kanban-hooks/release_cr_record_publish.py` `share/lcars-ui/server.py`,`share/scripts/kb-release-push-promote`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1701 Testing Log for non-CR teams - create at GAMMA entry (G10) and keep it current
 - Tap files updated in this publish: `share/kanban-hooks/release_cr_record_publish.py`,`share/lcars-ui/server.py`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1668 Testing Log stays current - re-publish on promote, regress and every GAMMA record

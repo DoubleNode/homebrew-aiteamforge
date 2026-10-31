@@ -8,18 +8,25 @@ kb-cr, the LCARS promote endpoint and the backfill all call it.
 
     release_cr_record_publish.py --board B --team T (--release-id REL | --cr-id CR) --reason <event>
                                  [--mode create-or-update|update-only] [--activity-file F] [--refresh-testing-log]
-                                 [--testing-log-update-only] [--testing-log-create]
+                                 [--testing-log-update-only] [--testing-log-create] [--lock-timeout SECONDS]
 
     --cr-id CR     resolves CR -> releaseAssignment.releaseId (back-compat for ``kb-cr publish-record <CR>``)
     --mode         create-or-update (default) | update-only. A create is SKIPPED while the release is PLANNED.
     --activity-file  legacy: the activity log of --cr-id (the others are read from <board dir>/change-requests/activity)
 
 stdout is ONE JSON object:
-    {"status": "published|skipped|failed", "releaseId", "reason"?, "recordMode": "create|update|adopt",
+    {"status": "published|skipped|failed|deferred", "releaseId", "reason"?, "recordMode": "create|update|adopt",
      "handle"?, "testingLog": {"status", "handle"?, "reason"?}, "mirroredCrs": [...], "handleUnstored"?: true,
      "rerun": "kb-cr publish-record <REL-ID>"}
 Exit codes:  0 published | 10 skipped (nothing to do: wiki unconfigured, cr-record unmapped, no release, release
-still PLANNED, CR support off, update-only with no page) -- a skip is NOT an error | 11 failed.
+still PLANNED, CR support off, update-only with no page) -- a skip is NOT an error | 11 failed |
+12 deferred (XACA-1702: --lock-timeout elapsed while another refresh held the lock; nothing was published and a
+background re-run owns the work -- NOT a skip and NOT a clean no-op, so a caller reading only the exit code must
+not treat it as success).
+
+--lock-timeout (XACA-1702-002) bounds the wait for the per-release lock for a caller on a client's clock (the LCARS
+promote/regress request path). Omitted = today's behaviour: wait LOCK_TIMEOUT_S, a timeout is a failure (11). A run
+that might CREATE a page ignores the bound (a deferred create would be lost: the background re-run is update-only).
 
 Non-CR teams (XACA-1701, spec 12.2 / G10): a team with no CR support and no CR linked to the release has no
 cr-record page, ever. When its wiki.json maps ``testing-log`` the publisher runs a Testing-Log-ONLY branch that
@@ -61,6 +68,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 EXIT_PUBLISHED, EXIT_SKIPPED, EXIT_FAILED = 0, 10, 11
+EXIT_DEFERRED = 12  # XACA-1702-002: bounded lock wait elapsed; nothing published, a background re-run owns it
 DOC = "cr-record"
 TESTING_LOG_DOC = "testing-log"
 _ALLOWED_DOCS = frozenset({DOC, TESTING_LOG_DOC})  # the CR Request ("cr") page is never touched from here
@@ -92,6 +100,11 @@ class _Fail(Exception):
     def __init__(self, msg: str, **extra: Any):
         Exception.__init__(self, msg)
         self.extra = extra
+
+
+class _LockBusy(_Fail):
+    """XACA-1702-002: the bounded (--lock-timeout) lock wait elapsed. Subclasses _Fail so any caller catching
+    ``_Fail`` still treats it as a failure (fail-closed); ``refresh()`` catches it first and reports "deferred"."""
 
 
 def _load_json(path: Path, what: str) -> Any:
@@ -393,19 +406,35 @@ class _TestingLogTools:
 # ------------------------------------------------------------------------------------------ lock
 
 @contextlib.contextmanager
-def _release_lock(board_path: str, rel_id: str):
+def _release_lock(board_path: str, rel_id: str, *, timeout: Optional[float] = None, deferrable: bool = False,
+                  recheck: Optional[Any] = None):
     d = Path(board_path).parent / "change-requests"
     d.mkdir(parents=True, exist_ok=True)
     safe = "".join(ch if ch.isalnum() or ch in "-._" else "_" for ch in rel_id)
     fh = open(d / (".cr-record-%s.lock" % safe), "a+")
     try:
-        deadline = time.monotonic() + LOCK_TIMEOUT_S
+        # XACA-1702-002: resolve at CALL time (never a default-arg value): a test monkeypatches LOCK_TIMEOUT_S
+        wait = timeout if timeout is not None else LOCK_TIMEOUT_S
+        start = time.monotonic()
+        deadline = start + wait
+        full_deadline = start + LOCK_TIMEOUT_S
         while True:
             try:
                 fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                 break
             except OSError:
+                if deferrable and recheck is not None and time.monotonic() > deadline:
+                    # XACA-1702-013: _may_create was read BEFORE the lock; re-evaluate at the point we would defer.
+                    # A CR linked in that window makes this run create-capable, and a deferred create is lost (the
+                    # background re-run is update-only), so keep waiting to the full deadline from the original start.
+                    recheck_now, recheck = recheck, None
+                    if recheck_now():
+                        deferrable = False
+                        deadline = full_deadline
                 if time.monotonic() > deadline:
+                    if deferrable:
+                        raise _LockBusy("cr-record lock of %s busy for %ss (another refresh is publishing); "
+                                        "deferred to the background refresh" % (rel_id, float(wait)))
                     raise _Fail("timed out waiting for the cr-record lock of %s (another refresh is running)" % rel_id)
                 time.sleep(0.2)
         yield
@@ -491,11 +520,39 @@ def _mirror_edit(rel_id: str, handle: Dict[str, Any], release_page_ids: set):
     return edit
 
 
+def _may_create(board: Dict[str, Any], release: Dict[str, Any], wiki: Dict[str, Any], mode: str,
+                testing_log_create: bool, testing_log_update_only: bool) -> bool:
+    """XACA-1702-002: could this run CREATE a page (cr-record or Testing Log)? Evaluated BEFORE the lock, from the
+    pre-lock board read. A create-capable run ignores --lock-timeout (the background re-run is update-only, so a
+    deferred create would be lost). Safe on a stale read: handles are only ever added, so "has a handle" never
+    goes false. Any evaluation error counts as True (wait the full time; the locked path reports the error)."""
+    try:
+        if _stage_of(release) not in _STAGES[1:]:
+            return False
+        if _is_non_cr(board, release):
+            return bool(testing_log_create) and _handle_of_doc(release, TESTING_LOG_DOC) is None
+        if mode != "create-or-update":
+            return False
+        if _handle_of(release) is None:
+            return True
+        return (not testing_log_update_only and TESTING_LOG_DOC in (wiki.get("docTypes") or {})
+                and _handle_of_doc(release, TESTING_LOG_DOC) is None)
+    except Exception:  # noqa: BLE001
+        return True
+
+
+def _handle_of_doc(rec: Dict[str, Any], doc: str) -> Optional[Dict[str, Any]]:
+    from release_cr_stage import get_wiki_handle
+    return get_wiki_handle(rec, doc)
+
+
 def refresh(board_path: str, team: str, *, release_id: Optional[str] = None, cr_id: Optional[str] = None,
             reason: str = "", mode: str = "create-or-update", activity_file: Optional[str] = None,
             refresh_testing_log: bool = False, testing_log_update_only: bool = False,
-            testing_log_create: bool = False, now: Optional[datetime] = None) -> Tuple[int, Dict[str, Any]]:
-    """Run one refresh. Returns (exit code, verdict dict). Never raises."""
+            testing_log_create: bool = False, now: Optional[datetime] = None,
+            lock_timeout: Optional[float] = None) -> Tuple[int, Dict[str, Any]]:
+    """Run one refresh. Returns (exit code, verdict dict). Never raises.
+    ``lock_timeout`` (XACA-1702-002): bound the lock wait for a run that cannot create; None = LOCK_TIMEOUT_S, failure."""
     verdict: Dict[str, Any] = {}
     rel_label = release_id or ""
     try:
@@ -532,7 +589,28 @@ def refresh(board_path: str, team: str, *, release_id: Optional[str] = None, cr_
                 wiki = None  # unmapped: fall through to the unchanged rules below (same skips as before)
         if wiki is None:
             wiki = _wiki_json(cfg)
-        with _release_lock(board_path, rel_label):
+        deferrable = lock_timeout is not None and not _may_create(board, release, wiki, mode, testing_log_create,
+                                                                  testing_log_update_only)
+        if deferrable and _is_non_cr(board, release):  # set pre-lock: a deferral never reaches _testing_log_only
+            verdict["scope"] = TESTING_LOG_DOC
+            verdict["rerun"] = _non_cr_rerun(board_path, team, rel_label)
+        def _recheck_may_create() -> bool:  # XACA-1702-013: fresh board; an evaluation error counts as may-create
+            try:
+                b2 = _load_json(Path(board_path), "board")
+                r2 = _find_release(b2, rel_label)
+                if r2 is None:
+                    return False
+                w2 = wiki if _is_non_cr(b2, r2) else _wiki_json(cfg)
+                may = _may_create(b2, r2, w2, mode, testing_log_create, testing_log_update_only)
+            except Exception:  # noqa: BLE001
+                may = True
+            if may:  # not deferring after all: drop the pre-lock deferral labelling
+                verdict.pop("scope", None)
+                verdict["rerun"] = "kb-cr publish-record %s" % rel_label
+            return may
+
+        with _release_lock(board_path, rel_label, timeout=lock_timeout if deferrable else None,
+                           deferrable=deferrable, recheck=_recheck_may_create if deferrable else None):
             board = _load_json(Path(board_path), "board")  # fresh, now that we hold the lock
             release = _find_release(board, rel_label)
             if release is None:
@@ -545,6 +623,9 @@ def refresh(board_path: str, team: str, *, release_id: Optional[str] = None, cr_
     except _Skip as exc:
         verdict.update(status="skipped", reason=str(exc))
         return EXIT_SKIPPED, verdict
+    except _LockBusy as exc:  # XACA-1702-002: before _Fail; deferred is neither a skip nor a failure
+        verdict.update(status="deferred", reason=str(exc), lockTimeout=float(lock_timeout))
+        return EXIT_DEFERRED, verdict
     except _Fail as exc:
         verdict.update(status="failed", reason=str(exc), **exc.extra)
         return EXIT_FAILED, verdict
@@ -664,6 +745,11 @@ def _refresh_locked(board_path, board, release, team, cfg, wiki, cr_id, mode, ac
     return EXIT_PUBLISHED, verdict
 
 
+def _non_cr_rerun(board_path: str, team: str, rel_id: str) -> str:
+    return "python3 %s --board %s --team %s --release-id %s --testing-log-create" % (
+        Path(__file__).resolve(), board_path, team, rel_id)
+
+
 def _testing_log_only(board_path, release, team, cfg, stage, refresh_testing_log, testing_log_create,
                       verdict) -> Tuple[int, Dict[str, Any]]:
     """XACA-1701 (spec 12.2 / G10): the non-CR team's Testing Log. Runs INSTEAD of the CR-path steps and returns
@@ -674,8 +760,7 @@ def _testing_log_only(board_path, release, team, cfg, stage, refresh_testing_log
     from release_cr_stage import CrStageError, ToolError, get_wiki_handle, publish_testing_log
     rel_id = str(release["id"])
     # the cr-record re-run hint is meaningless here (kb-cr is off for this team): name the runnable recovery
-    verdict["rerun"] = "python3 %s --board %s --team %s --release-id %s --testing-log-create" % (
-        Path(__file__).resolve(), board_path, team, rel_id)
+    verdict["rerun"] = _non_cr_rerun(board_path, team, rel_id)
     verdict["testingLog"] = {"status": "skipped"}
     verdict["scope"] = TESTING_LOG_DOC  # XACA-1701-012: callers label the run by what it published (no cr-record)
     if stage not in _STAGES[1:]:
@@ -703,6 +788,16 @@ def publish(board_path: str, cr_id: str, team: str, mode: str, activity_file: Op
     return code
 
 
+def _nonneg_float(v: str) -> float:
+    try:
+        f = float(v)
+    except ValueError:
+        raise argparse.ArgumentTypeError("%r is not a number" % v) from None
+    if not (f >= 0) or f == float("inf"):  # also rejects NaN
+        raise argparse.ArgumentTypeError("must be a finite number >= 0")
+    return f
+
+
 def main(argv: Optional[list] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     ap.add_argument("--board", required=True)
@@ -720,11 +815,15 @@ def main(argv: Optional[list] = None) -> int:
     ap.add_argument("--testing-log-create", action="store_true",
                     help="XACA-1701: non-CR teams only - CREATE the Testing Log (GAMMA or later); also the recovery "
                          "flag for a failed GAMMA-entry create. Ignored for CR teams.")
+    ap.add_argument("--lock-timeout", type=_nonneg_float, default=None, metavar="SECONDS",
+                    help="XACA-1702: bound the wait for the per-release lock; on timeout print status 'deferred' and "
+                         "exit 12 (a background re-run owns the work). Ignored by a run that might CREATE a page. "
+                         "Omitted = wait 120 s and fail (11).")
     a = ap.parse_args(argv)
     code, verdict = refresh(a.board, a.team, release_id=a.release_id, cr_id=a.cr_id, reason=a.reason, mode=a.mode,
                             activity_file=a.activity_file, refresh_testing_log=a.refresh_testing_log,
                             testing_log_update_only=a.testing_log_update_only,
-                            testing_log_create=a.testing_log_create)
+                            testing_log_create=a.testing_log_create, lock_timeout=a.lock_timeout)
     print(json.dumps(verdict, sort_keys=True))
     return code
 

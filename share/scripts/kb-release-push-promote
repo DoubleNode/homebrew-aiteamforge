@@ -831,16 +831,47 @@ print(json.dumps({'platform': sys.argv[1], 'targetEnvironment': sys.argv[2]}))
                 if command -v _kb_lcars_auth_args >/dev/null 2>&1; then
                     _kb_lcars_auth_args || true
                 fi
-                _promote_http=$(printf '%s' "$_KB_LCARS_AUTH_STDIN" | curl -s \
+                # XACA-1702-003: also capture curl's exit code and time_connect so a
+                # request that WAS sent and went unanswered (rc 28, time_connect > 0:
+                # the promote may have committed) is told apart from a refused
+                # connection (rc 7 / time_connect 0: LCARS is not running).
+                _promote_curl_rc=0
+                _promote_out=$(printf '%s' "$_KB_LCARS_AUTH_STDIN" | curl -s \
                     -o "$_promote_response_file" \
-                    -w "%{http_code}" \
+                    -w "%{http_code} %{time_connect}" \
                     -X POST \
                     -H "Content-Type: application/json" \
                     ${_KB_LCARS_AUTH_ARGS[@]+"${_KB_LCARS_AUTH_ARGS[@]}"} \
                     -d "$_promote_payload" \
                     --connect-timeout 5 \
                     --max-time 15 \
-                    "${_LCARS_BASE}/api/releases/${_release_id}/promote" 2>/dev/null) || _promote_http="000"
+                    "${_LCARS_BASE}/api/releases/${_release_id}/promote" 2>/dev/null) || _promote_curl_rc=$?
+                _promote_http="${_promote_out%% *}"
+                _promote_tconn="${_promote_out#* }"
+                # Safety (unchanged from before): no usable code => treat as unreachable.
+                [ -n "$_promote_http" ] || _promote_http="000"
+            fi
+
+            if [ "$OPT_DRY_RUN" -ne 1 ] && [ "$_promote_curl_rc" -ne 0 ] \
+               && [ "$_promote_curl_rc" -ne 7 ] && [ "$_promote_curl_rc" -ne 6 ]; then
+                if { [ "$_promote_curl_rc" -eq 28 ] \
+                     && [ -n "$(printf '%s' "$_promote_tconn" | tr -d '0.\n')" ]; } \
+                   || [ "$_promote_curl_rc" -eq 52 ] || [ "$_promote_curl_rc" -eq 56 ]; then
+                    # XACA-1702-003: connected (time_connect > 0), request sent, no answer in 15s.
+                    # XACA-1702-011/-012: curl 52 (empty reply) and 56 (recv failure) are the same case: the request
+                    # reached LCARS and only the reply was lost, so the promote may have committed.
+                    echo "[kb-release-push-promote] WARNING: promote of ${_release_id} ${_platform} → ${_target_env} sent, but LCARS did not answer (curl exit ${_promote_curl_rc}) within 15s. It may have COMMITTED." >&2
+                    echo "  Check: kb-release status ${_release_id}. Re-running is safe (a replay at the current stage is a no-op)." >&2
+                    rm -f "$_promote_response_file" 2>/dev/null || true
+                    _OVERALL_EXIT=1
+                    continue
+                elif [ "$_promote_curl_rc" -ne 28 ]; then
+                    echo "[kb-release-push-promote] ERROR: promote request failed (curl exit ${_promote_curl_rc}) for ${_release_id} ${_platform}." >&2
+                    rm -f "$_promote_response_file" 2>/dev/null || true
+                    _OVERALL_EXIT=1
+                    continue
+                fi
+                # rc 28 with time_connect == 0 (connect timeout): falls through to "not reachable".
             fi
 
             if [ "$_promote_http" = "000" ]; then
@@ -894,7 +925,10 @@ except Exception:
                 continue
             fi
 
+            # XACA-1702-003: read the body before it is removed, to surface a deferred status refresh.
+            _promote_body=""
             if [ "$OPT_DRY_RUN" -ne 1 ]; then
+                _promote_body=$(cat "$_promote_response_file" 2>/dev/null) || true
                 rm -f "$_promote_response_file" 2>/dev/null || true
             fi
 
@@ -905,6 +939,39 @@ except Exception:
             fi
 
             echo "[kb-release-push-promote] promoted ${_release_id} ${_platform} → ${_target_env}"
+
+            # XACA-1702-003: the promote committed; only the status-page refresh was deferred
+            # (cr-record lock busy). The server schedules a background refresh - not a failure.
+            if [ -n "$_promote_body" ]; then
+                _deferred_rerun=$(printf '%s' "$_promote_body" | python3 -c "
+import json,sys
+try:
+    d = json.loads(sys.stdin.read())
+    c = d.get('crRecord') or {}
+    if isinstance(c, dict) and c.get('status') == 'deferred':
+        print('deferred ' + ('sched' if c.get('scheduled') is True else 'nosched') + ' ' + str(c.get('rerun') or ''))
+except Exception:
+    pass
+" 2>/dev/null) || _deferred_rerun=""
+                case "$_deferred_rerun" in
+                    deferred*)
+                        # XACA-1702: read crRecord.scheduled; false/missing = a run is already pending or the thread did not start
+                        _deferred_sched="${_deferred_rerun#deferred }"
+                        _deferred_sched="${_deferred_sched%% *}"
+                        _deferred_rerun="${_deferred_rerun#deferred }"
+                        _deferred_rerun="${_deferred_rerun#"$_deferred_sched"}"
+                        _deferred_rerun="${_deferred_rerun# }"
+                        if [ "$_deferred_sched" = "sched" ]; then
+                            echo "  status page refresh deferred (lock busy); background refresh scheduled."
+                        else
+                            echo "  status page refresh deferred (lock busy); a background refresh is already pending or could not start."
+                        fi
+                        if [ -n "$_deferred_rerun" ]; then
+                            echo "  If it does not update: ${_deferred_rerun}"
+                        fi
+                        ;;
+                esac
+            fi
 
             # ── Step 4c: RELNOTES promotion ──────────────────────────────────
             _relnotes_dir=""

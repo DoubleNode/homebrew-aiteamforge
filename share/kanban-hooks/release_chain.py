@@ -17,6 +17,7 @@ the chain here) -> promote -> the next iteration runs the new stage's providers.
 """
 import argparse
 import json
+import socket
 import sys
 import urllib.error
 import urllib.request
@@ -31,6 +32,11 @@ RC_OK, RC_ERROR, RC_USAGE, RC_REFUSED, RC_MANUAL, RC_FAILED, RC_NOSHA = 0, 1, 2,
 
 class ChainError(Exception):
     pass
+
+
+class PromoteTimeout(ChainError):
+    """XACA-1702-003: the promote request was SENT and no answer came within the read timeout, so the server
+    may have committed it. Distinct from a transport failure (nothing was sent). Same rc (RC_ERROR)."""
 
 
 def http_promote(base_url, release_id, target, actor, dry_run, timeout=60):
@@ -51,7 +57,16 @@ def http_promote(base_url, release_id, target, actor, dry_run, timeout=60):
             return e.code, json.loads(e.read().decode(errors="replace") or "{}")
         except ValueError:
             return e.code, {}
-    except (urllib.error.URLError, OSError, ValueError) as e:
+    except urllib.error.URLError as e:
+        # Refused / DNS / connect timeout: nothing was sent, wording unchanged.
+        raise ChainError("transport failure: %s" % (e,))
+    except socket.timeout:
+        # XACA-1702-003: a bare read timeout (URLError is caught above; socket.timeout is TimeoutError on 3.10+
+        # and an OSError subclass before). Checked BEFORE the generic OSError arm.
+        raise PromoteTimeout("promote of %s to %s sent but no response within %ss; it may have COMMITTED - "
+                             "check kb-release status %s, then re-run the chain (it re-plans from the board)"
+                             % (release_id, target, timeout, release_id))
+    except (OSError, ValueError) as e:
         raise ChainError("transport failure: %s" % (e,))
 
 

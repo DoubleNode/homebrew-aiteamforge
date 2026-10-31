@@ -103,6 +103,11 @@ _CR_RECORD_FAIL_MARKERS = ("WARNING: cr-record page", "cr-record refresh failed"
 # which is why a timeout here kills the whole process group (_run_shell_group) and never decides the HTTP status of
 # a write that has already committed (XACA-1662-023).
 _CR_RECORD_FLUSH_TIMEOUT = 210
+# XACA-1702-002: the lock wait a REQUEST-path status refresh (promote/regress/create/new-sha/stamp fallback) may spend
+# on the per-release cr-record lock. The publisher defers (exit 12) instead of waiting its full 120 s, and the
+# update-only coalescer (_schedule_testing_log_refresh) re-publishes in the background. The 180 s subprocess timeout
+# is deliberately NOT lowered: killing a publish mid-flight risks a created page whose handle was never stored.
+_REQUEST_LOCK_TIMEOUT_S = 3
 # XACA-1668-002: per-release coalescing for the GAMMA record -> Testing Log refresh. A release id maps to "running"
 # (a refresh is in flight) or "dirty" (more records landed meanwhile: run once more when it finishes). The publisher
 # renders from the board at run time, so one trailing run covers every record that arrived while one was in flight.
@@ -9323,7 +9328,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             # A PLANNED birth is skipped: the publisher would skip it anyway and the page starts at the promote.
             extra = {}
             if born_stage != 'PLANNED':
-                extra['crRecord'] = self._refresh_release_cr_record(release_id, LCARS_TEAM, 'create:%s' % born_stage)
+                extra['crRecord'] = self._refresh_release_cr_record(release_id, LCARS_TEAM, 'create:%s' % born_stage,
+                                                                  lock_timeout=_REQUEST_LOCK_TIMEOUT_S)
 
             self.send_response(201)
             self.send_header('Content-Type', 'application/json')
@@ -9963,20 +9969,24 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             if r.returncode != 0:
                 print(f"[LCARS] WARNING: assumed-approval stamping exited rc={r.returncode} (ignored)")
                 if defer_refresh:
-                    self._refresh_release_cr_record(release_id, team, "assumed-approval-stamp")
+                    self._refresh_release_cr_record(release_id, team, "assumed-approval-stamp",
+                                                    lock_timeout=_REQUEST_LOCK_TIMEOUT_S)
             return stamped
         except subprocess.TimeoutExpired:
             print(f"[LCARS] WARNING: assumed-approval stamping timed out for {release_id} (ignored)")
             if defer_refresh:
-                self._refresh_release_cr_record(release_id, team, "assumed-approval-stamp")
+                self._refresh_release_cr_record(release_id, team, "assumed-approval-stamp",
+                                                    lock_timeout=_REQUEST_LOCK_TIMEOUT_S)
         except Exception as e:  # noqa: BLE001 - never fail a promote on the persist step
             print(f"[LCARS] WARNING: assumed-approval stamping skipped for {release_id}: {e}")
             if defer_refresh:
-                self._refresh_release_cr_record(release_id, team, "assumed-approval-stamp")
+                self._refresh_release_cr_record(release_id, team, "assumed-approval-stamp",
+                                                    lock_timeout=_REQUEST_LOCK_TIMEOUT_S)
         return []
 
     def _refresh_release_cr_record(self, release_id, team, reason, refresh_testing_log=False,
-                                   testing_log_update_only=False, record_mode=None, testing_log_create=False):
+                                   testing_log_update_only=False, record_mode=None, testing_log_create=False,
+                                   lock_timeout=None):
         """XACA-1662-002: refresh the release's living "Release & CR Status" wiki page after a stage move.
         Runs kanban-hooks/release_cr_record_publish.py (the single renderer/publisher/handle writer): it creates
         the page when the release has none and is past PLANNED, else updates it, and skips cleanly when the
@@ -9995,13 +10005,32 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
         XACA-1701: ``testing_log_create`` is passed ONLY by a promote whose destination is GAMMA. It makes the
         publisher create a NON-CR team's Testing Log (spec 12.2 / G10) when wiki.json maps testing-log; CR teams
-        ignore it. A failed create's re-run hint comes from the publisher verdict (a non-CR team has no kb-cr)."""
+        ignore it. A failed create's re-run hint comes from the publisher verdict (a non-CR team has no kb-cr).
+
+        XACA-1702-002: ``lock_timeout`` (seconds, request-path callers only) is forwarded as ``--lock-timeout``. If
+        the publisher defers (exit 12: the per-release lock stayed busy), that is NOT a failure: the verdict comes back
+        ``status: "deferred"`` and exactly ONE update-only background refresh is scheduled here (``scheduled`` in the
+        verdict), so callers must not schedule their own. The coalescer and post-response callers pass no timeout.
+
+        XACA-1702-010: the no-verdict branches (script missing, timeout, exception) cannot read the verdict's
+        ``scope``, so a GAMMA-entry (``testing_log_create``) call for a team without crSupport is labelled and
+        hinted as the non-CR Testing Log publish, never as kb-cr / a cr-record page."""
         rerun = "kb-cr publish-record %s" % release_id
+        label = "cr-record refresh"
+        script = Path(_KANBAN_HOOKS_DIR) / "release_cr_record_publish.py"
+        if testing_log_create:
+            try:  # an unreadable board keeps today's wording: the refresh must never fail a promote
+                with open(self._get_board_file(team), encoding="utf-8") as _bf:
+                    if not self._crsupport_enabled(json.load(_bf)):
+                        label = "Testing Log publish (non-CR, G10)"
+                        rerun = ("python3 %s --board %s --team %s --release-id %s --testing-log-create"
+                                 % (script, self._get_board_file(team), team, release_id))
+            except Exception:  # noqa: BLE001
+                pass
         try:
             board_file = self._get_board_file(team)
-            script = Path(_KANBAN_HOOKS_DIR) / "release_cr_record_publish.py"
             if not script.is_file():
-                print(f"[LCARS] WARNING: cr-record refresh skipped for {release_id}: {script} not found. "
+                print(f"[LCARS] WARNING: {label} skipped for {release_id}: {script} not found. "
                       f"re-run: {rerun}")
                 return {"status": "skipped", "reason": "publisher script not found", "rerun": rerun}
             run_env = dict(os.environ, KB_TEAM=team, KB_WIKI_DENY_DOCS="cr")
@@ -10011,7 +10040,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                                + (["--refresh-testing-log"] if refresh_testing_log else [])
                                + (["--testing-log-update-only"] if testing_log_update_only else [])
                                + (["--testing-log-create"] if testing_log_create else [])
-                               + (["--mode", record_mode] if record_mode else []),
+                               + (["--mode", record_mode] if record_mode else [])
+                               + (["--lock-timeout", str(lock_timeout)] if lock_timeout is not None else []),
                                capture_output=True, text=True, timeout=180, env=run_env)
             try:
                 verdict = json.loads((r.stdout or "").strip().splitlines()[-1])
@@ -10024,17 +10054,28 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             # XACA-1701-012: a non-CR team has no cr-record page; its run publishes only the Testing Log (G10)
             what = ("Testing Log publish (non-CR, G10)" if verdict.get("scope") == "testing-log"
                     else "cr-record refresh")
-            if verdict.get("status") == "failed":
+            if lock_timeout is not None and verdict.get("status") == "deferred":
+                # XACA-1702-002: lock busy -> hand off to the update-only coalescer (exactly one run). Not a failure,
+                # and the line must carry neither of kb-cr's _CR_RECORD_FAIL_MARKERS.
+                sched = self._schedule_testing_log_refresh(release_id, team, reason, record_mode="update-only")
+                verdict["scheduled"] = True if sched is None else bool(sched)
+                if verdict["scheduled"]:
+                    print(f"[LCARS] {what} for {release_id} ({reason}): deferred (lock busy); "
+                          f"background refresh scheduled")
+                else:
+                    print(f"[LCARS] {what} for {release_id} ({reason}): deferred (lock busy); background refresh "
+                          f"already pending or could not start. re-run: {verdict['rerun']}")
+            elif verdict.get("status") == "failed":
                 print(f"[LCARS] WARNING: {what} failed for {release_id} ({reason}): "
                       f"{verdict.get('reason', '')}. re-run: {verdict['rerun']}")
             else:
                 print(f"[LCARS] {what} for {release_id} ({reason}): {verdict.get('status')}")
             return verdict
         except subprocess.TimeoutExpired:
-            print(f"[LCARS] WARNING: cr-record refresh timed out for {release_id} ({reason}). re-run: {rerun}")
+            print(f"[LCARS] WARNING: {label} timed out for {release_id} ({reason}). re-run: {rerun}")
             return {"status": "failed", "reason": "timed out after 180s", "rerun": rerun}
         except Exception as e:  # noqa: BLE001 - a wiki refresh must never fail or alter a promote/regress
-            print(f"[LCARS] WARNING: cr-record refresh errored for {release_id} ({reason}): {e}. re-run: {rerun}")
+            print(f"[LCARS] WARNING: {label} errored for {release_id} ({reason}): {e}. re-run: {rerun}")
             return {"status": "failed", "reason": "%s: %s" % (type(e).__name__, e), "rerun": rerun}
 
     def _schedule_testing_log_refresh(self, release_id, team, reason, record_mode="update-only"):
@@ -10642,10 +10683,14 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             # runs on the background scheduler so it never stretches the promote past client timeouts.
             # XACA-1701: entering GAMMA is the one moment a non-CR team's Testing Log is CREATED (spec 12.2 / G10).
             # The kwarg is passed only at GAMMA entry, so every other promote calls the refresh exactly as before.
+            # XACA-1702-002: bounded lock wait (a create-shaped run still waits in full: the publisher decides). A
+            # deferred refresh already scheduled the one update-only background run, so do not schedule a second.
             cr_record = self._refresh_release_cr_record(release_id, LCARS_TEAM, 'promote:%s->%s' % (cur, eff_target),
+                                                        lock_timeout=_REQUEST_LOCK_TIMEOUT_S,
                                                         **({'testing_log_create': True} if eff_target == 'GAMMA' else {}))
-            self._schedule_testing_log_refresh(release_id, LCARS_TEAM, 'promote:%s->%s' % (cur, eff_target),
-                                               record_mode="update-only")
+            if cr_record.get("status") != "deferred":
+                self._schedule_testing_log_refresh(release_id, LCARS_TEAM, 'promote:%s->%s' % (cur, eff_target),
+                                                   record_mode="update-only")
             return self._send_json_response(dict(
                 base, allowed=True, release=snapshot,
                 success=True, previousEnvironment=cur, newEnvironment=eff_target, crRecord=cr_record))
@@ -10740,9 +10785,12 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                                        actor=actor, via='regress')
         # XACA-1662-002: a regress changes the stage the living status page shows. Lock already released.
         # XACA-1668-001/-011: and so does a successful regress; the Testing Log re-publish runs in the background.
-        cr_record = self._refresh_release_cr_record(release_id, LCARS_TEAM, 'regress:%s->%s' % (cur, landed))
-        self._schedule_testing_log_refresh(release_id, LCARS_TEAM, 'regress:%s->%s' % (cur, landed),
-                                           record_mode="update-only")
+        # XACA-1702-002: bounded lock wait; a deferral already scheduled the one background run (no double run).
+        cr_record = self._refresh_release_cr_record(release_id, LCARS_TEAM, 'regress:%s->%s' % (cur, landed),
+                                                    lock_timeout=_REQUEST_LOCK_TIMEOUT_S)
+        if cr_record.get("status") != "deferred":
+            self._schedule_testing_log_refresh(release_id, LCARS_TEAM, 'regress:%s->%s' % (cur, landed),
+                                               record_mode="update-only")
         payload = {"allowed": True, "from": cur, "to": landed, "release": snapshot,
                    "strandedInCR": stranded, "crRecord": cr_record,
                    **({"configWarning": cr_warn} if cr_warn else {})}
@@ -11192,7 +11240,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             payload = {"ok": True, "summary": summary}
             if summary.get('to') != summary.get('from'):
                 payload["crRecord"] = self._refresh_release_cr_record(
-                    release_id, LCARS_TEAM, 'new-sha:%s->%s' % (summary['from'], summary['to']))
+                    release_id, LCARS_TEAM, 'new-sha:%s->%s' % (summary['from'], summary['to']),
+                    lock_timeout=_REQUEST_LOCK_TIMEOUT_S)
             return self._send_json_response(payload)
         except _DeferredResponse as deferred:
             deferred.emit(self)
