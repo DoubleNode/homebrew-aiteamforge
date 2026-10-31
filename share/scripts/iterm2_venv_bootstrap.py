@@ -79,7 +79,8 @@ def _get_tap_venv_candidates() -> list[str]:
     brew_prefix = ""
     try:
         brew_prefix = subprocess.check_output(
-            ["brew", "--prefix"], text=True, timeout=5
+            ["brew", "--prefix"], text=True, timeout=5,
+            stderr=subprocess.DEVNULL,
         ).strip()
     except Exception:
         pass
@@ -87,7 +88,10 @@ def _get_tap_venv_candidates() -> list[str]:
     brew_atf_prefix = ""
     try:
         brew_atf_prefix = subprocess.check_output(
-            ["brew", "--prefix", "aiteamforge"], text=True, timeout=5
+            ["brew", "--prefix", "aiteamforge"], text=True, timeout=5,
+            # No tap installed (e.g. the dev box) -> brew prints
+            # 'No available formula' on stderr; the candidate is just skipped.
+            stderr=subprocess.DEVNULL,
         ).strip()
     except Exception:
         pass

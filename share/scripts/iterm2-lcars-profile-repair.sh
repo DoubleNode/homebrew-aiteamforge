@@ -13,6 +13,13 @@
 # a dynamic profile (AITEAMFORGE-DEFAULT-PROF-0001, AITEAMFORGE-AGENT-PANEL-0001)
 # shadow the dynamic file.
 #
+# CORRECTION (XACA-1707, measured on iTerm2 3.7.6): those saved copies carry
+# 'Is Dynamic Profile' = True and are iTerm2 3.7's own persistence of dynamic
+# profiles; iTerm2 rewrites them on relaunch. The stale URL is caused by
+# iTerm2 not reloading DynamicProfiles/ while running at all. --apply does
+# NOT fix a stale URL; set-lcars-profile-browser.py --verify now pushes the
+# URL through the iTerm2 API instead. --verify below remains the right check.
+#
 # Ownership: only saved profiles whose GUID starts with AITEAMFORGE- are ever
 # removed. A saved profile shadowing some OTHER dynamic profile (third-party) is
 # reported as "not touched" and never modified.
@@ -20,7 +27,8 @@
 # Modes:
 #   (default)  dry run: report shadowing entries, change nothing. Safe while
 #              iTerm2 runs.
-#   --apply    back up the prefs, remove the shadowing saved profiles, clear the
+#   --apply    (legacy; does not fix a stale URL on 3.7.6, see CORRECTION above)
+#              back up the prefs, remove the shadowing saved profiles, clear the
 #              migration flag. REFUSES while iTerm2 is running (quit it first;
 #              tmux sessions survive). Edits go through `defaults export` ->
 #              modify -> `defaults import` so cfprefsd sees them; the plist
@@ -37,7 +45,8 @@
 #   2  usage or environment error (bad flag, defaults export failed, interpreter
 #      not found, a dynamic profile *.json that is unreadable or malformed)
 #   3  aborted: the default profile is itself a shadowing copy; not touched
-#   4  dry run: repair NEEDED (run again with --apply)
+#   4  dry run: saved copies found (--apply removes them; on iTerm2 3.7 they
+#      are normal and come back, so this alone is not a fault)
 #   5  --verify could not reach a verdict: iterm2 module missing, iTerm2 API
 #      unreachable/failed, no profile named 'LCARS Web' is loaded in iTerm2, or
 #      the loaded profile's GUID has no URL in any dynamic profile file (nothing
@@ -167,7 +176,7 @@ except Exception as exc:
 
 if not loaded:
     die(5, "VERIFY UNAVAILABLE: no profile named 'LCARS Web' is loaded in iTerm2 "
-           "(relaunch iTerm2 after --apply, and check the dynamic profile file exists)")
+           "(relaunch iTerm2, start a team, and check the dynamic profile file exists)")
 
 rc = 0
 for guid, have in loaded:
@@ -242,7 +251,9 @@ if not shadow and flag is None:
     print("Nothing to repair.")
     sys.exit(0)
 if mode != "apply":
-    print("DRY RUN: repair needed, nothing changed. Quit iTerm2, then re-run with --apply.")
+    print("DRY RUN: saved copies found, nothing changed. On iTerm2 3.7 these are normal and "
+          "come back after --apply; for a stale LCARS URL use --verify (the team startup "
+          "now fixes it through the iTerm2 API).")
     sys.exit(4)
 prefs["New Bookmarks"] = keep
 prefs.pop("NoSyncMigratedDynamicProfileTagToFlag", None)

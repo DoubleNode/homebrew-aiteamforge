@@ -2016,8 +2016,10 @@ open_lcars_tab() {
     #
     # XACA-1661: --verify makes the setter read the URL back from the profile
     # file AND from iTerm2's live in-memory profile (iTerm2 3.7 can keep serving
-    # a stale URL, i.e. another team's board). Exit codes: 0 ok, 3 mismatch,
-    # 4 could not verify, 1/other write failure. The `|| setter_rc=$?` form
+    # a stale URL, i.e. another team's board). XACA-1707: on a mismatch the
+    # setter pushes the URL into iTerm2 via its API first, so 3 means even
+    # that failed. Exit codes: 0 ok, 3 mismatch, 4 could not verify,
+    # 1/other write failure. The `|| setter_rc=$?` form
     # captures the code without tripping `set -e` in callers.
     local setter_rc=0
     python3 "${setter_script}" "${lcars_url}" --verify || setter_rc=$?
@@ -2032,16 +2034,16 @@ open_lcars_tab() {
             echo "" >&2
             echo "🚨🚨 LCARS PROFILE URL MISMATCH -- the LCARS tab will open the WRONG team's board!" >&2
             echo "   Expected: ${lcars_url}" >&2
-            echo "   iTerm2 is serving a stale 'LCARS Web' profile URL (see details above)." >&2
-            echo "   Fix: inspect (dry-run):  ${_atf_base}/scripts/iterm2-lcars-profile-repair.sh" >&2
-            echo "        then QUIT iTerm2 and run:  ${_atf_base}/scripts/iterm2-lcars-profile-repair.sh --apply" >&2
+            echo "   iTerm2 is serving a stale 'LCARS Web' profile URL and the API push did not fix it (see details above)." >&2
+            echo "   Fix: QUIT iTerm2 (Cmd-Q), relaunch it, and start this team first." >&2
+            echo "        Check with:  ${_atf_base}/scripts/iterm2-lcars-profile-repair.sh --verify" >&2
             echo "   Opening the tab anyway so you are not left without one." >&2
             echo "" >&2
             ;;
         4)
             echo "    ⚠️  Could not verify the LCARS profile URL for ${lcars_url} (iTerm2 API unavailable or profile not found)." >&2
             echo "       The URL is UNVERIFIED -- the tab may or may not show the right board." >&2
-            echo "       If it looks wrong: ${_atf_base}/scripts/iterm2-lcars-profile-repair.sh (dry-run), then quit iTerm2 and --apply." >&2
+            echo "       If it looks wrong: quit iTerm2 (Cmd-Q), relaunch it, and start this team first." >&2
             ;;
         *)
             echo "🚨 LCARS profile setter FAILED for ${lcars_url} (exit ${setter_rc})" >&2

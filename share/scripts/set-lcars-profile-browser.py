@@ -27,11 +27,17 @@ _update_dynamic_profile_url cannot see that; --verify can. The poll is
 bounded by the (clamped) LCARS_PROFILE_RELOAD_WAIT value. Without --verify
 nothing here imports iterm2 and behaviour/exit codes are unchanged.
 
+XACA-1707: iTerm2 3.7.6 does not reload DynamicProfiles/ while running at
+all, so on a mismatch --verify pushes <url> into the in-memory LCARS Web
+profile through the API and reads it back once more before failing.
+
 Exit codes:
-  0  success (with --verify: in-memory URL matches)
+  0  success (with --verify: in-memory URL matches, directly or after the
+     API push)
   1  write failure (profile JSON missing/corrupt/unwritable/readback bad)
-  3  --verify: iTerm2 in-memory URL != requested URL (stale profile);
-     stderr names the file URL, the in-memory URL and the repair command
+  3  --verify: iTerm2 in-memory URL != requested URL even after the API
+     push (stale profile); stderr names the file URL, the in-memory URL,
+     why the push did not help, and the restart fallback
   4  --verify: iTerm2 API unavailable (iterm2 module missing, connection
      refused/timed out, 'LCARS Web' profile or 'Initial URL' not found).
      Loud by design: an unverifiable result is never reported as a pass.
@@ -315,12 +321,37 @@ async def _read_inmemory_url_async(iterm2) -> str:
     return url
 
 
-def _read_inmemory_url() -> str:
-    """Return the running iTerm2's in-memory 'Initial URL' for LCARS Web.
+async def _push_inmemory_url_async(iterm2, url: str) -> None:
+    conn = await asyncio.wait_for(
+        iterm2.Connection.async_create(), timeout=_VERIFY_CONNECT_TIMEOUT
+    )
+    profs = await asyncio.wait_for(
+        iterm2.PartialProfile.async_query(conn), timeout=_VERIFY_CONNECT_TIMEOUT
+    )
+    partial = next((p for p in profs if p.name == "LCARS Web"), None)
+    if partial is None:
+        raise _VerifyUnavailable('"LCARS Web" profile not found in iTerm2')
+    full = await asyncio.wait_for(
+        partial.async_get_full_profile(), timeout=_VERIFY_CONNECT_TIMEOUT
+    )
+    # The iterm2 library (2.14) has no public Initial URL setter; this is the
+    # helper every public profile setter uses (rpc.async_set_profile_property
+    # keyed by the profile GUID), so it edits the shared profile new tabs are
+    # created from.
+    setter = getattr(full, "_async_simple_set", None)
+    if setter is None:
+        raise _VerifyUnavailable("iterm2 module has no profile property setter")
+    await asyncio.wait_for(
+        setter("Initial URL", url), timeout=_VERIFY_CONNECT_TIMEOUT
+    )
 
-    Raises _VerifyUnavailable for every way the API can fail. Tests can
-    inject a fake `iterm2` module via PYTHONPATH (the venv bootstrap is a
-    no-op when `iterm2` is already importable).
+
+def _import_iterm2():
+    """Import iterm2 (re-exec under the venv first if needed).
+
+    Raises _VerifyUnavailable when the module is missing. Tests can inject
+    a fake `iterm2` module via PYTHONPATH (the venv bootstrap is a no-op
+    when `iterm2` is already importable).
     """
     try:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -331,14 +362,39 @@ def _read_inmemory_url() -> str:
         import iterm2
     except ImportError as exc:
         raise _VerifyUnavailable(f"iterm2 Python module not importable: {exc}")
+    return iterm2
+
+
+def _run_api(coro_fn, *args):
+    """Run coro_fn(iterm2, *args); every API failure -> _VerifyUnavailable."""
+    iterm2 = _import_iterm2()
     try:
-        return asyncio.run(_read_inmemory_url_async(iterm2))
+        return asyncio.run(coro_fn(iterm2, *args))
     except _VerifyUnavailable:
         raise
     except Exception as exc:
         raise _VerifyUnavailable(
             f"iTerm2 API call failed ({type(exc).__name__}: {exc})"
         )
+
+
+def _read_inmemory_url() -> str:
+    """Return the running iTerm2's in-memory 'Initial URL' for LCARS Web.
+
+    Raises _VerifyUnavailable for every way the API can fail.
+    """
+    return _run_api(_read_inmemory_url_async)
+
+
+def _push_inmemory_url(url: str) -> None:
+    """Set the running iTerm2's in-memory LCARS Web 'Initial URL' (XACA-1707).
+
+    iTerm2 3.7.6 does not reload DynamicProfiles/ while running (measured:
+    neither a rewrite nor a brand-new file is picked up), so the file write
+    alone leaves new LCARS tabs on whichever team's URL iTerm2 launched with.
+    Raises _VerifyUnavailable for every way the API can fail.
+    """
+    _run_api(_push_inmemory_url_async, url)
 
 
 def _file_url() -> str:
@@ -371,15 +427,31 @@ def _verify(url: str, timeout: float) -> int:
         if time.monotonic() >= deadline:
             break
         time.sleep(_VERIFY_POLL_INTERVAL)
+    # XACA-1707: iTerm2 ignored the file. Push the URL into its in-memory
+    # profile and read it back; success only on a matching read-back.
+    stale = last
+    try:
+        _push_inmemory_url(url)
+        last = _read_inmemory_url()
+        push_note = "API push did not take"
+    except _VerifyUnavailable as exc:
+        push_note = f"API push failed: {exc}"
+    if last == url:
+        print(
+            f"repaired: iTerm2 ignored the profile file (was {stale}); "
+            f"set LCARS Web Initial URL = {url} via the iTerm2 API"
+        )
+        return EXIT_OK
     repair = Path(__file__).resolve().parent / _REPAIR_SCRIPT
     print(
         "🚨 VERIFY MISMATCH: iTerm2 is serving a stale LCARS Web profile.\n"
         f"   DynamicProfiles file URL : {_file_url()}\n"
         f"   iTerm2 in-memory URL     : {last}\n"
         f"   expected                 : {url}\n"
-        f"   Repair: {repair} --apply\n"
-        "   (--apply requires quitting iTerm2; run it without --apply first "
-        "to preview.)",
+        f"   {push_note}\n"
+        "   Fallback: quit iTerm2 (Cmd-Q; tmux sessions survive), relaunch it,\n"
+        "   then start this team first. iTerm2 reads the profile file at launch.\n"
+        f"   Check afterwards: {repair} --verify",
         file=sys.stderr,
     )
     return EXIT_VERIFY_MISMATCH
