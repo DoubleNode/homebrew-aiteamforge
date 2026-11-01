@@ -30,7 +30,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-AGENT_VERSION = "1.0.0"
+# Bump on EVERY behavioural change to this file. XACA-1445-003: every build used to report
+# "1.0.0", so a 10-06 build missing the persistent-* commands ran for weeks unnoticed.
+AGENT_VERSION = "1.1.0"
 SCHEMA_VERSION = 1
 DEFAULT_CONFIG_PATH = "/usr/local/etc/ci-pool-agent/agent.json"
 DEFAULT_LIMACTL = "/opt/homebrew/bin/limactl"
@@ -1783,14 +1785,13 @@ class PersistentRunners(object):
         return arc not in (0, None) and erc not in (0, None)
 
     def _stop_mac(self, e):
-        rc, _ = run_rc([self.launchctl, "disable", "system/" + self.label])
-        if rc != 0:
-            return False
+        # XACA-1445-003: judge the FINAL STATE (disabled and not loaded), never a step's rc.
+        # `launchctl bootout` can exit non-zero while the service did get unloaded, which made
+        # a correct disable report FAILED. Fail closed: an unreadable state is not "stopped".
+        run_rc([self.launchctl, "disable", "system/" + self.label])
         if self.mac_loaded():
-            rc, _ = run_rc([self.launchctl, "bootout", "system/" + self.label])
-            if rc != 0:
-                return False
-        return not self.mac_loaded()
+            run_rc([self.launchctl, "bootout", "system/" + self.label])
+        return self.mac_disabled() is True and not self.mac_loaded()
 
     def enable(self):
         try:
@@ -1880,6 +1881,18 @@ def main(argv=None):
     args = sys.argv[1:] if argv is None else list(argv)
     if args and args[0] in PERSIST_COMMANDS:
         return persistent_main(args)
+    if args:
+        # XACA-1445-003: the daemon takes no arguments. An old build ignored argv and started a
+        # SECOND foreground poll loop on a mistyped/unsupported subcommand.
+        usage = ("usage: ci-pool-agent.py                          run the poll loop (daemon, no arguments)\n"
+                 "       ci-pool-agent.py persistent-status [--json]\n"
+                 "       ci-pool-agent.py persistent-disable [--force]\n"
+                 "       ci-pool-agent.py persistent-enable\n")
+        if args[0] in ("-h", "--help"):
+            sys.stdout.write(usage)
+            return 0
+        sys.stderr.write("ci-pool-agent: unknown argument %r\n%s" % (args[0], usage))
+        return 2
     try:
         cfg = load_config()
     except ValueError as e:

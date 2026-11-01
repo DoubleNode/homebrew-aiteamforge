@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1445 route CI to fleet-pool; retire CI_LINUX_RUNNER* split
+- Tap files updated in this publish: `share/scripts/ci-runner/client/ci-pool-agent.py`. Run `brew upgrade aiteamforge` to receive them.
 
 ## [0.21.11] - 2026-10-31
 - XACA-1445 cap decision log; report counts long-wait cancels as gaps
