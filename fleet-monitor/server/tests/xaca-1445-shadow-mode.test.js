@@ -566,3 +566,70 @@ describe('static-label job, pinned host unavailable: alerts follow the host mode
     assert.equal(await alertsFor('live'), 1);
   });
 });
+
+describe('decision log is size-capped (XACA-1445-018)', () => {
+    const CAP = 2000;   // a record is ~400 bytes, so this rotates every few jobs
+    const idsOf = (f) => (fs.existsSync(f) ? fs.readFileSync(f, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l).job_id) : []);
+
+    async function fill(s, from, to) {
+        for (let id = from; id <= to; id++) { s.d.onJob(rec(id), 'queued'); await s.d.tick(); }
+    }
+
+    test('rotates to <file>.1 at the cap, keeps exactly one generation, and stays bounded', async () => {
+        const s = setup({ env: { FLEET_CI_SHADOW_LOG_MAX_BYTES: String(CAP) } });
+        s.report('m4mini', {}, 2);
+        await fill(s, 1, 30);
+        assert.ok(fs.existsSync(s.logFile + '.1'), 'a rotated generation exists');
+        assert.equal(fs.existsSync(s.logFile + '.2'), false, 'only one rotated generation is kept');
+        assert.ok(fs.statSync(s.logFile).size <= CAP, 'live file within cap');
+        assert.ok(fs.statSync(s.logFile + '.1').size <= CAP, 'rotated file within cap');
+        const old = idsOf(s.logFile + '.1'); const cur = idsOf(s.logFile);
+        assert.ok(old.length > 0 && cur.length > 0);
+        // contiguous newest window: nothing recent is lost across the boundary, nothing duplicated
+        assert.deepEqual(old.concat(cur), Array.from({ length: cur[cur.length - 1] - old[0] + 1 }, (_, i) => old[0] + i));
+        assert.equal(cur[cur.length - 1], 30);
+        assert.equal(s.d.status().decisionsRecorded, 30);
+    });
+
+    test('below the cap nothing rotates', async () => {
+        const s = setup({ env: { FLEET_CI_SHADOW_LOG_MAX_BYTES: String(1024 * 1024) } });
+        s.report('m4mini', {}, 2);
+        await fill(s, 1, 10);
+        assert.equal(fs.existsSync(s.logFile + '.1'), false);
+        assert.equal(idsOf(s.logFile).length, 10);
+    });
+
+    test('a restart right after a rotation re-primes from .1 AND the live file: no recent job is re-decided', async () => {
+        const s = setup({ env: { FLEET_CI_SHADOW_LOG_MAX_BYTES: String(CAP) } });
+        s.report('m4mini', {}, 2);
+        // stop on the first job that lands in a fresh live file, so the live file holds only that one record
+        let id = 0;
+        for (;;) {
+            id++; s.d.onJob(rec(id), 'queued'); await s.d.tick();
+            if (fs.existsSync(s.logFile + '.1') && idsOf(s.logFile).length === 1) break;
+            assert.ok(id < 100, 'rotation never happened');
+        }
+        const old = idsOf(s.logFile + '.1');
+        assert.ok(old.length >= 2 && !idsOf(s.logFile).some((x) => old.includes(x)));
+        const before = old.length + 1;
+        const s2 = setup({ logFile: s.logFile, env: { FLEET_CI_SHADOW_LOG_MAX_BYTES: String(1024 * 1024) } });
+        s2.report('m4mini', {}, 2);
+        for (let j = 1; j <= id; j++) s2.d.onJob(rec(j), 'queued');   // every still-queued job is re-announced
+        await s2.d.tick();
+        assert.equal(idsOf(s.logFile + '.1').length + idsOf(s.logFile).length, before, 'no job in .1 or live was decided a second time');
+        const firstKnown = old[0];
+        assert.deepEqual(idsOf(s.logFile + '.1').concat(idsOf(s.logFile)).filter((x) => x >= firstKnown).length, before);
+        // jobs rotated out of both generations (id < firstKnown) are the only ones the new process may re-record
+        assert.equal(s2.d.status().decisionsRecorded, firstKnown - 1, 'only jobs older than both generations were re-recorded');
+    });
+
+    test('a rename failure never stops recording (log keeps growing past the cap, tick resolves)', async () => {
+        const s = setup({ env: { FLEET_CI_SHADOW_LOG_MAX_BYTES: String(CAP) } });
+        s.report('m4mini', {}, 2);
+        fs.mkdirSync(s.logFile + '.1');   // a non-empty directory at the target makes rename fail
+        fs.writeFileSync(path.join(s.logFile + '.1', 'x'), 'x');
+        await fill(s, 1, 12);
+        assert.equal(idsOf(s.logFile).length, 12);
+        assert.ok(s.lines.some((l) => /decision log rotation failed/.test(l)), s.lines.join('\n'));
+    });
+});

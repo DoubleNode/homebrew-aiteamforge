@@ -75,6 +75,11 @@ const MAX_CONFIG_REJECTED = 500;
 const MAX_DECIDED_IDS = 20000;
 const SHADOW_LOG_PRIME_BYTES = 512 * 1024;
 const DEFAULT_SHADOW_LOG_NAME = 'ci-shadow-decisions.jsonl';
+// XACA-1445-018: the decision log is size-capped. When the live file plus the next line would pass the cap it is
+// renamed (atomic, replaces any older one) to <file>.1 and a fresh file starts: ONE rotated generation is kept, so
+// disk use is bounded at about 2x the cap. Same 5 MB cap and rename-on-overflow shape as ci-dispatch-audit.js.
+// Env FLEET_CI_SHADOW_LOG_MAX_BYTES (positive integer) or deps.shadowLogMaxBytes overrides it.
+const DEFAULT_SHADOW_LOG_MAX_BYTES = 5 * 1024 * 1024;
 
 // XACA-1479-006: dispatch priority. Only these two values outrank normal; anything else (missing,
 // 'normal', unknown, a non-string) ranks as normal -- the dispatcher never promotes on bad data.
@@ -173,6 +178,7 @@ function dormantReason(env) {
  * @param {number}   [deps.maxMintsPerJob]  ghost backstop: runners that expired unpicked for one job (default MAX_MINTS_PER_JOB)
  * @param {number}   [deps.maxTrackedMs]    ghost backstop (default MAX_TRACKED_MS)
  * @param {string}   [deps.shadowLogPath] decision-record file (env FLEET_CI_SHADOW_LOG wins); none = no records written
+ * @param {number}   [deps.shadowLogMaxBytes] rotation cap for the decision log (env FLEET_CI_SHADOW_LOG_MAX_BYTES wins; default 5 MiB)
  * @param {Function} [deps.now]
  * @param {Function} [deps.setTimer]   (fn, ms) => handle
  * @param {Function} [deps.clearTimer]
@@ -258,9 +264,24 @@ function createDispatcher(deps) {
         while (decided.size > MAX_DECIDED_IDS) decided.delete(decided.values().next().value);
     }
 
-    /** Best effort: re-learn recorded job ids from the log tail so a restart does not duplicate them. */
-    function primeDecided(file) {
-        decidedPrimed = true;
+    const shadowLogMaxBytes = () => {
+        const e = Number(clean(env.FLEET_CI_SHADOW_LOG_MAX_BYTES));
+        if (Number.isInteger(e) && e > 0) return e;
+        return Number.isInteger(d.shadowLogMaxBytes) && d.shadowLogMaxBytes > 0 ? d.shadowLogMaxBytes : DEFAULT_SHADOW_LOG_MAX_BYTES;
+    };
+
+    /** Rotate when the next line would pass the cap. Never throws: a failed rename just lets the file grow this once. */
+    function rotateShadowLogIfNeeded(file, nextBytes) {
+        let size = 0;
+        try { size = fs.statSync(file).size; } catch (_) { return; }   // absent = nothing to rotate
+        if (size <= 0 || size + nextBytes <= shadowLogMaxBytes()) return;
+        try { fs.renameSync(file, file + '.1'); } catch (e) {
+            say('error', `decision log rotation failed (${clean((e && e.code) || (e && e.message)).slice(0, 80)})`);
+        }
+    }
+
+    /** Best effort: feed the job ids found in the tail of ONE file to markDecided (oldest line first). */
+    function primeFromFile(file) {
         let fd = null;
         try {
             fd = fs.openSync(file, 'r');
@@ -278,6 +299,17 @@ function createDispatcher(deps) {
         } catch (_) { /* no log yet is the normal case */ } finally {
             if (fd !== null) { try { fs.closeSync(fd); } catch (_) { /* nothing */ } }
         }
+    }
+
+    /**
+     * Re-learn recorded job ids so a restart does not duplicate them. Reads the rotated generation first and the live
+     * file second (age order), so a restart right after a rotation (live file tiny or absent) still knows every
+     * recently decided job. XACA-1445-018.
+     */
+    function primeDecided(file) {
+        decidedPrimed = true;
+        primeFromFile(file + '.1');
+        primeFromFile(file);
     }
 
     const pcfgFor = (cfg) => ({ now: now(), thresholds: cfg.thresholds, jobClasses: cfg.jobClasses, poolLabel: cfg.poolLabel });
@@ -338,6 +370,7 @@ function createDispatcher(deps) {
             }) + '\n';
             try {
                 fs.mkdirSync(path.dirname(file), { recursive: true });
+                rotateShadowLogIfNeeded(file, Buffer.byteLength(line));
                 fs.appendFileSync(file, line, { mode: 0o600 });   // single write of line + "\n"
                 decisionsRecorded++;
             } catch (e) {

@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1445 cap decision log; report counts long-wait cancels as gaps
+- Tap files updated in this publish: `fleet-monitor/server/lib/ci-dispatcher.js`,`fleet-monitor/server/tests/xaca-1445-shadow-mode.test.js`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1709 URL setter pushes via the iTerm2 API on every call
 - Tap files updated in this publish: `share/scripts/set-lcars-profile-browser.py`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1707 push the LCARS URL into iTerm2 via its API when iTerm2 3.7 ignores the profile file
