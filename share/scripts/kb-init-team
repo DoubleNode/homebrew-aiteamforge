@@ -163,12 +163,13 @@
 #
 #   REACHABILITY (not a value store — XACA-1161 addition; the original
 #   15-site register omitted it entirely):
-#     16. homebrew-tap/share/teams/registry.json — the installable-template
-#         catalog. It holds NO registry-schema fields at all; measured, the
+#     16. tap-src/share/teams/registry.json — the installable-template
+#         catalog (canonical since XACA-1609; the tap's share/teams copy is a
+#         publisher mirror — edit the dev-team file only). It holds NO registry-schema fields at all; measured, the
 #         union of its entry keys is exactly:
 #           category, color, description, icon, id, name, order, recommended, theme
 #         Verify (and note the control, which prints NONE rather than nothing):
-#           python3 -c "import json; d=json.load(open('homebrew-tap/share/teams/registry.json')); \
+#           python3 -c "import json; d=json.load(open('tap-src/share/teams/registry.json')); \
 #             k=set().union(*(set(e) for e in d['teams'])); print(sorted(k)); \
 #             print(sorted(k & {'kanban_dir','working_dir','team_code','lcars_port', \
 #             'lcars_port_base','lcars_port_range','primary_host','alias_of','board_less'}) or 'NONE')"

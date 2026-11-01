@@ -122,6 +122,18 @@
       "order": 11,
       "recommended": false,
       "mandatory": true
+    },
+    {
+      "id": "richmond",
+      "name": "AFC Richmond",
+      "category": "project",
+      "description": "General-purpose development team \u2014 features, architecture, releases, documentation, testing, code review and bugfixes (Ted Lasso themed)",
+      "color": "#5FAFFF",
+      "theme": "Ted Lasso",
+      "icon": "\u26bd",
+      "order": 12,
+      "recommended": false,
+      "mandatory": false
     }
   ],
   "categories": {
