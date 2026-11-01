@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+
+## [0.21.12] - 2026-11-01
 - XACA-1713 ship richmond installer inputs (conf, registry, prompts) via tap-src
 - Tap files updated in this publish: `share/personas/richmond/prompts/richmond-clinic-prompt.txt`,`share/personas/richmond/prompts/richmond-office-prompt.txt` `share/personas/richmond/prompts/richmond-operations-prompt.txt`,`share/personas/richmond/prompts/richmond-pressbox-prompt.txt` `share/personas/richmond/prompts/richmond-pressroom-prompt.txt`,`share/personas/richmond/prompts/richmond-tactics-prompt.txt` `share/personas/richmond/prompts/richmond-training-prompt.txt`,`share/scripts/kb-init-team` (+2 more). Run `brew upgrade aiteamforge` to receive them.
 - XACA-1459 per-owner GitHub App credentials + per-machine repo binding
@@ -8109,7 +8111,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.11...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.12...HEAD
+[0.21.12]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.11...v0.21.12
 [0.21.11]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.10...v0.21.11
 [0.21.10]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.9...v0.21.10
 [0.21.9]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.8...v0.21.9
