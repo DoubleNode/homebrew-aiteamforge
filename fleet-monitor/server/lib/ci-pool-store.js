@@ -71,10 +71,13 @@ const DEFAULT_JOB_CLASSES = Object.freeze({
 
 const CONFIG_FIELDS = ['allowlist', 'poolLabel', 'jobClasses', 'thresholds'];
 const MACHINE_FIELDS = ['enabled', 'paused', 'pausedBy', 'pausedAt', 'pauseReason',
-                        'prefers', 'thresholds', 'keyHash', 'telemetryKeyHash', 'mode'];
+                        'prefers', 'thresholds', 'keyHash', 'telemetryKeyHash', 'mode', 'repos'];
 // XACA-1445-011: `mode` is OPTIONAL (absent = 'live'), so pools written before it existed stay valid
 // and defaultMachine() is unchanged. 'shadow' = decide and record, never mint (per-host rollback R1).
-const OPTIONAL_MACHINE_FIELDS = ['mode'];
+// XACA-1459: `repos` is OPTIONAL too (absent / null = UNBOUND). A non-empty array of exact "owner/repo"
+// strings BINDS the machine: it serves only those repos, and those repos place only on machines bound to them.
+const OPTIONAL_MACHINE_FIELDS = ['mode', 'repos'];
+const MAX_BOUND_REPOS = 50;
 const MACHINE_MODES = ['live', 'shadow'];
 // XACA-1465-003: `fallbackSwitches` is OPTIONAL at the top level (absent = never set = defaults), so a pool
 // written before it existed stays valid and defaultPool() is unchanged. An explicit [] means "read nothing".
@@ -180,6 +183,17 @@ function validateConfig(c) {
     return errs;
 }
 
+/** XACA-1459: `repos` must be null (unbound) or a non-empty, duplicate-free (case-insensitive) array of "owner/repo". */
+function validateRepos(v, where) {
+    if (v === null) return [];
+    if (!Array.isArray(v) || v.length === 0 || v.length > MAX_BOUND_REPOS) {
+        return [`${where}: must be null (unbound) or a non-empty array of at most ${MAX_BOUND_REPOS} "owner/repo" strings`];
+    }
+    if (!v.every((r) => typeof r === 'string' && REPO_RE.test(r) && !/\/\.{1,2}$/.test(r))) return [`${where}: every entry must be an exact "owner/repo" string`];
+    if (new Set(v.map((r) => r.toLowerCase())).size !== v.length) return [`${where}: duplicate entry`];
+    return [];
+}
+
 function validateMachine(m, id) {
     const where = `machines["${id}"]`;
     if (!MACHINE_ID_RE.test(id)) return [`${where}: bad machine id`];
@@ -199,6 +213,7 @@ function validateMachine(m, id) {
         errs.push(`${where}.pausedAt: must be null or an ISO timestamp`);
     }
     if (has(m, 'mode') && !MACHINE_MODES.includes(m.mode)) errs.push(`${where}.mode: must be "live" or "shadow"`);
+    if (has(m, 'repos')) errs.push(...validateRepos(m.repos, `${where}.repos`));
     if (m.prefers !== null && !JOB_CLASS_VALUES.includes(m.prefers)) {
         errs.push(`${where}.prefers: must be null, "long" or "short"`);
     }
@@ -385,7 +400,7 @@ function createPoolStore(opts) {
     function upsertMachine(id, patch, meta) {
         if (typeof id !== 'string' || !MACHINE_ID_RE.test(id)) return { ok: false, error: 'bad machine id' };
         if (!isPlainObject(patch)) return { ok: false, error: 'patch must be an object' };
-        const patchable = ['enabled', 'paused', 'pauseReason', 'prefers', 'thresholds', 'mode'];
+        const patchable = ['enabled', 'paused', 'pauseReason', 'prefers', 'thresholds', 'mode', 'repos'];
         const bad = unknownFields(patch, patchable, 'machine patch');
         if (bad.length) return { ok: false, error: bad.join('; ') };
 
@@ -491,5 +506,5 @@ module.exports = {
     SCHEMA_VERSION, GIB, DEFAULT_THRESHOLDS, DEFAULT_JOB_CLASSES, THRESHOLD_BOUNDS,
     MACHINE_ID_RE, REPO_RE, DEFAULT_FALLBACK_SWITCHES, MAX_FALLBACK_SWITCHES, validateFallbackSwitches,
     defaultPool, defaultConfig, defaultMachine, validatePool, validateConfig, validateMachine,
-    hashSecret, createPoolStore,
+    hashSecret, createPoolStore, validateRepos, MAX_BOUND_REPOS,
 };

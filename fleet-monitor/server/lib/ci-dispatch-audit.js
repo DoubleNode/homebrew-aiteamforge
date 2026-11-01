@@ -52,7 +52,8 @@ const EVENT_FIELDS = {
   'key-mint':   BASE_FIELDS.concat(['keyKind', 'by']),   // XACA-1422: never the credential itself
   'key-revoke': BASE_FIELDS.concat(['keyKind', 'by']),
   'priority':   BASE_FIELDS.concat(['branch', 'priority', 'prNumber', 'httpStatus', 'suppressed']),   // XACA-1479-005: resolved / failed toward normal
-  'surge':      BASE_FIELDS.concat(['runId', 'labelSet', 'priority', 'ahead', 'target', 'forJobId'])   // XACA-1479-006: surge mints
+  'surge':      BASE_FIELDS.concat(['runId', 'labelSet', 'priority', 'ahead', 'target', 'forJobId']),   // XACA-1479-006: surge mints
+  'binding':    BASE_FIELDS.concat(['runId', 'jobName'])   // XACA-1459: a repo binding refused a machine for a job
 };
 
 const SECRET_PATTERNS = [

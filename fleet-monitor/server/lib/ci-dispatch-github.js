@@ -23,8 +23,16 @@
  * JWT issuer: GITHUB_APP_CLIENT_ID (preferred; GitHub's current recommendation) or
  * GITHUB_APP_ID (still accepted). Neither is secret; the private key is.
  *
+ * MULTI-OWNER (XACA-1459): one App credential per GitHub owner, selected by the job's repo owner.
+ *   Legacy: GITHUB_APP_CLIENT_ID|GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY (single App; unchanged).
+ *   Owner-keyed: GITHUB_APP_OWNERS=Contoso,Other plus GITHUB_APP_<KEY>_CLIENT_ID|_APP_ID|_PRIVATE_KEY
+ *   (<KEY> = owner upper-cased, non-alphanumerics -> "_"). Once any owner is declared the dispatcher is in
+ *   STRICT mode: the legacy credential serves only the home owner (GITHUB_APP_HOME_OWNER, default
+ *   DoubleNode), and an owner with no complete credential throws NO_CREDENTIAL. There is NEVER a fallback
+ *   to another owner's credential. See resolveCredentials().
+ *
  * SECRETS RULE (plan Requirement 11): GITHUB_APP_CLIENT_ID / GITHUB_APP_ID /
- * GITHUB_APP_PRIVATE_KEY are read ONLY here, via the injectable `config`. Every Error this module throws is a
+ * GITHUB_APP_PRIVATE_KEY (and the per-owner GITHUB_APP_<KEY>_* forms) are read ONLY here, via the injectable `config`. Every Error this module throws is a
  * GithubError whose message is built from fixed strings, the HTTP status and a
  * path TEMPLATE. Response bodies, the key, JWTs, installation tokens and JIT
  * configs are never copied into a message, and this module never logs.
@@ -83,6 +91,60 @@ function normalizePem(raw) {
     return String(raw).replace(/\\n/g, '\n').trim() + '\n';
 }
 
+const DEFAULT_HOME_OWNER = 'DoubleNode';
+const clean = (v) => (v === undefined || v === null ? '' : String(v).trim());
+/** Env-var infix for an owner: upper-cased, every non-alphanumeric run -> "_". */
+const ownerEnvKey = (owner) => String(owner).toUpperCase().replace(/[^A-Z0-9]+/g, '_');
+
+/**
+ * XACA-1459: resolve the App credentials in `config` into an owner-keyed table. Pure; never throws;
+ * the returned object carries the secret material, so callers must not log it.
+ *
+ * @returns {{strict: boolean, homeOwner: string, byOwner: Map<string,{owner:string,issuer:string,secret:string,complete:boolean}>,
+ *            legacy: {issuer:string,secret:string,complete:boolean}}}
+ *   strict=false: only the legacy single-App settings exist; they serve ANY owner (unchanged behaviour).
+ *   strict=true:  at least one owner was declared in GITHUB_APP_OWNERS; the table is exact and the
+ *                 legacy credential (if complete) is entered under the home owner only.
+ *   byOwner keys are lower-cased (GitHub owner names are case-insensitive). A PARTIAL credential (issuer
+ *   without private key, or the reverse) is present with complete=false so it can be reported, but is
+ *   never usable.
+ */
+function resolveCredentials(config) {
+    const c = config || {};
+    const legacyIssuer = clean(c.GITHUB_APP_CLIENT_ID) || clean(c.GITHUB_APP_ID);
+    const legacySecret = clean(c.GITHUB_APP_PRIVATE_KEY) === '' ? '' : c.GITHUB_APP_PRIVATE_KEY;
+    const legacy = { issuer: legacyIssuer, secret: legacySecret, complete: legacyIssuer !== '' && legacySecret !== '' };
+    const homeOwner = clean(c.GITHUB_APP_HOME_OWNER) || DEFAULT_HOME_OWNER;
+    const declared = clean(c.GITHUB_APP_OWNERS).split(',').map((x) => x.trim()).filter(Boolean);
+    const byOwner = new Map();
+    if (declared.length === 0) return { strict: false, homeOwner, byOwner, legacy };
+    for (const owner of declared) {
+        if (!OWNER_RE.test(owner)) continue;   // a malformed name never becomes a credential
+        const k = ownerEnvKey(owner);
+        const issuer = clean(c[`GITHUB_APP_${k}_CLIENT_ID`]) || clean(c[`GITHUB_APP_${k}_APP_ID`]);
+        const raw = c[`GITHUB_APP_${k}_PRIVATE_KEY`];
+        const secret = clean(raw) === '' ? '' : raw;
+        byOwner.set(owner.toLowerCase(), { owner, issuer, secret, complete: issuer !== '' && secret !== '' });
+    }
+    // The legacy credential is the home owner's, unless that owner was declared explicitly (explicit wins).
+    if (legacy.complete && !byOwner.has(homeOwner.toLowerCase())) {
+        byOwner.set(homeOwner.toLowerCase(), { owner: homeOwner, issuer: legacy.issuer, secret: legacy.secret, complete: true });
+    }
+    return { strict: true, homeOwner, byOwner, legacy };
+}
+
+/** Owners with a complete credential (display names), sorted. Legacy single-App mode reports ['*']. No secrets. */
+function credentialOwners(config) {
+    const r = resolveCredentials(config);
+    if (!r.strict) return r.legacy.complete ? ['*'] : [];
+    return [...r.byOwner.values()].filter((e) => e.complete).map((e) => e.owner).sort();
+}
+
+/** True when at least one owner has a complete credential (the dormant-state test). */
+function hasAnyCredential(config) {
+    return credentialOwners(config).length > 0;
+}
+
 function checkRepo(owner, repo) {
     if (!OWNER_RE.test(String(owner)) || !REPO_RE.test(String(repo)) || repo === '.' || repo === '..') {
         throw new GithubError('BAD_REPO', 'invalid owner/repo');
@@ -115,14 +177,23 @@ function createGithubClient(opts = {}) {
     let degradedRaisedForReset = null;   // resetAtMs of the episode already signalled
 
     // ---- App JWT ----------------------------------------------------------
-    function appJwt() {
-        // Client ID is preferred; App ID is the fallback. Blank values count as unset.
-        const clean = (v) => (v === undefined || v === null ? '' : String(v).trim());
-        const issuer = clean(config.GITHUB_APP_CLIENT_ID) || clean(config.GITHUB_APP_ID);
-        const key = config.GITHUB_APP_PRIVATE_KEY;
-        if (!issuer || !key) {
-            throw new GithubError('NOT_CONFIGURED',
-                'GitHub App credentials are not configured (need GITHUB_APP_CLIENT_ID or GITHUB_APP_ID, and GITHUB_APP_PRIVATE_KEY)');
+    function appJwt(owner) {
+        // XACA-1459: the credential is chosen by the repo OWNER. Unknown owner / partial credential =>
+        // NO_CREDENTIAL (fail closed; another owner's credential is never substituted).
+        const creds = resolveCredentials(config);
+        let issuer; let secret;
+        if (!creds.strict) {
+            // Legacy single-App mode: the one credential serves every owner, exactly as before.
+            if (!creds.legacy.complete) {
+                throw new GithubError('NOT_CONFIGURED',
+                    'GitHub App credentials are not configured (need GITHUB_APP_CLIENT_ID or GITHUB_APP_ID, and GITHUB_APP_PRIVATE_KEY)');
+            }
+            ({ issuer, secret } = creds.legacy);
+        } else {
+            const entry = typeof owner === 'string' ? creds.byOwner.get(owner.toLowerCase()) : undefined;
+            if (!entry) throw new GithubError('NO_CREDENTIAL', 'no GitHub App credential is configured for this repository owner');
+            if (!entry.complete) throw new GithubError('NO_CREDENTIAL', 'the GitHub App credential for this repository owner is incomplete');
+            ({ issuer, secret } = entry);
         }
         // Loose sanity check only: client ids look like "Iv23li...", app ids are numeric.
         // Reject whitespace/control/odd characters; never echo the value.
@@ -141,7 +212,7 @@ function createGithubClient(opts = {}) {
         try {
             const signer = crypto.createSign('RSA-SHA256');
             signer.update(signingInput);
-            sig = signer.sign(normalizePem(key));
+            sig = signer.sign(normalizePem(secret));
         } catch (_) {
             // Deliberately drop the underlying error: it is not allowed near key material.
             throw new GithubError('KEY_INVALID', 'GitHub App private key could not sign a JWT');
@@ -239,7 +310,7 @@ function createGithubClient(opts = {}) {
         const key = `${owner}/${repo}`;
         if (installationIds.has(key)) return installationIds.get(key);
         const res = await http('GET', '/repos/{owner}/{repo}/installation',
-            `/repos/${owner}/${repo}/installation`, { bearer: appJwt() });
+            `/repos/${owner}/${repo}/installation`, { bearer: appJwt(owner) });
         if (res.status === 404) throw new GithubError('NOT_INSTALLED', 'GitHub App is not installed on this repository', { status: 404 });
         if (res.status !== 200) throw new GithubError('HTTP', `GET /repos/{owner}/{repo}/installation failed: HTTP ${res.status}`, { status: res.status });
         const data = await parseBody(res);
@@ -258,7 +329,7 @@ function createGithubClient(opts = {}) {
 
         const res = await http('POST', '/app/installations/{id}/access_tokens',
             `/app/installations/${id}/access_tokens`,
-            { bearer: appJwt(), body: { repositories: [repo], permissions: { ...perms } } });
+            { bearer: appJwt(owner), body: { repositories: [repo], permissions: { ...perms } } });
         if (res.status !== 201) {
             if (res.status === 404 || res.status === 401) installationIds.delete(`${owner}/${repo}`);
             throw new GithubError('HTTP', `POST /app/installations/{id}/access_tokens failed: HTTP ${res.status}`, { status: res.status });
@@ -592,6 +663,7 @@ function createPriorityResolver(opts = {}) {
 }
 
 module.exports = {
+    resolveCredentials, credentialOwners, hasAnyCredential, DEFAULT_HOME_OWNER,
     createGithubClient, GithubError, PURPOSE_PERMISSIONS,
     createPriorityResolver, priorityOfLabels, PRIORITY_TTL_MS, PRIORITY_TIMEOUT_TTL_MS, PRIORITY_FAIL_AUDIT_EVERY_MS, PRIORITY_LABEL_PREFIX,
     TOKEN_REFRESH_MARGIN_MS, SLOW_BELOW, SUSPEND_BELOW, JWT_BACKDATE_S, JWT_LIFETIME_S,

@@ -79,6 +79,9 @@ function describeError(err, owner) {
     const code = err && err.code;
     const status = err && Number.isInteger(err.status) ? err.status : null;
     if (code === 'NOT_INSTALLED') return typeof owner === 'string' && owner ? `GitHub App not installed for ${owner}` : 'GitHub App not installed';
+    // XACA-1459-016: an owner with no (or an incomplete) per-owner App credential is a config gap, not an
+    // outage. Fixed string + owner only; err.message is never echoed (SECRETS RULE).
+    if (code === 'NO_CREDENTIAL') return typeof owner === 'string' && owner ? `No GitHub App credential configured for ${owner}` : 'No GitHub App credential configured for this owner';
     if (code === 'NOT_CONFIGURED') return REASON.NOT_CONFIGURED;
     if (code === 'KEY_INVALID') return REASON.KEY_INVALID;
     if (code === 'RATE_LIMITED') return REASON.RATE_LIMITED;

@@ -18,6 +18,10 @@
  *  - rankCandidates() eligible machines ordered by: host preference matching the
  *                     job class, then largest memReclaimableBytes, then id.
  *                     Preference only ORDERS; nothing waits for a preferred host.
+ *  - repo binding (XACA-1459): machine.repos = non-empty ["owner/repo", ...] BINDS a machine. A bound
+ *                     machine serves ONLY those repos; a repo bound to ANY machine places ONLY on
+ *                     machines bound to it. A machine with no binding keeps serving every unbound repo.
+ *                     A malformed binding makes the machine ineligible for everything.
  *  - labelSetKey() / computeSupply()   D5: mint per label-set,
  *                     mint = max(0, eligibleQueued(S) - outstandingIdle(S)).
  *  - mintLabels()     A3: a JIT runner carries ONLY the labels passed at mint,
@@ -29,10 +33,12 @@
  *   report   {receivedAt: <epoch ms | ISO>, capacity:{...C3}, slots:[{os,state,...}]}
  */
 
-const { DEFAULT_THRESHOLDS, DEFAULT_JOB_CLASSES } = require('./ci-pool-store');
+const { DEFAULT_THRESHOLDS, DEFAULT_JOB_CLASSES, REPO_RE, validateRepos } = require('./ci-pool-store');
 
 const DEFAULT_POOL_LABEL = 'fleet-pool';
 const OS_LABELS = ['Linux', 'macOS'];
+/** Eligibility reasons caused by repo binding (audited by the dispatcher). */
+const BINDING_REASONS = Object.freeze(['binding-malformed', 'repo-not-bound', 'repo-reserved']);
 
 const has = (o, k) => o !== null && typeof o === 'object' && Object.prototype.hasOwnProperty.call(o, k);
 const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
@@ -73,6 +79,33 @@ function jobClass(jobName, jobClasses) {
     return table[jobName] === 'long' ? 'long' : 'short';
 }
 
+// ------------------------------------------------------------- repo binding
+
+/** Lowercased "owner/repo" for a job, or null when the job does not carry a valid owner and repo. */
+function repoSlug(job) {
+    if (!job || typeof job.owner !== 'string' || typeof job.repo !== 'string') return null;
+    const slug = `${job.owner}/${job.repo}`;
+    return REPO_RE.test(slug) ? slug.toLowerCase() : null;
+}
+
+/** Lowercased binding of a machine: {state:'unbound'} | {state:'bound', repos:Set} | {state:'malformed'}. */
+function bindingOf(machine) {
+    const v = machine && Object.prototype.hasOwnProperty.call(machine, 'repos') ? machine.repos : null;
+    if (v === null || v === undefined) return { state: 'unbound' };
+    if (validateRepos(v, 'repos').length > 0) return { state: 'malformed' };   // the store's own rule: one definition
+    return { state: 'bound', repos: new Set(v.map((r) => r.toLowerCase())) };
+}
+
+/** Every repo (lowercased) bound on at least one machine with a WELL-FORMED binding. */
+function boundRepoSet(machines) {
+    const out = new Set();
+    for (const id of Object.keys(machines || {})) {
+        const b = bindingOf(machines[id]);
+        if (b.state === 'bound') for (const r of b.repos) out.add(r);
+    }
+    return out;
+}
+
 // -------------------------------------------------------------- eligibility
 
 /** Effective thresholds: defaults < config thresholds < per-machine overrides. */
@@ -99,7 +132,8 @@ function hostLabelOf(machine) {
  * @param machine  pool record (+ optional id/hostLabel): enabled, paused, thresholds
  * @param report   {receivedAt, capacity, slots}
  * @param job      {labels}
- * @param opts     {now (epoch ms, required), thresholds (config thresholds), poolLabel}
+ * @param opts     {now (epoch ms, required), thresholds (config thresholds), poolLabel,
+ *                  boundRepos (Set of lowercased "owner/repo" bound on any machine; see boundRepoSet)}
  * @returns {{eligible: boolean, reasons: string[]}}
  */
 function isEligible(machine, report, job, opts) {
@@ -110,6 +144,16 @@ function isEligible(machine, report, job, opts) {
     if (!machine || typeof machine !== 'object') return { eligible: false, reasons: ['no-machine-record'] };
     if (machine.enabled !== true) reasons.push('not-enabled');
     if (machine.paused !== false) reasons.push('paused');   // anything but an explicit false pauses (fail closed)
+
+    // XACA-1459 repo binding. Reasons: binding-malformed | repo-not-bound | repo-reserved.
+    const binding = bindingOf(machine);
+    const slug = repoSlug(job);
+    if (binding.state === 'malformed') reasons.push('binding-malformed');
+    else if (binding.state === 'bound') {
+        if (slug === null || !binding.repos.has(slug)) reasons.push('repo-not-bound');   // no repo identity => refuse
+    } else if (slug !== null && o.boundRepos instanceof Set && o.boundRepos.has(slug)) {
+        reasons.push('repo-reserved');   // this repo is bound to other machines; an unbound machine must not take it
+    }
 
     const os = jobOs(job);
     if (os === null) reasons.push('job-os-unknown');
@@ -176,10 +220,11 @@ function isEligible(machine, report, job, opts) {
 function evaluateMachines(machines, reports, job, cfg) {
     const c = cfg || {};
     const cls = jobClass(job && job.name, c.jobClasses);
+    const boundRepos = boundRepoSet(machines);
     const rows = Object.keys(machines || {}).map((id) => {
         const m = Object.assign({ id }, machines[id]);
         const r = reports && has(reports, id) ? reports[id] : null;
-        const v = isEligible(m, r, job, { now: c.now, thresholds: c.thresholds, poolLabel: c.poolLabel });
+        const v = isEligible(m, r, job, { now: c.now, thresholds: c.thresholds, poolLabel: c.poolLabel, boundRepos });
         const mem = r && r.capacity && isNum(r.capacity.memReclaimableBytes) ? r.capacity.memReclaimableBytes : 0;
         return { id, eligible: v.eligible, reasons: v.reasons, preferred: m.prefers === cls, memReclaimableBytes: mem };
     });
@@ -252,6 +297,7 @@ function mintLabels(job, machine, cfg) {
 
 module.exports = {
     DEFAULT_POOL_LABEL,
+    repoSlug, bindingOf, boundRepoSet, BINDING_REASONS,
     normalizeLabels, labelSetKey, jobOs, jobClass, effectiveThresholds, hostLabelOf,
     isEligible, evaluateMachines, rankCandidates, computeSupply, mintLabels,
 };

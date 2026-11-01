@@ -133,10 +133,12 @@ function capStr(v, max) {
     return t === '' ? null : t.slice(0, max);
 }
 
-/** True when GitHub App credentials look configured (presence only; never read the value elsewhere). */
+/**
+ * True when at least ONE owner has a complete GitHub App credential (XACA-1459: the legacy single-App
+ * settings count as one; a partial credential does not). Presence only; the values are never copied out.
+ */
 function hasCredentials(env) {
-    const e = env || {};
-    return (clean(e.GITHUB_APP_CLIENT_ID) !== '' || clean(e.GITHUB_APP_ID) !== '') && clean(e.GITHUB_APP_PRIVATE_KEY) !== '';
+    return require('./ci-dispatch-github').hasAnyCredential(env || {});
 }
 
 /**
@@ -158,7 +160,7 @@ function dormantReason(env) {
     const g = globalMode(e);
     if (g.unknown) return `FLEET_CI_DISPATCHER has unknown mode "${g.raw.slice(0, 20)}" (expected "1" or "shadow"); staying dormant`;
     if (g.mode === 'dormant') return 'FLEET_CI_DISPATCHER is not "1" or "shadow"';
-    if (!hasCredentials(e)) return 'GitHub App credentials are not configured (need GITHUB_APP_CLIENT_ID or GITHUB_APP_ID, and GITHUB_APP_PRIVATE_KEY)';
+    if (!hasCredentials(e)) return 'GitHub App credentials are not configured (need GITHUB_APP_CLIENT_ID or GITHUB_APP_ID, and GITHUB_APP_PRIVATE_KEY; or GITHUB_APP_OWNERS with per-owner GITHUB_APP_<OWNER>_* settings)';
     return null;
 }
 
@@ -579,6 +581,26 @@ function createDispatcher(deps) {
         return out;
     }
 
+    /**
+     * XACA-1459: audit each machine a repo BINDING refused for a job, once per (job, machine, reason).
+     * Never throws. The set is bounded (cleared at 2000) so a long-lived process cannot grow it forever.
+     */
+    const bindingAudited = new Set();
+    function auditBindingRefusals(rec, evals) {
+        try {
+            for (const e of evals) {
+                for (const reason of e.reasons) {
+                    if (!plc.BINDING_REASONS.includes(reason)) continue;
+                    const k = `${rec.key}|${e.id}|${reason}`;
+                    if (bindingAudited.has(k)) continue;
+                    if (bindingAudited.size >= 2000) bindingAudited.clear();
+                    bindingAudited.add(k);
+                    writeAudit('binding', { repo: `${rec.owner}/${rec.repo}`, jobId: rec.jobId, runAttempt: rec.runAttempt, runId: rec.runId, jobName: rec.name, machine: e.id, reason });
+                }
+            }
+        } catch (_) { /* audit must never break placement */ }
+    }
+
     function reasonsText(evals) {
         if (!evals.length) return 'no machines registered';
         return evals.map((e) => `${e.id}: ${e.reasons.join(',') || 'eligible'}`).join('; ');
@@ -675,6 +697,7 @@ function createDispatcher(deps) {
                 continue;
             }
             const evals = plc.evaluateMachines(machines, adjusted, t.rec, pcfg);
+            auditBindingRefusals(t.rec, evals);
             const via = t.viaHostLabel === true;
             // A job accepted ONLY through its static host label whose pinned host is not explicitly live
             // is the designed exception (014): recorded above, NOT demand, NO alert (the persistent
@@ -727,12 +750,18 @@ function createDispatcher(deps) {
         for (const s of supply) budget.set(s.key, s.mint);
         for (const [sk, sg] of surge) budget.set(sk, Math.max(budget.get(sk) || 0, sg.uncoveredInWindow));
         const stats = { minted: 0, failed: 0, surged: 0 };
-        const stoppedSets = new Set();   // a set whose mint loop stopped this tick (no capacity / bad labels / mint failure)
+        const stoppedSets = new Set();   // a set whose mint loop stopped this tick (no capacity / bad labels)
+        // XACA-1459 (PR #1254 test round 4): credentials are per owner, so a MINT FAILURE stops the (owner, label
+        // set) pair for the rest of the tick: one owner's NO_CREDENTIAL / KEY_INVALID / NOT_INSTALLED / HTTP error
+        // never stops another owner's jobs in the same set, and within one owner the pre-1459 behaviour (one
+        // attempt per set per tick) is unchanged. (Repo-scoped coverage/stop keys: XACA-1715.)
+        const stoppedOwnerSets = new Set();
+        const ownerSetKey = (j, sk) => `${String((j && j.owner) || '').toLowerCase()}|${sk}`;
         // Mint in dispatch order (priority, then FIFO) ACROSS sets, so a priority set is not starved of a
         // shared host's slots by an alphabetically earlier normal set.
         for (const job of needing) {
             const sk = plc.labelSetKey(job.labels);
-            if (stoppedSets.has(sk) || !((budget.get(sk) || 0) > 0)) continue;
+            if (stoppedSets.has(sk) || stoppedOwnerSets.has(ownerSetKey(job, sk)) || !((budget.get(sk) || 0) > 0)) continue;
             {
                 adjusted = withReservations(base, reserved);
                 const jobVia = !!(tracked.get(job.key) && tracked.get(job.key).viaHostLabel);
@@ -769,7 +798,7 @@ function createDispatcher(deps) {
                             ref: 'mint-failures',
                         });
                     }
-                    stoppedSets.add(sk); continue; // do not hammer GitHub within one tick (this set stops, as before)
+                    stoppedOwnerSets.add(ownerSetKey(job, sk)); continue; // do not hammer GitHub within one tick (this owner's set stops)
                 }
             }
         }

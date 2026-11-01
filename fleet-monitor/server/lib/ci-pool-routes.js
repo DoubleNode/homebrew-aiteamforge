@@ -14,7 +14,7 @@
  *   POST /api/ci-pool/agent/poll              per-host key   capacity in, assignments out
  *   POST /api/ci-pool/assignments/:id/state   per-host key   lifecycle transition (must own :id)
  *   GET  /api/ci-pool                         open, REDACTED (same posture as GET /api/ci-runners)
- *   PUT  /api/ci-pool/machines/:machine       admin          enabled, paused(+reason), prefers, thresholds
+ *   PUT  /api/ci-pool/machines/:machine       admin          enabled, paused(+reason), prefers, thresholds, mode, repos (XACA-1459 binding)
  *   PUT  /api/ci-pool/config                  admin          allowlist, poolLabel, jobClasses, thresholds
  *   GET  /api/ci-pool/fallback-switches      admin          the routing switches the fallback-switch reader polls (XACA-1465-003)
  *   PUT  /api/ci-pool/fallback-switches      admin          replace that list ({switches:[...]}; {switches:null} resets to defaults)
@@ -48,6 +48,7 @@ const { requireAdminKey } = require('./auth-middleware');
 const { MACHINE_ID_RE } = require('./ci-pool-store');
 const { ID_RE } = require('./ci-dispatch-assignments');
 const derive = require('./ci-pool-derive');
+const plc = require('./ci-dispatch-placement');
 
 const SCHEMA_VERSION = 1;
 const MAX_POLL_BYTES = 16 * 1024;
@@ -403,6 +404,10 @@ function registerCiPoolRoutes(app, deps) {
                     enabled: m.enabled, paused: m.paused, pausedBy: m.pausedBy, pausedAt: m.pausedAt,
                     pauseReason: m.pauseReason, prefers: m.prefers, thresholds: m.thresholds,
                     mode: m.mode === undefined ? 'live' : m.mode,
+                    // XACA-1459 (additive): the repo binding. repos is null when unbound; bindingState also
+                    // surfaces a malformed stored binding (the machine is then ineligible for every job).
+                    repos: Array.isArray(m.repos) ? m.repos : null,
+                    bindingState: plc.bindingOf(m).state,
                     hasKey: m.keyHash !== null,
                     hasTelemetryKey: m.telemetryKeyHash !== null,
                     lastPollAt: r ? iso(r.receivedAt) : null,
@@ -458,7 +463,7 @@ function registerCiPoolRoutes(app, deps) {
             if (!MACHINE_ID_RE.test(id)) return res.status(400).json({ error: 'bad machine id' });
             const body = req.body;
             if (!isPlainObject(body)) return res.status(400).json({ error: 'body must be a JSON object' });
-            const allowed = ['enabled', 'paused', 'reason', 'prefers', 'thresholds', 'mode', 'confirm'];
+            const allowed = ['enabled', 'paused', 'reason', 'prefers', 'thresholds', 'mode', 'repos', 'confirm'];
             const extra = Object.keys(body).filter((k) => !allowed.includes(k));
             if (extra.length) return res.status(400).json({ error: `unknown field "${extra[0]}"` });
             if (has(body, 'confirm') && typeof body.confirm !== 'boolean') return res.status(400).json({ error: 'confirm: must be boolean' });
@@ -507,11 +512,15 @@ function registerCiPoolRoutes(app, deps) {
             if (has(patch, 'enabled') && (!before || before.enabled !== after.enabled)) {
                 audit('enable', { machine: id, enabled: after.enabled, by: 'operator', action: after.enabled ? 'enable' : 'disable', outcome: 'applied', confirmed: confirmed });
             }
+            // XACA-1459: a binding change decides which machines may run which repos; always audited.
+            if (has(patch, 'repos') && JSON.stringify(before ? before.repos || null : null) !== JSON.stringify(after.repos || null)) {
+                audit('binding', { machine: id, reason: Array.isArray(after.repos) ? `bound:${after.repos.join(',')}` : 'unbound', state: 'applied' });
+            }
             const m = after;
             configChanged();   // hostLabels feed label:unknown / label:ambiguous
             return res.status(200).json({
                 success: true, machine: id,
-                record: { enabled: m.enabled, paused: m.paused, pausedBy: m.pausedBy, pausedAt: m.pausedAt, pauseReason: m.pauseReason, prefers: m.prefers, thresholds: m.thresholds, mode: m.mode === undefined ? 'live' : m.mode, hasKey: m.keyHash !== null, hasTelemetryKey: m.telemetryKeyHash !== null },
+                record: { enabled: m.enabled, paused: m.paused, pausedBy: m.pausedBy, pausedAt: m.pausedAt, pauseReason: m.pauseReason, prefers: m.prefers, thresholds: m.thresholds, mode: m.mode === undefined ? 'live' : m.mode, repos: Array.isArray(m.repos) ? m.repos : null, hasKey: m.keyHash !== null, hasTelemetryKey: m.telemetryKeyHash !== null },
             });
         } catch (error) {
             log.error('[CI-POOL] error updating machine:', error && error.message);

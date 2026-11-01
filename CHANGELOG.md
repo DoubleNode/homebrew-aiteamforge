@@ -6,6 +6,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1459 per-owner GitHub App credentials + per-machine repo binding
+- XACA-1609 adopt tap share/teams into tap-src/ byte-identical (PR-02)
+- Tap files updated in this publish: `fleet-monitor/server/lib/ci-dispatch-audit.js`,`fleet-monitor/server/lib/ci-dispatch-github.js` `fleet-monitor/server/lib/ci-dispatch-placement.js`,`fleet-monitor/server/lib/ci-dispatcher.js` `fleet-monitor/server/lib/ci-fallback-reader.js`,`fleet-monitor/server/lib/ci-pool-routes.js` `fleet-monitor/server/lib/ci-pool-store.js`,`fleet-monitor/server/package.json` (+5 more). Run `brew upgrade aiteamforge` to receive them.
 - XACA-1445 route CI to fleet-pool; retire CI_LINUX_RUNNER* split
 - Tap files updated in this publish: `share/scripts/ci-runner/client/ci-pool-agent.py`. Run `brew upgrade aiteamforge` to receive them.
 
