@@ -2077,6 +2077,7 @@ EOF_CRS
 # the actor is a lead). In a GAMMA flow the confirmation belongs to GAMMA's entry and is NOT sent here.
 _kb_release_close_out_promote() {
     local release_id="${1-}" confirm="${2-}" payload
+    _KB_CO_CRRECORD_STATUS=""
     payload=$(jq -nc --arg a "$(_kb_release_default_actor)" --arg c "$confirm" \
         '{targetStage:"PROD", actor:$a} + (if $c == "yes" then {confirmDeploy:true} else {} end)') || return 1
     _kb_release_api_post "${release_id}/promote" "$payload" || return 1
@@ -2087,7 +2088,91 @@ _kb_release_close_out_promote() {
         echo "Error: close-out finished but the PROD promote was refused (HTTP ${_KB_REL_CODE}): $(printf '%s' "$_KB_REL_BODY" | jq -r '.error // empty' 2>/dev/null)" >&2
         return 1
     fi
+    # XACA-1725-002: the promote response carries the server's status-page refresh verdict (.crRecord). It was ignored,
+    # so a deferred/failed refresh vanished silently. Surface it; the rc stays 0 (the promote itself succeeded) and the
+    # final refresh (_kb_release_close_out_final_refresh) is the authoritative repair.
+    # _KB_CO_CRRECORD_STATUS is exported for callers and tests; the close-out run does not branch on it (XACA-1725-017).
+    _KB_CO_CRRECORD_STATUS=$(printf '%s' "$_KB_REL_BODY" | jq -r '.crRecord.status // "" | strings' 2>/dev/null)
+    case "$_KB_CO_CRRECORD_STATUS" in
+        deferred)
+            echo "close-out: PROD promote's status-page refresh was deferred (lock busy); running the final refresh now" >&2 ;;
+        failed)
+            echo "close-out: PROD promote's status-page refresh FAILED: $(printf '%s' "$_KB_REL_BODY" | jq -r '.crRecord.reason // "no reason given"' 2>/dev/null). Re-run: $(printf '%s' "$_KB_REL_BODY" | jq -r --arg rid "$release_id" '.crRecord.rerun // ("kb-cr publish-record " + $rid + " (CR teams)")' 2>/dev/null)" >&2 ;;
+    esac
     return 0
+}
+
+# XACA-1725-003: the close-out's FINAL Release & CR Status / Testing Log refresh, run synchronously by the shell AFTER the
+# PROD promote (or on the already-at-PROD resume). The server's promote refresh is bounded (3 s, XACA-1702) and defers to
+# one background run when the per-release lock is busy (the crClose refresh a few seconds earlier); that run can be lost
+# (restart, coalescer), leaving the page at the pre-PROD stage. This call omits --lock-timeout, so the publisher waits
+# for the lock (its own LOCK_TIMEOUT_S bound, 120 s; no portable `timeout` here) and never defers.
+# The publisher is called directly, NOT via `kb-cr publish-record`: that returns 0 early for teams with CR support off,
+# and a non-CR team still has a Testing Log to refresh. The team picks the wiki config and space, so it must be the
+# resolved context team AND own <board_file>; never a guess (same rule as _kb_cr_record_team_owns_board, XACA-1662-022).
+# Ok = rc 0 AND status published AND no handleUnstored AND testingLog not failed, or rc 10 (a clean skip). Anything else
+# is loud, says the release IS at PROD, and names the re-run.
+# rc 10 (any skip reason) counts as success: the board comes from the same team resolution, so a skip is a clean no-op.
+# rc 0 ok | 3 the refresh did not land (distinct from 1, the promote failure).
+_kb_release_close_out_final_refresh() {
+    local board_file="${1-}" release_id="${2-}" ctx team tboard py verdict prc why="" rerun="" detail
+    [[ -n "$board_file" && -n "$release_id" ]] || { echo "Error: final refresh needs a board file and a release id" >&2; return 3; }
+    ctx=$(_kb_detect_context 2>/dev/null); team="${ctx%%:*}"
+    py="$(dirname "$(_kb_board_settings_script 2>/dev/null)")/release_cr_record_publish.py"
+    # XACA-1725-015: never embed the team that was refused; a board's re-run names the team that OWNS it, or (CR teams)
+    # the one sanctioned `kb-cr publish-record`.
+    local owner_team
+    owner_team=$(jq -r '.team // empty' "$board_file" 2>/dev/null)
+    rerun="python3 ${py} --board ${board_file} --team ${owner_team:-<team-that-owns-the-board>} --release-id ${release_id} --reason close-out:final --refresh-testing-log"
+    if [[ "$(jq -r '.teamConfig.crSupport.enabled == true' "$board_file" 2>/dev/null)" == "true" ]]; then
+        rerun="kb-cr publish-record ${release_id}"
+    fi
+    if [[ ! -f "$py" ]]; then
+        why="the publisher script is missing (${py})"
+    else
+        tboard=""
+        [[ -n "$team" && "$team" != "ERROR" ]] && tboard=$(_kb_get_board_file "$team" 2>/dev/null)
+        if [[ -z "$tboard" || "${tboard:A}" != "${board_file:A}" ]]; then
+            why="cannot resolve the team that owns ${board_file} (resolved '${team:-<none>}'); refusing to publish with a guessed team"
+        fi
+    fi
+    if [[ -z "$why" ]]; then
+        verdict=$(env -u TMUX KB_WIKI_DENY_DOCS=cr python3 "$py" --board "$board_file" --team "$team" \
+            --release-id "$release_id" --reason close-out:final --refresh-testing-log)
+        prc=$?
+        verdict=$(printf '%s\n' "$verdict" | tail -n 1)
+        detail=$(printf '%s' "$verdict" | jq -r '.rerun // empty' 2>/dev/null)
+        if [[ -n "$detail" ]]; then
+            rerun="$detail"
+        elif [[ "$(jq -r '.teamConfig.crSupport.enabled == true' "$board_file" 2>/dev/null)" == "true" ]]; then
+            rerun="kb-cr publish-record ${release_id}"   # CR teams: the one sanctioned re-run (never "kb-release close-out")
+        fi
+        if (( prc == 10 )); then
+            echo "close-out: final status page refresh skipped (nothing to publish: $(printf '%s' "$verdict" | jq -r '.reason // "clean skip"' 2>/dev/null))"
+            return 0
+        elif (( prc != 0 )); then
+            if printf '%s' "$verdict" | jq -e 'type == "object"' >/dev/null 2>&1; then
+                why="the publisher exited ${prc} ($(printf '%s' "$verdict" | jq -r '.status // "no status"' 2>/dev/null): $(printf '%s' "$verdict" | jq -r '.reason // "no reason given"' 2>/dev/null))"
+            else
+                why="the publisher exited ${prc} (no verdict)"
+            fi
+        elif ! printf '%s' "$verdict" | jq -e . >/dev/null 2>&1; then
+            why="the publisher's verdict was unparseable"
+        elif [[ "$(printf '%s' "$verdict" | jq -r '.status // ""')" != "published" ]]; then
+            why="the publisher reported status '$(printf '%s' "$verdict" | jq -r '.status // ""')' (expected published)"
+        elif [[ "$(printf '%s' "$verdict" | jq -r '.handleUnstored == true')" == "true" ]]; then
+            why="the page was published but its handle could not be stored on the board"
+        elif [[ "$(printf '%s' "$verdict" | jq -r '.testingLog.status // ""')" == "failed" ]]; then
+            why="the Testing Log refresh failed: $(printf '%s' "$verdict" | jq -r '.testingLog.reason // "no reason given"')"
+        elif [[ "$(printf '%s' "$verdict" | jq -r '(.handle.url // .testingLog.handle.url // "") | length > 0')" != "true" ]]; then
+            why="the publisher reported success but returned no page handle"
+        else
+            echo "close-out: final status page refresh ok ($(printf '%s' "$verdict" | jq -r '(.handle // .testingLog.handle) | "\(.url) v\(.version)"'); Testing Log $(printf '%s' "$verdict" | jq -r '.testingLog.status // "n/a"'))"
+            return 0
+        fi
+    fi
+    echo "ERROR: ${release_id} IS at PROD, but its final Release & CR Status / Testing Log refresh did not land: ${why}. Re-run: ${rerun}" >&2
+    return 3
 }
 
 # XACA-1446: the record's binding, read ONLY through `release_closeout.py binding` (the shell never inspects
@@ -2430,10 +2515,19 @@ print(r.release_version(json.load(sys.stdin)))' "$(dirname "$(_kb_release_branch
     rj=$(_kb_release_close_out_release_json "$board_file" "$release_id") || return 1
     if [[ "$(printf '%s' "$rj" | jq -r '.stage // ""')" == "PROD" ]]; then
         echo "Close-out for $release_id complete; release is already at PROD"
+        # XACA-1725-004: a close-out interrupted after its promote resumes here and still gets the final refresh
+        # (idempotent: the publisher updates in place). Today a re-run of a COMPLETED close-out also reaches this branch
+        # and refreshes again (harmless). Once XACA-1726 lands, a completed close-out returns early BEFORE this branch;
+        # its page is then refreshed directly with `kb-cr publish-record <REL-ID>`.
+        [[ "$dry_run" == "1" ]] || _kb_release_close_out_final_refresh "$board_file" "$release_id" || return 3
         return 0
     fi
     _kb_release_close_out_promote "$release_id" "$confirm" || return 1
     echo "Close-out for $release_id complete: release promoted to PROD"
+    # XACA-1725-004: the promote's own refresh is bounded and may defer or be lost; the final refresh waits for the lock.
+    # It runs even when _KB_CO_CRRECORD_STATUS=published (XACA-1725-017): the promote's Testing Log republish is a
+    # background thread and never verified, so this is the only verified Testing Log refresh. Cost: one extra page version.
+    [[ "$dry_run" == "1" ]] || _kb_release_close_out_final_refresh "$board_file" "$release_id" || return 3
     return 0
 }
 
@@ -29636,7 +29730,7 @@ kb-release-chain() {
 # at the first incomplete step (the same thing `kb-run <REL-ID>` does automatically). The release reaches PROD only
 # through the gated promote, as the LAST step; on any failure it stays at the bound stage (GAMMA, or the last enabled
 # stage before PROD in a flow without GAMMA: XACA-1446).
-# Exit: 0 complete (release at PROD) | 1 a step failed or was refused | 2 usage
+# Exit: 0 complete (release at PROD) | 1 a step failed or was refused | 2 usage | 3 at PROD but the final status page refresh did not land
 kb-release-close-out() {
     local release_id="" opt_repo="$PWD" opt_dry=0 bf rj ctx team dry codes
     local usage="Usage: kb-release close-out <release-id> [--repo-dir <path>] [--dry-run]"
@@ -29654,7 +29748,7 @@ kb-release-close-out() {
                 echo "delete the release branch (remote), kb-cr close (CR teams), then the gated promote to PROD."
                 echo "Resumes at the first incomplete step after a failure; the release stays at the bound stage until every"
                 echo "step is done. A flow with no GAMMA confirms the production deploy on that final promote (you must be a"
-                echo "lead). Exit: 0 complete, 1 step failed/refused, 2 usage."
+                echo "lead). Exit: 0 complete, 1 step failed/refused, 2 usage, 3 at PROD but the final status page refresh did not land."
                 return 0 ;;
             -*) echo "Error: Unknown option: ${1-}" >&2; echo "$usage" >&2; return 2 ;;
             *)
@@ -29707,6 +29801,8 @@ kb-release-close-out() {
 #      before PROD, XACA-1446) whose PROD close-out has STARTED (closeOut record bound to that stage) is resumed at its first incomplete step by _kb_release_close_out -- no session is launched;
 #      the release reaches PROD as that run's last act. A close-out is STARTED only by `kb-release close-out`.
 # Usage (via kb-run): kb-run <REL-ID> [--yes]
+# Exit: 9 = the resumed close-out reached PROD but its final status page refresh did not land (XACA-1725-013; the release IS at
+#       PROD, kb-run cannot repair it, use the re-run the close-out printed)
 # Exit: 0 ok | 1 error | 2 usage/not confirmed | 8 PROD close-out resumed but a step failed, OR refused as stale / its stage not
 #       passed (XACA-1353-014); the release stays at that stage either way
 _kb_release_run() {
@@ -29744,9 +29840,17 @@ _kb_release_run() {
                     return 8
                 fi
                 echo "↻ $release_id: PROD close-out is in progress; resuming at its first incomplete step (spec 13.4)"
-                if _kb_release_close_out "$_co_bf" "$release_id" --repo "$PWD"; then
+                local _co_rc
+                _kb_release_close_out "$_co_bf" "$release_id" --repo "$PWD"
+                _co_rc=$?
+                if (( _co_rc == 0 )); then
                     echo "✓ kb-run: close-out complete; $release_id is at PROD."
                     return 0
+                fi
+                # XACA-1725-013: rc 3 = the release IS at PROD and only the final status page refresh failed.
+                if (( _co_rc == 3 )); then
+                    echo "⚠ kb-run: $release_id is at PROD, but its final status page refresh did not land (see the re-run above). Re-running kb-run will not repair it." >&2
+                    return 9
                 fi
                 echo "✗ kb-run: PROD close-out stopped; $release_id stays in $stage and nothing was deleted early. Fix the cause above, then re-run: kb-run $release_id" >&2
                 return 8
