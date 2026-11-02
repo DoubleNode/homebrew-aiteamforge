@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1721: ship richmond avatars and terminal logos via the tap (XACA-1721)
+- Tap files updated in this publish: `share/lcars-ui/tests/test_xaca1721_richmond_images.py`,`share/personas/richmond/avatars/richmond_beard_avatar.png` `share/personas/richmond/avatars/richmond_beard_avatar_thumb.png`,`share/personas/richmond/avatars/richmond_higgins_avatar.png` `share/personas/richmond/avatars/richmond_higgins_avatar_thumb.png`,`share/personas/richmond/avatars/richmond_keeley_avatar.png` `share/personas/richmond/avatars/richmond_keeley_avatar_thumb.png`,`share/personas/richmond/avatars/richmond_roy_avatar.png` (+15 more). Run `brew upgrade aiteamforge` to receive them.
 
 ## [0.21.13] - 2026-11-02
 - XACA-1720: LCARS fails closed instead of launching on Python < 3.10 (XACA-1720)
