@@ -638,6 +638,16 @@ class CrStage:
                 "testing-log": self._step_testing_log, "publish": self._step_publish,
                 "notify": self._step_notify, "submit": self._step_submit}
         stop_at = STEPS.index(self.only) if self.only else len(STEPS) - 1
+        # XACA-1727-015: name the cause BEFORE any side effect when the cr-record fail-closed would block the CR.
+        if stop_at >= STEPS.index("draft"):
+            problems = self._cr_record_preflight()
+            if problems and stop_at >= STEPS.index("publish"):
+                msg = "\n".join(problems)
+                result["steps"].append({"step": "preflight", "status": "failed", "detail": msg})
+                result.update(cr=self.cr_id, stopped="preflight", message=msg, rc=RC_USAGE)
+                return result
+            for p in problems:  # draft-only run: the draft still renders, so this is a warning, not a stop
+                self.say("[preflight] WARNING (the publish step would refuse): " + p)
         for i, name in enumerate(STEPS):
             if i > stop_at:
                 break
@@ -1081,6 +1091,62 @@ class CrStage:
                                "re-run to retry the record step" % exc, RC_FAILED)
         note.append("kb-cr publish")
         return "done", "; ".join(note)
+
+    def _template_source(self, kind: str) -> str:
+        """Where the resolved ``template.md`` came from, as a path (XACA-1727-015). Reads the resolver's own
+        ``profileResolvedFrom`` provenance; the tier dirs mirror release_profile_resolver.resolve_profile."""
+        tier = (self._profile(kind).get("profileResolvedFrom") or {}).get("template.md")
+        cfg = os.path.join(self.kdir, "config", "profiles")
+        if tier == "team":
+            return "team override %s" % os.path.join(cfg, kind, "template.md")
+        if tier == "group":
+            return "group override %s" % os.path.join(cfg, "_group", kind, "template.md")
+        try:
+            import release_profile_resolver as _rpr  # noqa: PLC0415
+            return "built-in default %s" % (_rpr._DEFAULTS_ROOT / kind / "template.md")
+        except Exception:  # noqa: BLE001 -- injected resolver / bare python: still name the default tier
+            return "built-in default scripts/release_profile_defaults/%s/template.md" % kind
+
+    def _cr_record_preflight(self) -> List[str]:
+        """XACA-1727-015: problems that would make the cr-record fail-closed block this CR, each naming its cause
+        and fix. Empty when the resolved cr profile does not declare crRecord (Android-style override), when the CR
+        is already published, or when nothing is wrong. Read-only: no tool call, no board write."""
+        try:
+            if not self._profile_declares_cr_record():
+                return []
+            board, rel, _ = self._load()
+            cr = self._open_cr(board, rel)
+            if cr and (cr.get("crState") in _AT_LEAST_PUBLISHED or get_wiki_handle(cr, "cr") is not None):
+                return []  # the publish step skips/resumes; config gaps no longer matter
+            prof = self._profile("cr")
+        except CrStageError:
+            return []  # the step that needs it reports the real error
+        problems: List[str] = []
+        entry = next((e for e in prof["profile"]["linkPolicy"]["standardLinks"]
+                      if isinstance(e, dict) and e.get("id") == "crRecord"), {})
+        if entry.get("required") is not False and not re.search(r"\{\{\s*links\.crRecord\s*\}\}", prof["template"] or ""):
+            problems.append(
+                "the cr profile requires the Release & CR Status link (linkPolicy.standardLinks has crRecord) but the "
+                "resolved template (%s) does not contain {{links.crRecord}}, so every CR would fail validation. "
+                "Fix: add a line with {{links.crRecord}} to that template (the default puts it right after "
+                "{{links.testingLog}}), or override linkPolicy.standardLinks in your cr profile.json without crRecord."
+                % self._template_source("cr"))
+        if get_wiki_handle(rel, "cr-record") is None:  # a stored handle means no page needs creating
+            wiki = os.path.join(self.kdir, "config", "wiki.json")
+            try:
+                with open(wiki, "r", encoding="utf-8") as fh:
+                    dts = json.load(fh).get("docTypes")
+            except OSError:
+                dts = None  # no wiki.json: kb-wiki / the publisher name the missing file themselves
+                wiki = ""
+            except (ValueError, AttributeError):
+                dts = {}
+            if wiki and not (isinstance(dts, dict) and "cr-record" in dts):
+                problems.append(
+                    "the cr profile requires the Release & CR Status page, but the wiki config %s has no 'cr-record' "
+                    "doc type, so the page cannot be created and the CR cannot be published. "
+                    "Fix: add a 'cr-record' entry to docTypes in that file (next to 'cr')." % wiki)
+        return problems
 
     def _profile_declares_cr_record(self) -> bool:
         """XACA-1727-013: does the resolved CR profile (the one render/validate uses) list a crRecord standard link?"""
