@@ -9,5 +9,6 @@ product, in plain sentences, in the present or future tense.
   covered by the single "behind-the-scenes maintenance" line the template adds.
 - Reason for change: one to three sentences, user impact first.
 - Testing: say what was checked in plain words. Do not claim testing that did not happen.
-  Include the Testing Log link exactly once.
+  Include the Testing Log link exactly once, followed by the Release & CR Status link
+  (labelled "Release & CR Status") exactly once.
 - Rollback: state plainly how the change is undone if a problem appears.

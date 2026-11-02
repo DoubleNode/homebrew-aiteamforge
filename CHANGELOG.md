@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1727: CR pages link back to the Release & CR Status page (XACA-1727)
+- Tap files updated in this publish: `share/kanban-hooks/release_cr_facts.py`,`share/kanban-hooks/release_cr_stage.py` `share/scripts/release_fact_dictionary.py`,`share/scripts/release_profile_defaults/cr/profile.json` `share/scripts/release_profile_defaults/cr/style.md`,`share/scripts/release_profile_defaults/cr/template.md` `share/scripts/release_profile_validate.py`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1725: PROD close-out ends with a verified final status-page refresh (XACA-1725)
 - Tap files updated in this publish: `share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1723 realign Richmond to its personal-assistant charter

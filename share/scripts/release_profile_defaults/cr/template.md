@@ -7,7 +7,7 @@
 | Description: | {{content.descriptionOutcomes}} |
 | Anticipated Date/Time of change: | {{release.scheduledDate}} {{release.scheduledTime}} |
 | Reason for change: | {{content.reasonForChange}} |
-| Testing Documentation/Test details: | {{content.testingNarrative}} Full test detail: {{links.testingLog}} |
+| Testing Documentation/Test details: | {{content.testingNarrative}} Full test detail: {{links.testingLog}} Release & CR Status: {{links.crRecord}} |
 | Rollback Plan: | {{content.rollbackPlanText}} |
 
 {{#if release.foldedItemCount}}

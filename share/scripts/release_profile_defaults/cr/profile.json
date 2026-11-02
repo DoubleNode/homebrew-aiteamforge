@@ -7,7 +7,7 @@
     {"id": "description", "label": "Description:", "required": true, "format": "What is changing, in terms a user would notice"},
     {"id": "anticipatedDate", "label": "Anticipated Date/Time of change:", "required": true},
     {"id": "reasonForChange", "label": "Reason for change:", "required": true, "format": "1-3 sentences"},
-    {"id": "testing", "label": "Testing Documentation/Test details:", "required": true, "format": "Summary of testing plus a link to the Testing Log"},
+    {"id": "testing", "label": "Testing Documentation/Test details:", "required": true, "format": "Summary of testing plus a link to the Testing Log and a link to the Release & CR Status page"},
     {"id": "implementationPlan", "label": "Implementation Plan:", "required": true, "format": "The ordered production deployment procedure: numbered steps (1. 2. 3. ...), at least 2, each an action WE take to release the change into Production. Not a summary of what guests will see."},
     {"id": "rollbackPlan", "label": "Rollback Plan:", "required": true}
   ],
@@ -26,7 +26,8 @@
   "linkPolicy": {
     "defaultAllowLinks": false,
     "standardLinks": [
-      {"id": "testingLog", "required": true, "maxCount": 1, "sourcePlaceholder": "{{links.testingLog}}", "placement": "In or directly below the Testing Documentation field."}
+      {"id": "testingLog", "required": true, "maxCount": 1, "sourcePlaceholder": "{{links.testingLog}}", "placement": "In or directly below the Testing Documentation field."},
+      {"id": "crRecord", "required": true, "maxCount": 1, "sourcePlaceholder": "{{links.crRecord}}", "placement": "In the Testing Documentation field, directly after the Testing Log link. Label: Release & CR Status."}
     ],
     "everythingElseBanned": "No other links (no PR, repository or ticket links)."
   },

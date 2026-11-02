@@ -211,7 +211,7 @@ import time
 from bisect import bisect_right
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlparse, urlsplit
 
 __all__ = [
     "validate_draft",
@@ -820,7 +820,59 @@ def _is_standalone(body: str, ms: int, me: int) -> bool:
     return bool(_FILL.match(before)) and bool(_FILL.match(after))
 
 
-def _check_banned(body: str, starts: List[int], profile: dict) -> List[Any]:
+# XACA-1515: the TARGET of a permitted standard link is not prose. A required link such as
+# the Testing Log / Release & CR Status page URL carries a release id in its slug and an
+# all-digit page id, which the ticket-id and SHA bans would otherwise false-match. Only the
+# exact URL a linkPolicy.standardLinks placeholder resolves to (via `facts`) is blanked, and
+# only where it stands as a whole URL token (not the prefix of a longer URL). Link TEXT and
+# every other URL stay scanned; with no facts nothing is exempt (fail closed).
+_URL_CONT = r"(?![\w%/+~#?&=-]|\.\w)"
+
+
+def _is_http_url(u: str) -> bool:
+    """XACA-1727-012: only an absolute http(s) URL with a host may be exempted. A malformed standard-link
+    value (a ticket id, a SHA, a scheme-less host, javascript:) would otherwise blank that token body-wide."""
+    try:
+        p = urlparse(u)
+        return p.scheme.lower() in ("http", "https") and bool(p.hostname)
+    except ValueError:
+        return False
+
+
+def _permitted_link_urls(profile: dict, facts: Any) -> List[str]:
+    pol = profile.get("linkPolicy")
+    std = pol.get("standardLinks") if isinstance(pol, dict) else None
+    if not isinstance(std, list):
+        return []
+    urls = []
+    for e in std:
+        u = _resolve_placeholder(e.get("sourcePlaceholder"), facts) if isinstance(e, dict) else None
+        if u and _is_http_url(u) and u not in urls:
+            urls.append(u)
+    return urls
+
+
+def _url_spans(text: str, urls: List[str]) -> List[Tuple[int, int]]:
+    spans: List[Tuple[int, int]] = []
+    for u in urls:
+        for m in re.finditer(r"(?<![\w/.%+@=-])" + re.escape(u) + _URL_CONT, text):
+            spans.append((m.start(), m.end()))
+    return spans
+
+
+def _blank(text: str, spans: List[Tuple[int, int]]) -> str:
+    """`text` with each span replaced by spaces (newlines kept): same length, same lines."""
+    if not spans:
+        return text
+    chars = list(text)
+    for s, e in spans:
+        for i in range(max(s, 0), min(e, len(chars))):
+            if chars[i] != "\n":
+                chars[i] = " "
+    return "".join(chars)
+
+
+def _check_banned(body: str, starts: List[int], profile: dict, facts: Any = None) -> List[Any]:
     raw = profile.get("bannedTokenPatterns")
     if raw is None:
         return []
@@ -837,6 +889,17 @@ def _check_banned(body: str, starts: List[int], profile: dict) -> List[Any]:
     # decoded: a structural heading or a plain-text title that only exists after decoding
     # is a false FAIL (fail closed), not an evasion.
     dec, to_raw = _unescape_map(body)
+    urls = _permitted_link_urls(profile, facts)
+    if urls:
+        dspans = _url_spans(dec, urls)
+        if to_raw is None:
+            rspans = list(dspans)
+        else:
+            rspans = _url_spans(body, urls) + [
+                (to_raw(s), to_raw(e) if e < len(dec) else len(body)) for s, e in dspans]
+        scan_raw, scan_dec = _blank(body, rspans), _blank(dec, dspans)
+    else:
+        scan_raw, scan_dec = body, dec
     for i, item in enumerate(raw):
         if isinstance(item, str):
             pat, reason, standalone = item, "", False
@@ -852,11 +915,11 @@ def _check_banned(body: str, starts: List[int], profile: dict) -> List[Any]:
             out.append(bad)
             continue
         seen: set = set()      # raw offsets the raw pass reported for THIS pattern
-        out.append(_Job("finditer", pat, re.MULTILINE, body,
-                        _banned_then(pat, reason, body, starts, seen), standalone))
+        out.append(_Job("finditer", pat, re.MULTILINE, scan_raw,
+                        _banned_then(pat, reason, scan_raw, starts, seen), standalone))
         if to_raw is not None:
-            out.append(_Job("finditer", pat, re.MULTILINE, dec,
-                            _banned_then(pat, reason, dec, starts, seen, to_raw), standalone))
+            out.append(_Job("finditer", pat, re.MULTILINE, scan_dec,
+                            _banned_then(pat, reason, scan_dec, starts, seen, to_raw), standalone))
     return out
 
 
@@ -1768,7 +1831,7 @@ def validate_draft(rendered_body: str, title: str, profile: dict, *,
     starts = _line_starts(body)
     out.extend(_check_sections(body, lines, profile))
     out.extend(_check_plan_steps(lines, profile))
-    out.extend(_check_banned(body, starts, profile))
+    out.extend(_check_banned(body, starts, profile, facts))
     out.extend(_check_links(body, lines, starts, profile, facts))
     return _sort_banned(_resolve_jobs(out))
 

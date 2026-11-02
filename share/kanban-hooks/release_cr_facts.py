@@ -318,8 +318,9 @@ def cr_record_for_facts(cr: Dict[str, Any], *, release: Optional[Dict[str, Any]]
                         activity: Optional[Iterable[Any]] = None) -> Dict[str, Any]:
     """COPY of the board CR in the shape build_fact_set() reads (spec 8.1 / FACT-DICTIONARY contract 1):
     ``timestamps.cr_approval_expected_at`` / ``cr_deployed_prod_at`` flattened to the top level, the
-    ``approver`` {login, name} object collapsed to a string, ``links{testingLog, crRequestPage}`` taken from
-    the STORED WIKI PAGES (release ``testing-log``, CR ``cr``) with any older ``links`` value as fallback,
+    ``approver`` {login, name} object collapsed to a string, ``links{testingLog, crRecord, crRequestPage}`` taken
+    from the STORED WIKI PAGES (release ``testing-log`` / ``cr-record``, CR ``cr``) with any older ``links`` value
+    as fallback,
     and ``activity`` mapped by activity_rows(). Absent values stay absent (the dictionary renders empty)."""
     if not isinstance(cr, dict):
         raise FactSetError("cr is %s, expected an object" % type(cr).__name__)
@@ -342,9 +343,15 @@ def cr_record_for_facts(cr: Dict[str, Any], *, release: Optional[Dict[str, Any]]
     testing = wiki_page_url(release, "testing-log") or wiki_page_url(cr, "testing-log") or \
         str(links.get("testingLog") or rel_links.get("testingLog") or "")
     request = wiki_page_url(cr, "cr") or str(links.get("crRequestPage") or rel_links.get("crRequestPage") or "")
+    # XACA-1727: the Release & CR Status page, from the STORED handle first (release, then the CR-side mirror),
+    # exactly like testingLog, so the CR body links the page the board actually points at.
+    status_page = wiki_page_url(release, "cr-record") or wiki_page_url(cr, "cr-record") or \
+        str(links.get("crRecord") or rel_links.get("crRecord") or "")
     links = dict(links)
     if testing:
         links["testingLog"] = testing
+    if status_page:
+        links["crRecord"] = status_page
     if request:
         links["crRequestPage"] = request
     out["links"] = links

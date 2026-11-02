@@ -158,6 +158,9 @@ CANONICAL_FACTS: Dict[str, Dict[str, Any]] = {
     "links.testingLog": {"type": "string (URL)",
                          "source": "release/CR record `links.testingLog` (stored at publish, § 8.3 step 5)",
                          "example": "https://wiki.example/x/123", "kinds": ["cr", "cr-record", "notice"]},
+    "links.crRecord": {"type": "string (URL)",
+                       "source": "CR record `links.crRecord`, else release `links.crRecord`, else the release `wikiPages[cr-record].url` (the Release & CR Status page); empty when none",
+                       "example": "https://wiki.example/x/789", "kinds": ["cr", "cr-record", "notice"]},
     "links.crRequestPage": {"type": "string (URL)", "source": "CR record `links.crRequestPage`",
                             "example": "https://wiki.example/x/456", "kinds": ["cr-record", "notice"]},
     "prod.deployedSha": {"type": "string", "source": "release record `stageSha.GAMMA`", "example": "9f2c1ab",
@@ -887,6 +890,8 @@ def build_fact_set(release_record: Dict[str, Any], cr_record: Optional[Dict[str,
         cr_hist = [dict(h, crId=cr["id"]) for h in history]
     testing_url = str(_get(cr_links, "testingLog", default=_get(rel_links, "testingLog"))
                       or _page_url(rel, "testing-log"))
+    cr_record_url = str(_get(cr_links, "crRecord", default=_get(rel_links, "crRecord"))
+                        or _page_url(rel, "cr-record"))
     request_url = str(_get(cr_links, "crRequestPage", default=_get(rel_links, "crRequestPage"))
                       or _page_url(cr, "cr"))
     if cr.get("id"):
@@ -946,6 +951,7 @@ def build_fact_set(release_record: Dict[str, Any], cr_record: Optional[Dict[str,
         },
         "links": {
             "testingLog": testing_url,
+            "crRecord": cr_record_url,
             "crRequestPage": request_url,
         },
         "prod": {

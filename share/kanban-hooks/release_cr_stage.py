@@ -8,14 +8,16 @@ failure leaves the CR in its last good state and a re-run resumes there.
   cr            reuse the open linked CR (else kb-cr create + assign-release);       a CR is linked AND
                 record release.stageSha.CR = release branch HEAD                     stageSha.CR is set
   draft         facts -> render the team `cr` profile template -> mechanical         CR already published
-                validation (the testing-log link is not published yet, so that
-                one check waits for the strict pass below)
+                validation (the testing-log and cr-record links may not exist yet,
+                so those checks wait for the strict pass below)
   approval      STOP unless cr_draft_approved_at is set (the engine never approves   approved / not required
                 for the lead; the lead runs `kb-cr approve-draft <CR> --by <lead>`)
   testing-log   kb-wiki publish --doc testing-log; store the handle on the release   release.wikiPages has it
                 (links.testingLog on the release AND the CR)
-  publish       rebuild facts with the link, STRICT validation, kb-wiki publish      CR state >= cr-published
-                --doc cr, store the handle on the CR, then `kb-cr publish --url`
+  publish       ensure the Release & CR Status page (cr-record) exists FIRST (XACA-  CR state >= cr-published
+                1727: resolve the stored handle, else run the cr-record publisher; no page =
+                stop, no CR is published), rebuild facts with both links, STRICT validation,
+                kb-wiki publish --doc cr, store the handle on the CR, then `kb-cr publish --url`
   notify        kb-notify send --to cr-approver --template cr-submitted; a failure   a receipt exists / state
                 STOPS here (nothing is submitted)                                    >= cr-submitted
   submit        kb-cr submit; report cr_approval_expected_at                         CR state >= cr-submitted
@@ -107,6 +109,10 @@ _STEP_SLOT = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_.]*)\s*\}\}")  # XACA-1510
 _CONTENT_REF = re.compile(r"\{\{\s*content\.([A-Za-z0-9_]+)(\??)\s*\}\}")
 _CREATED_RE = re.compile(r"Created CR \[([^\]]+)\]")
 _TESTING_LINK_RULES = ("link-required-unresolved", "link-required-missing")
+# The standard links whose pages are only guaranteed to exist once the publish step runs: the Testing Log (step
+# testing-log) and the Release & CR Status page (cr-record, ensured at the top of step publish, XACA-1727). The
+# NON-strict draft pass tolerates exactly these being missing/unresolved; the strict publish pass requires all.
+_DEFERRED_DRAFT_LINKS = ("testingLog", "crRecord")
 
 
 def is_gamma_held(cr: Dict[str, Any]) -> bool:
@@ -312,6 +318,29 @@ class ShellTools:
 
     def cr_publish_record(self, cr_id: str) -> None:             # XACA-1349-005 (spec 13.3 step 6)
         self._kb_cr("publish-record", cr_id)
+
+    # -- the Release & CR Status page (XACA-1727)
+    def cr_record_ensure(self, board_file: str, release_id: str) -> Dict[str, Any]:
+        """Create (or adopt / re-publish) the release's cr-record page through its ONE publisher,
+        release_cr_record_publish.py, which renders it, publishes it and stores the handle (release
+        ``wikiPages["cr-record"]`` + ``links.crRecord``, mirrored to linked CRs). Called directly, not through
+        ``kb-cr publish-record``: that wrapper reports a skip as rc 0, and the CR publish must FAIL CLOSED on a
+        skip. No --lock-timeout: a create-capable run must wait for the per-release lock (XACA-1702), and this
+        process holds neither that lock nor the board lock here. Returns the verdict plus ``rc``; never raises
+        for the publisher's own 10/11/12 (the caller decides), raises ToolError when it cannot be run/parsed."""
+        cmd = [sys.executable, _find_script("release_cr_record_publish.py"), "--board", board_file,
+               "--team", self.team, "--release-id", release_id, "--reason", "kb-release:cr-stage:pre-publish"]
+        r = self.run(cmd, capture_output=True, text=True, env=_clean_env())
+        lines = [ln for ln in (r.stdout or "").splitlines() if ln.strip()]
+        try:
+            verdict = json.loads(lines[-1]) if lines else None
+        except ValueError:
+            verdict = None
+        if not isinstance(verdict, dict):
+            raise ToolError("the cr-record publisher (exit %d) printed no JSON verdict: %s"
+                            % (r.returncode, ((r.stderr or "") + (r.stdout or "")).strip()[-400:]), r.returncode or 1)
+        verdict["rc"] = r.returncode
+        return verdict
 
     # -- kb-wiki
     def _wiki(self, args: List[str]) -> Tuple[int, Dict[str, Any]]:
@@ -850,9 +879,10 @@ class CrStage:
         violations = rpv.validate_draft(body, title, res["profile"], facts=facts)
         if grandfathered:  # XACA-1510-015: the approved stored plan is accepted as approved
             violations = [v for v in violations if v.rule != "section-steps"]
-        if not strict:  # the Testing Log is not published yet: only its own link may be missing
+        if not strict:  # the Testing Log / status page may not exist yet: only THEIR links may be missing
             violations = [v for v in violations
-                          if not (v.rule in _TESTING_LINK_RULES and "testingLog" in v.detail)]
+                          if not (v.rule in _TESTING_LINK_RULES
+                                  and any(name in v.detail for name in _DEFERRED_DRAFT_LINKS))]
         if violations:
             lines = ["  - %s%s: %s" % (v.rule, (" (line %d)" % v.line) if v.line else "", v.detail) for v in violations[:12]]
             raise CrStageError("the %s draft failed validation (%d violation(s)):\n%s" % (kind, len(violations), "\n".join(lines)),
@@ -1019,10 +1049,26 @@ class CrStage:
         handle = get_wiki_handle(cr, "cr")
         note = []
         if handle is None:
+            # XACA-1727: the CR body links the Release & CR Status page, so that page must exist BEFORE the body
+            # renders. No page = stop here; a CR is never published with that link unresolved.
+            # XACA-1727-013: only when the RESOLVED cr profile declares the crRecord standard link; a team whose
+            # override omits it (Android) publishes exactly as before, with no publisher call and no new failure mode.
+            needs_rec = self._profile_declares_cr_record()
+            rec = None
+            if needs_rec:
+                rec, how = self._ensure_cr_record()
+                note.append("cr-record %s %s" % (how, rec["url"]))
+            board, rel, cr = self._load()
             url_tl = get_wiki_handle(rel, "testing-log")["url"]
             content = self._content(cr, self._profile("cr")["template"])
             facts = self._facts(board, rel, cr, content=content, testing_url=url_tl, render_plan=True)
             body, title = self._render_validate("cr", facts, strict=True, grandfathered=self._plan_waived)
+            if needs_rec and facts["links"].get("crRecord") != rec["url"]:  # belt and braces: the body links THE stored page
+                raise CrStageError("the CR facts resolved the Release & CR Status link to %r, but the stored "
+                                   "cr-record page is %s; fix the stale links.crRecord on %s or %s and re-run"
+                                   % (facts["links"].get("crRecord"), rec["url"], cr["id"], self.rel_id), RC_REFUSED)
+            # XACA-1513 (planned, not built): a DPD2 published copy must be written from THIS ``body``, never a
+            # re-render with other facts, so it carries the same Testing Log and Release & CR Status links.
             handle = self._publish_page("cr", cr["id"], title, body, None)
             set_wiki_handle(self.board_file, "crs", cr["id"], "cr", handle, links={"crRequestPage": handle["url"]})
             note.append("cr page %s (v%d)" % (handle["url"], handle["version"]))
@@ -1035,6 +1081,41 @@ class CrStage:
                                "re-run to retry the record step" % exc, RC_FAILED)
         note.append("kb-cr publish")
         return "done", "; ".join(note)
+
+    def _profile_declares_cr_record(self) -> bool:
+        """XACA-1727-013: does the resolved CR profile (the one render/validate uses) list a crRecord standard link?"""
+        pol = self._profile("cr")["profile"].get("linkPolicy")
+        std = pol.get("standardLinks") if isinstance(pol, dict) else None
+        return isinstance(std, list) and any(isinstance(e, dict) and e.get("id") == "crRecord" for e in std)
+
+    def _ensure_cr_record(self) -> Tuple[Dict[str, Any], str]:
+        """XACA-1727: the release's cr-record handle, resolving the stored one (idempotent: an existing page is
+        reused, never duplicated) or else creating it through ``tools.cr_record_ensure`` (the cr-record
+        publisher, which adopts a labelled page whose handle was lost before it ever creates). Returns
+        (handle, "present"|"created"). Raises CrStageError (fail closed) when no handle is stored afterwards."""
+        _board, rel, _cr = self._load()
+        have = get_wiki_handle(rel, "cr-record")
+        if have is not None:
+            return have, "present"
+        why = ""
+        try:
+            verdict = self.tools.cr_record_ensure(self.board_file, self.rel_id)
+        except ToolError as exc:
+            verdict, why = {}, str(exc)
+        if not why and verdict.get("rc") != 0:
+            why = "publisher %s (exit %s): %s" % (verdict.get("status", "?"), verdict.get("rc"),
+                                                 verdict.get("reason", "no detail"))
+            if verdict.get("handleUnstored"):
+                why += " [the page WAS published but its handle is not on the board; store it before re-running]"
+        _board, rel, _cr = self._load()
+        have = get_wiki_handle(rel, "cr-record")
+        if have is None:
+            raise CrStageError(
+                "the Release & CR Status page (cr-record) for %s does not exist and could not be created (%s). The CR "
+                "page was NOT published: it must link that page. Fix the cause, then re-run `kb-release cr-stage %s` "
+                "(or create the page first: kb-cr publish-record %s)"
+                % (self.rel_id, why or "the publisher stored no handle", self.rel_id, self.rel_id), RC_FAILED)
+        return have, "created"
 
     def _render_title(self, board, rel, cr) -> str:
         """The page title for kb-cr's cr_published_title stamp: the template's own heading, rendered."""
