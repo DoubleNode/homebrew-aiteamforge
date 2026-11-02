@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1723 realign Richmond to its personal-assistant charter
+- Tap files updated in this publish: `share/personas/richmond/agents/richmond_beard_architect_planner_persona.md`,`share/personas/richmond/agents/richmond_beard_research_planning_persona.md` `share/personas/richmond/agents/richmond_higgins_calendar_admin_persona.md`,`share/personas/richmond/agents/richmond_higgins_release_engineer_persona.md` `share/personas/richmond/agents/richmond_keeley_communications_persona.md`,`share/personas/richmond/agents/richmond_keeley_documentation_lead_persona.md` `share/personas/richmond/agents/richmond_roy_lead_tester_persona.md`,`share/personas/richmond/agents/richmond_roy_tasks_accountability_persona.md` (+15 more). Run `brew upgrade aiteamforge` to receive them.
 - XACA-1721: ship richmond avatars and terminal logos via the tap (XACA-1721)
 - Tap files updated in this publish: `share/lcars-ui/tests/test_xaca1721_richmond_images.py`,`share/personas/richmond/avatars/richmond_beard_avatar.png` `share/personas/richmond/avatars/richmond_beard_avatar_thumb.png`,`share/personas/richmond/avatars/richmond_higgins_avatar.png` `share/personas/richmond/avatars/richmond_higgins_avatar_thumb.png`,`share/personas/richmond/avatars/richmond_keeley_avatar.png` `share/personas/richmond/avatars/richmond_keeley_avatar_thumb.png`,`share/personas/richmond/avatars/richmond_roy_avatar.png` (+15 more). Run `brew upgrade aiteamforge` to receive them.
 
