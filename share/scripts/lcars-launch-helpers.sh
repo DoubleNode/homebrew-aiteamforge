@@ -769,7 +769,7 @@ resolve_lcars_tmux_bin() {
 # deps (pyzipper, requests, …). Single source of truth for both
 # start_lcars_server and lcars-health-check.sh::_hc_start_lcars_server.
 #
-# Probe order (XACA-0486/0562/0563/0614, hardened XACA-0713):
+# Probe order (XACA-0486/0562/0563/0614, hardened XACA-0713, gated XACA-1720):
 #   0. $LCARS_PYTHON (env override)
 #   1. KNOWN ABSOLUTE venv paths — probed DIRECTLY, no brew-on-PATH needed
 #   2. brew --prefix aiteamforge / libexec/venv (brew located by absolute path
@@ -777,7 +777,14 @@ resolve_lcars_tmux_bin() {
 #   3. env.sh → $AITEAMFORGE_PYTHON
 #   4. $(brew --prefix)/var/aiteamforge/venv
 #   5. $AITEAMFORGE_DIR/share/venv
-#   6. python3  (last-resort; dev source machine has deps globally)
+#   6. python3  (last-resort; dev source machine has deps globally; NOT gated —
+#      start_lcars_server makes the go/no-go decision on it)
+#
+# XACA-1720 VERSION GATE: candidates 0-5 are honored only when the interpreter
+# runs and reports >= 3.10 (_lcars_python_version_ok). A stale legacy venv
+# (e.g. ~/.aiteamforge/venv symlinked to Xcode Python 3.9.6, exported by tap
+# startup templates as LCARS_PYTHON) is skipped with ONE stderr line and the
+# probe continues. Stdout carries ONLY the chosen path (callers capture it).
 #
 # XACA-0713 ROOT CAUSE / FIX:
 #   In launchd / non-login (health-daemon) contexts the inherited PATH lacks
@@ -788,8 +795,43 @@ resolve_lcars_tmux_bin() {
 #   FIRST (step 1) makes resolution independent of brew being on PATH, and step 2
 #   now also locates the `brew` binary by absolute path so the brew-based probes
 #   still work under launchd.
+
+# _lcars_python_version <interp> — print "MAJOR.MINOR" or nothing if unreadable.
+_lcars_python_version() {
+    "$1" -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null
+}
+
+# _lcars_python_version_ok <interp> — 0 iff interp runs and reports >= 3.10.
+# Unreadable / malformed version = not OK (fail closed).
+_lcars_python_version_ok() {
+    local _v _maj _min
+    _v="$(_lcars_python_version "$1")" || return 1
+    case "$_v" in
+        [0-9]*.[0-9]*) ;;
+        *) return 1 ;;
+    esac
+    _maj="${_v%%.*}"
+    _min="${_v#*.}"
+    case "$_maj$_min" in *[!0-9]*) return 1 ;; esac
+    if [[ "$_maj" -gt 3 ]] || { [[ "$_maj" -eq 3 ]] && [[ "$_min" -ge 10 ]]; }; then
+        return 0
+    fi
+    return 1
+}
+
+# _lcars_python_candidate_ok <interp> — executable AND >= 3.10.
+# When executable but too old/unreadable, print ONE stderr line and return 1.
+_lcars_python_candidate_ok() {
+    local _ci="$1" _cv
+    [[ -n "$_ci" && -x "$_ci" ]] || return 1
+    if _lcars_python_version_ok "$_ci"; then return 0; fi
+    _cv="$(_lcars_python_version "$_ci")"
+    echo "    resolve_lcars_python: ignoring ${_ci} (python ${_cv:-unknown}, need >= 3.10) — falling through to next candidate" >&2
+    return 1
+}
+
 resolve_lcars_python() {
-    if [[ -n "${LCARS_PYTHON:-}" && -x "${LCARS_PYTHON}" ]]; then
+    if _lcars_python_candidate_ok "${LCARS_PYTHON:-}"; then
         echo "${LCARS_PYTHON}"; return 0
     fi
 
@@ -802,7 +844,7 @@ resolve_lcars_python() {
         /usr/local/var/aiteamforge/venv/bin/python3 \
         /opt/homebrew/opt/aiteamforge/libexec/venv/bin/python3 \
         /usr/local/opt/aiteamforge/libexec/venv/bin/python3 ; do
-        if [[ -x "$_cand" ]]; then echo "$_cand"; return 0; fi
+        if _lcars_python_candidate_ok "$_cand"; then echo "$_cand"; return 0; fi
     done
 
     # 2. brew-based probes. Locate `brew` itself by absolute path when it is not
@@ -815,7 +857,7 @@ resolve_lcars_python() {
     fi
     if [[ -n "$_brew" ]]; then
         if _brew_aitf_prefix="$("$_brew" --prefix aiteamforge 2>/dev/null)" \
-           && [[ -x "${_brew_aitf_prefix}/libexec/venv/bin/python3" ]]; then
+           && _lcars_python_candidate_ok "${_brew_aitf_prefix}/libexec/venv/bin/python3"; then
             echo "${_brew_aitf_prefix}/libexec/venv/bin/python3"; return 0
         fi
     fi
@@ -828,16 +870,16 @@ resolve_lcars_python() {
         # shellcheck disable=SC1090
         source "$_atf_env_sh"
     fi
-    if [[ -n "${AITEAMFORGE_PYTHON:-}" && -x "$AITEAMFORGE_PYTHON" ]]; then
+    if _lcars_python_candidate_ok "${AITEAMFORGE_PYTHON:-}"; then
         echo "$AITEAMFORGE_PYTHON"; return 0
     fi
     if [[ -n "$_brew_prefix" ]]; then
         _p="${_brew_prefix}/var/aiteamforge/venv/bin/python3"
-        if [[ -x "$_p" ]]; then echo "$_p"; return 0; fi
+        if _lcars_python_candidate_ok "$_p"; then echo "$_p"; return 0; fi
     fi
     _p="${AITEAMFORGE_DIR:-$HOME/aiteamforge}/share/venv/bin/python3"
-    if [[ -x "$_p" ]]; then echo "$_p"; return 0; fi
-    echo "python3"   # last-resort (dev source machine has deps globally)
+    if _lcars_python_candidate_ok "$_p"; then echo "$_p"; return 0; fi
+    echo "python3"   # last-resort (dev source machine has deps globally); start_lcars_server gates it
 }
 
 # ---------------------------------------------------------------------------
@@ -1640,6 +1682,47 @@ start_lcars_server() {
         echo "${$}" > "${_lock_dir}/pid" 2>/dev/null || true
     fi
 
+    # XACA-0486 / XACA-0562 / XACA-0563 / XACA-0614: Resolve the python that has
+    # the LCARS runtime imports (pyzipper, requests, etc. from share/requirements.txt).
+    # Delegated to resolve_lcars_python() — the single canonical resolver shared with
+    # lcars-health-check.sh::_hc_start_lcars_server (XACA-0614 §4).
+    #
+    # XACA-1720: the version decision happens HERE — before the target-file write,
+    # the stale-server pgrep/pkill below, and any spawn — so a refusal can never
+    # kill a healthy running server. server.py REQUIRES Python >= 3.10. If the
+    # resolver could only offer an older/unreadable interpreter (stale legacy
+    # venv, brew unreachable under launchd -> bare system python3 3.9.6) we FAIL
+    # CLOSED (return 1, nothing touched) unless LCARS_ALLOW_OLD_PYTHON=1 (the
+    # explicit opt-out; keeps the legacy XACA-0713 warn-and-launch behavior).
+    # The dev source machine has python3 >= 3.10 so it needs no opt-out.
+    local lcars_python _lcars_pyver
+    lcars_python="$(resolve_lcars_python)"
+    _lcars_pyver="$(_lcars_python_version "$lcars_python")"
+    if ! _lcars_python_version_ok "$lcars_python"; then
+        if [[ "${LCARS_ALLOW_OLD_PYTHON:-0}" == "1" ]]; then
+            echo "    ############################################################" >&2
+            echo "    ## XACA-0713 WARNING: resolved python is ${_lcars_pyver:-unreadable} (< 3.10)" >&2
+            echo "    ## interpreter: ${lcars_python}" >&2
+            echo "    ## server.py REQUIRES >= 3.10 and will likely CRASH on boot." >&2
+            echo "    ## Proceeding anyway: LCARS_ALLOW_OLD_PYTHON=1 is set." >&2
+            echo "    ############################################################" >&2
+        else
+            echo "    ############################################################" >&2
+            echo "    ## XACA-1720 REFUSING TO START LCARS (team ${team}, port ${port})" >&2
+            echo "    ## interpreter: ${lcars_python}" >&2
+            echo "    ## version:     ${_lcars_pyver:-unreadable} (server.py REQUIRES >= 3.10)" >&2
+            echo "    ## Cause: no >= 3.10 LCARS venv resolved (stale legacy venv, or" >&2
+            echo "    ##        brew unreachable under launchd -> system python3)." >&2
+            echo "    ## Any server already running on this port was left UNTOUCHED." >&2
+            echo "    ## Fix: install/repair the aiteamforge venv, or point" >&2
+            echo "    ##      LCARS_PYTHON at a python >= 3.10." >&2
+            echo "    ## Opt-out (unsupported): LCARS_ALLOW_OLD_PYTHON=1" >&2
+            echo "    ############################################################" >&2
+            _lcars_start_lock_release
+            return 1
+        fi
+    fi
+
     # XACA-0626: startup-time port drift guard.
     # Must run BEFORE the server binds so the .port file is correct before any
     # connect script reads it. Soft-fail: guard never aborts startup.
@@ -1722,44 +1805,6 @@ start_lcars_server() {
                 "" "SIGTERM" \
                 "stale server.py on port ${port} killed by start_lcars_server before launching a replacement"
         done
-    fi
-
-    # XACA-0486 / XACA-0562 / XACA-0563 / XACA-0614: Resolve the python that has
-    # the LCARS runtime imports (pyzipper, requests, etc. from share/requirements.txt).
-    # Delegated to resolve_lcars_python() — the single canonical resolver shared with
-    # lcars-health-check.sh::_hc_start_lcars_server (XACA-0614 §4).
-    # Probe order, override hooks, and last-resort fallback are documented in
-    # resolve_lcars_python() above.
-    local lcars_python
-    lcars_python="$(resolve_lcars_python)"
-
-    # XACA-0713 (moved here from lcars-health-check.sh::_hc_start_lcars_server
-    # as part of XACA-0763-004's delegation): server.py requires Python >= 3.10
-    # at RUNTIME (PEP-604 unions are deferred by `from __future__ import
-    # annotations`, but other runtime paths may still assume 3.10+). If
-    # resolve_lcars_python had to fall back to the macOS system python3 (3.9.6)
-    # — e.g. no venv installed, brew unreachable under launchd — the server
-    # will crash on boot. Emit a LOUD, unmistakable warning so the failure is
-    # diagnosable. This is a WARNING, not a hard abort: the dev source machine
-    # intentionally runs a globally-installed 3.x. Now runs for every launch
-    # site (team-startup.sh direct calls AND the health-check delegation),
-    # instead of only the health-check path as before.
-    local _lcars_pyver
-    _lcars_pyver="$("$lcars_python" -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null)"
-    if [[ -n "$_lcars_pyver" ]]; then
-        local _lcars_pymaj="${_lcars_pyver%%.*}"
-        local _lcars_pymin="${_lcars_pyver#*.}"
-        if [[ "$_lcars_pymaj" -lt 3 ]] \
-           || { [[ "$_lcars_pymaj" -eq 3 ]] && [[ "$_lcars_pymin" -lt 10 ]]; }; then
-            echo "    ############################################################" >&2
-            echo "    ## XACA-0713 WARNING: resolved python is ${_lcars_pyver} (< 3.10)" >&2
-            echo "    ## interpreter: ${lcars_python}" >&2
-            echo "    ## server.py REQUIRES >= 3.10 and will likely CRASH on boot." >&2
-            echo "    ## Cause: LCARS venv not found / brew unreachable under this" >&2
-            echo "    ## environment (launchd PATH?) — falling back to system python3." >&2
-            echo "    ## Fix: ensure the aiteamforge venv exists, or set \$LCARS_PYTHON." >&2
-            echo "    ############################################################" >&2
-        fi
     fi
 
     # Resolve a log dir consistent with the rendered-template convention

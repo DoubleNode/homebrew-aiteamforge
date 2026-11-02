@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1720: LCARS fails closed instead of launching on Python < 3.10 (XACA-1720)
+- Tap files updated in this publish: `share/scripts/lcars-launch-helpers.sh`. Run `brew upgrade aiteamforge` to receive them.
 
 ## [0.21.12] - 2026-11-01
 - XACA-1713 ship richmond installer inputs (conf, registry, prompts) via tap-src
