@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+
+## [0.21.13] - 2026-11-02
 - XACA-1720: LCARS fails closed instead of launching on Python < 3.10 (XACA-1720)
 - Tap files updated in this publish: `share/scripts/lcars-launch-helpers.sh`. Run `brew upgrade aiteamforge` to receive them.
 
@@ -8113,7 +8115,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.12...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.13...HEAD
+[0.21.13]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.12...v0.21.13
 [0.21.12]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.11...v0.21.12
 [0.21.11]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.10...v0.21.11
 [0.21.10]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.9...v0.21.10
