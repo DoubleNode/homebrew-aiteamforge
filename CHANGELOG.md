@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+
+## [0.21.14] - 2026-11-02
 - XACA-1727: CR pages link back to the Release & CR Status page (XACA-1727)
 - Tap files updated in this publish: `share/kanban-hooks/release_cr_facts.py`,`share/kanban-hooks/release_cr_stage.py` `share/scripts/release_fact_dictionary.py`,`share/scripts/release_profile_defaults/cr/profile.json` `share/scripts/release_profile_defaults/cr/style.md`,`share/scripts/release_profile_defaults/cr/template.md` `share/scripts/release_profile_validate.py`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1725: PROD close-out ends with a verified final status-page refresh (XACA-1725)
@@ -8123,7 +8125,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.13...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.14...HEAD
+[0.21.14]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.13...v0.21.14
 [0.21.13]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.12...v0.21.13
 [0.21.12]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.11...v0.21.12
 [0.21.11]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.10...v0.21.11
