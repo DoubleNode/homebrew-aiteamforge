@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+
+## [0.21.15] - 2026-11-03
 - XACA-1729: Regress into CR re-derives stages.CR.status from linked CRs (XACA-1729)
 - Tap files updated in this publish: `share/lcars-ui/server.py`,`share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1726: Closed-out release reaches terminal released status (XACA-1726)
@@ -8129,7 +8131,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.14...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.15...HEAD
+[0.21.15]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.14...v0.21.15
 [0.21.14]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.13...v0.21.14
 [0.21.13]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.12...v0.21.13
 [0.21.12]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.11...v0.21.12
