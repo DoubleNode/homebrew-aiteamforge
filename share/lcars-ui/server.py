@@ -10532,6 +10532,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         or _release_gate.CODE_ROLLBACK_SHA_UNKNOWN in reasons.codes
                         or _release_gate.CODE_ROLLBACK_OVERRIDE_CONFLICT in reasons.codes
                         or _release_gate.CODE_CLOSEOUT_INCOMPLETE in reasons.codes   # XACA-1353-013: PROD is the LAST act of close-out
+                        or release.get('status') == _release_gate.STATUS_RELEASED   # XACA-1726-002: terminal
                         or crsupport_malformed)
                 # XACA-1375: the informational CR_SUPPORT_DISABLED reason (release stranded at CR)
                 # never blocks: promote OUT of CR stays allowed in enforce mode too.
@@ -10573,7 +10574,21 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     now = self._get_timestamp()
                     if rollback is not None and not rollback['ok']:  # defence in depth: `hard` already refused
                         raise _DeferredResponse.json({"error": "rollback target unknown; refusing"}, 409)
+                    # XACA-1726-002: decided BEFORE the move (closeout_gap binds the record to the pre-PROD stage
+                    # and the release's current stage, so it reads "incomplete" once the release is at PROD).
+                    _closes_out = False
+                    if eff_target == 'PROD' and isinstance(release.get('closeOut'), dict):
+                        try:
+                            _closes_out = not _release_gate.closeout_gap(release, order)
+                        except Exception:  # noqa: BLE001 - fail closed: unreadable record is not "complete"
+                            _closes_out = False
                     self._apply_stage_move(release, data, cur, eff_target, now, 'promote', cr_on)
+                    _release_gate.refresh_cr_stage_status(release, board_raw)   # XACA-1726-003 (shared with the CR writers)
+                    if _closes_out:
+                        # Terminal state in the SAME locked write as the stage move: a completed close-out leaves
+                        # a released release with PROD passed, never in_progress/pending.
+                        release['status'] = _release_gate.STATUS_RELEASED
+                        release['stages']['PROD']['status'] = _release_gate.PASSED
                     if rollback is not None:  # spec 3.2: the previous production SHA, recorded at GAMMA entry
                         release['rollbackSha'] = rollback['sha']
                         release['rollbackShaSource'] = rollback['source']
@@ -12626,6 +12641,17 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 # Parity with shell: stamp release.updatedAt (XACA-0657)
                 release["updatedAt"] = now
 
+                # XACA-1726-003: linkage changed, so BOTH releases (the one the CR left and the one it joined)
+                # re-derive stages.CR.status in this same locked write. The CR's own releaseAssignment already
+                # landed above, so the shared linkage rule sees the new state.
+                if _release_gate is not None:
+                    _br = self._read_board_raw_locked()
+                    _release_gate.refresh_cr_stage_status(release, _br)
+                    if old_release_id:
+                        _old = self._find_release_by_id(releases_data, old_release_id)
+                        if _old is not None:
+                            _release_gate.refresh_cr_stage_status(_old, _br)
+
                 self._save_releases_config(releases_data, _lock_held=True)
 
             # Update manifest crIds. XACA-0890-003: hold the path lock across
@@ -12762,6 +12788,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 ]
                 # Parity with shell: stamp release.updatedAt on unlink (XACA-0657)
                 release["updatedAt"] = self._get_timestamp()
+                if _release_gate is not None:   # XACA-1726-003: same locked write as the unlink
+                    _release_gate.refresh_cr_stage_status(release, self._read_board_raw_locked())
                 self._save_releases_config(releases_data, _lock_held=True)
 
             # --- Remove from manifest crIds --- (XACA-0890-003: hold the path
@@ -15046,7 +15074,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             data = _cached_board(board_file)  # XACA-1382-003: read-only
             for release in data.get('releases', []):
                 status = release.get('status', '')
-                if status in ('archived', 'completed'):
+                if status in ('archived', 'completed', 'released'):   # XACA-1726-002: terminal, no due-date nag
                     continue
                 target_date = release.get('targetDate')
                 if not target_date:

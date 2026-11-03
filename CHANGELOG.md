@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1726: Closed-out release reaches terminal released status (XACA-1726)
+- Tap files updated in this publish: `share/kanban-hooks/approval_providers.py`,`share/kanban-hooks/release_gate.py` `share/lcars-ui/server.py`,`share/scripts/kb-cr.sh` `share/scripts/release_fact_dictionary.py`,`share/scripts/release_profile_defaults/cr-record/template.md` `share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 
 ## [0.21.14] - 2026-11-02
 - XACA-1727: CR pages link back to the Release & CR Status page (XACA-1727)

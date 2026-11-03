@@ -404,6 +404,13 @@ def stamp_assumed_approvals(board, now, actor="kb-cr", cr_ids=None, events=None,
             events.append((cr.get("id"), _state_event(
                 actor, now_iso,
                 "approve --assumed (assumed-schedule; cr_approved_at=%s)" % payload["cr_approved_at"])))
+    if stamped:
+        # XACA-1726-003: same write as the stamp, so the release's CR stage reads passed with no promote.
+        try:
+            import release_gate as _rg  # noqa: PLC0415
+            _rg.refresh_all_cr_stage_status(board)
+        except Exception:  # noqa: BLE001 - a refresh problem never blocks the approval stamp
+            pass
     return stamped
 
 
@@ -718,7 +725,7 @@ def cr_close_block(board, cr_id):
             rid = rel.get("id")
             if not _cr_linked_to(cr_id, assigned, rid, _listed_cr_ids(rel)):
                 continue
-            if _rg.current_stage(rel) == "PROD" or (rel.get("status") or "") in ("completed", "cancelled", "closed"):
+            if _rg.current_stage(rel) == "PROD" or (rel.get("status") or "") in ("completed", "cancelled", "closed", "released"):  # XACA-1726-002
                 continue
             co = rel.get("closeOut")
             steps = co.get("steps") if isinstance(co, dict) else None
@@ -915,6 +922,25 @@ def _board_cli(args):
     return 0
 
 
+def _refresh_cr_stage_cli(args):
+    """`refresh-cr-stage --board B` (XACA-1726-003): print the board with every release's stages.CR.status
+    re-derived from its linked CRs. Run by the shell CR writers under the board lock (_kb_jq_atomic_write); prints
+    NOTHING and exits 3 when no release changed, so the atomic write aborts and the board is not rewritten.
+    Exit 2 on an unreadable board."""
+    try:
+        with open(args.board, encoding="utf-8") as fh:
+            board = json.loads(fh.read())
+        import release_gate as _rg  # noqa: PLC0415
+        changed = _rg.refresh_all_cr_stage_status(board)
+    except (OSError, ValueError, ImportError) as e:
+        sys.stderr.write("approval_providers refresh-cr-stage: %s\n" % e)
+        return 2
+    if not changed:
+        return 3
+    sys.stdout.write(json.dumps(board, indent=2, ensure_ascii=False) + "\n")
+    return 0
+
+
 def _managed_cli(args):
     """Print `yes`/`no` (exit 0); any error exits 2 and the caller must treat it as engine-managed."""
     try:
@@ -999,6 +1025,8 @@ def main(argv=None):
     cb = sub.add_parser("cr-close-block")   # XACA-1667-004: the shell close paths ask THE rule (cr_close_block)
     cb.add_argument("--board", required=True)
     cb.add_argument("--cr-id", required=True)
+    rf = sub.add_parser("refresh-cr-stage")   # XACA-1726-003: shell CR writers refresh stages.CR.status after a write
+    rf.add_argument("--board", required=True)
     r = sub.add_parser("is-engine-managed")
     r.add_argument("--board", required=True)
     g = r.add_mutually_exclusive_group(required=True)
@@ -1012,6 +1040,8 @@ def main(argv=None):
             return _cr_close_block_cli(args)
         if args.mode == "is-engine-managed":
             return _managed_cli(args)
+        if args.mode == "refresh-cr-stage":
+            return _refresh_cr_stage_cli(args)
         if args.mode in ("stamp-board", "set-expected"):
             return _board_cli(args)
         if args.mode == "compute":

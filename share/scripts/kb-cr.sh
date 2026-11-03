@@ -544,6 +544,7 @@ _kb_cr_lifecycle_advance() {
     # the LCARS endpoint's `|| { exit 3; }` guard could never fire for any state
     # that stamps a timestamp. Caught by mutation-testing on PR #741: a stubbed
     # failing write still produced exit 0 and an HTTP 200.
+    _kb_cr_refresh_release_cr_stage "$board_file"   # XACA-1726-003
 
     # Append activity log entry (best-effort — never block the state transition)
     local event
@@ -1189,6 +1190,7 @@ _kb_cr_stamp_state_entry() {
         --arg     psuppress "$_ps_flag" \
         --arg     purl      "$_ps_url" \
         || return 1
+        _kb_cr_refresh_release_cr_stage "$board_file"   # XACA-1726-003
 
         local evt_nots
         evt_nots=$(_kb_cr_activity_event "cr_state_changed" \
@@ -2752,6 +2754,7 @@ _kb_cr_container_resume() {
         .crs[$cidx].updatedAt = $ts |
         .lastUpdated = $ts
     ' --argjson cidx "$cr_idx" --arg st "$held_from" --arg ts "$ts" || return 1
+    _kb_cr_refresh_release_cr_stage "$_cr_board"   # XACA-1726-003
 
     local evt
     evt=$(_kb_cr_activity_event "cr_state_changed" \
@@ -2786,6 +2789,24 @@ _kb_cr_approval_py() {
 _kb_cr_after_board_write() {
     ( (type _kb_register_team &>/dev/null && _kb_register_team) & ) 2>/dev/null
     ( (type _kb_push_board &>/dev/null && _kb_push_board) & ) 2>/dev/null
+}
+
+# _kb_cr_refresh_release_cr_stage <board_file>   (XACA-1726-003)
+# Re-derive stages.CR.status on every release from its linked CRs' lifecycle (ONE rule:
+# release_gate.derive_cr_stage_status, via approval_providers.py refresh-cr-stage). Called right after every
+# write of a CR's crState, as its own locked atomic write on the same lock file. Best-effort by design: it never
+# fails the state change that triggered it (a failed/no-op refresh is silent; the next promote, CR write or
+# stamp re-derives it). exit 3 from the CLI = "nothing changed", which aborts the write: board untouched.
+_kb_cr_refresh_release_cr_stage() {
+    local board="$1" py
+    py=$(_kb_cr_approval_py 2>/dev/null) || return 0
+    # A real write (rc 0; exit 3 = nothing changed aborts it) fires the usual post-write hooks, so a pushed board
+    # copy never keeps the pre-refresh CR stage (PR #1266 [Test][Advisory]).
+    if _kb_jq_atomic_write "${board}.lock" "${board}.tmp" "$board" "cr-stage refresh" \
+        python3 "$py" refresh-cr-stage --board "$board" >/dev/null 2>&1; then
+        _kb_cr_after_board_write
+    fi
+    return 0
 }
 
 # _kb_cr_set_expected_approval <board_file> <cr_id>
@@ -3577,6 +3598,7 @@ _kb_cr_container_revert() {
     --arg purl "$poller_url" \
     --argjson entry "$revert_entry" \
     || return 1
+    _kb_cr_refresh_release_cr_stage "$_cr_board"   # XACA-1726-003
 
     # ── Activity log event ───────────────────────────────────────────────────
     local event
@@ -4273,6 +4295,8 @@ _kb_cr_container_assign_release() {
     # Delegate to the shared write function in kanban-helpers.sh.
     # _kb_cr_release_link validates CR and release existence, handles re-link.
     _kb_cr_release_link "$_cr_board" "$_cr_team" "$cr_id" "$rel_id" || return $?
+    # XACA-1726-003: the linked set of the joined release (and of the one a re-link left) changed.
+    _kb_cr_refresh_release_cr_stage "$_cr_board"
     # XACA-1662-003: a link writes no activity event, but it fills the page's CR fields -> refresh.
     _kb_cr_record_mark_dirty "$_cr_board" "$cr_id"
     return 0
@@ -4294,7 +4318,8 @@ _kb_cr_container_unassign_release() {
     [[ "$_cr_enabled" != "true" ]] && { _kb_cr_disabled_exit "$_cr_team"; return 0; }
 
     # Delegate to the shared write function in kanban-helpers.sh.
-    _kb_cr_release_unlink "$_cr_board" "$_cr_team" "$cr_id"
+    _kb_cr_release_unlink "$_cr_board" "$_cr_team" "$cr_id" || return $?
+    _kb_cr_refresh_release_cr_stage "$_cr_board"   # XACA-1726-003: the release lost a CR
 }
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -5,6 +5,9 @@
 | Field | Value |
 | --- | --- |
 | Release stage | {{status.stage}} |
+{{#if status.release}}
+| Release state | {{status.release}} |
+{{/if}}
 | Change Request | {{status.cr}} |
 | Testing Log | {{status.testingLog}} |
 {{#if links.crRequestPage}}

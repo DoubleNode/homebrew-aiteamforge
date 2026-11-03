@@ -54,6 +54,9 @@ from release_closeout import first_incomplete as _closeout_first_incomplete, bin
 ALWAYS_ENABLED = ("PLANNED", "DEV", "PROD")
 TEST_STAGES = ("DEV", "QA", "ALPHA", "BETA", "GAMMA")  # stages whose exit gate is a test set
 PASSED, FAILED, WAIVED, PENDING, RUNNING = "passed", "failed", "waived", "pending", "running"
+# XACA-1726-002: the terminal release.status a completed PROD close-out writes. Distinct from 'archived'
+# (a housekeeping move off the board) and from 'in_progress'/'active' (still moving through the pipeline).
+STATUS_RELEASED = "released"
 
 # Stable machine-readable codes (XACA-1346-052/054). Reasons stay human strings; evaluate() and
 # validate_waiver() return a PARALLEL `reasonCodes` list (and `reasonData`, per-reason params such
@@ -346,8 +349,124 @@ def _grade(expected, tests, sha, waiver, stage=None):
     return rows
 
 
-def derive_stage_status(stage_record, tests, expected, stage=None):
-    """Spec 3.4. `tests` are the stage's records; graded at stage_record['sha']."""
+# XACA-1726-003: crState values that decide the CR stage. The CR stage is not graded by test records; it
+# follows the lifecycle of the CR(s) linked to the release.
+CR_PASSED_STATES = ("cr-approved", "cr-completed", "cr-closed")
+CR_FAILED_STATES = ("cr-held", "cr-rejected")
+# Retired CR states, mirrored from approval_providers._CR_RETIRED (a test asserts the two stay equal) so callers of
+# the gate can name them without importing the providers module. NOT used by derive_cr_stage_status: there only
+# cr-rejected is history, because the effective cr-closed it receives (linked_cr_states) is this build's approval.
+CR_RETIRED_STATES = ("cr-closed", "cr-rejected")
+
+
+def derive_cr_stage_status(cr_states):
+    """XACA-1726-003: stages.CR.status from the crState of every CR linked to the release.
+
+    Per CR: cr-approved, cr-completed or cr-closed -> passed; cr-held or cr-rejected -> failed; any other
+    state (drafted, published, submitted, implementing, ..., unknown, None) -> pending.
+    Multi-CR rule: rejected CRs are dropped first, so a rejection never poisons a release that has a later CR
+    (live, or closed after completing for this build). Of what remains: ANY failed (cr-held) -> failed; else ALL
+    passed (approved / completed / effective cr-closed) -> passed; else pending. ONLY rejected CRs -> failed (no
+    replacement). No linked CR (empty / None / not a list) -> pending: absence of a CR is never a pass.
+    Pure; takes the crState strings, not the board, so callers choose the linkage rule
+    (approval_providers._linked_crs). The caller passes EFFECTIVE states (linked_cr_states): a cr-closed CR that is
+    not completed-and-bound-to-the-current-build is already left out, so a closed CR in the list always counts."""
+    if not isinstance(cr_states, (list, tuple)) or not cr_states:
+        return PENDING
+    # Only a REJECTED CR is history here. A cr-closed state in the EFFECTIVE list has already passed
+    # completed-and-bound-to-this-build (linked_cr_states), so it IS this build's approval and counts like a live
+    # passed CR: an earlier rejection must not turn a replacement CR that completed and closed into `failed`.
+    live = [st for st in cr_states if st != "cr-rejected"]
+    if not live:
+        return FAILED   # only rejected CRs, no replacement
+    if any(st in CR_FAILED_STATES for st in live):
+        return FAILED
+    if all(st in CR_PASSED_STATES for st in live):
+        return PASSED
+    return PENDING
+
+
+def linked_cr_states(board, release):
+    """XACA-1726-003: the EFFECTIVE crState of every CR linked to `release` under THE linkage rule
+    (approval_providers._linked_crs), ready for derive_cr_stage_status.
+
+    A cr-closed CR approves THIS build only when BOTH existing checks pass (reused, never reimplemented):
+    approval_providers.cr_closed_after_completion (completed before it closed, no revert after) AND
+    approval_providers.cr_closed_bound_to_build (recorded SHA == stageSha.CR, else the GAMMA-entry time rule;
+    XACA-1667-012). A closed CR failing either (superseded by a new build, abandoned without ever completing, or a
+    binding that cannot be read) counts as NOTHING: it is left out of the list, as it no longer approves this build.
+    Every other CR contributes its crState unchanged.
+
+    None when the set cannot be read (module missing, malformed linkedCRs / crs, a linked id missing from the
+    board): callers then leave stages.CR.status alone rather than manufacture a verdict (fail closed)."""
+    if not isinstance(board, dict) or not isinstance(release, dict):
+        return None
+    try:
+        import approval_providers as _ap  # noqa: PLC0415 - lazy: approval_providers imports this module lazily too
+        crs, missing = _ap._linked_crs(board, release)
+    except Exception:  # noqa: BLE001
+        return None
+    if missing:   # a linkedCRs id with no CR on this board (e.g. a cross-team link): the set is incomplete
+        return None
+    out = []
+    for c in crs:
+        if not isinstance(c, dict):
+            continue
+        st = c.get("crState")
+        if st == "cr-closed":
+            try:
+                counts = (_ap.cr_closed_after_completion(c)[0] is True
+                          and _ap.cr_closed_bound_to_build(c, release)[0] is True)
+            except Exception:  # noqa: BLE001 - unreadable binding: fail closed toward pending, never passed
+                counts = False
+            if not counts:
+                continue
+        out.append(st)
+    return out
+
+
+def refresh_cr_stage_status(release, board):
+    """XACA-1726-003: set release.stages.CR.status from the linked CRs (derive_cr_stage_status). In place; the
+    caller holds the board lock and saves, so every writer of a CR's crState refreshes in the SAME locked write.
+    Only an existing stages.CR record is touched. Unreadable linkage -> untouched. A released release whose CR
+    stage already reads passed is left alone. With NO linked CR, a stage carrying a waiver or intentionallyEmpty
+    is left alone (a lead decision, not a CR verdict). Returns True when the status changed."""
+    stages = release.get("stages") if isinstance(release, dict) else None
+    srec = stages.get("CR") if isinstance(stages, dict) else None
+    if not isinstance(srec, dict):
+        return False
+    if release.get("status") == STATUS_RELEASED and srec.get("status") == PASSED:
+        return False
+    states = linked_cr_states(board, release)
+    if states is None:
+        return False
+    # No linked CR: a stage resolved by the lead (a waiver) or declared intentionallyEmpty is a deliberate decision,
+    # not a CR verdict, so an unrelated CR write must not reset it to pending. With >=1 linked CR the CRs rule.
+    if not states and (srec.get("intentionallyEmpty") is True or isinstance(srec.get("waiver"), dict)):
+        return False
+    new = derive_cr_stage_status(states)
+    if srec.get("status") == new:
+        return False
+    srec["status"] = new
+    return True
+
+
+def refresh_all_cr_stage_status(board):
+    """refresh_cr_stage_status for every release on `board` (in place). Returns the ids of releases changed.
+    Used by the CR-state writers that know a CR changed but not which release(s) it is linked to."""
+    releases = board.get("releases") if isinstance(board, dict) else None
+    if not isinstance(releases, list):
+        return []
+    return [r.get("id") for r in releases if isinstance(r, dict) and refresh_cr_stage_status(r, board)]
+
+
+def derive_stage_status(stage_record, tests, expected, stage=None, cr_states=None):
+    """Spec 3.4. `tests` are the stage's records; graded at stage_record['sha'].
+    XACA-1726-003: for stage 'CR' with `cr_states` supplied (a list of linked CRs' crState values), the status is
+    derive_cr_stage_status(cr_states) and tests are ignored. cr_states=None (caller has no board) keeps the
+    test-record derivation."""
+    if stage == "CR" and cr_states is not None:
+        return derive_cr_stage_status(cr_states)
     sr = stage_record or {}
     rows = _grade(expected, tests, sr.get("sha"), sr.get("waiver"), stage)
     if not rows:
@@ -624,6 +743,8 @@ def evaluate(release, target_stage, flow_config, *, cr_support_enabled, actor=No
     order = enabled_stages(flow_config, cr_support_enabled=cr_support_enabled)
     cur = current_stage(release)
     nxt = None
+    if release.get("status") == STATUS_RELEASED:
+        reasons.append("release is already released (terminal status); it cannot be promoted")
     if cur == "PROD":
         reasons.append("release is at PROD (terminal); nothing to promote to")
     else:
@@ -678,6 +799,8 @@ def evaluate_regress(release, target_stage, flow_config, reason, *, cr_support_e
     reasons = []
     order = enabled_stages(flow_config, cr_support_enabled=cr_support_enabled)
     cur = current_stage(release)
+    if release.get("status") == STATUS_RELEASED:
+        reasons.append("release is already released (terminal status); it cannot be regressed")
     if not str(reason or "").strip():
         reasons.append("regress requires a non-empty reason")
     if target_stage not in STAGES:

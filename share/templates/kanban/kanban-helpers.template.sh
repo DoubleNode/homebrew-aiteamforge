@@ -1429,6 +1429,29 @@ _kb_release_close_out_release_json() {
         --arg id "$release_id"
 }
 
+# XACA-1726-012: has this release's close-out ALREADY completed? <release.json>. rc 0 + a one-line report on stdout when
+# EITHER release.status == "released" (the terminal status written at the PROD close-out commit) OR the release is at
+# PROD with a bound closeOut record whose every step is done. rc 1 (silent) otherwise: a fresh or PARTIAL record is NOT
+# complete and keeps its resume behaviour. Pure read of the record: callers run it BEFORE any branch-tip / sha preflight
+# and any git or Confluence step, because after a completed close-out the release branch is deleted and those
+# preflights would only produce a misleading WARNING and re-plan the tag and both merges.
+_kb_release_close_out_already_done() {
+    local rj="${1-}" line
+    [[ -n "$rj" ]] || return 1
+    line=$(printf '%s' "$rj" | jq -er '
+        select((.status == "released")
+            or (.stage == "PROD"
+                and (.closeOut | type == "object")
+                and ((.closeOut.steps // {}) | type == "object" and length > 0)
+                and all((.closeOut.steps // {})[]; .status == "done")))
+        | "\(.id // "?") (\(.version // .tag // .name // .branch // "unversioned")) was closed out"
+          + (((.releasedAt // ([.closeOut.steps[]?.ts // empty] | max)) // null) as $t | if $t then " at " + $t else "" end)
+        ' 2>/dev/null) || return 1
+    echo "Already closed out: ${line}. Nothing to plan or run (no tag, merge, branch delete or Confluence step)."
+    echo "To refresh its status page without re-running close-out: kb-cr publish-record $(printf '%s' "$rj" | jq -r '.id // empty' 2>/dev/null)"
+    return 0
+}
+
 # ---------------------------------------------------------------------------
 # _kb_release_close_out <board_file> <release_id> [--repo <dir>] [--dry-run]   (XACA-1353-002)
 #
@@ -1985,6 +2008,28 @@ _kb_co_linked_crs() {
     _ap="$(dirname "$_bs")/approval_providers.py"
     [[ -f "$_ap" ]] || { echo "Error: missing $_ap" >&2; return 1; }
     python3 "$_ap" linked-crs --board "${1-}" --release-id "${2-}"
+}
+
+# _kb_release_refresh_cr_stage <board_file>   (XACA-1726)
+# Re-derive stages.CR.status on every release from its linked CRs (ONE rule: release_gate.derive_cr_stage_status via
+# approval_providers.py refresh-cr-stage), as its own locked atomic write. Used by kb-release link-cr / unlink-cr: a
+# changed linkage changes which CRs count. Self-contained in this file (no kb-cr.sh dependency; kb-cr.sh has its own
+# equivalent for its CR-state writers). Best-effort by design: never fails the link/unlink that triggered
+# it; exit 3 from the CLI = nothing changed, which aborts the write and leaves the board untouched.
+_kb_release_refresh_cr_stage() {
+    local _bs _ap board="${1-}"
+    [[ -n "$board" && -f "$board" ]] || return 0
+    _bs=$(_kb_board_settings_script 2>/dev/null) || return 0
+    _ap="$(dirname "$_bs")/approval_providers.py"
+    [[ -f "$_ap" ]] || return 0
+    # A real write (rc 0; the CLI's exit 3 = nothing changed aborts it) fires the same post-write hooks as
+    # _kb_jq_update, so a pushed board copy never keeps the pre-refresh CR stage (PR #1266 [Test][Advisory]).
+    if _kb_jq_atomic_write "${board}.lock" "${board}.tmp" "$board" "cr-stage refresh" \
+        python3 "$_ap" refresh-cr-stage --board "$board" >/dev/null 2>&1; then
+        ( (type _kb_register_team &>/dev/null && _kb_register_team) & ) 2>/dev/null
+        ( (type _kb_push_board &>/dev/null && _kb_push_board) & ) 2>/dev/null
+    fi
+    return 0
 }
 
 # XACA-1353-017: the START-of-close-out preflight for CR teams. Every CR assigned to the release must be one crClose can
@@ -2544,6 +2589,8 @@ _kb_release_close_out() {
     done
     [[ -n "$board_file" && -f "$board_file" && -n "$release_id" ]] || { echo "Usage: _kb_release_close_out <board_file> <release_id> [--repo <dir>] [--dry-run]" >&2; return 1; }
     [[ -n "$repo" ]] || repo="$PWD"
+    # XACA-1726-012 (defence in depth for direct callers): a completed close-out is never re-planned or re-run.
+    _kb_release_close_out_already_done "$(_kb_release_close_out_release_json "$board_file" "$release_id")" && return 0
     repo=$(_kb_co_git -C "$repo" rev-parse --show-toplevel 2>/dev/null) || { echo "Error: $repo is not a git repository" >&2; return 1; }
     # XACA-1353-014 (defence in depth, before the clone): a live record must be bound to the current build.
     name=$(_kb_release_close_out_release_json "$board_file" "$release_id")
@@ -29351,7 +29398,11 @@ kb-release-link-cr() {
         return 1
     fi
 
-    _kb_cr_release_link "$board_file" "$team" "$cr_id" "$rel_id"
+    _kb_cr_release_link "$board_file" "$team" "$cr_id" "$rel_id" || return $?
+    # XACA-1726: the linked set of the joined release (and of the one a re-link left) changed -> re-derive
+    # stages.CR.status (best-effort; same rule kb-cr assign-release uses).
+    _kb_release_refresh_cr_stage "$board_file"
+    return 0
 }
 
 # kb-release-unlink-cr <REL-ID> <CR-ID>
@@ -29396,7 +29447,10 @@ kb-release-unlink-cr() {
         fi
     fi
 
-    _kb_cr_release_unlink "$board_file" "$team" "$cr_id"
+    _kb_cr_release_unlink "$board_file" "$team" "$cr_id" || return $?
+    # XACA-1726: the release lost a CR -> re-derive stages.CR.status (best-effort, as kb-cr unassign-release).
+    _kb_release_refresh_cr_stage "$board_file"
+    return 0
 }
 
 # Reconcile every release manifest against the current team's board.
@@ -29730,7 +29784,7 @@ kb-release-chain() {
 # at the first incomplete step (the same thing `kb-run <REL-ID>` does automatically). The release reaches PROD only
 # through the gated promote, as the LAST step; on any failure it stays at the bound stage (GAMMA, or the last enabled
 # stage before PROD in a flow without GAMMA: XACA-1446).
-# Exit: 0 complete (release at PROD) | 1 a step failed or was refused | 2 usage | 3 at PROD but the final status page refresh did not land
+# Exit: 0 complete (release at PROD) or ALREADY closed out (XACA-1726-012: reported, nothing run) | 1 a step failed or was refused | 2 usage | 3 at PROD but the final status page refresh did not land
 kb-release-close-out() {
     local release_id="" opt_repo="$PWD" opt_dry=0 bf rj ctx team dry codes
     local usage="Usage: kb-release close-out <release-id> [--repo-dir <path>] [--dry-run]"
@@ -29763,6 +29817,9 @@ kb-release-close-out() {
     bf=$(_kb_get_board_file "$team") || { echo "Error: no board for team '$team'" >&2; return 1; }
     rj=$(_kb_release_close_out_release_json "$bf" "$release_id")
     [[ -n "$rj" ]] || { echo "Error: release '$release_id' not found" >&2; return 1; }
+    # XACA-1726-012: already closed out (status released, or PROD + every closeOut step done) = report + exit 0, BEFORE
+    # the gate / CR / binding / branch-tip preflights and in --dry-run too. A partial record falls through to resume.
+    _kb_release_close_out_already_done "$rj" && return 0
     if ! printf '%s' "$rj" | jq -e '.closeOut | type == "object"' >/dev/null 2>&1; then
         # fresh start: the gate must agree the release is otherwise ready (its bound stage passed). Fail closed.
         # XACA-1353-017: and a CR team's linked CRs must all be ones crClose can handle (named per CR, before the gate).

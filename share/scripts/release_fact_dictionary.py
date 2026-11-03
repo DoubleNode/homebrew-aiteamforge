@@ -134,8 +134,11 @@ CANONICAL_FACTS: Dict[str, Dict[str, Any]] = {
     "status.stage": {"type": "string", "source": "release record `currentStage`/`stage`; `unknown` if neither is set",
                      "example": "DEV", "kinds": ["cr-record"]},
     "status.cr": {"type": "string",
-                  "source": "`<cr.id> (<cr.state>)` for the current CR; `No open CR` when the release has linked CRs but none is current (all closed/superseded/held); `No CR yet` when it has none",
+                  "source": "`<cr.id> (<cr.state>)` for the current CR; `No open CR` when the release has linked CRs but none is current (all closed/superseded/held); `No CR yet` when it has none; on a `released` release with no current CR, `<id> (<state>), closed` for each linked CR (XACA-1726-004)",
                   "example": "CR-0107 (cr-submitted)", "kinds": ["cr-record"]},
+    "status.release": {"type": "string",
+                       "source": "terminal state: `Released - closed out <stages.PROD completedAt, else enteredAt, team timezone>` when release `status` is `released` (XACA-1726-004); empty for every other release",
+                       "example": "Released - closed out Oct 30 2026 08:43 AM CDT", "kinds": ["cr-record"]},
     "status.testingLog": {"type": "string",
                           "source": "`links.testingLog`, else the release `wikiPages[testing-log].url`; `not yet published` if neither exists",
                           "example": "https://wiki.example/x/123", "kinds": ["cr-record"]},
@@ -900,6 +903,15 @@ def build_fact_set(release_record: Dict[str, Any], cr_record: Optional[Dict[str,
         cr_summary = "No open CR"
     else:
         cr_summary = "No CR yet"
+    released = str(rel.get("status") or "") == "released"
+    if released and not cr.get("id") and linked_rows:
+        # XACA-1726-004: a closed-out release has no open CR by design; say which CRs closed, not "No open CR".
+        cr_summary = "; ".join("%s (%s), closed" % (r["id"], r["state"] or "state unknown") for r in linked_rows)
+    release_state = ""
+    if released:
+        prod = _stages(rel).get("PROD", {})
+        when = _fmt_ts(prod.get("completedAt") or prod.get("enteredAt"), tz)
+        release_state = "Released - closed out %s" % when if when else "Released"
 
     waivers = []
     for sname, st in _stages(rel).items():
@@ -945,7 +957,7 @@ def build_fact_set(release_record: Dict[str, Any], cr_record: Optional[Dict[str,
             "state": _cr_state(cr),
         },
         "status": {
-            "stage": current or "unknown", "cr": cr_summary,
+            "stage": current or "unknown", "cr": cr_summary, "release": release_state,
             "testingLog": testing_url or "not yet published",
             "updatedAtUTC": now.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
         },
