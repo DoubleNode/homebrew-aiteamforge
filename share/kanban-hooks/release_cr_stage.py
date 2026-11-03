@@ -1133,19 +1133,35 @@ class CrStage:
                 % self._template_source("cr"))
         if get_wiki_handle(rel, "cr-record") is None:  # a stored handle means no page needs creating
             wiki = os.path.join(self.kdir, "config", "wiki.json")
+            fix = "Fix: add a 'cr-record' entry to docTypes in that file (next to 'cr')."
+            why = ""
             try:
                 with open(wiki, "r", encoding="utf-8") as fh:
-                    dts = json.load(fh).get("docTypes")
-            except OSError:
-                dts = None  # no wiki.json: kb-wiki / the publisher name the missing file themselves
-                wiki = ""
-            except (ValueError, AttributeError):
-                dts = {}
-            if wiki and not (isinstance(dts, dict) and "cr-record" in dts):
-                problems.append(
-                    "the cr profile requires the Release & CR Status page, but the wiki config %s has no 'cr-record' "
-                    "doc type, so the page cannot be created and the CR cannot be published. "
-                    "Fix: add a 'cr-record' entry to docTypes in that file (next to 'cr')." % wiki)
+                    cfg = json.load(fh)
+            except FileNotFoundError:
+                cfg = None  # genuinely absent: kb-wiki / the publisher name the missing file themselves
+            except (OSError, ValueError) as exc:  # unreadable, a directory, or not JSON: fail closed, like kb-wiki
+                cfg = None
+                why = ("the wiki config %s exists but cannot be read (%s), so the Release & CR Status page cannot be "
+                       "created and the CR cannot be published. Fix: make it a readable JSON file."
+                       % (wiki, type(exc).__name__))
+            else:
+                dts = cfg.get("docTypes") if isinstance(cfg, dict) else None
+                if not isinstance(cfg, dict):
+                    why = ("the wiki config %s must be a JSON object, so the Release & CR Status page cannot be "
+                           "created. Fix: make it an object with a docTypes object." % wiki)
+                elif not isinstance(dts, dict):
+                    why = ("%s: docTypes must be an object, so the Release & CR Status page cannot be created and the "
+                           "CR cannot be published. %s" % (wiki, fix))
+                elif dts.get("cr-record") is None:  # kb-wiki's own test: a missing OR null entry is unmapped
+                    why = ("the cr profile requires the Release & CR Status page, but the wiki config %s has no "
+                           "'cr-record' doc type (missing or null), so the page cannot be created and the CR cannot be "
+                           "published. %s" % (wiki, fix))
+                elif not isinstance(dts["cr-record"], dict):
+                    why = ("the wiki config %s has a 'cr-record' doc type that is not an object, so the page cannot be "
+                           "created. %s" % (wiki, fix))
+            if why:
+                problems.append(why)
         return problems
 
     def _profile_declares_cr_record(self) -> bool:
