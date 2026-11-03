@@ -451,6 +451,73 @@ def refresh_cr_stage_status(release, board):
     return True
 
 
+def reconcile_closeout(release, board, apply=False):
+    """XACA-1726-005: bring an ALREADY closed-out release to the terminal state the PROD promote now writes
+    (spec 3.5). Returns (changes, reason):
+      reason is a str  -> NOT eligible, changes == [] (the reason names the failed condition);
+      reason is None   -> eligible; changes is the list of {"field", "old", "new"} (empty = already reconciled).
+    Eligible ONLY when the release is not archived, is at stage PROD, AND carries a closeOut dict in which every
+    REQUIRED step (closeout_required_steps: the base steps, plus crClose for a CR team) is present and `done`, and
+    no recorded step is anything else (the shell _kb_release_close_out_already_done predicate, minus its `released`
+    shortcut: that shortcut would make a released-but-PROD-pending release look finished). The record
+    must also still be bound to the build it was started on (release_closeout.binding_gap, record-intrinsic so it
+    reads correctly at PROD).
+    closeout_gap() is deliberately NOT used: it binds the record to the pre-PROD stage and the release's CURRENT
+    stage, so on a release already AT PROD it always reads "incomplete"; the promote handler therefore decides
+    `_closes_out` before moving the stage, which a release that closed out earlier cannot replay.
+    Effects: status -> released; stages.PROD.status -> passed; stages.CR re-derived (refresh_cr_stage_status) while
+    the release still has its PRE-change status, so the released+passed freeze cannot skip the derive.
+    Pure unless apply=True, which mutates `release` in place (caller holds the board lock). Never raises."""
+    try:
+        return _reconcile_closeout(release, board, apply)
+    except Exception as e:  # noqa: BLE001 - malformed input is "not eligible", never a crash
+        return [], "release record is unreadable (%s: %s)" % (type(e).__name__, e)
+
+
+def _reconcile_closeout(release, board, apply):
+    import copy  # noqa: PLC0415
+    if not isinstance(release, dict):
+        return [], "release record is not an object"
+    if release.get("status") == "archived":
+        return [], "release is archived (a deliberate end state; reconcile never resurrects it)"
+    if release.get("stage") != "PROD":
+        return [], "release is at stage %r, not PROD; close-out has not finished" % (release.get("stage"),)
+    co = release.get("closeOut")
+    if not isinstance(co, dict):
+        return [], "release has no closeOut record"
+    steps = co.get("steps")
+    if not isinstance(steps, dict) or not steps:
+        return [], "closeOut has no steps recorded"
+    missing = [n for n in closeout_required_steps(co) if n not in steps]
+    if missing:
+        return [], "closeOut is missing required step(s): %s" % ", ".join(missing)
+    for name in steps:
+        rec = steps[name]
+        if not (isinstance(rec, dict) and rec.get("status") == "done"):
+            return [], "closeOut step %s is not done" % name
+    gap = _closeout_binding_gap(release)
+    if gap:
+        return [], gap
+    stages = release.get("stages")
+    prod = stages.get("PROD") if isinstance(stages, dict) else None
+    if not isinstance(prod, dict):
+        return [], "release has no stages.PROD record"
+    work = release if apply else copy.deepcopy(release)
+    changes = []
+    # CR first, with the pre-change status (see docstring).
+    cr_old = (work["stages"].get("CR") or {}).get("status") if isinstance(work["stages"].get("CR"), dict) else None
+    if refresh_cr_stage_status(work, board):
+        changes.append({"field": "stages.CR.status", "old": cr_old, "new": work["stages"]["CR"].get("status")})
+    if work["stages"]["PROD"].get("status") != PASSED:
+        changes.append({"field": "stages.PROD.status", "old": work["stages"]["PROD"].get("status"), "new": PASSED})
+        work["stages"]["PROD"]["status"] = PASSED
+    if work.get("status") != STATUS_RELEASED:
+        changes.append({"field": "status", "old": work.get("status"), "new": STATUS_RELEASED})
+        work["status"] = STATUS_RELEASED
+    changes.sort(key=lambda c: ("status", "stages.PROD.status", "stages.CR.status").index(c["field"]))
+    return changes, None
+
+
 def refresh_all_cr_stage_status(board):
     """refresh_cr_stage_status for every release on `board` (in place). Returns the ids of releases changed.
     Used by the CR-state writers that know a CR changed but not which release(s) it is linked to."""
@@ -535,6 +602,13 @@ def _row_code(outcome, why):
 _CLOSEOUT_BASE_STEPS = ("tag", "mergeProduction", "mergeIntegration", "mergeOtherReleases", "deleteBranch")
 
 
+def closeout_required_steps(co):
+    """THE list of close-out steps that must exist AND be done: the base steps, plus `crClose` when the record says
+    crTeam is True (a literal True; exactly how close-out itself decides CR-ness). Shared by closeout_gap and
+    reconcile_closeout (XACA-1726-005) so the two can never disagree about what "complete" means."""
+    return _CLOSEOUT_BASE_STEPS + (("crClose",) if isinstance(co, dict) and co.get("crTeam") is True else ())
+
+
 def closeout_gap(release, order):
     """Why the PROD close-out (spec 3.2 PROD / 13.4) is not finished, or None when it is. Only a release that
     HAS a branch is subject (a pre-branch-model release has nothing to close out). Fails closed: a missing or
@@ -559,7 +633,7 @@ def closeout_gap(release, order):
     _cur = current_stage(release)
     if _rec_stage != _cur:
         return "close-out was started at %s but the release is at %s" % (_rec_stage, _cur)
-    need = _CLOSEOUT_BASE_STEPS + (("crClose",) if co.get("crTeam") is True else ())
+    need = closeout_required_steps(co)
     miss = [s for s in need if s not in co["steps"]]
     if miss:
         return "close-out record is malformed (missing step %s)" % miss[0]

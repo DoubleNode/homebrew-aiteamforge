@@ -941,6 +941,63 @@ def _refresh_cr_stage_cli(args):
     return 0
 
 
+def _reconcile_closeout_cli(args):
+    """`reconcile-closeout --board B --release-id R [--dry-run]` (XACA-1726-005). The pure rule is
+    release_gate.reconcile_closeout. Exit 0 = changes planned (default: the new board on stdout, for
+    _kb_jq_atomic_write, and the plan as JSON on stderr; --dry-run: the plan JSON on stdout, board untouched),
+    3 = eligible but nothing to change (already reconciled; nothing on stdout, so the write aborts),
+    4 = NOT eligible (reason on stderr), 2 = unreadable board / unknown release / usage."""
+    try:
+        with open(args.board, encoding="utf-8") as fh:
+            board = json.loads(fh.read())
+        import release_gate as _rg  # noqa: PLC0415
+    except (OSError, ValueError, ImportError) as e:
+        sys.stderr.write("approval_providers reconcile-closeout: %s\n" % e)
+        return 2
+    releases = board.get("releases") if isinstance(board, dict) else None
+    rel = next((r for r in releases if isinstance(r, dict) and r.get("id") == args.release_id), None) \
+        if isinstance(releases, list) else None
+    if rel is None:
+        sys.stderr.write("approval_providers reconcile-closeout: release %s not found on the board\n" % args.release_id)
+        return 2
+    changes, reason = _rg.reconcile_closeout(rel, board, apply=not args.dry_run)
+    if reason is not None:
+        sys.stderr.write("not eligible: %s\n" % reason)
+        return 4
+    if not changes:
+        sys.stderr.write("already reconciled: no changes\n")
+        return 3
+    plan = json.dumps({"release": args.release_id, "changes": changes}, indent=2, ensure_ascii=False)
+    if args.dry_run:
+        sys.stdout.write(plan + "\n")
+        return 0
+    if args.changes_out:   # the changes THIS evaluation applied (the shell logs these, not its pre-lock dry-run)
+        with open(args.changes_out, "w", encoding="utf-8") as fh:
+            fh.write(plan + "\n")
+    sys.stderr.write(plan + "\n")
+    sys.stdout.write(json.dumps(board, indent=2, ensure_ascii=False) + "\n")
+    return 0
+
+
+def _reconcile_closeout_log_cli(args):
+    """`reconcile-closeout-log --team T --release-id R --actor A --changes JSON` (XACA-1726-005): the one
+    per-release history entry (activity/<REL-ID>.json, the log every release action uses; releases carry no
+    in-board history). Run by the shell AFTER a real board write, never inside it, so a failed write leaves no
+    entry. Fire-and-forget: always exits 0."""
+    try:
+        import os as _os  # noqa: PLC0415
+        from kanban_utils import log_activity  # noqa: PLC0415
+        _os.environ["CLAUDE_AGENT_HANDLE"] = args.actor
+        log_activity("release_reconcile_closeout", args.release_id, "release", field="status",
+                     old_value=args.old_status, new_value="released",
+                     context=json.dumps({"action": "reconcile-closeout", "actor": args.actor,
+                                         "changes": _json_arg(args.changes, "--changes")}, sort_keys=True),
+                     team=args.team)
+    except Exception as e:  # noqa: BLE001
+        sys.stderr.write("approval_providers reconcile-closeout-log: %s\n" % e)
+    return 0
+
+
 def _managed_cli(args):
     """Print `yes`/`no` (exit 0); any error exits 2 and the caller must treat it as engine-managed."""
     try:
@@ -1027,6 +1084,17 @@ def main(argv=None):
     cb.add_argument("--cr-id", required=True)
     rf = sub.add_parser("refresh-cr-stage")   # XACA-1726-003: shell CR writers refresh stages.CR.status after a write
     rf.add_argument("--board", required=True)
+    rc = sub.add_parser("reconcile-closeout")   # XACA-1726-005: bring an already closed-out release to `released`
+    rc.add_argument("--board", required=True)
+    rc.add_argument("--release-id", required=True)
+    rc.add_argument("--dry-run", action="store_true")
+    rc.add_argument("--changes-out", default=None)
+    rl = sub.add_parser("reconcile-closeout-log")
+    rl.add_argument("--team", required=True)
+    rl.add_argument("--release-id", required=True)
+    rl.add_argument("--actor", required=True)
+    rl.add_argument("--old-status", default=None)
+    rl.add_argument("--changes", default="[]")
     r = sub.add_parser("is-engine-managed")
     r.add_argument("--board", required=True)
     g = r.add_mutually_exclusive_group(required=True)
@@ -1042,6 +1110,10 @@ def main(argv=None):
             return _managed_cli(args)
         if args.mode == "refresh-cr-stage":
             return _refresh_cr_stage_cli(args)
+        if args.mode == "reconcile-closeout":
+            return _reconcile_closeout_cli(args)
+        if args.mode == "reconcile-closeout-log":
+            return _reconcile_closeout_log_cli(args)
         if args.mode in ("stamp-board", "set-expected"):
             return _board_cli(args)
         if args.mode == "compute":

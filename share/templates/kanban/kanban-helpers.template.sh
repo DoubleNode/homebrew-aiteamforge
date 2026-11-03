@@ -30072,6 +30072,10 @@ kb-release() {
         unlink-cr)
             kb-release-unlink-cr "$@"
             ;;
+        reconcile-closeout)
+            # XACA-1726-005: one-time correction of a release that closed out before the terminal `released` status existed
+            kb-release-reconcile-closeout "$@"
+            ;;
         help|--help|-h|"")
             echo "Release Management Commands:"
             echo "  kb-release create <name> [options]         Create a new release"
@@ -30115,6 +30119,8 @@ kb-release() {
             echo "  kb-release reschedule <id> <date>          Change target date"
             echo "  kb-release link-cr <rel> <cr>              Link a CR to this release (XACA-0657)"
             echo "  kb-release unlink-cr <rel> <cr>            Unlink a CR from this release (XACA-0657)"
+            echo "  kb-release reconcile-closeout <rel> [--apply] [--actor NAME]"
+            echo "                                              Bring an already closed-out release to status released (dry-run by default; XACA-1726)"
             echo ""
             echo "Create options:"
             echo "  --type <type>        feature|bugfix|hotfix|maintenance (default: feature)"
@@ -30161,6 +30167,100 @@ kb-release() {
             return 1
             ;;
     esac
+}
+
+# kb-release-reconcile-closeout <REL-ID> [--apply] [--actor NAME]   (XACA-1726-005)
+# Bring an ALREADY closed-out release to the terminal state the PROD promote now writes (spec 3.5): status released,
+# stages.PROD.status passed, stages.CR re-derived. ONE rule: release_gate.reconcile_closeout via
+# approval_providers.py reconcile-closeout. DRY-RUN BY DEFAULT: prints the verdict and the planned changes and writes
+# nothing. --apply does it as ONE locked atomic write, then fires the post-write hooks and appends one per-release
+# history entry (activity/<REL-ID>.json) -- both only when it really wrote. Re-running is a no-op.
+# rc 0 = dry-run done / applied / already reconciled; rc 1 = not eligible or the write failed; rc 2 = usage.
+# Team = the usual kb-release context (KB_TEAM=firebase kb-release reconcile-closeout REL-...).
+kb-release-reconcile-closeout() {
+    local rel_id="" apply=0 actor="" arg
+    while [[ $# -gt 0 ]]; do
+        arg="$1"; shift
+        case "$arg" in
+            --apply) apply=1 ;;
+            --dry-run) apply=0 ;;
+            --actor) actor="${1-}"; shift || true ;;
+            --actor=*) actor="${arg#--actor=}" ;;
+            -h|--help)
+                echo "Usage: kb-release reconcile-closeout <REL-ID> [--apply] [--actor NAME]"
+                echo "  Bring an already closed-out release (at PROD, every closeOut step done) to status released,"
+                echo "  stages.PROD passed, stages.CR re-derived. Dry-run by default; --apply writes."
+                return 0 ;;
+            -*) echo "kb-release reconcile-closeout: unknown option '$arg'" >&2; return 2 ;;
+            *) [[ -z "$rel_id" ]] && rel_id="$arg" || { echo "kb-release reconcile-closeout: unexpected argument '$arg'" >&2; return 2; } ;;
+        esac
+    done
+    if [[ -z "$rel_id" ]]; then
+        echo "Usage: kb-release reconcile-closeout <REL-ID> [--apply] [--actor NAME]" >&2
+        return 2
+    fi
+    [[ -n "$actor" ]] || actor="${CLAUDE_AGENT_HANDLE:-${USER:-unknown}}"
+
+    local context team board_file _bs _ap plan rc
+    context=$(_kb_detect_context 2>/dev/null)
+    team="${context%%:*}"
+    if [[ -z "$team" || "$team" == "ERROR:"* ]]; then
+        echo "kb-release reconcile-closeout: could not determine team context" >&2
+        return 1
+    fi
+    board_file=$(_kb_get_board_file "$team")
+    if [[ ! -f "$board_file" ]]; then
+        echo "kb-release reconcile-closeout: no board found for team '$team'" >&2
+        return 1
+    fi
+    _bs=$(_kb_board_settings_script 2>/dev/null) || { echo "kb-release reconcile-closeout: cannot locate kanban-hooks/" >&2; return 1; }
+    _ap="$(dirname "$_bs")/approval_providers.py"
+    [[ -f "$_ap" ]] || { echo "kb-release reconcile-closeout: missing $_ap" >&2; return 1; }
+
+    # Verdict + plan (read-only). rc 0 = changes planned, 3 = already reconciled, 4 = not eligible, 2 = unreadable.
+    local errf why; errf=$(mktemp "${TMPDIR:-/tmp}/kb-reconcile-err.XXXXXX") || return 1
+    plan=$(python3 "$_ap" reconcile-closeout --board "$board_file" --release-id "$rel_id" --dry-run 2>"$errf")
+    rc=$?
+    why=$(cat "$errf" 2>/dev/null); rm -f "$errf"
+    case "$rc" in
+        3) echo "$rel_id: already reconciled (status released, PROD passed, CR current). Nothing to do."; return 0 ;;
+        4) echo "kb-release reconcile-closeout: $rel_id is NOT eligible: ${why#not eligible: }" >&2; return 1 ;;
+        0) ;;
+        *) echo "kb-release reconcile-closeout: cannot evaluate $rel_id: $why" >&2; return 1 ;;
+    esac
+
+    echo "$rel_id (team $team) is eligible. Planned changes:"
+    printf '%s' "$plan" | jq -r '.changes[] | "  \(.field): \(.old) -> \(.new)"'
+    if (( ! apply )); then
+        echo "Dry run: nothing written. Re-run with --apply to write."
+        return 0
+    fi
+
+    # The history entry records what the LOCKED write applied (the CLI's --changes-out), not the pre-lock dry-run.
+    local old_status changes_json applied_f
+    applied_f=$(mktemp "${TMPDIR:-/tmp}/kb-reconcile-applied.XXXXXX") || return 1
+    if _kb_jq_atomic_write "${board_file}.lock" "${board_file}.tmp" "$board_file" "reconcile-closeout" \
+        python3 "$_ap" reconcile-closeout --board "$board_file" --release-id "$rel_id" --changes-out "$applied_f" 2>/dev/null; then
+        old_status=$(jq -r '[.changes[] | select(.field == "status") | .old][0] // empty' "$applied_f" 2>/dev/null)
+        changes_json=$(jq -c '.changes' "$applied_f" 2>/dev/null)
+        rm -f "$applied_f"
+        python3 "$_ap" reconcile-closeout-log --team "$team" --release-id "$rel_id" --actor "$actor" \
+            --old-status "$old_status" --changes "${changes_json:-[]}" >/dev/null 2>&1 || true
+        ( (type _kb_register_team &>/dev/null && _kb_register_team) & ) 2>/dev/null
+        ( (type _kb_push_board &>/dev/null && _kb_push_board) & ) 2>/dev/null
+        echo "Applied: $rel_id reconciled."
+        return 0
+    fi
+    rm -f "$applied_f"
+    # The locked write wrote nothing: a concurrent reconcile won (rc 3), eligibility changed since the dry-run
+    # (rc 4: say why), or it genuinely failed.
+    why=$(python3 "$_ap" reconcile-closeout --board "$board_file" --release-id "$rel_id" --dry-run 2>&1 >/dev/null)
+    case $? in
+        3) echo "$rel_id: already reconciled (concurrently). Nothing written."; return 0 ;;
+        4) echo "kb-release reconcile-closeout: $rel_id is NOT eligible: ${why#not eligible: }" >&2; return 1 ;;
+    esac
+    echo "kb-release reconcile-closeout: the locked write failed; the board is unchanged" >&2
+    return 1
 }
 
 # ============================================================================
