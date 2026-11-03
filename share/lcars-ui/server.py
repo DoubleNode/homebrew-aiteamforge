@@ -10292,6 +10292,16 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             if kind == 'regress':  # re-entering a stage: it restarts (records/waivers stay SHA-bound)
                 st['enteredAt'] = now
                 st['status'] = 'pending'
+        if kind == 'regress' and to == 'CR':
+            # XACA-1729: CR status is derived from the linked CRs (XACA-1726), not from tests, so a blanket
+            # 'pending' misreads a release regressed into CR whose bound CR is already approved. Runs after BOTH
+            # branches above: a release with no stages.CR record yet (CR enabled after it passed CR) gets a fresh
+            # record that must be derived too (XACA-1729-011). Same locked write (callers hold the board lock; no
+            # new lock). A waived or intentionallyEmpty CR stage with no linked CR is left alone by the helper.
+            try:
+                _release_gate.refresh_cr_stage_status(release, self._read_board_raw_locked())
+            except Exception as e:  # noqa: BLE001 - fail closed: stay 'pending', never claim passed
+                print(f"[LCARS] Warning: CR stage re-derive on regress failed: {e}")
         legacy = self._legacy_environment_for_stage(release, data, to, cr_on)
         platforms = release.get('platforms')
         for pdata in (platforms.values() if isinstance(platforms, dict) else []):

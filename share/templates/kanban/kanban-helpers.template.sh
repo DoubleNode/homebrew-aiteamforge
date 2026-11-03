@@ -2561,9 +2561,9 @@ print(r.release_version(json.load(sys.stdin)))' "$(dirname "$(_kb_release_branch
     if [[ "$(printf '%s' "$rj" | jq -r '.stage // ""')" == "PROD" ]]; then
         echo "Close-out for $release_id complete; release is already at PROD"
         # XACA-1725-004: a close-out interrupted after its promote resumes here and still gets the final refresh
-        # (idempotent: the publisher updates in place). Today a re-run of a COMPLETED close-out also reaches this branch
-        # and refreshes again (harmless). Once XACA-1726 lands, a completed close-out returns early BEFORE this branch;
-        # its page is then refreshed directly with `kb-cr publish-record <REL-ID>`.
+        # (idempotent: the publisher updates in place). A COMPLETED close-out never reaches this branch: since XACA-1726
+        # _kb_release_close_out_already_done stops it early with 'Already closed out' and a `kb-cr publish-record <REL-ID>`
+        # hint, so refreshing a finished release's page is that command, not a re-run of close-out.
         [[ "$dry_run" == "1" ]] || _kb_release_close_out_final_refresh "$board_file" "$release_id" || return 3
         return 0
     fi
