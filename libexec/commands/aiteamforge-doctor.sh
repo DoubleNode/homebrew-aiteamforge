@@ -610,12 +610,6 @@ attempt_remediation() {
   return 0
 }
 
-# XACA-1102: seed a missing .installed-version stamp (one-time, silent) BEFORE any
-# check reads it. Also runs when doctor is invoked directly rather than via the CLI.
-if command -v aitf_backfill_installed_version >/dev/null 2>&1; then
-  aitf_backfill_installed_version || true
-fi
-
 # Banner — suppressed in quiet preflight mode (XACA-0655-004).
 if [ "${DOCTOR_QUIET:-false}" != "true" ]; then
   [[ -t 1 ]] && clear
@@ -989,20 +983,30 @@ check_version_drift() {
 
   # --- Working-dir installed version ---
   # XACA-1102: the .installed-version stamp is the ONLY source. The installer
-  # writes it, and the CLI/doctor backfill seeds it (aitf_backfill_installed_version,
-  # called at the top of doctor) on boxes provisioned before that. There is no
-  # config-version fallback any more: a missing stamp here means provisioning failed.
+  # writes it; on boxes provisioned before that, the one-time backfill below (and
+  # the CLI's) seeds it from the INSTALL-TIME config version. It runs HERE, on the
+  # check path only (not on --help or arg errors), and a seed is reported, never
+  # silent. There is no config-version fallback any more: a stamp still missing
+  # after the backfill means provisioning failed.
   local installed_version=""
   local drift_mode="stamp"
   local stamp_file="${working_dir}/.installed-version"
+  local _bf_msg=""
+
+  if command -v aitf_backfill_installed_version >/dev/null 2>&1; then
+    _bf_msg="$(aitf_backfill_installed_version 2>&1 >/dev/null || true)"
+    [ -n "$_bf_msg" ] && print_info "  ${_bf_msg}"
+  fi
 
   if [ -f "$stamp_file" ]; then
     installed_version="$(tr -d '[:space:]' < "$stamp_file" | sed 's/^v//')"
   fi
 
   if [ -z "$installed_version" ]; then
-    check_result fail "Working-dir version stamp missing: provisioning did not write ${stamp_file}. This is a bug; please report it" \
-      "Manual repair: printf '%s\\n' \"\$(cat ${framework_dir}/../VERSION)\" > ${stamp_file}  (only if the working dir really is at that version)"
+    local _missing_what="missing"
+    [ -e "$stamp_file" ] && _missing_what="present but empty/unreadable"
+    check_result fail "Working-dir version stamp ${_missing_what}: provisioning did not write a valid ${stamp_file}. This is a bug; please report it" \
+      "Repair: write the version this working dir was INSTALLED at (not the Cellar version, which would hide drift) to ${stamp_file}, e.g. from the \"version\" in ${working_dir}/.aiteamforge-config, then re-run doctor"
     return
   fi
 

@@ -305,6 +305,52 @@ else
     test_pass
 fi
 
+WRITE_PROG='. "$XV_TAP/libexec/lib/installed-version.sh"; aitf_write_installed_version "$AITEAMFORGE_DIR" "$XV_VERSION"'
+
+test_start "W1: writer REJECTS embedded whitespace/newlines instead of squashing them (0.1.0<NL>0.2.0 must not become 0.1.00.2.0)"
+_w1_bad=""
+for _case in multiline space; do
+    _d="$W/w1-$_case/aiteamforge"; mkdir -p "$_d"
+    case "$_case" in
+        multiline) _v="$(printf '0.1.0\n0.2.0')" ;;
+        space)     _v="0.1.0 0.2.0" ;;
+    esac
+    _rc=0; XV_VERSION="$_v" _run "$NOBREW_BIN" "$_d" "$WRITE_PROG" >/dev/null 2>&1 || _rc=$?
+    [ "$_rc" -eq 0 ] && _w1_bad="$_w1_bad $_case:accepted(rc=0)"
+    [ -e "$_d/.installed-version" ] && _w1_bad="$_w1_bad $_case:wrote='$(tr '\n' '|' < "$_d/.installed-version")'"
+done
+# Surrounding whitespace is still trimmed (not a regression of the accept path).
+_d="$W/w1-pad/aiteamforge"; mkdir -p "$_d"
+_rc=0; XV_VERSION="$(printf '  0.20.3_1 \n')" _run "$NOBREW_BIN" "$_d" "$WRITE_PROG" >/dev/null 2>&1 || _rc=$?
+_got="$(cat "$_d/.installed-version" 2>/dev/null)"
+[ "$_rc" -ne 0 ] || [ "$_got" != "0.20.3_1" ] && _w1_bad="$_w1_bad padded:rc=$_rc,got='$_got'"
+if [ -n "$_w1_bad" ]; then test_fail "unexpected:$_w1_bad"; else test_pass; fi
+
+test_start "W2: writer refuses a DIRECTORY at the stamp path (mv would move the temp file into it), leaves no temp file"
+_d="$W/w2/aiteamforge"; mkdir -p "$_d/.installed-version"
+_rc=0; XV_VERSION="0.21.15" _run "$NOBREW_BIN" "$_d" "$WRITE_PROG" >/dev/null 2>&1 || _rc=$?
+_inside="$(ls -A "$_d/.installed-version")"
+_tmps=0; for _f in "$_d"/.installed-version.*; do [ -e "$_f" ] && _tmps=$((_tmps + 1)); done
+if [ "$_rc" -eq 0 ]; then
+    test_fail "writer returned 0 with a directory at the stamp path"
+elif [ -n "$_inside" ] || [ "$_tmps" != "0" ]; then
+    test_fail "writer left files behind: inside='$_inside' temps=$_tmps"
+else
+    test_pass
+fi
+
+test_start "B4: backfill REPAIRS a zero-byte stamp (guard is -s, not -e) from the config version (0.11.6)"
+B4_DIR="$W/b4/aiteamforge"
+mk_never_upgraded "$B4_DIR" "0.11.6"
+: > "$B4_DIR/.installed-version"
+_rc=0; _run "$NOBREW_BIN" "$B4_DIR" "$BACKFILL_PROG" >/dev/null 2>&1 || _rc=$?
+_stamp="$(cat "$B4_DIR/.installed-version")"
+if [ "$_rc" -ne 0 ] || [ "$_stamp" != "0.11.6" ]; then
+    test_fail "expected rc=0 and stamp '0.11.6', got rc=$_rc stamp='$_stamp'"
+else
+    test_pass
+fi
+
 # ═══════════════════════════════════════════════════════════════════════════
 # G — get_installed_version (source 3, the config fallback, is retired)
 # ═══════════════════════════════════════════════════════════════════════════
@@ -395,22 +441,28 @@ fi
 test_start "D1: no stamp and no config version -> FAIL text, old upgrade advice gone, FAILED_CHECKS=1"
 D1_DIR="$W/d1/aiteamforge"
 mk_never_upgraded "$D1_DIR" ""
-_out="$(run_drift "$D1_DIR" backfill)"
+_out="$(run_drift "$D1_DIR")"
 if [[ "$_out" != *"Working-dir version stamp missing: provisioning did not write"* ]]; then
     test_fail "FAIL text absent. Output: $_out"
 elif [[ "$_out" != *"COUNTS pass=0 fail=1 warn=0"* ]]; then
     test_fail "expected exactly one fail and no warn/pass. Output: $_out"
+elif [[ "$_out" == *"/../VERSION"* ]] || [[ "$_out" == *"cat "*"VERSION)"* ]]; then
+    test_fail "repair hint still suggests stamping the Cellar VERSION (hides drift). Output: $_out"
 elif [[ "$_out" == *"to refresh and stamp"* ]] || [[ "$_out" == *"Cannot determine working-dir version"* ]] || [[ "$_out" == *"config-fallback"* ]]; then
     test_fail "old warn/advice text still present. Output: $_out"
 else
     test_pass
 fi
 
-test_start "D2: stamp backfilled to 0.11.6 with cellar at 0.21.15 -> drift reported (warn), both versions named, no fail"
+test_start "D2: doctor's OWN check backfills a never-upgraded box (0.11.6, cellar 0.21.15), SAYS so, then reports drift (warn), no fail"
 D2_DIR="$W/d2/aiteamforge"
 mk_never_upgraded "$D2_DIR" "0.11.6"
-_out="$(run_drift "$D2_DIR" backfill)"
-if [[ "$_out" != *"Cellar v0.21.15 BUT working-dir v0.11.6"* ]]; then
+_out="$(run_drift "$D2_DIR")"
+if [ "$(cat "$D2_DIR/.installed-version" 2>/dev/null)" != "0.11.6" ]; then
+    test_fail "check_version_drift did not backfill the stamp to 0.11.6 (got '$(cat "$D2_DIR/.installed-version" 2>/dev/null)'). Output: $_out"
+elif [[ "$_out" != *"stamped working-dir version 0.11.6"* ]]; then
+    test_fail "backfill was silent: the seed must be reported. Output: $_out"
+elif [[ "$_out" != *"Cellar v0.21.15 BUT working-dir v0.11.6"* ]]; then
     test_fail "drift message missing/incorrect. Output: $_out"
 elif [[ "$_out" != *"COUNTS pass=0 fail=0 warn=1"* ]]; then
     test_fail "expected exactly one warn. Output: $_out"
@@ -425,6 +477,29 @@ printf '0.21.15\n' > "$D3_DIR/.installed-version"
 _out="$(run_drift "$D3_DIR")"
 if [[ "$_out" != *"Cellar v0.21.15 matches working-dir v0.21.15"* ]] || [[ "$_out" != *"COUNTS pass=1 fail=0 warn=0"* ]]; then
     test_fail "Output: $_out"
+else
+    test_pass
+fi
+
+test_start "D4: zero-byte stamp and no config version -> FAIL says 'present but empty', not 'missing'"
+D4_DIR="$W/d4/aiteamforge"
+mk_never_upgraded "$D4_DIR" ""
+: > "$D4_DIR/.installed-version"
+_out="$(run_drift "$D4_DIR")"
+if [[ "$_out" != *"stamp present but empty"* ]] || [[ "$_out" != *"COUNTS pass=0 fail=1 warn=0"* ]]; then
+    test_fail "Output: $_out"
+else
+    test_pass
+fi
+
+test_start "D5: 'aiteamforge doctor --help' does NOT write the stamp (backfill is scoped to the check path)"
+D5_DIR="$W/d5/aiteamforge"
+mk_never_upgraded "$D5_DIR" "0.11.6"
+_rc=0; _out="$(_run "$NOBREW_BIN" "$D5_DIR" '"$0" "$XV_DOCTOR" --help' 2>&1)" || _rc=$?
+if [ -e "$D5_DIR/.installed-version" ]; then
+    test_fail "doctor --help wrote a stamp ('$(cat "$D5_DIR/.installed-version")')"
+elif [[ "$_out" != *"sage"* ]]; then
+    test_fail "doctor --help did not print usage (rc=$_rc) — the test did not reach the arg parser: $_out"
 else
     test_pass
 fi

@@ -25,8 +25,13 @@ aitf_write_installed_version() {
   # Digits and dots, optional suffix (brew revision "0.20.3_1", "1.2.3-rc1", "+meta").
   # Regex held in a variable: required for bash 3.2 =~ portability.
   local re='^[0-9]+(\.[0-9]+)*([_+-][0-9A-Za-z._+-]+)?$'
-  ver="$(printf '%s' "$ver" | tr -d '[:space:]')"
+  # Trim only LEADING/TRAILING whitespace: an embedded newline or space must be
+  # rejected by the regex, not squashed ("0.1.0\n0.2.0" must not become 0.1.00.2.0).
+  ver="${ver#"${ver%%[![:space:]]*}"}"
+  ver="${ver%"${ver##*[![:space:]]}"}"
   [ -n "$dir" ] && [ -d "$dir" ] || return 1
+  # A directory at the stamp path would make `mv` move the temp file INTO it.
+  [ -d "${dir}/.installed-version" ] && return 1
   [[ "$ver" =~ $re ]] || return 1
   tmp="$(mktemp "${dir}/.installed-version.XXXXXX" 2>/dev/null)" || return 1
   if printf '%s\n' "$ver" > "$tmp" 2>/dev/null && chmod 644 "$tmp" 2>/dev/null \
@@ -42,18 +47,21 @@ aitf_write_installed_version() {
 #   "version" value. That value is the version the working dir was INSTALLED at,
 #   which is the truth on a box that was never upgraded. It is NEVER seeded from
 #   the brew version (that would hide real working-dir drift), never overwrites
-#   an existing stamp, and writes nothing if the config has no valid version.
+#   an existing NON-EMPTY stamp, and writes nothing if the config has no valid version.
 #
-#   THIS IS THE ONLY REMAINING READER OF THE CONFIG "version" VALUE (XACA-1102-012
-#   retired it as a fallback in get_installed_version and fleet-reporter.sh).
-#   Do not add another.
+#   THIS IS THE ONLY REMAINING READER THAT USES THE CONFIG "version" AS A VERSION
+#   ANSWER (XACA-1102-012 retired it as a fallback in get_installed_version and
+#   fleet-reporter.sh; validate-install.sh only prints it as a field-presence
+#   check). Do not add another.
 #
 #   Silent on stdout, at most one stderr line, always returns 0.
 aitf_backfill_installed_version() {
   local dir="${AITEAMFORGE_DIR:-$HOME/aiteamforge}"
   local cfg="${dir}/.aiteamforge-config" v=""
   [ -d "$dir" ] || return 0
-  [ -e "${dir}/.installed-version" ] && return 0
+  # -s, not -e: a zero-byte stamp is as good as none and must be repaired.
+  [ -s "${dir}/.installed-version" ] && return 0
+  [ -d "${dir}/.installed-version" ] && return 0
   [ -f "$cfg" ] || return 0
 
   if command -v jq >/dev/null 2>&1; then
