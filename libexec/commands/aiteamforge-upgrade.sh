@@ -6995,6 +6995,13 @@ update_env_loader() {
     print_warning "${target} is a symlink — left untouched (not refreshed)"
     return 0
   fi
+  # XACA-0730-018: a non-regular path (e.g. a directory) reads as "absent" to
+  # the [ -f ] checks below, and `mv -f tmp target` would then drop the temp
+  # INSIDE it while reporting a false "Installed missing". Refuse instead.
+  if [ -e "$target" ] && [ ! -f "$target" ]; then
+    print_warning "${target} exists but is not a regular file — left untouched (not refreshed)"
+    return 0
+  fi
 
   # Dry run renders into TMPDIR so it never writes into the live tree; a real
   # run renders beside the target so the final mv is a same-filesystem rename.

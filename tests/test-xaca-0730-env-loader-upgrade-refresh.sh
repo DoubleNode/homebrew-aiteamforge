@@ -276,6 +276,27 @@ else
     fi
 fi
 
+# ═══════════════════════════════════════════════════════════════════════════
+# F7 — a DIRECTORY at the target path (XACA-0730-018): must be refused, not
+# reported as "Installed missing" with the temp file dropped inside it
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "F7: a directory at share/aiteamforge-env.sh is left untouched, no false success"
+F7="$WORK_ROOT/f7/aiteamforge"
+mkdir -p "$F7/share/aiteamforge-env.sh"
+_out="$(_run_upgrade_step "$F7" false 2>&1)"; _rc=$?
+_inside="$(find "$F7/share/aiteamforge-env.sh" -mindepth 1 | wc -l | tr -d '[:space:]')"
+if [ "$_rc" -ne 0 ]; then
+    test_fail "update_env_loader exited $_rc (must warn and continue): $_out"
+elif [ "$_inside" != "0" ]; then
+    test_fail "wrote $_inside file(s) inside the directory at the target path"
+elif [[ "$_out" == *"Installed missing"* ]] || [[ "$_out" == *"Refreshed"* ]]; then
+    test_fail "reported a false success for a non-regular target. Output: $_out"
+elif [[ "$_out" != *"not a regular file"* ]]; then
+    test_fail "did not warn that the target is not a regular file. Output: $_out"
+else
+    test_pass
+fi
+
 # Restore the outer sandbox value (F6 subshell exported its own).
 export AITEAMFORGE_DIR="$TEST_TMP_DIR/aiteamforge"
 
