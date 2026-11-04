@@ -93,6 +93,7 @@ test-xaca-0677-root-wm-refresh.sh               plain-shell
 test-xaca-0683-skip-launchctl.sh                plain-shell
 test-xaca-0704-negative.sh                      plain-shell
 test-xaca-0704-positive.sh                      plain-shell
+test-xaca-0730-env-loader-upgrade-refresh.sh   plain-shell
 test-xaca-0743-four-tier-knowledge.sh           plain-shell
 test-xaca-0746-kb-knowledge-in-tap.sh           plain-shell
 test-xaca-0747-knowledge-repo.sh                plain-shell

@@ -38,6 +38,9 @@ source "${LIBEXEC_DIR}/lib/power-guard-bundle.sh"
 # XACA-1402-011: opt-in iMessage relay bundle placement + stale-running-copy notice,
 # shared verbatim with install-shell.sh. Files and text only -- see lib/imessage-relay-bundle.sh.
 source "${LIBEXEC_DIR}/lib/imessage-relay-bundle.sh"
+# XACA-0730: aiteamforge-env.sh renderer, shared verbatim with install-shell.sh
+# (install_env_loader). Consumed by update_env_loader. Defines one function only.
+source "${LIBEXEC_DIR}/lib/env-loader.sh"
 # XACA-0931: shared nested-project persona deploy-target enumerator — the
 # SAME enumerator aiteamforge-persona-parity-check.sh's S3 surface uses
 # (XACA-0931-003), so the upgrade-path fixer and the drift detector can never
@@ -118,6 +121,7 @@ What Gets Updated:
   • Helper scripts (board-check, restore-helper, backup, kb-cr)
   • Team launch scripts (per-team startup/shutdown + station scripts)
   • Shell aliases and helpers (re-sourced)
+  • Environment loader (share/aiteamforge-env.sh, refreshed if stale)
   • Skills (symlinks verified or re-copied)
   • LaunchAgents (updated if changed)
 
@@ -6961,6 +6965,107 @@ update_imgcat() {
   fi
 }
 
+# XACA-0730: $WORKING_DIR/share/aiteamforge-env.sh on the UPGRADE path.
+#
+# install_env_loader() (install-shell.sh) renders it, but only `aiteamforge
+# setup` reaches that, so a changed template never reached an installed box:
+# M1Pro kept a May copy without the XACA-0494 worktree-helpers block through
+# ~10 upgrades. Same install-time-only class as XACA-1159 / XACA-1669.
+#
+# Predicate is CONTENT, not existence: render with the SAME shared renderer
+# (lib/env-loader.sh, aitf_render_env_loader) into a temp and cmp it against
+# the installed copy. absent -> install; differs -> verified backup
+# (${target}.backup-<ts>, update_templates' convention) then atomic replace;
+# identical -> untouched (no mtime churn). The file is fully framework-owned
+# (no user-editable section), so a differing copy is stale by definition.
+# Fail-soft but LOUD: every failure prints a warning and leaves the existing
+# copy in place; the upgrade continues.
+update_env_loader() {
+  print_section "Updating environment loader (aiteamforge-env.sh)"
+
+  local template="${FRAMEWORK_DIR}/share/templates/aiteamforge-env.sh"
+  local target="${WORKING_DIR}/share/aiteamforge-env.sh"
+  local target_dir="${WORKING_DIR}/share"
+
+  if [ ! -f "$template" ]; then
+    print_warning "Env loader template not found ($template) — ${target} NOT refreshed"
+    return 0
+  fi
+  if [ -L "$target" ]; then
+    print_warning "${target} is a symlink — left untouched (not refreshed)"
+    return 0
+  fi
+
+  # Dry run renders into TMPDIR so it never writes into the live tree; a real
+  # run renders beside the target so the final mv is a same-filesystem rename.
+  local tmp="" err=""
+  if [ "$DRY_RUN" = true ] || [ ! -d "$target_dir" ]; then
+    tmp="$(mktemp "${TMPDIR:-/tmp}/aitf-env-loader.XXXXXX")" || tmp=""
+  else
+    tmp="$(mktemp "${target}.XXXXXX")" || tmp=""
+  fi
+  if [ -z "$tmp" ]; then
+    print_warning "Could not create a temp file to render the env loader — ${target} NOT refreshed"
+    return 0
+  fi
+
+  if ! err="$(aitf_render_env_loader "$template" "$WORKING_DIR" "$tmp" 2>&1)"; then
+    rm -f "$tmp"
+    print_warning "Env loader render failed (${err:-unknown error}) — ${target} NOT refreshed"
+    return 0
+  fi
+
+  local state="absent"
+  if [ -f "$target" ]; then
+    if cmp -s "$tmp" "$target"; then
+      rm -f "$tmp"
+      print_success "aiteamforge-env.sh already current"
+      return 0
+    fi
+    state="stale"
+  fi
+
+  if [ "$DRY_RUN" = true ]; then
+    rm -f "$tmp"
+    if [ "$state" = "absent" ]; then
+      echo "Would install: ${target} (missing)"
+    else
+      echo "Would refresh: ${target} (differs from the shipped template; a backup would be kept)"
+    fi
+    return 0
+  fi
+
+  if [ ! -d "$target_dir" ] && ! mkdir -p "$target_dir"; then
+    rm -f "$tmp"
+    print_warning "Could not create ${target_dir} — aiteamforge-env.sh NOT installed"
+    return 0
+  fi
+
+  local backup=""
+  if [ "$state" = "stale" ]; then
+    backup="${target}.backup-$(date +%Y%m%d-%H%M%S)"
+    if ! cp -p "$target" "$backup" || ! cmp -s "$target" "$backup"; then
+      rm -f "$backup" "$tmp"
+      print_warning "Could not create a verified backup of ${target} — stale copy left in place (NOT refreshed)"
+      return 0
+    fi
+  fi
+
+  # 755 matches install_env_loader (sed > target; chmod +x).
+  if _aitf_install_rendered "$tmp" "$target" 755; then
+    if [ "$state" = "absent" ]; then
+      print_success "Installed missing aiteamforge-env.sh"
+    else
+      print_success "Refreshed stale aiteamforge-env.sh (previous copy: ${backup})"
+    fi
+  else
+    rm -f "$tmp"
+    if [ -n "$backup" ]; then rm -f "$backup"; fi
+    print_warning "Could not install the rendered env loader at ${target} — existing copy (if any) left in place"
+  fi
+  return 0
+}
+
 # Show changelog
 show_changelog() {
   print_section "What's New"
@@ -7021,6 +7126,7 @@ update_template_dirs
 update_ttyd_bridge
 update_imgcat
 update_shell_helpers
+update_env_loader
 update_team_personas
 # XACA-1296-020: refreshes PROMPT_REFRESH_TEAMS' (spacedock-only)
 # scripts/prompts/*.txt content on an already-installed team. Sequenced

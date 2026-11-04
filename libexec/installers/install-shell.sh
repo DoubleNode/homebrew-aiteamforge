@@ -24,6 +24,9 @@ source "$SCRIPT_DIR/../lib/power-guard-bundle.sh"
 # command (files and text only; nothing is run). Shared verbatim with
 # aiteamforge-upgrade.sh.
 source "$SCRIPT_DIR/../lib/imessage-relay-bundle.sh"
+# XACA-0730: aiteamforge-env.sh renderer, shared verbatim with
+# aiteamforge-upgrade.sh (update_env_loader). Defines one function, runs nothing.
+source "$SCRIPT_DIR/../lib/env-loader.sh"
 
 #──────────────────────────────────────────────────────────────────────────────
 # Constants
@@ -120,9 +123,9 @@ install_env_loader() {
 
     info "Installing environment loader"
 
-    # Substitute variables in template
-    sed -e "s|{{AITEAMFORGE_DIR}}|$AITEAMFORGE_DIR|g" \
-        "$template" > "$target"
+    # XACA-0730: the substitution lives in lib/env-loader.sh so upgrade
+    # (update_env_loader) renders byte-identically and can refresh by cmp.
+    aitf_render_env_loader "$template" "$AITEAMFORGE_DIR" "$target" || return 1
 
     chmod +x "$target"
     success "Installed environment loader"
