@@ -2542,6 +2542,20 @@ EOF
 printf '%s\n' "${INSTALL_PROFILE}" > "${INSTALL_DIR}/.install-profile"
 echo -e "${GREEN}✓${NC} Install profile marker written (${INSTALL_PROFILE})"
 
+# XACA-1102: stamp the installed version, from the SAME ${VERSION} the config's
+# "version" value just got. Until now only `aiteamforge upgrade` wrote this stamp,
+# so a never-upgraded box had none. Non-fatal: a failed stamp must not fail the
+# install (the CLI/doctor backfill re-seeds it from the config version).
+# shellcheck source=/dev/null
+[ -f "${AITEAMFORGE_HOME}/libexec/lib/installed-version.sh" ] && source "${AITEAMFORGE_HOME}/libexec/lib/installed-version.sh"
+if command -v aitf_write_installed_version >/dev/null 2>&1; then
+  if aitf_write_installed_version "${INSTALL_DIR}" "${VERSION}"; then
+    echo -e "${GREEN}✓${NC} Installed version stamped (${VERSION})"
+  else
+    echo -e "${YELLOW}⚠ Could not write .installed-version (version '${VERSION}'); the CLI will backfill it from the config${NC}" >&2
+  fi
+fi
+
 # ═══════════════════════════════════════════════════════════════════════════
 # COMPLETION
 # ═══════════════════════════════════════════════════════════════════════════

@@ -35,6 +35,11 @@ get_config_value() {
   fi
 }
 
+# Shared .installed-version writer + one-time backfill (XACA-1102). Sourced here so
+# every consumer of config.sh (upgrade, doctor, status) gets it.
+# shellcheck source=/dev/null
+[ -f "${BASH_SOURCE[0]%/*}/installed-version.sh" ] && . "${BASH_SOURCE[0]%/*}/installed-version.sh"
+
 # Get installed version
 #
 # XACA-0702: the config "version" value is stamped ONCE at install time and is
@@ -43,9 +48,11 @@ get_config_value() {
 #   1. The live brew version when installed via brew (`brew list --versions`).
 #   2. The working-dir .installed-version stamp written by the upgrade flow
 #      (XACA-0578/0702) — accurate on non-brew installs and a fast brew fallback.
-#   3. The legacy config "version" value.
+# The legacy config "version" value is NO LONGER a source (XACA-1102-012): it is
+# the install-time value and goes stale. It survives only as the one-time seed in
+# aitf_backfill_installed_version (installed-version.sh), which writes the stamp.
 # Each source is guarded (brew may be absent; files may not exist). Returns a
-# single trimmed token; "unknown" only if every source fails.
+# single trimmed token; "unknown" only if both sources fail.
 #
 # Shared lib consumed by aiteamforge-status.sh / aiteamforge-doctor.sh /
 # aiteamforge-upgrade.sh — all callers expect a single version token on stdout,
@@ -73,11 +80,6 @@ get_installed_version() {
     if [ -f "$stamp_file" ]; then
       v="$(tr -d '[:space:]' < "$stamp_file" 2>/dev/null || true)"
     fi
-  fi
-
-  # Source 3: legacy config value.
-  if [ -z "$v" ]; then
-    v="$(get_config_value "version" 2>/dev/null || true)"
   fi
 
   if [ -n "$v" ]; then

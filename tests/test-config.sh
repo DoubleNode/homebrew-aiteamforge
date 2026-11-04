@@ -118,8 +118,26 @@ value=$(get_config_value "version" || echo "")
 assert_empty "$value"
 test_pass
 
-test_start "get_installed_version returns correct version"
+# XACA-1102-012: the config "version" value is no longer a get_installed_version
+# source (this test used to assert that fallback). The .installed-version stamp is
+# the working-dir source; a config-only box reads "unknown" until the one-time
+# backfill (aitf_backfill_installed_version) seeds the stamp from that config value.
+test_start "get_installed_version returns the .installed-version stamp"
 create_test_config
+printf '1.3.0\n' > "$AITEAMFORGE_DIR/.installed-version"
+version=$(get_installed_version)
+assert_equal "1.3.0" "$version"
+test_pass
+
+test_start "get_installed_version ignores the legacy config version (XACA-1102-012)"
+create_test_config
+rm -f "$AITEAMFORGE_DIR/.installed-version"
+version=$(get_installed_version)
+assert_equal "unknown" "$version"
+test_pass
+
+test_start "backfill seeds the stamp from the config version, then get_installed_version reads it"
+aitf_backfill_installed_version 2>/dev/null
 version=$(get_installed_version)
 assert_equal "1.3.0" "$version"
 test_pass

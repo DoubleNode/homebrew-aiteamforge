@@ -94,6 +94,15 @@ check_configured() {
   fi
 }
 
+# XACA-1102: one-time backfill of a missing .installed-version stamp (boxes
+# provisioned before the installer wrote it). Homebrew sandboxes Formula
+# post_install away from $HOME, so the CLI is the trigger. Silent, fast, never fatal.
+# shellcheck source=/dev/null
+[ -f "${AITEAMFORGE_HOME}/libexec/lib/installed-version.sh" ] && . "${AITEAMFORGE_HOME}/libexec/lib/installed-version.sh"
+if command -v aitf_backfill_installed_version >/dev/null 2>&1; then
+  aitf_backfill_installed_version || true
+fi
+
 # Main command dispatcher
 case "${1:-}" in
   setup)

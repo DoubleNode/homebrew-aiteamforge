@@ -610,6 +610,12 @@ attempt_remediation() {
   return 0
 }
 
+# XACA-1102: seed a missing .installed-version stamp (one-time, silent) BEFORE any
+# check reads it. Also runs when doctor is invoked directly rather than via the CLI.
+if command -v aitf_backfill_installed_version >/dev/null 2>&1; then
+  aitf_backfill_installed_version || true
+fi
+
 # Banner — suppressed in quiet preflight mode (XACA-0655-004).
 if [ "${DOCTOR_QUIET:-false}" != "true" ]; then
   [[ -t 1 ]] && clear
@@ -953,9 +959,9 @@ check_framework() {
 # Check: Cellar-vs-working-dir version drift (XACA-0578)
 # Detects when `brew upgrade aiteamforge` ran but `aiteamforge upgrade --non-interactive`
 # did NOT follow (e.g. cellar-watch LaunchAgent is disabled/missing/broken).
-# The .installed-version stamp is written by `aiteamforge upgrade` (Edit A); if it
-# is absent the check falls back to the "version" field in .aiteamforge-config
-# (install-time only — less reliable for drift detection).
+# The .installed-version stamp is written by the installer and by `aiteamforge upgrade`
+# (via aitf_write_installed_version); doctor backfills it once from the install config
+# on older boxes. A stamp still missing after that is a FAULT (XACA-1102), not a warn.
 check_version_drift() {
   print_section "Checking Cellar vs Working-Dir Version"
 
@@ -982,29 +988,22 @@ check_version_drift() {
   fi
 
   # --- Working-dir installed version ---
+  # XACA-1102: the .installed-version stamp is the ONLY source. The installer
+  # writes it, and the CLI/doctor backfill seeds it (aitf_backfill_installed_version,
+  # called at the top of doctor) on boxes provisioned before that. There is no
+  # config-version fallback any more: a missing stamp here means provisioning failed.
   local installed_version=""
-  local drift_mode=""
+  local drift_mode="stamp"
   local stamp_file="${working_dir}/.installed-version"
 
   if [ -f "$stamp_file" ]; then
-    installed_version="$(cat "$stamp_file" | tr -d '[:space:]' | sed 's/^v//')"
-    drift_mode="stamp"
-  else
-    # Fallback: config "version" field (install-time only — less reliable)
-    installed_version="$(get_installed_version | tr -d '[:space:]' | sed 's/^v//')"
-    drift_mode="config-fallback"
+    installed_version="$(tr -d '[:space:]' < "$stamp_file" | sed 's/^v//')"
   fi
 
-  # --- Diagnostics for missing stamp ---
   if [ -z "$installed_version" ]; then
-    check_result warn "Cannot determine working-dir version (no .installed-version stamp and no version in config)" \
-      "Run: aiteamforge upgrade --non-interactive  to refresh and stamp"
+    check_result fail "Working-dir version stamp missing: provisioning did not write ${stamp_file}. This is a bug; please report it" \
+      "Manual repair: printf '%s\\n' \"\$(cat ${framework_dir}/../VERSION)\" > ${stamp_file}  (only if the working dir really is at that version)"
     return
-  fi
-
-  # Fallback mode advisory
-  if [ "$drift_mode" = "config-fallback" ]; then
-    print_info "  Note: .installed-version stamp absent — using config version (less reliable; run 'aiteamforge upgrade --non-interactive' to stamp)"
   fi
 
   # --- Compare ---

@@ -7190,7 +7190,7 @@ remove_legacy_lcars_runatload_agent "${LAUNCHAGENTS_DIR:-$HOME/Library/LaunchAge
 if [ "$DRY_RUN" = false ]; then
   if [ "$UPGRADE_VIA_BREW" = true ] && [ -n "$UPGRADE_BREW_VERSION" ] && [ -d "$WORKING_DIR" ]; then
     # Brew install method: stamp the real installed brew version.
-    if printf '%s\n' "$UPGRADE_BREW_VERSION" > "$WORKING_DIR/.installed-version" 2>/dev/null; then
+    if aitf_write_installed_version "$WORKING_DIR" "$UPGRADE_BREW_VERSION"; then
       print_info "Stamped working-dir version (brew): ${UPGRADE_BREW_VERSION}"
     fi
   else
@@ -7204,8 +7204,8 @@ if [ "$DRY_RUN" = false ]; then
       fi
     done
     if [ -n "$_stamp_version_file" ] && [ -d "$WORKING_DIR" ]; then
-      if cp "$_stamp_version_file" "$WORKING_DIR/.installed-version" 2>/dev/null; then
-        print_info "Stamped working-dir version: $(cat "$WORKING_DIR/.installed-version" | tr -d '[:space:]')"
+      if aitf_write_installed_version "$WORKING_DIR" "$(cat "$_stamp_version_file" 2>/dev/null)"; then
+        print_info "Stamped working-dir version: $(tr -d '[:space:]' < "$WORKING_DIR/.installed-version")"
       fi
     fi
     unset _stamp_version_file _stamp_candidate
