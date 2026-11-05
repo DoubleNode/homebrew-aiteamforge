@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1102: Installer writes .installed-version; retire stale config version fallback (XACA-1102)
+- Tap files updated in this publish: `share/scripts/fleet-reporter.sh`. Run `brew upgrade aiteamforge` to receive them.
 
 ## [0.21.15] - 2026-11-03
 - XACA-1729: Regress into CR re-derives stages.CR.status from linked CRs (XACA-1729)

@@ -1025,7 +1025,7 @@ get_lcars_services() {
 # Scope: this reports the WORKING-DIR installed AITeamForge version --
 # homebrew-tap's aiteamforge-doctor.sh calls this exact concept "working-dir
 # installed version" (its check_version_drift() function) and resolves it
-# from three sources in priority order, none of which invoke `brew` as a
+# from its sources in priority order, none of which invoke `brew` as a
 # subprocess (a `brew --prefix`/`brew list` fork means a Ruby VM startup
 # every ~60s on every consumer machine, forever -- ruled out deliberately):
 #
@@ -1036,21 +1036,23 @@ get_lcars_services() {
 #      _get_aiteamforge_cellar_version below) -- what brew installed. This
 #      is the ONLY source with a real answer on a machine that has
 #      installed AITeamForge but never once run `aiteamforge upgrade`:
-#      the stamp above is written EXCLUSIVELY by the upgrade flow, so a
-#      never-upgraded machine has no stamp at all. Those never-upgraded
+#      the stamp above was historically written ONLY by the upgrade flow, so a
+#      machine provisioned before XACA-1102 may lack it. Those
 #      machines are exactly the most-drifted, least-monitored ones --
 #      the case this ticket exists to catch -- so skipping this source
 #      would make the feature blind on precisely the hosts it targets.
-#   3. Legacy `.aiteamforge-config` "version" field -- stamped once at
-#      install time and never updated by `brew upgrade` (XACA-0702); last
-#      resort only, per aiteamforge-doctor.sh's own "less reliable" note.
-#   4. None of the above resolve -- omit the "aiteamforge" key entirely.
+#      (The legacy `.aiteamforge-config` "version" field was retired as a source
+#      by XACA-1102: it is install-time only and goes stale. It now survives only
+#      as the one-time seed that writes the stamp -- aitf_backfill_installed_version
+#      in homebrew-tap's libexec/lib/installed-version.sh -- so source 1 is
+#      populated on every installed box once any `aiteamforge` command runs.)
+#   3. Neither resolves -- omit the "aiteamforge" key entirely.
 #
 # All reads are local files under $AITEAMFORGE_DIR (default ~/aiteamforge)
 # or the Cellar path -- no network, no `brew` invocation of any kind.
 #
 # On this dev machine (M3Pro) the AITeamForge tap must NEVER be installed
-# (see CLAUDE.md), so all three sources are expected to be absent here --
+# (see CLAUDE.md), so both sources are expected to be absent here --
 # that is the correct, common case, not a bug. Absence must still produce
 # a valid "system" container -- "system" and "system.versions" are ALWAYS
 # present -- but the "aiteamforge" LEAF is OMITTED (not null, not empty
@@ -1281,26 +1283,11 @@ _get_aiteamforge_version() {
         v="$(_get_aiteamforge_cellar_version)"
     fi
 
-    # Source 3: legacy config "version" field -- last resort, unreliable.
-    if [ -z "$v" ]; then
-        local config_file
-        config_file="${working_dir}/.aiteamforge-config"
-        if [ -f "$config_file" ]; then
-            if command -v jq >/dev/null 2>&1; then
-                v="$(jq -r '.version // empty' "$config_file" 2>/dev/null || true)"
-            else
-                # Fallback mirrors homebrew-tap/libexec/lib/config.sh's
-                # get_config_value() non-jq branch.
-                v="$(grep '"version"' "$config_file" 2>/dev/null | sed -E 's/.*"version": *"?([^",}]+)"?.*/\1/' | head -n1 || true)"
-            fi
-        fi
-    fi
-
-    # Source 4 (implicit): nothing resolved -- $v stays empty, and
+    # Source 3 (implicit): nothing resolved -- $v stays empty, and
     # build_payload() omits the "aiteamforge" key entirely on an empty
     # _AITEAMFORGE_VERSION, per the XACA-1091 "omit, don't null" convention.
     # XACA-1031-023: normalize HERE, on the single shared exit path, so it
-    # covers ALL THREE sources. It previously sat on the last line of
+    # covers BOTH sources. It previously sat on the last line of
     # _get_aiteamforge_cellar_version() -- source 2 of 3 -- leaving the
     # .installed-version stamp (source 1, the HIGHEST priority, present on
     # every machine that has ever run `aiteamforge upgrade`) emitting raw brew
