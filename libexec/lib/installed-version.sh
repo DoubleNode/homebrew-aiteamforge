@@ -62,6 +62,9 @@ aitf_backfill_installed_version() {
   local stamp="${dir}/.installed-version"
   [ -d "$stamp" ] && return 0
   # Anything that EXISTS at the stamp path (a file, or a symlink that resolves):
+  #  - NOT a regular file (FIFO, device such as /dev/zero, socket, or a symlink to
+  #    one) -> FAIL CLOSED, never read it: reading a FIFO blocks forever, and the
+  #    CLI runs this on EVERY invocation (XACA-1102-023/-024);
   #  - unreadable (mode 000/200, symlink to an unreadable file) -> FAIL CLOSED and
   #    leave it alone. We cannot tell real content from none, and overwriting a
   #    real stamp with the stale config version is worse than doing nothing
@@ -71,6 +74,7 @@ aitf_backfill_installed_version() {
   # A DANGLING symlink (-L but not -e) holds no content, so it is repaired: the
   # writer's mv replaces the link itself, never its (absent) target.
   if [ -e "$stamp" ]; then
+    [ -f "$stamp" ] || return 0
     [ -r "$stamp" ] || return 0
     if [ -n "$( { tr -d '[:space:]' < "$stamp"; } 2>/dev/null || true)" ]; then
       return 0

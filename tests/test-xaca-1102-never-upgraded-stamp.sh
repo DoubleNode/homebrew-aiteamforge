@@ -397,6 +397,41 @@ else
     test_pass
 fi
 
+test_start "B6: backfill never READS a non-regular stamp (FIFO / symlink->FIFO / symlink->/dev/zero): returns promptly, leaves it in place (timeout-guarded)"
+_b6_bad=""
+for _case in fifo link-fifo link-devzero; do
+    _d="$W/b6-$_case/aiteamforge"; mk_never_upgraded "$_d" "0.11.6"
+    _s="$_d/.installed-version"
+    case "$_case" in
+        fifo)         mkfifo "$_s" ;;
+        link-fifo)    mkfifo "$_d/a-fifo"; ln -s "$_d/a-fifo" "$_s" ;;
+        link-devzero) ln -s /dev/zero "$_s" ;;
+    esac
+    # No coreutils `timeout` on macOS: background the child and poll for <=5 s.
+    ( _run "$NOBREW_BIN" "$_d" "$BACKFILL_PROG" >/dev/null 2>&1 ) &
+    _pid=$!; _hung=true
+    for _i in 1 2 3 4 5 6 7 8 9 10; do
+        if ! kill -0 "$_pid" 2>/dev/null; then _hung=false; break; fi
+        sleep 0.5
+    done
+    if [ "$_hung" = true ]; then
+        pkill -P "$_pid" 2>/dev/null || true; kill "$_pid" 2>/dev/null || true
+        # Unblock any reader still parked on the FIFO so nothing outlives the suite.
+        case "$_case" in fifo) : > "$_s" & ;; link-fifo) : > "$_d/a-fifo" & ;; esac
+        _b6_bad="$_b6_bad $_case:HUNG(>5s)"
+    fi
+    wait "$_pid" 2>/dev/null || true
+    case "$_case" in
+        fifo)         [ -p "$_s" ] || _b6_bad="$_b6_bad $_case:fifo-replaced" ;;
+        link-fifo|link-devzero) [ -L "$_s" ] || _b6_bad="$_b6_bad $_case:link-replaced" ;;
+    esac
+done
+if [ -n "$_b6_bad" ]; then
+    test_fail "unexpected:$_b6_bad"
+else
+    test_pass
+fi
+
 # ═══════════════════════════════════════════════════════════════════════════
 # G — get_installed_version (source 3, the config fallback, is retired)
 # ═══════════════════════════════════════════════════════════════════════════
