@@ -59,13 +59,22 @@ aitf_backfill_installed_version() {
   local dir="${AITEAMFORGE_DIR:-$HOME/aiteamforge}"
   local cfg="${dir}/.aiteamforge-config" v=""
   [ -d "$dir" ] || return 0
-  [ -d "${dir}/.installed-version" ] && return 0
-  # Present means NON-WHITESPACE content, not merely non-zero size: a zero-byte or
-  # whitespace-only stamp (e.g. a lone newline) reads as empty everywhere and must
-  # be repaired, or doctor would FAIL "present but empty" forever (XACA-1102-019).
-  if [ -f "${dir}/.installed-version" ] \
-     && [ -n "$(tr -d '[:space:]' < "${dir}/.installed-version" 2>/dev/null || true)" ]; then
-    return 0
+  local stamp="${dir}/.installed-version"
+  [ -d "$stamp" ] && return 0
+  # Anything that EXISTS at the stamp path (a file, or a symlink that resolves):
+  #  - unreadable (mode 000/200, symlink to an unreadable file) -> FAIL CLOSED and
+  #    leave it alone. We cannot tell real content from none, and overwriting a
+  #    real stamp with the stale config version is worse than doing nothing
+  #    (XACA-1102-021/-022);
+  #  - readable with NON-WHITESPACE content -> present, leave it alone;
+  #  - readable but zero-byte / whitespace-only -> repair it (XACA-1102-019).
+  # A DANGLING symlink (-L but not -e) holds no content, so it is repaired: the
+  # writer's mv replaces the link itself, never its (absent) target.
+  if [ -e "$stamp" ]; then
+    [ -r "$stamp" ] || return 0
+    if [ -n "$( { tr -d '[:space:]' < "$stamp"; } 2>/dev/null || true)" ]; then
+      return 0
+    fi
   fi
   [ -f "$cfg" ] || return 0
 

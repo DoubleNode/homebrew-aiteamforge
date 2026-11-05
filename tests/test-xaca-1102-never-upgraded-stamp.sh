@@ -365,6 +365,38 @@ else
     test_pass
 fi
 
+test_start "B5: backfill FAILS CLOSED on an unreadable stamp (mode 000 / 200 / symlink to unreadable): content untouched, no stderr; dangling symlink IS repaired"
+_b5_bad=""
+for _case in mode000 mode200 link-unreadable dangling; do
+    _d="$W/b5-$_case/aiteamforge"; mk_never_upgraded "$_d" "0.11.6"
+    _s="$_d/.installed-version"
+    case "$_case" in
+        mode000) printf '0.20.0\n' > "$_s"; chmod 000 "$_s" ;;
+        mode200) printf '0.20.0\n' > "$_s"; chmod 200 "$_s" ;;
+        link-unreadable) printf '0.20.0\n' > "$_d/real-stamp"; chmod 000 "$_d/real-stamp"; ln -s "$_d/real-stamp" "$_s" ;;
+        dangling) ln -s "$_d/no-such-target" "$_s" ;;
+    esac
+    _rc=0; _err="$(_run "$NOBREW_BIN" "$_d" "$BACKFILL_PROG" 2>&1 >/dev/null)" || _rc=$?
+    case "$_case" in
+        mode000|mode200) chmod 644 "$_s"; _want="0.20.0"; _got="$(cat "$_s")" ;;
+        link-unreadable) chmod 644 "$_d/real-stamp"; _want="0.20.0"; _got="$(cat "$_d/real-stamp")"
+                         [ -L "$_s" ] || _b5_bad="$_b5_bad $_case:symlink-replaced" ;;
+        dangling) _want="0.11.6"; _got="$(cat "$_s" 2>/dev/null)"
+                  [ -L "$_s" ] && _b5_bad="$_b5_bad $_case:still-a-dangling-link" ;;
+    esac
+    [ "$_rc" -ne 0 ] && _b5_bad="$_b5_bad $_case:rc=$_rc"
+    [ "$_got" != "$_want" ] && _b5_bad="$_b5_bad $_case:want='$_want',got='$_got'"
+    case "$_case" in
+        dangling) [[ "$_err" == *"stamped working-dir version 0.11.6"* ]] || _b5_bad="$_b5_bad $_case:no-seed-note" ;;
+        *) [ -n "$_err" ] && _b5_bad="$_b5_bad $_case:stderr='$_err'" ;;
+    esac
+done
+if [ -n "$_b5_bad" ]; then
+    test_fail "unexpected:$_b5_bad"
+else
+    test_pass
+fi
+
 # ═══════════════════════════════════════════════════════════════════════════
 # G — get_installed_version (source 3, the config fallback, is retired)
 # ═══════════════════════════════════════════════════════════════════════════
