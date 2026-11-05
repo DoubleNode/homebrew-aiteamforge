@@ -83,6 +83,9 @@ else
     _OWN_TMP=false
 fi
 cleanup() {
+    if [ -n "${W:-}" ] && [ -d "${W:-}" ]; then
+        find "$W" -depth -delete 2>/dev/null || true
+    fi
     if [ "${_OWN_TMP:-false}" = true ] && [ -n "${TEST_TMP_DIR:-}" ] && [ -d "${TEST_TMP_DIR:-}" ]; then
         find "$TEST_TMP_DIR" -depth -delete 2>/dev/null || true
     fi
@@ -91,7 +94,10 @@ trap cleanup EXIT
 
 # Sandbox BEFORE anything is sourced.
 export AITEAMFORGE_DIR="$TEST_TMP_DIR/aiteamforge"
-W="$TEST_TMP_DIR/xaca1102"
+# A FRESH per-run dir even under a caller-supplied TEST_TMP_DIR: fixtures from a
+# previous run in the same dir must not leak in (XACA-1102-020). Nothing the
+# caller owns is deleted; our own subdir is removed on exit.
+W="$(mktemp -d "$TEST_TMP_DIR/xaca1102.XXXXXX")"
 SANDBOX_HOME="$W/home"
 mkdir -p "$SANDBOX_HOME" "$W/tmp"
 
@@ -339,14 +345,22 @@ else
     test_pass
 fi
 
-test_start "B4: backfill REPAIRS a zero-byte stamp (guard is -s, not -e) from the config version (0.11.6)"
+test_start "B4: backfill REPAIRS a zero-byte or whitespace-only stamp (empty / lone newline / spaces) from the config version (0.11.6)"
 B4_DIR="$W/b4/aiteamforge"
 mk_never_upgraded "$B4_DIR" "0.11.6"
-: > "$B4_DIR/.installed-version"
-_rc=0; _run "$NOBREW_BIN" "$B4_DIR" "$BACKFILL_PROG" >/dev/null 2>&1 || _rc=$?
-_stamp="$(cat "$B4_DIR/.installed-version")"
-if [ "$_rc" -ne 0 ] || [ "$_stamp" != "0.11.6" ]; then
-    test_fail "expected rc=0 and stamp '0.11.6', got rc=$_rc stamp='$_stamp'"
+_b4_bad=""
+for _case in empty newline spaces; do
+    case "$_case" in
+        empty)   : > "$B4_DIR/.installed-version" ;;
+        newline) printf '\n' > "$B4_DIR/.installed-version" ;;
+        spaces)  printf '  \t \n\n' > "$B4_DIR/.installed-version" ;;
+    esac
+    _rc=0; _run "$NOBREW_BIN" "$B4_DIR" "$BACKFILL_PROG" >/dev/null 2>&1 || _rc=$?
+    _stamp="$(cat "$B4_DIR/.installed-version")"
+    if [ "$_rc" -ne 0 ] || [ "$_stamp" != "0.11.6" ]; then _b4_bad="$_b4_bad $_case:rc=$_rc,stamp='$_stamp'"; fi
+done
+if [ -n "$_b4_bad" ]; then
+    test_fail "zero-byte/whitespace-only stamp not repaired to 0.11.6:$_b4_bad"
 else
     test_pass
 fi

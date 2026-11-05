@@ -59,9 +59,14 @@ aitf_backfill_installed_version() {
   local dir="${AITEAMFORGE_DIR:-$HOME/aiteamforge}"
   local cfg="${dir}/.aiteamforge-config" v=""
   [ -d "$dir" ] || return 0
-  # -s, not -e: a zero-byte stamp is as good as none and must be repaired.
-  [ -s "${dir}/.installed-version" ] && return 0
   [ -d "${dir}/.installed-version" ] && return 0
+  # Present means NON-WHITESPACE content, not merely non-zero size: a zero-byte or
+  # whitespace-only stamp (e.g. a lone newline) reads as empty everywhere and must
+  # be repaired, or doctor would FAIL "present but empty" forever (XACA-1102-019).
+  if [ -f "${dir}/.installed-version" ] \
+     && [ -n "$(tr -d '[:space:]' < "${dir}/.installed-version" 2>/dev/null || true)" ]; then
+    return 0
+  fi
   [ -f "$cfg" ] || return 0
 
   if command -v jq >/dev/null 2>&1; then
