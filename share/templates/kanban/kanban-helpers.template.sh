@@ -17682,6 +17682,45 @@ kb-retro-check() {
     echo ""
 }
 
+# Filter a newline-separated list of file paths to only those that contain
+# the canonical plan-doc marker '<!-- plan_doc: canonical -->'.
+# stdin:  newline-separated file paths
+# stdout: subset of paths whose file contains the marker (full-file grep)
+# Used internally by _kb_pick_plan_doc (XACA-0478).
+_kb_filter_canonical_plan_docs() {
+    local f
+    while IFS= read -r f; do
+        [[ -z "$f" ]] && continue
+        if grep -q '<!-- plan_doc: canonical -->' "$f" 2>/dev/null; then
+            printf '%s\n' "$f"
+        fi
+    done
+}
+
+# Two-pass plan-doc picker (XACA-0478):
+#   Pass 1 — prefer any file carrying '<!-- plan_doc: canonical -->'
+#   Pass 2 — fall back to sort+head-1 for un-migrated / single-doc directories
+# $1 = directory to search (flat kanban root OR plans/<ID>/ subdir)
+# $2 = item_id (e.g. XACA-0456)
+# stdout: single resolved plan-doc path, or nothing if none found
+_kb_pick_plan_doc() {
+    local search_dir="${1-}" iid="${2-}"
+    local candidates marked
+    candidates=$(find "$search_dir" -maxdepth 1 -name "${iid}_*.md" \
+        ! -name "*_RETROSPECTIVE.md" -type f 2>/dev/null | sort)
+    [[ -z "$candidates" ]] && return 0
+    marked=$(printf '%s\n' "$candidates" | _kb_filter_canonical_plan_docs)
+    if [[ -n "$marked" ]]; then
+        # Marker wins; sort+head-1 among marked docs is a deterministic tie-break
+        # when a directory legitimately carries more than one marked doc.
+        printf '%s\n' "$marked" | sort | head -1
+    else
+        # No markers present — fall back to XACA-0472 lexicographic pick for
+        # full backward compatibility with legacy and un-migrated directories.
+        printf '%s\n' "$candidates" | head -1
+    fi
+}
+
 # Glob for an existing retrospective file by filename convention alone.
 # Usage: _kb_glob_existing_retro <ITEM-ID> <KANBAN-DIR>
 # Output: full path (stdout) + return 0 if found; empty + return 1 if not.
@@ -17691,9 +17730,10 @@ kb-retro-check() {
 #   2. Flat:   <kanban>/<ID>_*_RETROSPECTIVE.md
 #
 # Deliberately does NOT consult plan docs and does NOT call kb-retro-path. This is the
-# shared, non-recursive core used by _kb_find_existing_retro (its tiers 2-3). It must
-# stay free of any call back into _kb_find_existing_retro: that function's tier 1 calls
-# kb-retro-path, so routing the other way would recurse infinitely.
+# shared, non-recursive core used by BOTH _kb_find_existing_retro (its tiers 2-3) and
+# kb-retro-path's no-plan-doc fallback (XACA-0813). kb-retro-path must NOT route through
+# _kb_find_existing_retro instead: that function's tier 1 calls kb-retro-path, so doing
+# so would recurse infinitely.
 #
 # Uses `find -name` (NOT raw globs) so it is safe under zsh nomatch. Pattern carries the
 # EXACT uppercase item ID so it matches real filenames (find -name is case-sensitive).
@@ -17887,8 +17927,17 @@ _kb_retro_failure_lines() {
 # Looks up the item's plan document to extract the description slug,
 # then constructs the canonical retrospective file path. This prevents
 # agents from manually deriving paths (the #1 source of naming errors).
+#
+# Plan-doc resolution uses a two-pass strategy (XACA-0478):
+#   1. Prefer any plan doc that carries '<!-- plan_doc: canonical -->' anywhere
+#      in its body. This is invisible in GitHub/LCARS/Confluence renders and
+#      greppable in pure shell — no YAML parser needed.
+#   2. If no marked doc is found, fall back to sort+head-1 (XACA-0472 behavior)
+#      for full backward compatibility with single-doc and un-migrated dirs.
+# When multiple marked docs exist, sort+head-1 is used among them as a
+# deterministic tie-break.
 kb-retro-path() {
-    local item_id="$1"
+    local item_id="${1-}"
     local in_team="${2-}"
     local in_kanban_dir="${3-}"
 
@@ -17934,22 +17983,51 @@ kb-retro-path() {
         return 1
     fi
 
-    # Find the plan document to extract the description slug
-    # Plan docs follow: <ITEM-ID>_<desc>.md (but NOT _RETROSPECTIVE.md)
+    # Find the plan document to extract the description slug.
+    # Plan docs follow: <ITEM-ID>_<desc>.md (but NOT _RETROSPECTIVE.md).
+    # Search flat layout first (legacy), then plans/<ID>/ subdir (planner-skill layout).
+    # Both branches use _kb_pick_plan_doc which applies the two-pass marker strategy:
+    #   Pass 1: prefer doc carrying '<!-- plan_doc: canonical -->' (XACA-0478).
+    #   Pass 2: fall back to sort+head-1 for un-migrated dirs (XACA-0472 compat).
     local plan_doc desc_slug
-    plan_doc=$(find "$kanban_dir" -maxdepth 1 -name "${item_id}_*.md" \
-        ! -name "*_RETROSPECTIVE.md" -type f 2>/dev/null | head -1)
+    plan_doc=$(_kb_pick_plan_doc "$kanban_dir" "$item_id")
 
+    # Fallback: planner-skill puts plan docs under kanban/plans/<ID>/ (XACA-0358 P068)
+    if [[ -z "$plan_doc" ]] && [[ -d "${kanban_dir}/plans/${item_id}" ]]; then
+        plan_doc=$(_kb_pick_plan_doc "${kanban_dir}/plans/${item_id}" "$item_id")
+    fi
+
+    # XACA-0813: no plan doc does NOT mean no retrospective. Items closed without a
+    # planning phase (single-session fixes, investigation tickets) legitimately have a
+    # retro and never had a plan doc. Before erroring, look for an EXISTING retro by
+    # filename convention and return it — that is what every caller actually wants.
+    #
+    # Only the WRITE path genuinely needs a plan doc: without one there is no
+    # description slug from which to synthesize a NEW retro filename. So we resolve an
+    # existing file when there is one, and error only when there is nothing to find.
     if [[ -z "$plan_doc" ]]; then
-        echo "Error: No plan document found for $item_id in $kanban_dir" >&2
-        echo "Expected: ${kanban_dir}/${item_id}_<description>.md" >&2
+        local existing_retro
+        existing_retro=$(_kb_glob_existing_retro "$item_id" "$kanban_dir")
+        if [[ -n "$existing_retro" ]]; then
+            printf '%s\n' "$existing_retro"
+            return 0
+        fi
+
+        echo "Error: No plan document or existing retrospective found for $item_id in $kanban_dir" >&2
+        echo "Searched for an existing retro:" >&2
+        echo "  ${kanban_dir}/${item_id}_<description>_RETROSPECTIVE.md" >&2
+        echo "  ${kanban_dir}/plans/${item_id}/${item_id}_<description>_RETROSPECTIVE.md" >&2
+        echo "To derive a NEW retro path, a plan doc is required:" >&2
+        echo "  ${kanban_dir}/${item_id}_<description>.md" >&2
+        echo "  ${kanban_dir}/plans/${item_id}/${item_id}_<description>.md" >&2
         return 1
     fi
 
     # Extract description slug from plan doc filename
     # e.g., XACA-0111_fix_retrospective_naming.md → fix_retrospective_naming
-    local plan_basename
+    local plan_basename plan_dir
     plan_basename=$(basename "$plan_doc" .md)
+    plan_dir=$(dirname "$plan_doc")
     # Remove the ITEM-ID_ prefix to get just the description slug
     desc_slug="${plan_basename#${item_id}_}"
 
@@ -17958,18 +18036,21 @@ kb-retro-path() {
         return 1
     fi
 
-    # Output the canonical retrospective path
-    echo "${kanban_dir}/${item_id}_${desc_slug}_RETROSPECTIVE.md"
+    # Output the canonical retrospective path (same directory as the plan doc)
+    echo "${plan_dir}/${item_id}_${desc_slug}_RETROSPECTIVE.md"
 }
 
 # Resolve the canonical plan-doc directory path for a kanban item
 # Usage: kb-plan-doc-path <ITEM-ID>
 # Output: /full/path/to/kanban/plans/<ITEM-ID>/
 #
-# Mirrors kb-retro-path. Resolves the team's kanban dir, then returns the
-# plans/<ITEM-ID>/ subdirectory. Caller mkdir -p's if writing.
+# Resolves the kanban directory via team → _kb_get_kanban_dir, exactly as
+# kb-retro-path does. This means container-layout teams (iOS/Android/Firebase/DNS)
+# correctly get their sibling kanban/ directory rather than a path inside the git
+# repo. The plans/<ID>/ subdirectory does not need to exist yet (it is a target
+# path to be created by callers).
 kb-plan-doc-path() {
-    local item_id="$1"
+    local item_id="${1-}"
 
     if [[ -z "$item_id" ]]; then
         echo "Usage: kb-plan-doc-path <ITEM-ID>" >&2
@@ -17981,12 +18062,14 @@ kb-plan-doc-path() {
         return 1
     fi
 
+    # Validate item ID format (X + 3 uppercase letters + dash + digits)
     if [[ ! "$item_id" =~ ^X[A-Z]{3}-[0-9]+$ ]]; then
         echo "Error: Invalid item ID format: $item_id" >&2
         echo "Expected format: XABC-1234 (e.g., XACA-0278, XIOS-0562)" >&2
         return 1
     fi
 
+    # Resolve team from item ID prefix
     local team
     team=$(_kb_get_team_from_code "$item_id")
     if [[ -z "$team" ]]; then
@@ -17994,14 +18077,22 @@ kb-plan-doc-path() {
         return 1
     fi
 
+    # Get the kanban directory for this team (handles both in-repo and sibling layouts)
     local kanban_dir
     kanban_dir=$(_kb_get_kanban_dir "$team")
 
+    # Match kb-retro-path: check the resolved kanban *base* dir exists. This is a
+    # live guard — catches a team whose repo/kanban isn't present on this machine
+    # (XACA-0383: _kb_get_kanban_dir's '*' arm now returns 1 for unknown teams, so
+    # kanban_dir may also be empty on non-zero return). The plans/<ID>/ subdir
+    # itself need NOT exist yet — callers create it — so we deliberately test the
+    # base dir, not the subdir.
     if [[ ! -d "$kanban_dir" ]]; then
         echo "Error: Kanban directory not found: $kanban_dir" >&2
         return 1
     fi
 
+    # Output the canonical plan-doc directory path (does not need to exist yet)
     echo "${kanban_dir}/plans/${item_id}/"
 }
 

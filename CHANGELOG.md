@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1762: Tap kb-retro-path finds plans/<ID>/ plan docs (XACA-1762)
+- Tap files updated in this publish: `share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1708: CI pool gates on memory pressure, not sticky swap; idle Lima VM recycle (XACA-1708)
 - Tap files updated in this publish: `fleet-monitor/server/lib/ci-dispatch-placement.js`,`fleet-monitor/server/lib/ci-pool-routes.js` `fleet-monitor/server/lib/ci-pool-store.js`,`fleet-monitor/server/tests/fixtures/xaca-1444-ci-pool-draining.json` `fleet-monitor/server/tests/fixtures/xaca-1444-ci-pool-mixed.json`,`fleet-monitor/server/tests/fixtures/xaca-1444-ci-pool-no-capacity.json` `fleet-monitor/server/tests/xaca-1441-ci-pool-routes.test.js`,`fleet-monitor/server/tests/xaca-1441-placement.test.js` (+7 more). Run `brew upgrade aiteamforge` to receive them.
 - XACA-1102: Installer writes .installed-version; retire stale config version fallback (XACA-1102)
