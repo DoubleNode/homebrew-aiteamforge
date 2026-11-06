@@ -192,8 +192,29 @@ function isEligible(machine, report, job, opts) {
         if (!isNum(c.memReclaimableBytes)) reasons.push('mem-reclaimable-missing');
         else if (c.memReclaimableBytes < th.memReclaimableBytes) reasons.push('mem-reclaimable-low');
     }
+    // Swap (XACA-1708-003). macOS swap-used is a sticky high-water mark, so an ABSOLUTE gate trips forever on
+    // a long-running host regardless of real pressure (m1mini 2026-10-31: 3.6 GiB swap, 55% free, 7.6h queued).
+    // Agents that report memPressureLevel are gated on pressure + swap GROWTH instead; absolute swapUsedBytes
+    // is informational for them. swapUsedBytes stays a REQUIRED report field (routes enforce it), so its absence
+    // is still 'swap-missing' for everyone: a report without it is a broken agent, fail closed.
     if (!isNum(c.swapUsedBytes)) reasons.push('swap-missing');
-    else if (!(c.swapUsedBytes < th.swapUsedBytes)) reasons.push('swap-high');
+    if (c.memPressureLevel === undefined) {
+        // LEGACY agent (no memPressureLevel field at all): the original absolute gate, unchanged, so an old
+        // agent is never less gated than before this change.
+        if (isNum(c.swapUsedBytes) && !(c.swapUsedBytes < th.swapUsedBytes)) reasons.push('swap-high');
+    } else {
+        // Present-but-unusable (null, string, NaN, < 1) must not read as "normal": fail closed.
+        if (!isNum(c.memPressureLevel) || c.memPressureLevel < 1) reasons.push('mem-pressure-malformed');
+        else if (c.memPressureLevel >= th.memPressureLevel) reasons.push('mem-pressure');
+
+        // Swap growth: both fields are absent until the agent's window is half-filled (=> no verdict, not a
+        // refusal). One without the other, or a bad value, is malformed => refuse.
+        const g = c.swapGrowthBytes, w = c.swapGrowthWindowSec;
+        if (g !== undefined || w !== undefined) {
+            if (!isNum(g) || !isNum(w) || w <= 0) reasons.push('swap-growth-malformed');
+            else if ((g * 3600) / w > th.swapGrowthBytesPerHour) reasons.push('swap-growing');
+        }
+    }
 
     if (!isNum(c.memFreePct)) reasons.push('mem-free-missing');
     else if (c.memFreePct < th.memFreePct) reasons.push('mem-free-low');

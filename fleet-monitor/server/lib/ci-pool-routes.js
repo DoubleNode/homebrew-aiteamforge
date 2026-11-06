@@ -107,6 +107,11 @@ const CAPACITY_SPEC = {
     load15:              [false, 'num', 0, 100000],
     ncpu:                [true,  'int', 1, 4096],
     teamSessions:        [false, 'int', 0, 100000],
+    // XACA-1708: pressure signals. All optional (old agents omit them; the dispatcher then falls back
+    // to the absolute swap gate). swapGrowthBytes may be negative (swap shrank over the window).
+    memPressureLevel:    [false, 'enum', [1, 2, 4]],
+    swapGrowthBytes:     [false, 'int', -(2 ** 50), 2 ** 50],
+    swapGrowthWindowSec: [false, 'int', 1, 86400 * 7],
     vmState:             [true,  'enum', VM_STATES],
 };
 

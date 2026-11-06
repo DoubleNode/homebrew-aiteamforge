@@ -55,14 +55,29 @@ const THRESHOLD_BOUNDS = {
     memFreePct:          [0, 100, false],
     loadPerCpu:          [0, 64, false],
     pollStaleMs:         [1000, 600000, true],
+    memPressureLevel:    [1, 4, true],
+    swapGrowthBytesPerHour: [0, 1024 * GIB, true],
 };
+
+/**
+ * XACA-1708-003: thresholds added after pools were already on disk. `config.thresholds` is validated
+ * requireAll, so a stored pool written before these existed would fail to load if they were required.
+ * They are OPTIONAL in storage; effectiveThresholds() fills them from DEFAULT_THRESHOLDS when absent.
+ */
+const OPTIONAL_THRESHOLDS = ['memPressureLevel', 'swapGrowthBytesPerHour'];
 
 const DEFAULT_THRESHOLDS = Object.freeze({
     memReclaimableBytes: 1.5 * GIB,   // macOS job needs >= 1.5 GiB (XACA-1436)
-    swapUsedBytes: Math.round(2.8 * GIB), // gate is swapUsed < this
+    swapUsedBytes: Math.round(2.8 * GIB), // LEGACY agents only (no memPressureLevel): gate is swapUsed < this
     memFreePct: 35,                   // gate is memFreePct >= this
     loadPerCpu: 0.75,                 // gate is load1/ncpu < this
     pollStaleMs: 30000,               // gate is now - lastPoll <= this
+    // XACA-1708-003: pressure-based gate for agents that report memPressureLevel.
+    memPressureLevel: 2,              // refuse when kern.memorystatus_vm_pressure_level >= this (1 normal, 2 warn, 4 critical)
+    // Refuse when swap is GROWING faster than this (normalized to per hour). 1 GiB/h is a first guess, not
+    // measured: a host genuinely thrashing pages out far more than that on a 16 GiB box, while a sticky
+    // high-water mark (the 2026-10-31 m1mini case: 3.6 GiB used, flat) reads ~0. Revisit with fleet data.
+    swapGrowthBytesPerHour: GIB,
 });
 
 const DEFAULT_JOB_CLASSES = Object.freeze({
@@ -143,7 +158,7 @@ function validateThresholds(t, where, requireAll) {
     const errs = unknownFields(t, Object.keys(THRESHOLD_BOUNDS), where);
     for (const [name, [min, max, int]] of Object.entries(THRESHOLD_BOUNDS)) {
         if (!has(t, name)) {
-            if (requireAll) errs.push(`${where}.${name}: required`);
+            if (requireAll && !OPTIONAL_THRESHOLDS.includes(name)) errs.push(`${where}.${name}: required`);
             continue;
         }
         const v = t[name];

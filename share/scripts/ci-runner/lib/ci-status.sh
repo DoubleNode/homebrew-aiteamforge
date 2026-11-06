@@ -238,7 +238,7 @@ ci_capability_state() {
         while IFS= read -r f; do
             bn="${f##*/}"; d=0
             if [ "$state_ok" = 1 ]; then
-                for rel in agent reporter macos lima-vm; do [ "$bn" = "com.doublenode.ci-runner.${s_host}.${rel}.plist" ] && d=1; done
+                for rel in agent reporter macos lima-vm recycle; do [ "$bn" = "com.doublenode.ci-runner.${s_host}.${rel}.plist" ] && d=1; done
             fi
             if [ "$d" = 1 ]; then own=$((own + 1)); else other=$((other + 1)); _cis_add art_list "daemon plist: ${f}"; fi
         done <<EOF_PL

@@ -86,6 +86,74 @@ test('isEligible: swap boundary (< 2.8 GiB, strict) and per-host override', () =
     assert.equal(check(lenient, report({ capacity: { swapUsedBytes: 3 * GIB } }), linuxJob).eligible, true);
 });
 
+// XACA-1708-003: pressure-based swap gate. `pr` = a report from a NEW agent (reports memPressureLevel).
+const pr = (cap) => report({ capacity: Object.assign({ memPressureLevel: 1 }, cap) });
+const rs = (m, r, j) => check(m, r, j || linuxJob).reasons;
+
+test('XACA-1708 regression: 3.6 GiB swap + normal pressure + flat growth is ELIGIBLE (m1mini 2026-10-31)', () => {
+    const r = pr({ swapUsedBytes: 3.6 * GIB, memFreePct: 55, swapGrowthBytes: 10 * 1024 * 1024, swapGrowthWindowSec: 3600 });
+    const v = check(machine(), r, linuxJob);
+    assert.deepEqual(v.reasons, []);
+    assert.equal(v.eligible, true);
+    assert.equal(check(machine(), r, macJob).eligible, true);
+});
+
+test('XACA-1708: memPressureLevel >= 2 refuses mem-pressure; 1 passes; threshold overridable per host', () => {
+    assert.ok(rs(machine(), pr({ memPressureLevel: 2 })).includes('mem-pressure'));
+    assert.ok(rs(machine(), pr({ memPressureLevel: 4 })).includes('mem-pressure'));
+    assert.equal(check(machine(), pr({ memPressureLevel: 1 }), linuxJob).eligible, true);
+    const strict = machine({ thresholds: { memPressureLevel: 4 } });
+    assert.equal(check(strict, pr({ memPressureLevel: 2 }), linuxJob).eligible, true);
+    assert.ok(rs(strict, pr({ memPressureLevel: 4 })).includes('mem-pressure'));
+});
+
+test('XACA-1708: a malformed memPressureLevel fails closed (never reads as normal)', () => {
+    for (const bad of [null, 'normal', '1', NaN, Infinity, 0, -1, {}, []]) {
+        const r = rs(machine(), pr({ memPressureLevel: bad }));
+        assert.ok(r.includes('mem-pressure-malformed'), String(bad));
+        assert.equal(r.includes('swap-high'), false, 'malformed new-field agent does not fall back to legacy gate');
+    }
+});
+
+test('XACA-1708: swap growth gate (per-hour normalized, strict >), negative growth fine, absent -> no verdict', () => {
+    const th = DEFAULT_THRESHOLDS.swapGrowthBytesPerHour;
+    assert.ok(rs(machine(), pr({ swapGrowthBytes: th + 1, swapGrowthWindowSec: 3600 })).includes('swap-growing'));
+    assert.equal(rs(machine(), pr({ swapGrowthBytes: th, swapGrowthWindowSec: 3600 })).includes('swap-growing'), false);
+    // normalization: half a GiB over 15 min = 2 GiB/h
+    assert.ok(rs(machine(), pr({ swapGrowthBytes: 0.5 * GIB, swapGrowthWindowSec: 900 })).includes('swap-growing'));
+    assert.equal(rs(machine(), pr({ swapGrowthBytes: 0.5 * GIB, swapGrowthWindowSec: 7200 })).includes('swap-growing'), false);
+    assert.equal(check(machine(), pr({ swapGrowthBytes: -2 * GIB, swapGrowthWindowSec: 600 }), linuxJob).eligible, true);
+    const none = rs(machine(), pr({}));
+    assert.deepEqual(none, []);
+    const lenient = machine({ thresholds: { swapGrowthBytesPerHour: 4 * GIB } });
+    assert.equal(check(lenient, pr({ swapGrowthBytes: 2 * GIB, swapGrowthWindowSec: 3600 }), linuxJob).eligible, true);
+});
+
+test('XACA-1708: half-present or invalid growth fields fail closed', () => {
+    for (const cap of [
+        { swapGrowthBytes: 5 },
+        { swapGrowthWindowSec: 600 },
+        { swapGrowthBytes: 5, swapGrowthWindowSec: 0 },
+        { swapGrowthBytes: 5, swapGrowthWindowSec: -1 },
+        { swapGrowthBytes: '5', swapGrowthWindowSec: 600 },
+        { swapGrowthBytes: null, swapGrowthWindowSec: 600 },
+    ]) assert.ok(rs(machine(), pr(cap)).includes('swap-growth-malformed'), JSON.stringify(cap));
+});
+
+test('XACA-1708: LEGACY agent (no memPressureLevel) keeps the absolute swap-high gate exactly', () => {
+    assert.ok(rs(machine(), report({ capacity: { swapUsedBytes: 2.8 * GIB } })).includes('swap-high'));
+    assert.ok(rs(machine(), report({ capacity: { swapUsedBytes: 3.6 * GIB } })).includes('swap-high'));
+    assert.equal(check(machine(), report({ capacity: { swapUsedBytes: 2.8 * GIB - 1 } }), linuxJob).eligible, true);
+    // growth fields without the level are ignored by the legacy path
+    assert.equal(rs(machine(), report({ capacity: { swapGrowthBytes: 99 * GIB, swapGrowthWindowSec: 60 } })).includes('swap-growing'), false);
+});
+
+test('XACA-1708: new-field agent is not gated on absolute swap, but swap-missing still refuses', () => {
+    assert.equal(rs(machine(), pr({ swapUsedBytes: 100 * GIB })).includes('swap-high'), false);
+    const r = pr({}); delete r.capacity.swapUsedBytes;
+    assert.ok(rs(machine(), r).includes('swap-missing'));
+});
+
 test('isEligible: memFreePct boundary (>= 35)', () => {
     assert.equal(check(machine(), report({ capacity: { memFreePct: 35 } }), linuxJob).eligible, true);
     assert.ok(check(machine(), report({ capacity: { memFreePct: 34.9 } }), linuxJob).reasons.includes('mem-free-low'));

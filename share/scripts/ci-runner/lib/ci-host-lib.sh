@@ -23,6 +23,18 @@
 # variables resolve under $CIH_TEST_ROOT (a real gh must never be reached).
 #
 # Naming: public cih_*, internals _cih_*, globals CIH_* / _CIH_*.
+#
+# RECYCLE (XACA-1708-004): `recycle` restarts the Lima VM when the host is idle, reusing
+# cih_stop_services / cih_start_services (one VM stop/start path, plain `limactl stop`,
+# never -f). Its record is the SENTINEL <state-dir>/<host>.recycle.json, the same
+# file format family as the pause marker but a separate file (see _CIH_PY_MARKER).
+# _CIH_MARKER_KIND (pause|recycle) selects which file the marker helpers address;
+# _CIH_RECYCLING=1 makes the stop/start helpers leave the macOS daemon and the launchd
+# disable flags alone (the VM job has RunAtLoad only, so a reboot mid-recycle restarts it).
+#
+# recycle needs NO GitHub access (the scheduled run is root's launchd context, which has no gh
+# login): its busy detection is LOCAL (_cih_recycle_idle_check) and its post-start wait is local
+# (_cih_wait_units_active). pause/resume/status keep using GitHub exactly as before.
 
 [ -n "${_CIH_LIB_LOADED:-}" ] && return 0
 _CIH_LIB_LOADED=1
@@ -38,6 +50,9 @@ _CIH_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${CIH_DATE:=date}"
 : "${CIH_INSTALL:=/usr/bin/install}"
 : "${CIH_CURL:=curl}"
+: "${CIH_PGREP:=pgrep}"   # recycle local busy check (macOS Runner.Worker); never needs GitHub
+: "${CIH_PS:=ps}"         # orphaned-sentinel check: is the recorded recycle pid a live ci-host process
+: "${CIH_AGENT_STATE_DIR:=/usr/local/var/ci-pool-agent}"   # holds the pool agent slots.json
 : "${CIH_PROVISION_SCRIPT:=${_CIH_LIB_DIR}/../provision-host.sh}"
 : "${CIH_STATE_DIR:=/usr/local/etc/ci-runner}"
 : "${CIH_REPO:=DoubleNode/dev-team}"
@@ -83,6 +98,8 @@ _cih_fail() {
     PAUSED) return 10 ;;
     TRANSITIONAL) return 11 ;;
     DEGRADED) return 12 ;;
+    BUSY) return 13 ;;
+    RECYCLE_PENDING) return 14 ;;
     *) return 1 ;;
   esac
 }
@@ -99,7 +116,8 @@ _cih_name_for_rc() {
     0) echo OK ;; 2) echo USAGE ;; 3) echo REFUSED ;; 4) echo DRAIN_TIMEOUT ;;
     5) echo ENV ;; 6) echo GITHUB ;; 7) echo LOCAL_SERVICE ;;
     8) echo ONLINE_TIMEOUT ;; 9) echo STATE_CONFLICT ;; 10) echo PAUSED ;;
-    11) echo TRANSITIONAL ;; 12) echo DEGRADED ;; *) echo INTERNAL ;;
+    11) echo TRANSITIONAL ;; 12) echo DEGRADED ;; 13) echo BUSY ;;
+    14) echo RECYCLE_PENDING ;; *) echo INTERNAL ;;
   esac
 }
 
@@ -162,6 +180,8 @@ _cih_max_polls() { # TIMEOUT_SECS
 _CIH_PY_MARKER='
 import sys, os, json
 op, path, host = sys.argv[1:4]
+kind = "recycle" if path.endswith(".recycle.json") else "pause"
+STATES = ("recycling", "error") if kind == "recycle" else ("draining", "paused", "resuming")
 def load():
     try:
         with open(path) as f:
@@ -172,7 +192,7 @@ def load():
         return None, "corrupt"
     if (not isinstance(d, dict) or d.get("schema_version") != 1
             or d.get("host") != host
-            or d.get("state") not in ("draining", "paused", "resuming")):
+            or d.get("state") not in STATES):
         return d, "corrupt"
     return d, d["state"]
 def walk(d, key, create):
@@ -207,7 +227,17 @@ if op == "retire":
     d, st = load()
     if st == "absent":
         sys.exit(0)
-    last = os.path.join(os.path.dirname(path), host + ".pause.last.json")
+    last = os.path.join(os.path.dirname(path), host + "." + kind + ".last.json")
+    if len(sys.argv) > 5 and isinstance(d, dict):
+        # retire with a note (XACA-1708-013): write the annotated copy to .last.json atomically,
+        # then drop the live file. A crash in between leaves the live file = still fail-closed.
+        d["retired_by"], d["retired_at"] = sys.argv[4], sys.argv[5]
+        tmp = last + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(json.dumps(d, indent=2) + "\n")
+        os.replace(tmp, last)
+        os.unlink(path)
+        sys.exit(0)
     os.replace(path, last)
     sys.exit(0)
 if op == "write":
@@ -215,7 +245,12 @@ if op == "write":
     d, st = load()
     if st == "corrupt":
         sys.exit(9)
-    if d is None:
+    if d is None and kind == "recycle":
+        d = {"schema_version": 1, "host": host, "state": "recycling", "since": now,
+             "updated": now, "by": by, "phase": None, "pid": None,
+             "stopped": {"runner_units": [], "macos_daemon": False, "vm": False},
+             "launchd_disabled": [], "last_error": None}
+    elif d is None:
         d = {"schema_version": 1, "host": host, "state": "draining", "since": now,
              "updated": now, "by": by, "reason": None, "forced": False,
              "redirect_to": None, "saved_vars": {},
@@ -238,9 +273,9 @@ if op == "write":
         else:
             c[last] = v
     d["updated"] = now
-    if d.get("state") not in ("draining", "paused", "resuming"):
+    if d.get("state") not in STATES:
         sys.exit(9)
-    tmp = os.path.join(os.path.dirname(path), "." + host + ".pause.json.tmp." + str(os.getpid()))
+    tmp = os.path.join(os.path.dirname(path), "." + host + "." + kind + ".json.tmp." + str(os.getpid()))
     with open(tmp, "w") as f:
         json.dump(d, f, indent=2, sort_keys=True)
         f.write("\n")
@@ -284,7 +319,7 @@ sys.exit(1)
 
 _CIH_PY_STATUS='
 import sys, json
-host, marker, vm, units, macos, runners, varlines, drift, online_by, all_out = sys.argv[1:11]
+host, marker, vm, units, macos, runners, varlines, drift, online_by, all_out, recycle, hyg = sys.argv[1:13]
 rs = []
 for line in runners.splitlines():
     p = line.split("\t")
@@ -301,13 +336,88 @@ for kv in online_by.split():
     k, _, v = kv.partition("=")
     ob[k] = int(v)
 print(json.dumps({
-    "host": host, "marker": marker, "vm": vm,
+    "host": host, "marker": marker, "vm": vm, "recycle": recycle,
     "units": [u for u in units.split() if u],
     "macos_daemon": macos, "runners": rs, "vars": vs,
     "drift": [d for d in drift.split("|") if d],
     "pool": {"online_linux_by_host": ob, "all_out_of_rotation": all_out == "1"},
+    "hygiene": ("unavailable" if hyg == "unavailable" else json.loads(hyg)),
 }, indent=2, sort_keys=True))
 '
+
+# XACA-1708-006: advisory CI-host hygiene. Parses ONE `top -l 1 -o mem -stats
+# pid,command,user,mem,cmprs` capture (argv[1]) and lists non-CI processes whose
+# resident+compressed footprint is >= the threshold. Exit 1 = could not parse (the caller
+# reports "unavailable"; a parse failure must never read as clean).
+_CIH_PY_HYGIENE='
+import sys, re, json
+raw, thr_mib, ci_user = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    thr = int(thr_mib) * 1048576
+    if thr < 0: raise ValueError
+except ValueError:
+    sys.exit(1)
+UNIT = {"B": 1, "K": 1024, "M": 1048576, "G": 1073741824, "T": 1099511627776}
+def size(tok):
+    m = re.match(r"^(\d+(?:\.\d+)?)([BKMGT])?[+-]?$", tok)
+    if not m: raise ValueError(tok)
+    return int(float(m.group(1)) * UNIT[m.group(2) or "B"])
+EXCL = re.compile(r"limactl|\blima|qemu|Virtualization|\bvz\b|Runner\.(Listener|Worker)|actions\.runner|ci-runner|^top$")
+lines = raw.splitlines()
+hdr = None
+for i, l in enumerate(lines):
+    f = l.split()
+    if f[:2] == ["PID", "COMMAND"] and f[-2:] == ["MEM", "CMPRS"]:
+        hdr = i
+        break
+if hdr is None:
+    sys.exit(1)
+procs, rows = [], 0
+for l in lines[hdr + 1:]:
+    f = l.split()
+    if not f: continue
+    if len(f) < 5 or not f[0].isdigit():
+        sys.exit(1)
+    try:
+        mem, cmp_ = size(f[-2]), size(f[-1])
+    except ValueError:
+        sys.exit(1)
+    rows += 1
+    user, cmd = f[-3], " ".join(f[1:-3])
+    if user == ci_user or EXCL.search(cmd):
+        continue
+    if mem + cmp_ >= thr:
+        procs.append({"command": cmd, "user": user, "memBytes": mem, "compressedBytes": cmp_})
+if rows == 0:
+    sys.exit(1)
+procs.sort(key=lambda p: -(p["memBytes"] + p["compressedBytes"]))
+warn = ["%s (%s) holds %.1f GiB resident+compressed on a CI host; quit it or cap its scrollback (runbook: CI-host hygiene)"
+        % (p["command"], p["user"], (p["memBytes"] + p["compressedBytes"]) / 1073741824.0) for p in procs]
+print(json.dumps({"heavyProcs": procs, "warnings": warn, "thresholdMiB": int(thr_mib)}, separators=(",", ":")))
+'
+
+_CIH_PY_HYGIENE_TEXT='
+import sys, json
+d = json.loads(sys.argv[1])
+if not d.get("heavyProcs"):
+    print("hygiene: clean (no non-CI process >= %d MiB resident+compressed)" % d["thresholdMiB"])
+else:
+    print("hygiene: %d heavy non-CI process(es) >= %d MiB resident+compressed" % (len(d["heavyProcs"]), d["thresholdMiB"]))
+    for w in d["warnings"]: print("hygiene: WARN " + w)
+'
+
+# Echo the hygiene JSON, or the literal word unavailable. Always rc 0 (advisory).
+_cih_hygiene() {
+  local raw top thr
+  top="${CIH_TOP:-top}"
+  if [ "${CIH_TEST_MODE:-}" = "1" ]; then
+    case "$(command -v "$top" 2>/dev/null || true)" in "${CIH_TEST_ROOT:-/nonexistent}"/*) ;; *) echo unavailable; return 0 ;; esac
+  fi
+  thr="${CIH_HYGIENE_THRESHOLD_MIB:-1024}"
+  raw="$("$top" -l 1 -o mem -stats pid,command,user,mem,cmprs 2>/dev/null)" || { echo unavailable; return 0; }
+  _cih_py -c "$_CIH_PY_HYGIENE" "$raw" "$thr" "$CIH_CI_USER" 2>/dev/null || echo unavailable
+  return 0
+}
 
 _CIH_PY_PUBLISH='
 import sys, json
@@ -554,7 +664,9 @@ _cih_value_host() { _cih_py -c "$_CIH_PY_VALUE" host-of "$1" "$CIH_KNOWN_HOSTS";
 # ---------------------------------------------------------------------------
 # Marker (state file + lock)
 # ---------------------------------------------------------------------------
-cih_marker_path() { printf '%s/%s.pause.json\n' "$CIH_STATE_DIR" "$1"; }
+# KIND pause (default) = operator pause marker; recycle = the recycle sentinel (XACA-1708-004).
+cih_marker_path() { printf '%s/%s.%s.json\n' "$CIH_STATE_DIR" "$1" "${_CIH_MARKER_KIND:-pause}"; }
+cih_sentinel_path() { printf '%s/%s.recycle.json\n' "$CIH_STATE_DIR" "$1"; }
 
 _cih_marker_py() { # OP HOST [args...]
   local op="$1" h="$2"; shift 2
@@ -572,7 +684,9 @@ cih_marker_write() {
   [ "$rc" = "0" ] || { _cih_fail "$([ "$rc" = 9 ] && echo STATE_CONFLICT || echo INTERNAL)" "marker write failed for $h (rc $rc)"; return $?; }
 }
 
-cih_marker_retire() { _cih_marker_py retire "$1"; }
+cih_marker_retire() { # HOST [NOTE]  (NOTE is recorded as retired_by in the .last.json copy)
+  if [ -n "${2:-}" ]; then _cih_marker_py retire "$1" "$2" "$(_cih_now)"; else _cih_marker_py retire "$1"; fi
+}
 
 # Best-effort last_error update; never changes the caller's result.
 _cih_marker_err() { # HOST RC STEP DETAIL
@@ -624,13 +738,17 @@ _cih_parse_opts() { # CMD args...
   CIH_HOST=""; CIH_OPT_REASON=""; CIH_OPT_DRAIN_TIMEOUT="$CIH_DEFAULT_DRAIN_TIMEOUT"
   CIH_OPT_ONLINE_TIMEOUT="$CIH_DEFAULT_ONLINE_TIMEOUT"; CIH_OPT_REDIRECT=""
   CIH_OPT_FORCE=0; CIH_OPT_DRYRUN=0; CIH_OPT_JSON=0
+  CIH_OPT_MIN_UPTIME=""; CIH_OPT_IFIDLE=0; CIH_OPT_RECOVER=0
   local raw_host=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --host) [ $# -ge 2 ] || { _cih_fail USAGE "--host needs a value"; return $?; }; raw_host="$2"; shift 2 ;;
       --reason) [ "$cmd" = pause ] && [ $# -ge 2 ] || { _cih_fail USAGE "--reason is pause-only and needs a value"; return $?; }; CIH_OPT_REASON="$2"; shift 2 ;;
       --drain-timeout) [ "$cmd" = pause ] && [ $# -ge 2 ] || { _cih_fail USAGE "--drain-timeout is pause-only and needs a value"; return $?; }; CIH_OPT_DRAIN_TIMEOUT="$2"; shift 2 ;;
-      --online-timeout) [ "$cmd" = resume ] && [ $# -ge 2 ] || { _cih_fail USAGE "--online-timeout is resume-only and needs a value"; return $?; }; CIH_OPT_ONLINE_TIMEOUT="$2"; shift 2 ;;
+      --online-timeout) { [ "$cmd" = resume ] || [ "$cmd" = recycle ]; } && [ $# -ge 2 ] || { _cih_fail USAGE "--online-timeout is resume/recycle-only and needs a value"; return $?; }; CIH_OPT_ONLINE_TIMEOUT="$2"; shift 2 ;;
+      --min-uptime) [ "$cmd" = recycle ] && [ $# -ge 2 ] || { _cih_fail USAGE "--min-uptime is recycle-only and needs a value (seconds)"; return $?; }; CIH_OPT_MIN_UPTIME="$2"; shift 2 ;;
+      --if-idle) [ "$cmd" = recycle ] || { _cih_fail USAGE "--if-idle is recycle-only"; return $?; }; CIH_OPT_IFIDLE=1; shift ;;
+      --recover) [ "$cmd" = recycle ] || { _cih_fail USAGE "--recover is recycle-only"; return $?; }; CIH_OPT_RECOVER=1; shift ;;
       --redirect-to) [ "$cmd" = pause ] && [ $# -ge 2 ] || { _cih_fail USAGE "--redirect-to is pause-only and needs a host"; return $?; }; CIH_OPT_REDIRECT="$2"; shift 2 ;;
       --force) [ "$cmd" = pause ] || { _cih_fail USAGE "--force is pause-only"; return $?; }; CIH_OPT_FORCE=1; shift ;;
       --dry-run) [ "$cmd" != status ] || { _cih_fail USAGE "--dry-run is not valid for status"; return $?; }; CIH_OPT_DRYRUN=1; shift ;;
@@ -644,6 +762,12 @@ _cih_parse_opts() { # CMD args...
   case "$CIH_OPT_DRAIN_TIMEOUT$CIH_OPT_ONLINE_TIMEOUT" in
     ''|*[!0-9]*) _cih_fail USAGE "timeouts must be non-negative integers (seconds)"; return $? ;;
   esac
+  case "$CIH_OPT_MIN_UPTIME" in
+    *[!0-9]*) _cih_fail USAGE "--min-uptime must be a non-negative integer (seconds)"; return $? ;;
+  esac
+  if [ "$CIH_OPT_RECOVER" = "1" ] && { [ -n "$CIH_OPT_MIN_UPTIME" ] || [ "$CIH_OPT_IFIDLE" = "1" ]; }; then
+    _cih_fail USAGE "--recover takes no policy flags (--min-uptime/--if-idle)"; return $?
+  fi
   # The drain needs two consecutive clean polls, so a budget shorter than two poll
   # intervals can never succeed except by luck of the loop arithmetic: reject it
   # up front instead of reporting a misleading DRAIN_TIMEOUT. Poll 0 (tests) is exempt.
@@ -880,13 +1004,32 @@ cih_vm_state() {
 }
 
 # Guest runner units (first column); empty when the VM is not Running. rc 7 on a failed read of a Running VM.
-cih_guest_units() {
+cih_guest_units() { _cih_guest_units_list; }
+
+# Same listing but INCLUDING inactive/failed units (`list-units --all`): the default listing omits
+# an inactive unit, so a unit that was stopped (and never came back) is invisible to it. Only
+# `not-found` rows (stale references to a removed unit) are dropped; any other load state, notably
+# `error`/`bad-setting` (a broken unit file) or `masked`, is KEPT so it fails the is-active health
+# check instead of vanishing from it (XACA-1708-018/019: filtering on == "loaded" hid a broken
+# runner and let an orphaned sentinel be NOOP-retired while that runner was offline). Used by the recycle health checks and the recycle start
+# path, never by the stop path (stopping an already-inactive unit is pointless churn).
+cih_guest_units_all() { _cih_guest_units_list --all; }
+
+_cih_guest_units_list() { # [--all]
   local st out rc
   st="$(cih_vm_state)" || return $?
   [ "$st" = "Running" ] || return 0
-  out="$(_cih_guest systemctl list-units --plain --no-legend 'actions.runner.*' 2>/dev/null)"; rc=$?
+  if [ "${1:-}" = "--all" ]; then
+    out="$(_cih_guest systemctl list-units --all --plain --no-legend 'actions.runner.*' 2>/dev/null)"; rc=$?
+  else
+    out="$(_cih_guest systemctl list-units --plain --no-legend 'actions.runner.*' 2>/dev/null)"; rc=$?
+  fi
   [ "$rc" = "0" ] || { _cih_fail LOCAL_SERVICE "listing guest runner units failed (rc $rc)"; return $?; }
-  printf '%s\n' "$out" | awk 'NF {print $1}'
+  if [ "${1:-}" = "--all" ]; then
+    printf '%s\n' "$out" | awk 'NF && $2 != "not-found" {print $1}'
+  else
+    printf '%s\n' "$out" | awk 'NF {print $1}'
+  fi
 }
 
 cih_wait_vm_state() { # STATE SECS
@@ -919,12 +1062,19 @@ EOF
 # step in the marker. rc 10 = a runner became busy again (caller goes back to drain);
 # 7 local failure; 6 GitHub.
 cih_stop_services() { # HOST
-  local h="$1" st units u rn bs
+  local h="$1" st units u rn bs rc
   st="$(cih_vm_state)" || { _cih_marker_err "$h" 7 stop-vm "cannot read VM state"; return 7; }
   if [ "$st" = "Running" ]; then
     units="$(cih_guest_units)" || return $?
     # Units recorded by an earlier partial stop are already down; list only live ones.
     for u in $units; do
+      if [ "${_CIH_RECYCLING:-}" = "1" ]; then
+        # Recycle is GitHub-free: re-check busy LOCALLY before every unit stop (13 -> back out as 10).
+        _cih_recycle_idle_check "$h"; rc=$?
+        if [ "$rc" = "13" ]; then _cih_log "a CI job appeared; not stopping $u"; return 10; fi
+        [ "$rc" = "0" ] || return "$rc"
+        rn=""
+      else
       rn="$(_cih_unit_runner "$u")" || return $?
       # A unit that maps to no listed runner cannot be proven idle, and stopping it could
       # kill a running job: refuse as GitHub-side unclassifiable (same family as the
@@ -932,15 +1082,19 @@ cih_stop_services() { # HOST
       if [ -z "$rn" ]; then _cih_fail GITHUB "guest unit '$u' maps to no runner in the $h runners API; cannot prove it idle, refusing to stop it"; return $?; fi
       bs="$(_cih_runner_busy_state "$h" "$rn")" || return $?
       [ "$bs" = "idle" ] || { _cih_log "runner $rn became busy again; back to draining"; return 10; }
+      fi
       _cih_log "stopping guest unit $u"
+      # Write-ahead (XACA-1708-017): record the unit BEFORE stopping it. A crash between the stop
+      # and a later record would leave a stopped unit that no recovery check can see; recorded-
+      # but-still-active is harmless (start skips active units).
+      cih_marker_write "$h" "stopped.runner_units+=$u" || return $?
       _cih_guest sudo systemctl stop "$u" >/dev/null 2>&1 || { _cih_marker_err "$h" 7 stop-unit "systemctl stop $u failed"; _cih_fail LOCAL_SERVICE "systemctl stop $u failed"; return $?; }
       if _cih_guest systemctl is-active "$u" >/dev/null 2>&1; then
         _cih_marker_err "$h" 7 stop-unit "$u still active after stop"; _cih_fail LOCAL_SERVICE "$u still active after stop"; return $?
       fi
-      cih_marker_write "$h" "stopped.runner_units+=$u" || return $?
     done
   fi
-  if [ "$CIH_HAS_MACOS" = "1" ]; then
+  if [ "$CIH_HAS_MACOS" = "1" ] && [ "${_CIH_RECYCLING:-}" != "1" ]; then
     if _cih_daemon_loaded "$CIH_LABEL_MAC"; then
       rn="${CIH_HOST}-macos-1"
       bs="$(_cih_runner_busy_state "$h" "$rn")" || return $?
@@ -959,6 +1113,9 @@ cih_stop_services() { # HOST
   cih_wait_vm_state Stopped "$CIH_VM_STOP_SECS" || { _cih_marker_err "$h" 7 stop-vm "VM not Stopped"; return 7; }
   cih_marker_write "$h" "stopped.vm:=true" || return $?
   local l
+  # A recycle never disables launchd jobs: the VM job is RunAtLoad-only, so a reboot while
+  # the sentinel exists simply restarts the VM (the recovery path then only clears the sentinel).
+  [ "${_CIH_RECYCLING:-}" != "1" ] || return 0
   for l in "$CIH_LABEL_VM" $([ "$CIH_HAS_MACOS" = "1" ] && echo "$CIH_LABEL_MAC"); do
     _cih_launchctl disable "system/$l" >/dev/null 2>&1 || { _cih_marker_err "$h" 7 disable "launchctl disable $l failed"; _cih_fail LOCAL_SERVICE "launchctl disable $l failed"; return $?; }
     cih_marker_write "$h" "launchd_disabled+=$l" || return $?
@@ -988,14 +1145,20 @@ cih_start_services() { # HOST
     fi
     cih_wait_vm_state Running "$CIH_VM_STOP_SECS" || return $?
   fi
-  for u in $(cih_marker_list "$h" stopped.runner_units 2>/dev/null); do
+  local rec all=""
+  rec="$(cih_marker_list "$h" stopped.runner_units 2>/dev/null)" || rec=""
+  # Recycle recovery also starts any runner unit that is down but was never recorded: every row of
+  # the --all listing except not-found, i.e. including error/bad-setting/masked units. Those cannot
+  # start, so the recover fails closed into state=error (a human must fix or remove the unit).
+  [ "${_CIH_RECYCLING:-}" != "1" ] || all="$(cih_guest_units_all 2>/dev/null)" || all=""
+  for u in $(printf '%s\n%s\n' "$rec" "$all" | awk 'NF && !seen[$0]++'); do
     if ! _cih_guest systemctl is-active "$u" >/dev/null 2>&1; then
       _cih_log "starting guest unit $u"
       _cih_guest sudo systemctl start "$u" >/dev/null 2>&1 || { _cih_fail LOCAL_SERVICE "systemctl start $u failed"; return $?; }
       _cih_guest systemctl is-active "$u" >/dev/null 2>&1 || { _cih_fail LOCAL_SERVICE "$u not active after start"; return $?; }
     fi
   done
-  if [ "$CIH_HAS_MACOS" = "1" ] && ! _cih_daemon_loaded "$CIH_LABEL_MAC"; then
+  if [ "$CIH_HAS_MACOS" = "1" ] && [ "${_CIH_RECYCLING:-}" != "1" ] && ! _cih_daemon_loaded "$CIH_LABEL_MAC"; then
     _cih_log "bootstrapping $CIH_LABEL_MAC"
     _cih_launchctl bootstrap system "$CIH_PLIST_MAC" >/dev/null 2>&1 || { _cih_fail LOCAL_SERVICE "launchctl bootstrap $CIH_PLIST_MAC failed"; return $?; }
   fi
@@ -1006,8 +1169,9 @@ cih_start_services() { # HOST
 # Resume helpers (XACA-1440-004)
 # ---------------------------------------------------------------------------
 # cih_wait_online HOST TIMEOUT: 0 all H runners online, 8 timeout, 6 unclassifiable.
-cih_wait_online() { # HOST TIMEOUT
-  local h="$1" max i=0 out rc id name status busy labels all
+# Optional 3rd arg "linux": only the host's Linux runners count (recycle leaves macOS alone).
+cih_wait_online() { # HOST TIMEOUT [linux]
+  local h="$1" max i=0 out rc id name status busy labels all only="${3:-}"
   max="$(_cih_max_polls "$2")"
   while :; do
     out="$(cih_host_runners "$h")"; rc=$?
@@ -1015,6 +1179,7 @@ cih_wait_online() { # HOST TIMEOUT
     all=1
     while IFS="	" read -r id name status busy labels; do
       [ -n "$id" ] || continue
+      [ "$only" != "linux" ] || case "$name" in *-linux-*) ;; *) continue ;; esac
       [ "$status" = "online" ] || all=0
     done <<EOF
 $out
@@ -1223,19 +1388,303 @@ cih_cmd_resume() {
   cih_wait_online "$h" "$CIH_OPT_ONLINE_TIMEOUT" || { rc=$?; _cih_marker_err "$h" "$rc" online "${CIH_RESULT_DETAIL:-online wait failed}"; return "$rc"; }
   cih_restore_vars "$h" || { rc=$?; _cih_marker_err "$h" "$rc" restore "${CIH_RESULT_DETAIL:-restore failed}"; return "$rc"; }
   cih_marker_retire "$h" || { _cih_fail INTERNAL "could not retire the marker"; return $?; }
+  # A recycle sentinel left behind by an interrupted recycle is moot once the host resumed.
+  [ "$(_cih_recycle_state "$h")" = "absent" ] || _CIH_MARKER_KIND=recycle cih_marker_retire "$h" || true
   cih_publish_pause_flag "$h" false ""
   cih_pool_summary || _cih_warn "pool summary unavailable"
   _cih_ok OK "resumed"
   return 0
 }
 
+# ---------------------------------------------------------------------------
+# Recycle (XACA-1708-004): restart the Lima VM ONLY when it is safe.
+# ---------------------------------------------------------------------------
+# Sentinel: $CIH_STATE_DIR/<host>.recycle.json (cih_sentinel_path), schema_version 1:
+#   {"schema_version":1,"host":H,"state":"recycling"|"error","phase":"stopping"|"starting"|
+#    "recovering","since":ISO,"updated":ISO,"by":USER,"pid":N,
+#    "stopped":{...},"launchd_disabled":[],"last_error":null|{"rc","step","detail"}}
+# EXISTS from before the first stop until the VM is back and the host's Linux runners are
+# online, then is renamed to <host>.recycle.last.json. state=error means the recycle failed
+# and needs a human (or `recycle --recover`); the sentinel stays so the pool agent keeps
+# refusing to claim jobs. Anything but "absent" means: do not start work on this host.
+_cih_recycle_state() { _CIH_MARKER_KIND=recycle cih_marker_state "$1"; } # absent|recycling|error|corrupt
+
+# Guest uptime in whole seconds (prints a number); rc 7 when unreadable.
+_cih_vm_uptime() {
+  local out
+  out="$(_cih_guest cat /proc/uptime 2>/dev/null | awk 'NR==1 {print int($1)}')"
+  case "$out" in ''|*[!0-9]*) _cih_fail LOCAL_SERVICE "cannot read VM uptime from the guest (unreadable /proc/uptime)"; return $? ;; esac
+  printf '%s\n' "$out"
+}
+
+# Marks the sentinel as failed (best effort) and records why; never changes the caller's rc.
+_cih_recycle_fail() { # HOST RC STEP
+  _CIH_MARKER_KIND=recycle cih_marker_write "$1" state=error >/dev/null 2>&1 || true
+  _cih_marker_err "$1" "$2" "$3" "${CIH_RESULT_DETAIL:-failed}"
+  _cih_err "recycle failed at '$3'; sentinel $(cih_sentinel_path "$1") left in state=error (no force-stop attempted). Fix the cause, then: ci-host.sh recycle --host $1 --recover"
+}
+
+cih_cmd_recycle() {
+  _cih_setup_cmd recycle "$@" || return $?
+  local rc
+  _CIH_MARKER_KIND=recycle
+  _cih_recycle_body; rc=$?
+  _CIH_MARKER_KIND=pause; _CIH_RECYCLING=""
+  return "$rc"
+}
+
+_cih_recycle_body() {
+  local h="$CIH_HOST" st rst vst rc up
+  cih_preflight --no-github || return $?   # recycle never talks to GitHub (root's launchd has no gh login)
+  if [ "$CIH_OPT_DRYRUN" != "1" ]; then
+    cih_lock_acquire "$h" || return $?
+  fi
+  # 1. An operator pause (or its transition, or a corrupt marker) always wins: a recycle must
+  #    never fight a pause in progress nor resume a host a human paused.
+  st="$(_CIH_MARKER_KIND=pause cih_marker_state "$h")"
+  [ "$st" = "absent" ] || { _cih_fail STATE_CONFLICT "host '$h' has a pause marker (state '$st'); a recycle never touches a paused/pausing/resuming host"; return $?; }
+  # 2. Sentinel: already recycling, or a crashed/failed recycle.
+  rst="$(_cih_recycle_state "$h")"
+  if [ "$CIH_OPT_RECOVER" = "1" ]; then
+    _cih_recycle_recover "$h" "$rst"; return $?
+  fi
+  case "$rst" in
+    absent) ;;
+    corrupt) _cih_fail STATE_CONFLICT "recycle sentinel for '$h' is corrupt (fail-closed); inspect $(cih_sentinel_path "$h")"; return $? ;;
+    recycling)
+      # XACA-1708-013: the SCHEDULED path heals a sentinel orphaned by a crash/reboot.
+      if [ "$CIH_OPT_IFIDLE" = "1" ] && [ "$CIH_OPT_DRYRUN" != "1" ] && [ "$(_cih_recycle_pid_state "$h")" = "dead" ]; then
+        _cih_recycle_auto_recover "$h"; return $?
+      fi
+      _cih_fail RECYCLE_PENDING "recycle sentinel present for '$h' (state '$rst'): a recycle is running or was interrupted. Inspect 'ci-host.sh status --host $h'; if no recycle is running use 'recycle --recover'"; return $? ;;
+    *) _cih_fail RECYCLE_PENDING "recycle sentinel present for '$h' (state '$rst'): a recycle is running or was interrupted. Inspect 'ci-host.sh status --host $h'; if no recycle is running use 'recycle --recover'"; return $? ;;
+  esac
+  # 3. The VM must be a healthy Running VM (we restart healthy VMs, we do not start dead ones).
+  vst="$(cih_vm_state)" || return $?
+  [ "$vst" = "Running" ] || { _cih_fail REFUSED "VM is '$vst', not Running; recycle only restarts a healthy VM (use status / the runbook for an outage)"; return $?; }
+  # 4. Policy: minimum uptime. Unreadable uptime is fail-closed, never "old enough".
+  if [ -n "$CIH_OPT_MIN_UPTIME" ]; then
+    up="$(_cih_vm_uptime)" || return $?
+    if [ "$up" -lt "$CIH_OPT_MIN_UPTIME" ]; then
+      _cih_ok NOOP "VM uptime ${up}s is below --min-uptime ${CIH_OPT_MIN_UPTIME}s; nothing to do"
+      _cih_log "$CIH_RESULT_DETAIL"; return 0
+    fi
+  fi
+  # 5. Idle, decided LOCALLY (guest/host Runner.Worker + pool agent slots.json). See _cih_recycle_idle_check.
+  _cih_recycle_idle_check "$h"; rc=$?
+  if [ "$rc" = "13" ]; then
+    [ "$CIH_OPT_IFIDLE" = "1" ] || return 13
+    _cih_ok NOOP "host busy; skipped (--if-idle). ${CIH_RESULT_DETAIL}"; return 0
+  elif [ "$rc" != "0" ]; then
+    return "$rc"
+  fi
+  if [ "$CIH_OPT_DRYRUN" = "1" ]; then
+    _cih_log "dry-run: host idle, VM Running, no pause marker, no sentinel. Would write $(cih_sentinel_path "$h"), stop the guest runner units and the VM (plain stop, never -f), start the VM and units, wait for the Linux runners online (${CIH_OPT_ONLINE_TIMEOUT}s), then retire the sentinel. Nothing changed."
+    _cih_ok OK "dry-run"; return 0
+  fi
+  _CIH_RECYCLING=1
+  # Write-ahead sentinel BEFORE the first stop, then re-check idle (closes the window in which
+  # the pool agent claimed a job between our first check and the sentinel becoming visible).
+  cih_marker_write "$h" state=recycling phase=stopping "pid:=$$" || return $?
+  _cih_recycle_idle_check "$h"; rc=$?
+  if [ "$rc" != "0" ]; then
+    _cih_log "became busy after the sentinel was written; abandoning the recycle (nothing stopped)"
+    cih_marker_retire "$h" || _cih_warn "could not retire the recycle sentinel after backing out; the next scheduled tick will auto-recover it"
+    if [ "$rc" = "13" ] && [ "$CIH_OPT_IFIDLE" = "1" ]; then
+      # Same outcome as a busy host at the first check (XACA-1708-013): a scheduled tick is a no-op.
+      _cih_ok NOOP "host became busy after the sentinel was written; backed out cleanly, sentinel retired (--if-idle). ${CIH_RESULT_DETAIL}"; return 0
+    fi
+    return "$rc"
+  fi
+  cih_stop_services "$h"; rc=$?
+  if [ "$rc" = "10" ]; then
+    # A runner went busy while stopping: bring back whatever was stopped, drop the sentinel.
+    _cih_log "runner became busy while stopping; restoring services and abandoning the recycle"
+    if cih_start_services "$h"; then
+      cih_marker_retire "$h" || _cih_warn "could not retire the recycle sentinel after restoring services; the next scheduled tick will auto-recover it"
+      if [ "$CIH_OPT_IFIDLE" = "1" ]; then _cih_ok NOOP "a runner became busy during the recycle; services restored, sentinel retired (--if-idle), nothing lost"; return 0; fi
+      _cih_fail BUSY "a runner became busy during the recycle; services restored, nothing lost"; return $?; fi
+    _cih_recycle_fail "$h" 7 restore-after-busy; return 7
+  elif [ "$rc" != "0" ]; then
+    _cih_recycle_fail "$h" "$rc" stop; return "$rc"
+  fi
+  _cih_recycle_finish "$h" starting
+  return $?
+}
+
+# Start the VM back, wait for the Linux runners, retire the sentinel. Shared by the normal
+# path and --recover (every step is idempotent, see cih_start_services).
+_cih_recycle_finish() { # HOST PHASE
+  local h="$1" rc
+  cih_marker_write "$h" state=recycling "phase=$2" || return $?
+  cih_start_services "$h" || { rc=$?; _cih_recycle_fail "$h" "$rc" start; return "$rc"; }
+  _cih_wait_units_active "$h" "$CIH_OPT_ONLINE_TIMEOUT" || { rc=$?; _cih_recycle_fail "$h" "$rc" online; return "$rc"; }
+  cih_marker_retire "$h" || { _cih_fail INTERNAL "could not retire the recycle sentinel"; return $?; }
+  _cih_ok OK "recycled"
+  return 0
+}
+
+# LOCAL busy detection for recycle (no GitHub, no token: the scheduled run is root's launchd
+# context, which has no gh login). Three independent signals; ANY busy => busy (13), and any
+# signal that cannot be read => refuse (7), never idle:
+#   1. Linux guest: a Runner.Worker process (limactl shell; the exit status is echoed behind a
+#      marker so a failed limactl is never mistaken for pgrep's "no match").
+#   2. macOS host (only when the host has a macOS lane): Runner.Worker of the CI user.
+#   3. Pool agent: any slot in slots.json that is starting/busy/cleaning. File absent = no
+#      agent state = no slots; present but unparseable/unknown state = unreadable.
+# The pinned-queue check of the pause drain is deliberately NOT done: the sentinel (written
+# before the first stop) already makes the pool agent stop claiming, and a job queued for this
+# host simply waits the few minutes a restart takes. 0 idle, 13 busy, 7 unreadable.
+_CIH_PY_SLOTS='
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        raw = json.load(f)
+except FileNotFoundError:
+    print("idle"); sys.exit(0)
+except PermissionError:
+    sys.exit(4)   # EACCES: the agent state dir is root 0700 (XACA-1708-014); run via sudo
+except (OSError, ValueError):
+    sys.exit(3)
+slots = raw.get("slots") if isinstance(raw, dict) else None
+if not isinstance(slots, dict):
+    sys.exit(3)
+busy = False
+for key, e in slots.items():
+    st = e.get("state") if isinstance(e, dict) else None
+    if st in ("starting", "busy", "cleaning"):
+        busy = True
+    elif st not in ("idle", "broken"):
+        sys.exit(3)
+print("busy" if busy else "idle")
+'
+
+_cih_recycle_idle_check() { # HOST
+  local h="$1" out rc mark busy_what="" unread=""
+  # 1. Linux guest
+  out="$(_cih_guest sh -c 'pgrep -f "[R]unner[.]Worker" >/dev/null 2>&1; echo "cih-worker-rc=$?"' 2>/dev/null)"; rc=$?
+  mark="$(printf '%s\n' "$out" | sed -n 's/^cih-worker-rc=\([0-9]*\)$/\1/p' | tail -n 1)"
+  if [ "$rc" != "0" ]; then unread="${unread}guest probe failed (limactl shell rc $rc); "
+  else case "$mark" in
+    0) busy_what="${busy_what}Runner.Worker running in the VM; " ;;
+    1) ;;
+    *) unread="${unread}guest probe unreadable (pgrep rc '${mark:-none}'); " ;;
+  esac; fi
+  # 2. macOS lane
+  if [ "$CIH_HAS_MACOS" = "1" ]; then
+    if [ "${CIH_TEST_MODE:-}" = "1" ]; then
+      case "$(command -v "$CIH_PGREP" 2>/dev/null || true)" in "$CIH_TEST_ROOT"/*) ;; *) _cih_fail ENV "test mode: CIH_PGREP is not stubbed"; return $? ;; esac
+    fi
+    "$CIH_PGREP" -u "$CIH_CI_USER" -f '[R]unner[.]Worker' >/dev/null 2>&1; rc=$?
+    case "$rc" in
+      0) busy_what="${busy_what}Runner.Worker running on the macOS lane; " ;;
+      1) ;;
+      *) unread="${unread}macOS Runner.Worker probe failed (pgrep rc $rc); " ;;
+    esac
+  fi
+  # 3. pool agent slots
+  out="$(_cih_py -c "$_CIH_PY_SLOTS" "$CIH_AGENT_STATE_DIR/slots.json" 2>/dev/null)"; rc=$?
+  if [ "$rc" = "4" ]; then unread="${unread}pool agent slots.json permission denied (EACCES: $CIH_AGENT_STATE_DIR is root-only; run as root, i.e. 'sudo ci-host.sh recycle ...'); "
+  elif [ "$rc" != "0" ]; then unread="${unread}pool agent slots.json unreadable (corrupt or unparseable); "
+  else case "$out" in
+    idle) ;;
+    busy) busy_what="${busy_what}pool agent slot starting/busy/cleaning; " ;;
+    *) unread="${unread}pool agent slots.json unclassifiable; " ;;
+  esac; fi
+  if [ -n "$busy_what" ]; then
+    CIH_RESULT_NAME=BUSY; CIH_RESULT_DETAIL="host '$h' is busy (${busy_what%; }); nothing was stopped"; return 13
+  fi
+  if [ -n "$unread" ]; then _cih_fail LOCAL_SERVICE "cannot prove host '$h' idle: ${unread%; }(fail-closed)"; return $?; fi
+  return 0
+}
+
+# Wait (local, no GitHub) until the guest runner units are active again: every unit the recycle
+# stopped plus every listed actions.runner.* unit must be active, and there must be at least one.
+# rc 0 ok, 8 timeout.
+_cih_units_active_now() { # HOST  (single pass, no polling; rc 0 only when >=1 unit and all active)
+  local h="$1" listed rec u n=0 all=1
+  listed="$(cih_guest_units_all 2>/dev/null)" || listed=""
+  rec="$(_CIH_MARKER_KIND=recycle cih_marker_list "$h" stopped.runner_units 2>/dev/null)" || rec=""
+  for u in $(printf '%s\n%s\n' "$listed" "$rec" | awk 'NF && !seen[$0]++'); do
+    n=$((n + 1))
+    _cih_guest systemctl is-active "$u" >/dev/null 2>&1 || all=0
+  done
+  [ "$n" -gt 0 ] && [ "$all" = "1" ]
+}
+
+_cih_wait_units_active() { # HOST TIMEOUT
+  local h="$1" max i=0
+  max="$(_cih_max_polls "$2")"
+  while :; do
+    _cih_units_active_now "$h" && return 0
+    i=$((i + 1))
+    [ "$i" -lt "$max" ] || { _cih_fail ONLINE_TIMEOUT "guest runner units of $h not all active within ${2}s (checked locally; sentinel stays, re-run with --recover)"; return $?; }
+    _cih_sleep "$CIH_POLL_SECS"
+  done
+}
+
+# Is the pid recorded in the recycle sentinel a live ci-host process? Prints alive|dead|unknown.
+# Only "dead" ever enables auto-recovery; anything unreadable is "unknown" (fail closed = treated
+# like alive). Liveness comes from `ps -p` (not kill -0: as admin kill -0 on a root pid is EPERM
+# and would read as dead). A live pid whose command is not ci-host is a REUSED pid (the recorded
+# process died, e.g. across a reboot) and counts as dead.
+_cih_recycle_pid_state() { # HOST
+  local h="$1" pid cmd rc
+  pid="$(_CIH_MARKER_KIND=recycle cih_marker_get "$h" pid 2>/dev/null)" || { echo unknown; return 0; }
+  case "$pid" in ''|*[!0-9]*|0) echo unknown; return 0 ;; esac
+  if [ "${CIH_TEST_MODE:-}" = "1" ]; then
+    case "$(command -v "$CIH_PS" 2>/dev/null || true)" in "$CIH_TEST_ROOT"/*) ;; *) echo unknown; return 0 ;; esac
+  fi
+  # stderr is merged on purpose: rc 1 with NO output at all is ps's "no such pid"; rc 1 with any
+  # diagnostic text means we could not prove the pid dead, so it is unknown (-> 14), not dead.
+  cmd="$("$CIH_PS" -p "$pid" -o command= 2>&1)"; rc=$?
+  if [ "$rc" = "1" ] && [ -z "$cmd" ]; then echo dead; return 0; fi
+  [ "$rc" = "0" ] && [ -n "$cmd" ] || { echo unknown; return 0; }
+  case "$cmd" in *ci-host*) echo alive ;; *) echo dead ;; esac
+}
+
+# Scheduled-path healing of an orphaned sentinel (state=recycling, recorded pid not a live
+# ci-host). The lock is already held, so no concurrent ci-host operation exists.
+#   VM Running AND all guest runner units active -> nothing is down: retire the sentinel
+#     (retired_by: auto-recover) and exit 0 NOOP; the NEXT tick makes the normal recycle decision.
+#   otherwise -> run the same idempotent finish path as `--recover` (start VM + units, wait for
+#     the runners, retire). Failure leaves state=error, which is never auto-retired (human needed).
+_cih_recycle_auto_recover() { # HOST
+  local h="$1" vst
+  vst="$(cih_vm_state)" || return $?
+  if [ "$vst" = "Running" ] && _cih_units_active_now "$h"; then
+    cih_marker_retire "$h" "auto-recover" || { _cih_fail INTERNAL "could not retire the orphaned recycle sentinel"; return $?; }
+    _cih_ok NOOP "retired orphaned recycle sentinel for '$h' (recorded pid not running, VM Running, runner units active); next tick decides"
+    _cih_log "$CIH_RESULT_DETAIL"; return 0
+  fi
+  _cih_log "orphaned recycle sentinel for '$h' (recorded pid not running) and the VM is '$vst' or units are not active: auto-running the recover path"
+  _CIH_RECYCLING=1
+  _cih_recycle_finish "$h" recovering
+}
+
+# recycle --recover: finish a crashed or failed recycle (VM down, or sentinel in state error).
+_cih_recycle_recover() { # HOST SENTINEL-STATE
+  local h="$1" rst="$2"
+  case "$rst" in
+    absent) _cih_ok NOOP "no recycle sentinel; nothing to recover"; _cih_log "$CIH_RESULT_DETAIL"; return 0 ;;
+    corrupt) _cih_fail STATE_CONFLICT "recycle sentinel for '$h' is corrupt (fail-closed); inspect $(cih_sentinel_path "$h")"; return $? ;;
+  esac
+  if [ "$CIH_OPT_DRYRUN" = "1" ]; then
+    _cih_log "dry-run: sentinel state '$rst'; would start the VM and units, wait for the Linux runners online, retire the sentinel. Nothing changed."
+    _cih_ok OK "dry-run"; return 0
+  fi
+  _CIH_RECYCLING=1
+  _cih_recycle_finish "$h" recovering
+}
+
 # Status: rc precedence 6, 5, 11, 10, 12, 0 (design section 3).
 cih_cmd_status() {
   _cih_setup_cmd status "$@" || return $?
-  local h="$CIH_HOST" st vst units macos out rc id name status busy labels
-  local drift="" rcs=0 varlines="" v val vrc tgt anyonline=0 anyoffline=0 runners="" live=""
+  local h="$CIH_HOST" st vst units macos out rc id name status busy labels rst
+  local drift="" rcs=0 varlines="" v val vrc tgt anyonline=0 anyoffline=0 runners="" live="" hyg=""
   cih_preflight || return $?
   st="$(cih_marker_state "$h")"
+  rst="$(_cih_recycle_state "$h")"
   vst="$(cih_vm_state 2>/dev/null)" || vst=unknown
   units="$(cih_guest_units 2>/dev/null | tr '\n' ' ')" || units=""
   macos=none
@@ -1282,13 +1731,21 @@ EOF
     absent)
       if [ "$vst" != "Running" ] || [ "$anyoffline" = "1" ]; then drift="down-not-paused"; rcs=12; fi ;;
   esac
+  # XACA-1708-004: a recycle sentinel is never "active": an interrupted or failed recycle is
+  # TRANSITIONAL (it explains a down VM, so it replaces DEGRADED) until recycle --recover.
+  local orph=""
+  if [ "$rst" != "absent" ]; then drift="${drift}|recycle-$rst"; rcs=11; fi
+  if [ "$rst" = "recycling" ] && [ "$(_cih_recycle_pid_state "$h")" = "dead" ]; then orph=" (orphaned: recorded pid not running)"; drift="${drift}|recycle-orphaned"; fi
   _cih_pool_compute || return $?
+  hyg="$(_cih_hygiene)"   # XACA-1708-006: advisory only, never touches rcs
   if [ "$CIH_OPT_JSON" = "1" ]; then
-    _cih_py -c "$_CIH_PY_STATUS" "$h" "$st" "$vst" "$units" "$macos" "$runners" "$varlines" "${drift#|}" "$_CIH_POOL_ONLINE" "$_CIH_POOL_ALL_OUT"
+    _cih_py -c "$_CIH_PY_STATUS" "$h" "$st" "$vst" "$units" "$macos" "$runners" "$varlines" "${drift#|}" "$_CIH_POOL_ONLINE" "$_CIH_POOL_ALL_OUT" "$rst" "$hyg"
   else
-    _cih_log "marker=$st vm=$vst macos_daemon=$macos units=${units:-none}"
+    _cih_log "marker=$st recycle=$rst${orph} vm=$vst macos_daemon=$macos units=${units:-none}"
     _cih_log "drift: ${drift:-none}"
     _cih_log "pool: online Linux runners by host: $_CIH_POOL_ONLINE"
+    if [ "$hyg" = "unavailable" ]; then _cih_log "hygiene: unavailable (top output unreadable; NOT a clean result)"
+    else _cih_py -c "$_CIH_PY_HYGIENE_TEXT" "$hyg" | while IFS= read -r hl; do _cih_log "$hl"; done; fi
   fi
   [ "$_CIH_POOL_ALL_OUT" != "1" ] || _cih_warn "EVERY known host is out of rotation: no CI capacity is available (jobs will queue)"
   case "$rcs" in

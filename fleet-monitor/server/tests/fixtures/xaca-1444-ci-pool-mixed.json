@@ -17,7 +17,9 @@
       "swapUsedBytes": 3006477107,
       "memFreePct": 35,
       "loadPerCpu": 0.75,
-      "pollStaleMs": 30000
+      "pollStaleMs": 30000,
+      "memPressureLevel": 2,
+      "swapGrowthBytesPerHour": 1073741824
     }
   },
   "machines": {

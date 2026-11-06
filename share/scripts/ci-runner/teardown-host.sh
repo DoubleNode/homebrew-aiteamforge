@@ -28,7 +28,8 @@
 #      the reporter's fleet-config.json (holds the fct_ telemetry key), the XACA-1440 pause
 #      marker `<host>.pause.json` and its lock dir, and the provision manifest `<host>.provision-manifest`
 #   6. remove the root-owned copies in /usr/local/libexec (agent, reporter, JIT scripts)
-#   7. remove the four LaunchDaemon plists  (com.doublenode.ci-runner.<host>.{agent,reporter,macos,lima-vm})
+#   7. remove the LaunchDaemon plists  (com.doublenode.ci-runner.<host>.{recycle,agent,reporter,macos,lima-vm};
+#      the recycle schedule, XACA-1708-005, is booted out first of the non-agent daemons, after the busy check)
 #   8. (--remove-user) delete the ci-runner user, its group and its home. DEFAULT: KEEP the user.
 #
 # Steps 5, 6 and the agent dirs are machine-level (the names carry no host suffix). They are
@@ -131,7 +132,7 @@ if [ "$DRY" = 0 ] && [ "$(id -u)" -ne 0 ]; then
   echo "teardown-host.sh: run under sudo (or use --dry-run)" >&2; result NOT_ROOT 5; exit 5
 fi
 
-LABELS_ORDER="agent reporter macos lima-vm"
+LABELS_ORDER="recycle agent reporter macos lima-vm"
 label_of() { printf 'com.doublenode.ci-runner.%s.%s' "$HOST" "$1"; }
 plist_of() { printf '%s/%s.plist' "$LD_DIR" "$(label_of "$1")"; }
 
@@ -311,6 +312,8 @@ rm_dir() { # path (a dedicated directory this installer created)
   run "remove directory $1" rm -rf "$1"
 }
 rm_file "$PAUSE_DIR/${HOST}.pause.json"
+rm_file "$PAUSE_DIR/${HOST}.recycle.json"        # XACA-1708-005: recycle sentinel and its completed-record
+rm_file "$PAUSE_DIR/${HOST}.recycle.last.json"
 rm_file "$PAUSE_DIR/${HOST}.provision-manifest"   # XACA-1443-015: the record provision-host.sh made of this host
 rm_dir  "$PAUSE_DIR/.${HOST}.lock"
 if [ "$DRY" = 0 ]; then rmdir "$PAUSE_DIR" 2>/dev/null || true; fi
@@ -320,6 +323,8 @@ if [ "$OTHERS" -eq 0 ]; then
   rm_dir  "$AGENT_STATE_DIR"
   rm_dir  "$AGENT_LOG_DIR"
   # ---- 6. root-owned copies (no host suffix in the names: shared) ----------------------------------
+  rm_dir  "$LIBEXEC_DIR/ci-host"                   # XACA-1708-005: root-owned ci-host.sh runtime copy
+  rm_dir  "${CI_RECYCLE_LOG_DIR:-$(dirname "$AGENT_LOG_DIR")/ci-runner}"   # XACA-1708-005: recycle daemon logs
   for f in ci-pool-agent.py ci-runner-reporter.sh ci-runner-jit-macos.sh ci-runner-job-started.sh; do
     rm_file "$LIBEXEC_DIR/$f"
   done

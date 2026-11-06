@@ -8,6 +8,7 @@
 #   ci-host.sh pause  --host H [--reason TEXT] [--drain-timeout SECS] [--redirect-to HOST] [--force] [--dry-run]
 #   ci-host.sh resume --host H [--online-timeout SECS] [--dry-run]
 #   ci-host.sh status --host H [--json]
+#   ci-host.sh recycle --host H [--if-idle] [--min-uptime SECS] [--online-timeout SECS] [--recover] [--dry-run]
 #
 # The last stdout line is always:  RESULT: <NAME> host=<h> rc=<n> detail=<...>
 # (with `status --json` the RESULT line goes to stderr so stdout stays pure JSON).
@@ -23,10 +24,17 @@ Usage:
   ci-host.sh pause  --host H [--reason TEXT] [--drain-timeout SECS] [--redirect-to HOST] [--force] [--dry-run]
   ci-host.sh resume --host H [--online-timeout SECS] [--dry-run]
   ci-host.sh status --host H [--json]
+  ci-host.sh recycle --host H [--if-idle] [--min-uptime SECS] [--online-timeout SECS] [--recover] [--dry-run]
 
 H is m1mini or m4mini (any case). Run ON the CI host as an admin user.
 pause drains (never cancels a job), then stops the runners and the VM.
 Defaults: --drain-timeout 3600, --online-timeout 300.
+recycle (XACA-1708-004) restarts the Lima VM (graceful stop, never -f) ONLY when it is safe: no CI job
+running (checked LOCALLY: Runner.Worker in the VM / on the macOS lane, pool agent slots; no GitHub access needed), no operator pause marker, no recycle sentinel, VM Running. Every
+unreadable state refuses. It writes <state-dir>/<host>.recycle.json for the whole stop+start window.
+  --if-idle      a busy host is a silent NOOP (rc 0) instead of BUSY (rc 13): for schedules
+  --min-uptime N NOOP (rc 0) unless the guest has been up at least N seconds; unreadable uptime refuses
+  --recover      finish an interrupted/failed recycle (start the VM, wait online, retire the sentinel)
 --drain-timeout must be at least two poll intervals (30 s at the default 15 s poll); smaller is a usage error (rc 2).
 
 Exit codes (stable; the last stdout line is `RESULT: <NAME> host=<h> rc=<n> detail=<...>`):
@@ -44,6 +52,10 @@ Exit codes (stable; the last stdout line is `RESULT: <NAME> host=<h> rc=<n> deta
   10  PAUSED          `status` only: marker `paused`, reality agrees.
   11  TRANSITIONAL    `status` only: `draining`/`resuming`, drift, or corrupt marker.
   12  DEGRADED        `status` only: active (no marker), but VM down or H's runners not online.
+  13  BUSY            `recycle` only: a CI job is running on the host (local check). Nothing was stopped.
+  14  RECYCLE_PENDING `recycle` only: a recycle sentinel exists (running or interrupted). Use `recycle --recover`.
+  (recycle also uses 3 REFUSED = VM not Running, 9 STATE_CONFLICT = operator pause marker / corrupt sentinel / live lock,
+   6 / 7 / 8 as for pause and resume.)
 USAGE
 }
 
@@ -51,7 +63,7 @@ main() {
   local cmd="${1:-}" rc json=0 a
   case "$cmd" in
     -h|--help|help) usage; return 0 ;;
-    pause|resume|status) shift ;;
+    pause|resume|status|recycle) shift ;;
     '') usage >&2; CIH_HOST=""; CIH_RESULT_NAME=USAGE; CIH_RESULT_DETAIL="no command"; _emit 2; return 2 ;;
     *)  usage >&2; CIH_HOST=""; CIH_RESULT_NAME=USAGE; CIH_RESULT_DETAIL="unknown command '$cmd'"; _emit 2; return 2 ;;
   esac

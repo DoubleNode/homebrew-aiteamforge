@@ -296,6 +296,16 @@ describe('poll validation (C3/C8)', () => {
         ['memFreePct over 100', (() => { const v = validPoll(); v.capacity.memFreePct = 101; return v; })()],
         ['non-integer ncpu', (() => { const v = validPoll(); v.capacity.ncpu = 2.5; return v; })()],
         ['zero ncpu', (() => { const v = validPoll(); v.capacity.ncpu = 0; return v; })()],
+        ['memPressureLevel 0', (() => { const v = validPoll(); v.capacity.memPressureLevel = 0; return v; })()],
+        ['memPressureLevel 3 (not 1|2|4)', (() => { const v = validPoll(); v.capacity.memPressureLevel = 3; return v; })()],
+        ['swapGrowthWindowSec zero', (() => { const v = validPoll(); v.capacity.swapGrowthWindowSec = 0; return v; })()],
+        ['swapGrowthWindowSec fractional', (() => { const v = validPoll(); v.capacity.swapGrowthWindowSec = 1.5; return v; })()],
+        ['memPressureLevel 5', (() => { const v = validPoll(); v.capacity.memPressureLevel = 5; return v; })()],
+        ['memPressureLevel string', (() => { const v = validPoll(); v.capacity.memPressureLevel = '2'; return v; })()],
+        ['swapGrowthBytes string', (() => { const v = validPoll(); v.capacity.swapGrowthBytes = 'x'; return v; })()],
+        ['swapGrowthBytes fractional', (() => { const v = validPoll(); v.capacity.swapGrowthBytes = 1.5; return v; })()],
+        ['swapGrowthWindowSec negative', (() => { const v = validPoll(); v.capacity.swapGrowthWindowSec = -1; return v; })()],
+        ['swapGrowthWindowSec NaN-ish (null)', (() => { const v = validPoll(); v.capacity.swapGrowthWindowSec = null; return v; })()],
         ['bad vmState', (() => { const v = validPoll(); v.capacity.vmState = 'paused'; return v; })()],
         ['slots not array', validPoll({ slots: {} })],
         ['too many slots', validPoll({ slots: Array.from({ length: 33 }, (_, i) => ({ os: 'Linux', index: (i % 64) + 1, state: 'idle', assignmentId: null })) })],
@@ -314,6 +324,23 @@ describe('poll validation (C3/C8)', () => {
             assert.equal(s.reg.reports.has('m4mini'), false, 'a rejected poll records nothing (the machine reads stale)');
         });
     }
+
+    test('XACA-1708: pressure fields are optional, accepted when valid (negative growth allowed)', () => {
+        const v = validPoll();
+        Object.assign(v.capacity, { memPressureLevel: 2, swapGrowthBytes: -500, swapGrowthWindowSec: 1800 });
+        const out = validatePoll(v).capacity;
+        assert.deepEqual([out.memPressureLevel, out.swapGrowthBytes, out.swapGrowthWindowSec], [2, -500, 1800]);
+    });
+
+    test('XACA-1708 over HTTP: new-agent report (pressure fields) and legacy report (none) are both 200', async () => {
+        const s = setup();
+        const withFields = validPoll();
+        Object.assign(withFields.capacity, { memPressureLevel: 1, swapGrowthBytes: -4096, swapGrowthWindowSec: 900 });
+        assert.equal((await poll(s, KEY_A, withFields)).status, 200);
+        const legacy = validPoll();
+        for (const k of ['memPressureLevel', 'swapGrowthBytes', 'swapGrowthWindowSec']) delete legacy.capacity[k];
+        assert.equal((await poll(s, KEY_A, legacy)).status, 200);
+    });
 
     test('schemaVersion mismatch is 400 with {error, expected} (C8)', async () => {
         const s = setup();
@@ -596,6 +623,12 @@ describe('operator writes (admin tier)', () => {
             ['/api/ci-pool/machines/m4mini', { paused: 'yes' }],
             ['/api/ci-pool/machines/m4mini', { prefers: 'medium' }],
             ['/api/ci-pool/machines/m4mini', { thresholds: { bogus: 1 } }],
+            ['/api/ci-pool/machines/m4mini', { thresholds: { memPressureLevel: 0 } }],
+            ['/api/ci-pool/machines/m4mini', { thresholds: { memPressureLevel: 5 } }],
+            ['/api/ci-pool/machines/m4mini', { thresholds: { memPressureLevel: 2.5 } }],
+            ['/api/ci-pool/machines/m4mini', { thresholds: { swapGrowthBytesPerHour: -1 } }],
+            ['/api/ci-pool/machines/m4mini', { thresholds: { swapGrowthBytesPerHour: '1' } }],
+            ['/api/ci-pool/config', { thresholds: { memPressureLevel: 9 } }],
             ['/api/ci-pool/machines/m4mini', []],
             ['/api/ci-pool/machines/bad%20id', { enabled: true }],
             ['/api/ci-pool/config', { nope: 1 }],

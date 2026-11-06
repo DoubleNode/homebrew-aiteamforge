@@ -32,7 +32,7 @@ import urllib.request
 
 # Bump on EVERY behavioural change to this file. XACA-1445-003: every build used to report
 # "1.0.0", so a 10-06 build missing the persistent-* commands ran for weeks unnoticed.
-AGENT_VERSION = "1.1.0"
+AGENT_VERSION = "1.2.0"
 SCHEMA_VERSION = 1
 DEFAULT_CONFIG_PATH = "/usr/local/etc/ci-pool-agent/agent.json"
 DEFAULT_LIMACTL = "/opt/homebrew/bin/limactl"
@@ -41,6 +41,14 @@ DEFAULT_LOG_PATH = "/Library/Logs/ci-pool-agent/agent.log"
 CI_USER = "ci-runner"
 COLLECTOR_TIMEOUT = 5          # seconds, per subprocess (D7)
 SLOW_CACHE_TTL = 30.0          # memory_pressure + limactl list (D7)
+# XACA-1708-002: trailing window for swapGrowthBytes. Overridable per host with
+# agent.json "swapGrowthWindowSec" (same style as the other optional keys).
+DEFAULT_SWAP_GROWTH_WINDOW = 3600.0   # seconds
+# XACA-1708-007: bounds on the configured window. Below the floor the extrapolation to bytes/hour is noise
+# (and a sub-second window rounds swapGrowthWindowSec to 0, which the server rejects with a 400 for the
+# WHOLE poll); above the ceiling the server rejects the field (max 7 days). Out-of-range is clamped.
+MIN_SWAP_GROWTH_WINDOW = 60.0
+MAX_SWAP_GROWTH_WINDOW = 86400.0 * 7
 
 log = logging.getLogger("ci-pool-agent")
 
@@ -48,6 +56,13 @@ log = logging.getLogger("ci-pool-agent")
 # ---------------------------------------------------------------------------
 # Config + logging
 # ---------------------------------------------------------------------------
+def _positive_float(v, default):
+    """A positive finite number from config, else the default (bools rejected)."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return default
+    return float(v) if 0 < v < float("inf") else default
+
+
 def load_config(path=None):
     """Load agent.json (non-secret). Path from CI_POOL_AGENT_CONFIG.
 
@@ -85,6 +100,10 @@ def load_config(path=None):
         "launchctl": raw.get("launchctl") or DEFAULT_LAUNCHCTL,
         "plistDir": raw.get("plistDir") or DEFAULT_PLIST_DIR,
         "macLabel": raw.get("macLabel") or "",
+        # XACA-1708-002: trailing window for swapGrowthBytes (seconds)
+        "swapGrowthWindowSec": min(MAX_SWAP_GROWTH_WINDOW, max(
+            MIN_SWAP_GROWTH_WINDOW,
+            _positive_float(raw.get("swapGrowthWindowSec"), DEFAULT_SWAP_GROWTH_WINDOW))),
     }
 
 
@@ -237,6 +256,26 @@ def collect_swap():
     return parse_swapusage(run_cmd(["/usr/sbin/sysctl", "-n", "vm.swapusage"]))
 
 
+_MEMPRESSURE_LEVELS = (1, 2, 4)   # macOS: normal, warn, critical
+
+
+def parse_pressure_level(text):
+    """kern.memorystatus_vm_pressure_level -> 1|2|4, else None.
+
+    Anything unreadable or outside the documented levels is None (field
+    omitted): absence must never be defaulted to 1 ("normal")."""
+    try:
+        v = int((text or "").strip())
+    except ValueError:
+        return None
+    return v if v in _MEMPRESSURE_LEVELS else None
+
+
+def collect_pressure_level():
+    return parse_pressure_level(run_cmd(
+        ["/usr/sbin/sysctl", "-n", "kern.memorystatus_vm_pressure_level"]))
+
+
 def collect_load():
     return parse_loadavg(run_cmd(["/usr/sbin/sysctl", "-n", "vm.loadavg"]))
 
@@ -302,6 +341,29 @@ def read_pause_marker(marker_dir, machine):
     return d["state"]
 
 
+def recycle_in_progress(marker_dir, machine):
+    """XACA-1708-005: True while the VM-recycle sentinel <dir>/<machine>.recycle.json
+    exists (written by `ci-host.sh recycle`, XACA-1708-004). While it does the agent
+    claims nothing and advertises no idle slot.
+
+    FAIL CLOSED: the only "no recycle" answer is a definite does-not-exist
+    (ENOENT/ENOTDIR). Present, unparseable, wrong-shaped, or any other error
+    (EACCES, EIO, ...) all return True. The content is deliberately not
+    validated: existence is the contract. A machine name that cannot form a
+    sentinel filename returns False (the poll itself is refused as BAD_CONFIG).
+    """
+    if not machine or not re.match(r"^[A-Za-z0-9._-]+$", machine):
+        return False
+    path = os.path.join(marker_dir or DEFAULT_MARKER_DIR, machine + ".recycle.json")
+    try:
+        os.stat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError:
+        return True
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Cache for the slow collectors (memory_pressure, limactl list)
 # ---------------------------------------------------------------------------
@@ -325,10 +387,42 @@ class TTLCache(object):
         return val
 
 
+class SwapGrowthTracker(object):
+    """Trailing-window swap growth (XACA-1708-002).
+
+    Swap used is a sticky high-water mark on macOS, so the absolute value says
+    little; the CHANGE over the recent past says whether the host is actively
+    swapping. Samples live in memory only: an agent restart resets the window
+    and growth is omitted again until a sample at least half the window old
+    exists (a fresh agent must not report a fake 0).
+
+    sample(used) records and returns (growthBytes, actualWindowSec) or None.
+    The baseline is the OLDEST retained sample within `window` seconds; growth
+    may be negative.
+    """
+
+    def __init__(self, window=DEFAULT_SWAP_GROWTH_WINDOW, clock=time.monotonic):
+        self.window = float(window)
+        self.clock = clock
+        self._samples = []          # [(t, usedBytes)], oldest first
+
+    def sample(self, used):
+        now = self.clock()
+        self._samples.append((now, used))
+        cutoff = now - self.window
+        while len(self._samples) > 1 and self._samples[0][0] < cutoff:
+            self._samples.pop(0)
+        t0, u0 = self._samples[0]
+        span = now - t0
+        if span < self.window / 2.0:
+            return None
+        return used - u0, max(1, int(round(span)))
+
+
 # ---------------------------------------------------------------------------
 # Capacity report builder (Contract C3)
 # ---------------------------------------------------------------------------
-def collect_capacity(config, slots_state, cache=None):
+def collect_capacity(config, slots_state, cache=None, swap_tracker=None):
     """Build the C3 poll-request body. Failed collectors omit their field.
 
     slots_state: list of {"os","index","state","assignmentId"} (owned by the
@@ -336,6 +430,10 @@ def collect_capacity(config, slots_state, cache=None):
     `pauseMarker` reports the XACA-1440 marker for drift detection
     (EPIC-0070 decision 2026-10-06). The server allowlist accepts it
     (XACA-1441-025); build_poll_body decides whether it is sent.
+
+    XACA-1708-002 additive capacity fields (omitted when unknown):
+    memPressureLevel (1/2/4), and, when a swap_tracker is supplied,
+    swapGrowthBytes / swapGrowthWindowSec.
     """
     cache = cache if cache is not None else TTLCache()
     cap = {}
@@ -350,6 +448,10 @@ def collect_capacity(config, slots_state, cache=None):
     swap = collect_swap()
     if swap is not None:
         cap["swapUsedBytes"], cap["swapTotalBytes"] = swap
+        growth = swap_tracker.sample(swap[0]) if swap_tracker is not None else None
+        if growth is not None:
+            cap["swapGrowthBytes"], cap["swapGrowthWindowSec"] = growth
+    put("memPressureLevel", collect_pressure_level())
     load = collect_load()
     if load is not None:
         cap["load1"], cap["load5"], cap["load15"] = load
@@ -1403,10 +1505,14 @@ class PollLoop(object):
         self.allow_insecure = allow_insecure
         self.opener = opener
         self.cache = cache if cache is not None else TTLCache()
+        self.swap_tracker = SwapGrowthTracker(
+            config.get("swapGrowthWindowSec") or DEFAULT_SWAP_GROWTH_WINDOW)
         self.poll_after = float(POLL_AFTER_DEFAULT)
         self._last_kind = None
         self._last_marker = None
         self._last_control = None
+        self._last_recycling = None
+        self._recycling = False
         self.sup.bind_reporter(self.outbox.add)
 
     def _note(self, kind, level, msg, *args):
@@ -1425,7 +1531,18 @@ class PollLoop(object):
     def step(self):
         self._guard("reap", self.sup.reap)
         slots = self._guard("slots_state", self.sup.slots_state) or []
-        report = collect_capacity(self.config, slots, self.cache)
+        recycling = recycle_in_progress(self.config.get("markerDir"),
+                                        self.config.get("machine"))
+        if recycling:
+            # XACA-1708-005: advertise no idle slot ("cleaning" is online but not
+            # claimable, assignmentId stays null); busy/starting/broken pass through.
+            slots = [dict(s, state="cleaning") if s.get("state") == "idle" else s
+                     for s in slots]
+        if recycling != self._last_recycling:
+            log.info("recycle sentinel: %s", "present, claims held" if recycling else "absent")
+            self._last_recycling = recycling
+        self._recycling = recycling
+        report = collect_capacity(self.config, slots, self.cache, self.swap_tracker)
         marker = report.get("pauseMarker")
         if marker != self._last_marker:
             log.info("pause marker: %s", marker)
@@ -1477,13 +1594,21 @@ class PollLoop(object):
         for cid in resp["cancel"]:
             log.info("cancel requested id=%s", cid)
             self._guard("cancel", self.sup.cancel, cid)
-        runnable = resp["enabled"] and not resp["paused"]
+        runnable = resp["enabled"] and not resp["paused"] and not self._recycling
         for a in resp["assignments"]:
+            # XACA-1708-007: the sentinel is first read at the top of step(), BEFORE the poll round trip.
+            # `ci-host.sh recycle` may write it (and run its "idle?" re-check) inside that window; read it
+            # again immediately before starting anything so a job is never started behind a visible sentinel.
+            if runnable and not self._recycling and recycle_in_progress(
+                    self.config.get("markerDir"), self.config.get("machine")):
+                self._recycling = True
+                runnable = False
             if not runnable:
                 # Contract says this list is empty when paused/disabled. If it is not,
                 # start NOTHING; fail the assignment so the server frees it.
                 log.warning("assignment id=%s received while paused/disabled; not started", a.id)
-                self.outbox.add(a.id, "failed", reason="agent-paused")
+                self.outbox.add(a.id, "failed",
+                                reason="agent-recycling" if self._recycling else "agent-paused")
                 continue
             log.info("assignment id=%s os=%s runner=%s", a.id, a.os, a.runner_name)
             try:

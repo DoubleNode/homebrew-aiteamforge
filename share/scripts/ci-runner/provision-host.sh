@@ -67,6 +67,10 @@
 #   LaunchDaemon com.doublenode.ci-runner.<host>.macos     keeps it running
 #   LaunchDaemon com.doublenode.ci-runner.<host>.reporter  telemetry push every
 #                60 s (XACA-1387-004; see "REPORTER" below)
+#   LaunchDaemon com.doublenode.ci-runner.<host>.recycle   (XACA-1708-005) every 6 h runs
+#                `ci-host.sh recycle --host <host> --if-idle --min-uptime 86400` as root: restarts
+#                the idle Lima VM so host RAM/swap it never gives back is reclaimed. Skipped under
+#                --no-linux; --no-recycle-schedule removes it. See "RECYCLE SCHEDULE" below.
 #   (.<host> is omitted from the daemon labels under --legacy-names.)
 #
 # Daemons (System domain, UserName=ci-runner) rather than LaunchAgents: an
@@ -175,6 +179,16 @@ PLIST_REPORTER=""
 REPORTER_DEST="${LIBEXEC_DIR}/ci-runner-reporter.sh"
 REPORTER_MACHINE=""      # derived: <host>
 REPORTER_INTERVAL=60
+
+# Recycle schedule (XACA-1708-005). Default ON for any host with a Linux lane.
+RECYCLE_SCHEDULE=1
+RECYCLE_EVERY_HOURS=6          # --recycle-every-hours N  -> StartInterval N*3600
+RECYCLE_MIN_UPTIME_HOURS=24    # --recycle-min-uptime-hours N -> ci-host.sh --min-uptime N*3600
+LABEL_RECYCLE=""               # derived
+PLIST_RECYCLE=""
+# Root-owned runtime copy of ci-host.sh + its lib + provision-host.sh (ci-host derives the host's names by
+# sourcing ../provision-host.sh relative to lib/). A root daemon must never execute a user-writable checkout.
+RECYCLE_RUNTIME_DIR="${LIBEXEC_DIR}/ci-host"
 REPORTER_CFG_DIR="${CI_HOME}/.aiteamforge"
 REPORTER_CFG="${REPORTER_CFG_DIR}/fleet-config.json"
 # XACA-1443-016: the client payload is chosen by PROVENANCE, never by "does some directory exist".
@@ -214,6 +228,9 @@ AGENT_CFG="${AGENT_CFG_DIR}/agent.json"
 AGENT_KEY="${AGENT_CFG_DIR}/agent.key"
 AGENT_STATE_DIR="${CI_AGENT_STATE_DIR:-/usr/local/var/ci-pool-agent}"
 AGENT_LOG_DIR="${CI_AGENT_LOG_DIR:-/Library/Logs/ci-pool-agent}"
+# Root-owned (NOT ci-runner's log dir: a ci-runner-owned dir would let a job plant a symlink that root then opens).
+# Default is a sibling of the agent log dir, so every env redirect of CI_AGENT_LOG_DIR also sandboxes it.
+RECYCLE_LOG_DIR="${CI_RECYCLE_LOG_DIR:-$(dirname "$AGENT_LOG_DIR")/ci-runner}"
 AGENT_SRC="${_PH_CLIENT}/ci-pool-agent.py"
 GUEST_JIT_SRC="${_PH_CLIENT}/ci-runner-jit-guest.sh"
 MAC_JIT_SRC="${_PH_CLIENT}/ci-runner-jit-macos.sh"
@@ -275,6 +292,11 @@ Fleet CI Pool agent (XACA-1442, opt-in; nothing is installed without --with-agen
   --no-pause-marker    agent.json gets "sendPauseMarker": false (default true): the agent stops sending
                        its XACA-1440 pause marker; for hosts polling an older server that rejects it.
 
+Recycle schedule (XACA-1708-005; default ON when the host has a Linux lane):
+  --no-recycle-schedule          install no recycle daemon, and REMOVE one a previous provision installed
+  --recycle-every-hours <N>      run interval, hours (default 6)
+  --recycle-min-uptime-hours <N> only recycle a VM up at least this long (default 24)
+
 Development aid (runs as the CURRENT user, no daemons, no registration):
        bash provision-host.sh --host <name> --baseline-only --vm-name <vm>
 EOF
@@ -316,6 +338,9 @@ while [ $# -gt 0 ]; do
     --jit-slots) [ $# -ge 2 ] || { usage >&2; exit 2; }; case "$2" in ''|*[!0-9]*) echo "provision-host.sh: --jit-slots needs a non-negative integer, got '$2'" >&2; usage >&2; exit 2 ;; esac; JIT_SLOTS="$((10#$2))"; shift 2 ;;
     --refuse-if-busy) REFUSE_IF_BUSY=1; shift ;;
     --no-pause-marker) SEND_PAUSE_MARKER=0; shift ;;
+    --no-recycle-schedule) RECYCLE_SCHEDULE=0; shift ;;
+    --recycle-every-hours) [ $# -ge 2 ] || { usage >&2; exit 2; }; need_uint "$1" "$2"; RECYCLE_EVERY_HOURS="$((10#$2))"; shift 2 ;;
+    --recycle-min-uptime-hours) [ $# -ge 2 ] || { usage >&2; exit 2; }; need_uint "$1" "$2"; RECYCLE_MIN_UPTIME_HOURS="$((10#$2))"; shift 2 ;;
     --agent-key-file) [ $# -ge 2 ] || { usage >&2; exit 2; }; [ -n "$2" ] || { echo "provision-host.sh: --agent-key-file needs a path, got ''" >&2; exit 2; }; AGENT_KEY_FILE="$2"; shift 2 ;;
     --telemetry-key-file) [ $# -ge 2 ] || { usage >&2; exit 2; }; [ -n "$2" ] || { echo "provision-host.sh: --telemetry-key-file needs a path, got ''" >&2; exit 2; }; TELEMETRY_KEY_FILE="$2"; shift 2 ;;
     --server-url) [ $# -ge 2 ] || { usage >&2; exit 2; }; [ -n "$2" ] || { echo "provision-host.sh: --server-url needs a URL, got ''" >&2; exit 2; }; SERVER_URL="$2"; shift 2 ;;
@@ -481,10 +506,12 @@ derive_names() {
   LABEL_MAC="com.doublenode.ci-runner${sfx}.macos"
   LABEL_REPORTER="com.doublenode.ci-runner${sfx}.reporter"
   LABEL_AGENT="com.doublenode.ci-runner${sfx}.agent"
+  LABEL_RECYCLE="com.doublenode.ci-runner${sfx}.recycle"
   PLIST_VM="${LD_DIR}/${LABEL_VM}.plist"
   PLIST_MAC="${LD_DIR}/${LABEL_MAC}.plist"
   PLIST_REPORTER="${LD_DIR}/${LABEL_REPORTER}.plist"
   PLIST_AGENT="${LD_DIR}/${LABEL_AGENT}.plist"
+  PLIST_RECYCLE="${LD_DIR}/${LABEL_RECYCLE}.plist"
 }
 derive_names
 
@@ -808,6 +835,86 @@ plist_agent() {
 </dict>
 </plist>
 EOF
+}
+
+# ── RECYCLE SCHEDULE (XACA-1708-005) ──────────────────────────────────────
+# Interval LaunchDaemon, root (like the agent: ci-host.sh uses `sudo -n`, which root has, and limactl
+# runs as ci-runner through it). RunAtLoad is false so provisioning never restarts a VM as a side
+# effect; the first run is one interval later. `--if-idle` makes every tick a safe NOOP while a job
+# runs; a BUSY (rc 13) tick simply tries again next interval. Absent while the host has no Linux lane.
+# The recycle's busy check is LOCAL (Runner.Worker + pool agent slots.json): root has no gh login and the
+# daemon carries no GitHub token or GH_CONFIG_DIR.
+recycle_enabled() { [ "$RECYCLE_SCHEDULE" = "1" ] && [ "$NO_LINUX" = "0" ]; }
+
+plist_recycle() {
+  cat <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>${LABEL_RECYCLE}</string>
+  <!-- No UserName: root, see the comment above plist_recycle in provision-host.sh. No secret here. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>${RECYCLE_RUNTIME_DIR}/ci-host.sh</string>
+    <string>recycle</string>
+    <string>--host</string><string>${HOST}</string>
+    <string>--if-idle</string>
+    <string>--min-uptime</string><string>$((RECYCLE_MIN_UPTIME_HOURS * 3600))</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>${CI_PATH}</string>
+    <!-- XACA-1708-007: pin the dirs the agent was provisioned with; a default here would read a
+         missing slots.json / marker as "no slots" on an overridden host. -->
+    <key>CIH_AGENT_STATE_DIR</key><string>${AGENT_STATE_DIR}</string>
+    <key>CIH_STATE_DIR</key><string>${MANIFEST_DIR}</string>
+  </dict>
+  <key>StartInterval</key><integer>$((RECYCLE_EVERY_HOURS * 3600))</integer>
+  <key>RunAtLoad</key><false/>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>${RECYCLE_LOG_DIR}/recycle.${HOST}.out.log</string>
+  <key>StandardErrorPath</key><string>${RECYCLE_LOG_DIR}/recycle.${HOST}.err.log</string>
+</dict>
+</plist>
+EOF
+}
+
+# Copy ci-host.sh, its lib and provision-host.sh to the root-owned runtime dir (cmp-guarded: a re-run
+# with identical sources writes nothing). Sources come from this script's own directory.
+stage_recycle_runtime() {
+  local f
+  for f in ci-host.sh provision-host.sh lib/ci-host-lib.sh; do
+    [ -f "${_PH_DIR}/${f}" ] || die "recycle schedule: source not found: ${_PH_DIR}/${f} (re-run with --no-recycle-schedule to skip it)"
+  done
+  install -d -m 755 -o root -g wheel "$RECYCLE_RUNTIME_DIR" "${RECYCLE_RUNTIME_DIR}/lib" "$RECYCLE_LOG_DIR"
+  for f in ci-host.sh provision-host.sh lib/ci-host-lib.sh; do
+    if install_if_changed "${_PH_DIR}/${f}" "${RECYCLE_RUNTIME_DIR}/${f}" 755 root wheel; then log "installed ${RECYCLE_RUNTIME_DIR}/${f}"; fi
+  done
+  return 0
+}
+
+# Install (or, when disabled, remove) the recycle daemon. Touches ONLY its own label: no other daemon
+# is booted out, bootstrapped or kickstarted, whatever changed here.
+stage_recycle() {
+  local pchanged=0
+  if ! recycle_enabled; then
+    if [ "$NO_LINUX" = "1" ]; then
+      log "recycle schedule: skipped (--no-linux: no VM to recycle)"
+    elif [ -e "$PLIST_RECYCLE" ] || daemon_loaded "$LABEL_RECYCLE"; then
+      if daemon_loaded "$LABEL_RECYCLE"; then launchctl bootout "system/$LABEL_RECYCLE" || warn "bootout $LABEL_RECYCLE returned non-zero"; fi
+      rm -f "$PLIST_RECYCLE"
+      log "recycle schedule disabled (--no-recycle-schedule): removed ${LABEL_RECYCLE}"
+    else
+      log "recycle schedule disabled (--no-recycle-schedule): nothing installed"
+    fi
+    return 0
+  fi
+  stage_recycle_runtime
+  if install_plist "$PLIST_RECYCLE" plist_recycle; then pchanged=1; log "wrote $PLIST_RECYCLE"; fi
+  ensure_daemon_loaded "$LABEL_RECYCLE" "$PLIST_RECYCLE" "$pchanged"
+  return 0
 }
 
 # ── Guest-side scripts (run inside the VM as root) ────────────────────────
@@ -1463,6 +1570,10 @@ do_status() {
   if [ -f "$REPORTER_DEST" ]; then log "  script: ${REPORTER_DEST}"; else log "  script MISSING: ${REPORTER_DEST}"; rc=1; fi
   if [ -f "$REPORTER_CFG" ]; then log "  credentials: ${REPORTER_CFG} present"; else log "  credentials MISSING: ${REPORTER_CFG}"; rc=1; fi
   log "  last exit: $(launchctl print "system/${LABEL_REPORTER}" 2>/dev/null | sed -n 's/^[[:space:]]*last exit code = //p' | awk 'NR==1')"
+  if [ -e "$PLIST_RECYCLE" ]; then   # informational only: never changes the exit code
+    log "== recycle schedule (XACA-1708-005) =="
+    log "  ${LABEL_RECYCLE}: $(daemon_state "$LABEL_RECYCLE")  (interval job: loaded-idle is healthy)"
+  fi
   if [ "$WITH_AGENT" = "1" ]; then
     log "== CI pool agent (XACA-1442) =="
     st=$(daemon_state "$LABEL_AGENT"); log "  ${LABEL_AGENT}: ${st}  (KeepAlive: running is healthy)"
@@ -1595,6 +1706,19 @@ do_dry_run() {
     plist_agent >"$alint"
     if plutil -lint "$alint" >/dev/null; then plan "plist_agent: generated plist passes plutil -lint"; else plan "plist_agent: plist LINT FAILED"; fi
     rm -f "$alint"
+  fi
+  if recycle_enabled; then
+    local rlint
+    plan "recycle (XACA-1708-005): install ci-host.sh + provision-host.sh + lib/ci-host-lib.sh -> ${RECYCLE_RUNTIME_DIR}/ (root:wheel 755; sources $([ -f "${_PH_DIR}/ci-host.sh" ] && [ -f "${_PH_DIR}/lib/ci-host-lib.sh" ] && echo present || echo 'MISSING: a real run would REFUSE'))"
+    plan "  would: write ${PLIST_RECYCLE} ($([ -f "$PLIST_RECYCLE" ] && echo exists || echo absent)); daemon $(daemon_state "$LABEL_RECYCLE"); root, StartInterval $((RECYCLE_EVERY_HOURS * 3600)) (every ${RECYCLE_EVERY_HOURS} h), RunAtLoad false, runs: ci-host.sh recycle --host ${HOST} --if-idle --min-uptime $((RECYCLE_MIN_UPTIME_HOURS * 3600)); logs ${RECYCLE_LOG_DIR}"
+    rlint=$(mktemp /tmp/ci-runner-dryrun.XXXXXX)
+    plist_recycle >"$rlint"
+    if plutil -lint "$rlint" >/dev/null; then plan "plist_recycle: generated plist passes plutil -lint"; else plan "plist_recycle: plist LINT FAILED"; fi
+    rm -f "$rlint"
+  elif [ "$NO_LINUX" = "1" ]; then
+    plan "recycle: SKIPPED (--no-linux): no VM to recycle"
+  else
+    plan "recycle: DISABLED (--no-recycle-schedule): would remove ${PLIST_RECYCLE} ($([ -f "$PLIST_RECYCLE" ] && echo 'exists, would be booted out and deleted' || echo 'absent, nothing to do'))"
   fi
   plan "finish: print status; delete ${TOKEN_FILE:-<token file>}"
 }
@@ -1743,6 +1867,7 @@ if [ "$MODE" != "baseline-only" ]; then
     stage_mac_jit
     stage_agent
   fi
+  stage_recycle
   log "provisioning complete; status:"
   do_status || warn "status reports something not up — see above"
   write_provision_manifest

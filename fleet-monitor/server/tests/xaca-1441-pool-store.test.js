@@ -32,6 +32,17 @@ test('defaults are dormant and seeded', () => {
     assert.deepEqual(S.validatePool(S.defaultPool()), []);
 });
 
+test('XACA-1708: pressure thresholds default, and a pool stored BEFORE they existed still validates', () => {
+    assert.equal(S.DEFAULT_THRESHOLDS.memPressureLevel, 2);
+    assert.equal(S.DEFAULT_THRESHOLDS.swapGrowthBytesPerHour, S.GIB);
+    const old = S.defaultPool();
+    delete old.config.thresholds.memPressureLevel;
+    delete old.config.thresholds.swapGrowthBytesPerHour;
+    assert.deepEqual(S.validatePool(old), []);
+    delete old.config.thresholds.memFreePct;   // a genuinely required key is still required
+    assert.notDeepEqual(S.validatePool(old), []);
+});
+
 test('a new machine record defaults to enabled:false, not paused', () => {
     const { store } = tmpStore();
     assert.equal(store.upsertMachine('m4mini', { prefers: 'long' }).ok, true);
