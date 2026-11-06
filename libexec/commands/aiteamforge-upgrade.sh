@@ -6675,7 +6675,8 @@ update_claude_settings() {
 
   # XACA-1227: one-time, receipt-guarded removal of the 5 enabledPlugins keys
   # the pre-fix template force-enabled. Single source of truth for the id list,
-  # receipt and backup rules: _xaca1227_remove_legacy_template_plugins() in
+  # receipt (v2 set keyed by canonical settings path, written BEFORE the file
+  # write) and backup rules: _xaca1227_remove_legacy_template_plugins() in
   # install-claude-config.sh. Same subshell/fail-soft pattern as above.
   local _xaca1227_result="" _xaca1227_rc=0
   _xaca1227_result="$(

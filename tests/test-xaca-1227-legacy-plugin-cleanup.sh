@@ -24,6 +24,10 @@
 #   C7  dry-run (helper and upgrade DRY_RUN branch): no write/receipt/backup
 #   C8  backup byte-identical to the original; file mode preserved
 #   C9  invalid JSON / missing / symlink / non-object enabledPlugins: untouched
+#   C11 TABLE-DRIVEN ADVERSARIAL ROWS R1-R11 (PR #1287 blocking findings 018/019):
+#       receipt identity/provenance; each row seeds state, lets the user
+#       deliberately re-enable a legacy id, re-runs, and asserts it SURVIVES.
+#       Controls run R1-R5 against tap 56b6a55a and assert they FAIL there.
 #   C10 merge-failure guard: an invalid-JSON target through install_settings_json
 #       (inside `if`) is not truncated; control: pristine code truncates it
 #
@@ -150,6 +154,7 @@ new_sandbox() {
 }
 settings() { printf '%s' "$SB/home/.claude/settings.json"; }
 receipt()  { printf '%s' "$SB/aiteamforge/.xaca1227-legacy-plugins.receipt"; }
+canon_path() { printf '%s/%s' "$(cd "$(dirname "$1")" && pwd -P)" "$(basename "$1")"; }
 cksum_of() { cksum < "$1" 2>/dev/null; }
 mode_of()  { stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1" 2>/dev/null; }
 count_backups() { find "$SB/aiteamforge/.backups" -type d -name 'xaca1227-legacy-plugins-*' 2>/dev/null | wc -l | tr -d '[:space:]'; }
@@ -279,8 +284,8 @@ elif [ "$(legacy_present_count "$S")" != "0" ]; then
     test_fail "legacy keys remain"
 elif [ "$BEFORE_REST" != "$AFTER_REST" ]; then
     test_fail "other top-level keys changed"
-elif [[ "$OUT" != *"kept-user=2"* ]]; then
-    test_fail "report should say kept-user=2: $OUT"
+elif [[ "$OUT" != *"kept=2"* ]] || [[ "$OUT" == *"kept-user="* ]]; then
+    test_fail "report should say kept=2 (field renamed from kept-user): $OUT"
 else
     test_pass
 fi
@@ -390,18 +395,22 @@ elif [ "$(jq -r '.enabledPlugins["firebase@claude-plugins-official"]' "$(setting
 elif [ "$(count_backups)" != "$_nb" ]; then test_fail "second run created another backup"
 else test_pass; fi
 
-test_start "C5b: a receipt that covers a DIFFERENT target does not count; a corrupt receipt does not count"
+test_start "C5b: a receipt that covers a DIFFERENT target does not count; an UNREADABLE receipt -> untouched rc 3 (spec: modify nothing)"
 new_sandbox "$SEED_ALL"
 printf '{"ticket":"XACA-1227","target":"/somewhere/else/settings.json"}\n' > "$(receipt)"
 run_helper "$GOOD_TMPL_DIR"
 _rcA="$RC"; _outA="$OUT"; _remA="$(legacy_present_count "$(settings)")"
 new_sandbox "$SEED_ALL"
 printf 'not json at all' > "$(receipt)"
+_ckC="$(cksum_of "$(settings)")"
 run_helper "$GOOD_TMPL_DIR"
-if [ "$_rcA" = "2" ] && [ "$_remA" = "0" ] && [ "$RC" = "2" ] && [ "$(legacy_present_count "$(settings)")" = "0" ]; then
+# XACA-1227 review spec: an unparseable receipt is "untouched" (rc 3), never a
+# license to migrate (the receipt is the only protection for later user choices).
+if [ "$_rcA" = "2" ] && [ "$_remA" = "0" ] && [ "$RC" = "3" ] \
+   && [ "$(cksum_of "$(settings)")" = "$_ckC" ] && [ "$(legacy_true_count "$(settings)")" = "5" ]; then
     test_pass
 else
-    test_fail "other-target receipt: rc=$_rcA remaining=$_remA ($_outA); corrupt receipt: rc=$RC remaining=$(legacy_present_count "$(settings)")"
+    test_fail "other-target receipt: rc=$_rcA remaining=$_remA ($_outA); corrupt receipt: rc=$RC (want 3) remaining=$(legacy_true_count "$(settings)") (want 5 untouched)"
 fi
 
 # ===========================================================================
@@ -476,7 +485,7 @@ if [ -z "$BK" ]; then test_fail "no backup file found"
 elif ! cmp -s "$BK" "$SB/original.json"; then test_fail "backup differs from the original"
 elif [ "$(mode_of "$(settings)")" != "600" ]; then test_fail "mode is $(mode_of "$(settings)"), want 600"
 elif [ "$(count_backups)" != "1" ]; then test_fail "expected exactly 1 backup dir, got $(count_backups)"
-elif [ "$(jq -r '.backup' "$(receipt)")" != "$BK" ]; then test_fail "receipt backup path != actual backup"
+elif [ "$(jq -r --arg c "$(canon_path "$(settings)")" '(.targets[$c].backup // .backup)' "$(receipt)")" != "$BK" ]; then test_fail "receipt backup path != actual backup"
 else test_pass; fi
 
 # ===========================================================================
@@ -555,6 +564,348 @@ else
         test_fail "pristine code did not truncate; C10a may be vacuous. target now: $(head -c 200 "$(settings)")"
     fi
 fi
+
+# ===========================================================================
+# C11 - TABLE-DRIVEN ADVERSARIAL ROWS (PR #1287 blocking findings 018 / 019)
+# ===========================================================================
+# Provenance rule: the helper cannot tell a template-originated `true` from a
+# user's deliberate `true`, so the RECEIPT is the only thing protecting later
+# user choices. Every row below: seed state -> (first migration) -> the user
+# deliberately sets a legacy id to true again -> second run -> assert the key
+# SURVIVES and the receipt/output match the spec. Receipt v2 =
+# {"ticket":"XACA-1227","version":2,"targets":{"<canon>":{removed,backup,at}}}
+# keyed by canon = $(cd "$(dirname t)" && pwd -P)/basename.
+#
+# Row functions return 0 = every spec assertion holds, 1 = an assertion failed
+# (ROW_MSG says which), 2 = harness/setup problem. The CONTROL driver runs the
+# SAME function against tap 56b6a55a and passes ONLY on rc 1 (assertion red on
+# pre-fix code); rc 2 can never masquerade as a discriminating control.
+FW_FIRE='firebase@claude-plugins-official'
+FW_SWIFT='swift-lsp@claude-plugins-official'
+ROW_MSG=""
+
+# th_* runners: explicit CLAUDE_CONFIG_DIR spelling + libexec, all sandboxed.
+th_guard() {
+    case "$1" in
+        "$SB"/*) return 0 ;;
+    esac
+    echo "FATAL: sandbox escape: $1" >&2; exit 99
+}
+th_helper() {   # <cfg-spelling> <tmpl-dir> [libexec] -> OUT RC
+    local cfg="$1" tmpl="$2" lib="${3:-$UT_LIBEXEC}"
+    th_guard "$cfg"
+    OUT="$(
+        export HOME="$SB/home" AITEAMFORGE_DIR="$SB/aiteamforge" CLAUDE_CONFIG_DIR="$cfg" TEMPLATE_DIR="$tmpl"
+        # shellcheck source=/dev/null
+        source "$lib/installers/install-claude-config.sh" >/dev/null 2>&1
+        set +e
+        _xaca1227_remove_legacy_template_plugins
+        echo "::rc=$?"
+    )"
+    RC="${OUT##*::rc=}"
+    OUT="${OUT%::rc=*}"
+}
+th_install() {  # <cfg-spelling> [libexec] [tmpl-dir] -> IOUT
+    local cfg="$1" lib="${2:-$UT_LIBEXEC}" tmpl="${3:-$GOOD_TMPL_DIR}"
+    th_guard "$cfg"
+    IOUT="$(
+        export HOME="$SB/home" AITEAMFORGE_DIR="$SB/aiteamforge" CLAUDE_CONFIG_DIR="$cfg" TEMPLATE_DIR="$tmpl"
+        # shellcheck source=/dev/null
+        source "$lib/installers/install-claude-config.sh" >/dev/null 2>&1
+        if install_settings_json; then echo "::install-rc=0"; else echo "::install-rc=1"; fi
+    ) 2>&1)"
+}
+th_upgrade() {  # <cfg-spelling> -> UOUT   (the REAL extracted update_claude_settings)
+    local cfg="$1"
+    th_guard "$cfg"
+    UOUT="$(
+        export HOME="$SB/home" AITEAMFORGE_DIR="$SB/aiteamforge" CLAUDE_CONFIG_DIR="$cfg"
+        LIBEXEC_DIR="$UT_LIBEXEC"
+        FRAMEWORK_DIR="$SB/fw"
+        WORKING_DIR="$SB/aiteamforge"
+        DRY_RUN=false
+        print_section() { :; }
+        print_info() { :; }
+        print_success() { echo "OK: $*"; }
+        print_warning() { echo "WARN: $*"; }
+        # shellcheck source=/dev/null
+        source "$UPD_FN_SRC"
+        update_claude_settings
+    ) 2>&1)"
+}
+
+row_world() {   # fresh sandbox + $SB/real, $SB/realB config dirs
+    new_sandbox ""
+    mkdir -p "$SB/real" "$SB/realB"
+}
+set_key_true() {  # <file> <id>
+    jq --arg k "$2" '.enabledPlugins[$k] = true' "$1" > "$1.tmp.$$" && mv "$1.tmp.$$" "$1"
+}
+key_is_true() { [ "$(jq -r --arg k "$2" '.enabledPlugins[$k]' "$1" 2>/dev/null)" = "true" ]; }
+receipt_v2_has() {  # <canon-target>
+    jq -e --arg c "$1" '.version == 2 and .ticket == "XACA-1227" and (.targets | type) == "object" and (.targets | has($c))' "$(receipt)" >/dev/null 2>&1
+}
+unlock_aitf() { chmod 755 "$SB/aiteamforge" 2>/dev/null; return 0; }
+lock_aitf() {   # make ONLY new files in AITEAMFORGE_DIR impossible; .backups stays writable
+    mkdir -p "$SB/aiteamforge/.backups"
+    chmod 755 "$SB/aiteamforge/.backups"
+    chmod 555 "$SB/aiteamforge"
+}
+row_fail() { ROW_MSG="$*"; return 1; }
+row_setup_fail() { ROW_MSG="SETUP: $*"; return 2; }
+
+# --- R2b/R3-R5 (+variants): re-run via a different spelling of the same file --
+row_survive() {  # <spelling-token> [libexec]
+    local spell="$1" lib="${2:-$UT_LIBEXEC}" S cfg ck c
+    row_world
+    S="$SB/real/settings.json"
+    printf '%s\n' "$SEED_ALL" > "$S"
+    c="$(canon_path "$S")"
+    th_helper "$SB/real" "$GOOD_TMPL_DIR" "$lib"
+    if [ "$RC" != "2" ] || [ "$(legacy_present_count "$S")" != "0" ]; then row_setup_fail "first migration rc=$RC out=$OUT"; return; fi
+    set_key_true "$S" "$FW_FIRE"
+    ln -s "$SB/real" "$SB/link"
+    case "$spell" in
+        plain)    cfg="$SB/real" ;;
+        slash)    cfg="$SB/real/" ;;
+        dslash)   cfg="$SB/real//" ;;
+        symlink)  cfg="$SB/link" ;;
+        dotdot)   cfg="$SB/real/../real" ;;
+        combo)    cfg="$SB/link/../real/" ;;
+        *)        row_setup_fail "unknown spelling $spell"; return ;;
+    esac
+    ck="$(cksum_of "$S")"
+    th_helper "$cfg" "$GOOD_TMPL_DIR" "$lib"
+    if ! key_is_true "$S" "$FW_FIRE"; then row_fail "user's re-enabled $FW_FIRE was REMOVED on rerun via '$cfg' (rc=$RC out=$OUT)"; return; fi
+    if [ "$(cksum_of "$S")" != "$ck" ]; then row_fail "settings.json modified on rerun via '$cfg'"; return; fi
+    if [ "$RC" != "0" ] || [[ "$OUT" != *"already migrated"* ]]; then row_fail "rerun via '$cfg': rc=$RC out=$OUT (want 0 / already migrated)"; return; fi
+    if ! receipt_v2_has "$c"; then row_fail "receipt is not a v2 set holding canonical $c: $(cat "$(receipt)" 2>/dev/null)"; return; fi
+    if [ "$(jq -r '.targets | length' "$(receipt)")" != "1" ]; then row_fail "one physical file produced $(jq -r '.targets | length' "$(receipt)") receipt entries"; return; fi
+    return 0
+}
+
+# --- R2: migrate A, migrate B (same AITEAMFORGE_DIR), re-enable on A, rerun A -
+row_two_targets() {  # [libexec]
+    local lib="${1:-$UT_LIBEXEC}" A B ca cb ck
+    row_world
+    A="$SB/real/settings.json"; B="$SB/realB/settings.json"
+    printf '%s\n' "$SEED_ALL" > "$A"; printf '%s\n' "$SEED_ALL" > "$B"
+    ca="$(canon_path "$A")"; cb="$(canon_path "$B")"
+    th_helper "$SB/real" "$GOOD_TMPL_DIR" "$lib"; if [ "$RC" != "2" ]; then row_setup_fail "migrate A rc=$RC: $OUT"; return; fi
+    th_helper "$SB/realB" "$GOOD_TMPL_DIR" "$lib"; if [ "$RC" != "2" ]; then row_setup_fail "migrate B rc=$RC: $OUT"; return; fi
+    set_key_true "$A" "$FW_FIRE"; set_key_true "$B" "$FW_SWIFT"
+    ck="$(cksum_of "$A")"
+    th_helper "$SB/real" "$GOOD_TMPL_DIR" "$lib"
+    if ! key_is_true "$A" "$FW_FIRE"; then row_fail "A's re-enabled key removed after B was migrated in between (rc=$RC out=$OUT)"; return; fi
+    if [ "$RC" != "0" ] || [ "$(cksum_of "$A")" != "$ck" ] || [[ "$OUT" != *"already migrated"* ]]; then row_fail "A rerun rc=$RC out=$OUT"; return; fi
+    th_helper "$SB/realB" "$GOOD_TMPL_DIR" "$lib"
+    if ! key_is_true "$B" "$FW_SWIFT"; then row_fail "B's re-enabled key removed on rerun (rc=$RC out=$OUT)"; return; fi
+    if ! receipt_v2_has "$ca"; then row_fail "receipt lost A ($ca): $(cat "$(receipt)" 2>/dev/null)"; return; fi
+    if ! receipt_v2_has "$cb"; then row_fail "receipt lost B ($cb): $(cat "$(receipt)" 2>/dev/null)"; return; fi
+    return 0
+}
+
+# --- R1: fresh install (target absent) -> user enables legacy id -> upgrade ---
+row_fresh_then_upgrade() {  # [libexec]
+    local lib="${1:-$UT_LIBEXEC}" S c ck
+    row_world
+    S="$SB/real/settings.json"; c="$(canon_path "$S")"
+    th_install "$SB/real" "$lib" "$GOOD_TMPL_DIR"
+    if [ ! -f "$S" ] || [ "$(legacy_present_count "$S")" != "0" ]; then row_setup_fail "fresh install produced no clean settings: $IOUT"; return; fi
+    if [ ! -f "$(receipt)" ]; then row_fail "fresh install recorded NO receipt (target never held template-originated keys; helper cannot tell a later user enable apart)"; return; fi
+    if ! receipt_v2_has "$c"; then row_fail "fresh-install receipt does not cover $c as v2: $(cat "$(receipt)")"; return; fi
+    if [ "$(jq -c --arg c "$c" '.targets[$c].removed' "$(receipt)")" != "[]" ]; then row_fail "fresh-install receipt removed != []: $(cat "$(receipt)")"; return; fi
+    set_key_true "$S" "$FW_SWIFT"
+    ck="$(cksum_of "$S")"
+    th_helper "$SB/real" "$GOOD_TMPL_DIR" "$lib"
+    if ! key_is_true "$S" "$FW_SWIFT"; then row_fail "helper removed the user's $FW_SWIFT after a fresh install (rc=$RC out=$OUT)"; return; fi
+    if [ "$(cksum_of "$S")" != "$ck" ]; then row_fail "helper modified settings after fresh install"; return; fi
+    th_upgrade "$SB/real"
+    if ! key_is_true "$S" "$FW_SWIFT"; then row_fail "UPGRADE (update_claude_settings) removed the user's $FW_SWIFT; out: $UOUT"; return; fi
+    if [[ "$UOUT" == *"legacy-plugins: removed="* ]]; then row_fail "upgrade reported a removal: $UOUT"; return; fi
+    return 0
+}
+
+# --- TABLE (spelling rows; id|token|description) ------------------------------
+TABLE_SURVIVE='R3|slash|trailing slash CLAUDE_CONFIG_DIR=real/
+R3b|dslash|double trailing slash real//
+R4|symlink|parent reached through a symlink (link -> real)
+R5|dotdot|non-normalized real/../real
+R5b|combo|symlink + dotdot + trailing slash (link/../real/)'
+
+test_start "R1: fresh install (target absent) -> user enables legacy id -> helper AND upgrade update_claude_settings leave it; v2 receipt records removed=[]"
+row_fresh_then_upgrade; _r=$?
+if [ "$_r" = 0 ]; then test_pass; else test_fail "$ROW_MSG"; fi
+
+test_start "R2: migrate A, migrate B (same AITEAMFORGE_DIR), user re-enables on A, rerun A -> survives; receipt holds A AND B"
+row_two_targets; _r=$?
+if [ "$_r" = 0 ]; then test_pass; else test_fail "$ROW_MSG"; fi
+
+test_start "R2b: plain same-spelling rerun survives (baseline row of the spelling table)"
+row_survive plain; _r=$?
+if [ "$_r" = 0 ]; then test_pass; else test_fail "$ROW_MSG"; fi
+
+while IFS='|' read -r _id _spell _desc; do
+    [ -n "$_id" ] || continue
+    test_start "$_id: $_desc -> re-enabled key survives, 'already migrated', single canonical receipt entry"
+    row_survive "$_spell"; _r=$?
+    if [ "$_r" = 0 ]; then test_pass; else test_fail "$ROW_MSG"; fi
+done <<EOT
+$TABLE_SURVIVE
+EOT
+
+# --- R6: removal path, receipt write forced to fail ---------------------------
+test_start "R6a: removal path, AITEAMFORGE_DIR not writable for the receipt -> rc 1, settings byte-identical, 'could not record receipt; nothing removed'"
+if [ "$(id -u)" = "0" ]; then
+    test_skip_loud "running as root: chmod cannot make the receipt unwritable"
+else
+    row_world
+    printf '%s\n' "$SEED_ALL" > "$SB/real/settings.json"
+    cp "$SB/real/settings.json" "$SB/pre.json"
+    lock_aitf
+    th_helper "$SB/real" "$GOOD_TMPL_DIR"
+    unlock_aitf
+    if [ "$RC" != "1" ]; then test_fail "rc=$RC (want 1); out: $OUT"
+    elif ! cmp -s "$SB/real/settings.json" "$SB/pre.json"; then test_fail "settings.json changed although the receipt could not be recorded"
+    elif [[ "$OUT" != *"legacy-plugins: skipped (could not record receipt; nothing removed)"* ]]; then test_fail "wrong message: $OUT"
+    elif [ -e "$(receipt)" ]; then test_fail "a receipt exists after a failed write"
+    elif [ "$(legacy_true_count "$SB/real/settings.json")" != "5" ]; then test_fail "legacy keys were removed"
+    else test_pass; fi
+fi
+
+test_start "R6b: receipt path pre-created as a DIRECTORY -> nothing removed, settings byte-identical, rc 1 (write failed) or 3 (unreadable receipt), no file moved INTO the directory"
+row_world
+printf '%s\n' "$SEED_ALL" > "$SB/real/settings.json"
+cp "$SB/real/settings.json" "$SB/pre.json"
+mkdir -p "$(receipt)"
+th_helper "$SB/real" "$GOOD_TMPL_DIR"
+# A directory at the receipt path is either an unwritable receipt (rc 1, "could not
+# record receipt") or an unreadable one (rc 3, "untouched (receipt ... unreadable");
+# both honour the invariant (nothing removed). R6a pins the exact rc-1 contract.
+if [ "$RC" != "1" ] && [ "$RC" != "3" ]; then test_fail "rc=$RC (want 1 or 3); out: $OUT"
+elif ! cmp -s "$SB/real/settings.json" "$SB/pre.json"; then test_fail "settings.json changed although the receipt could not be recorded"
+elif [[ "$OUT" != *"could not record receipt; nothing removed"* ]] && [[ "$OUT" != *"legacy-plugins: untouched (receipt"* ]]; then test_fail "wrong message: $OUT"
+elif [ -n "$(find "$(receipt)" -type f 2>/dev/null)" ]; then test_fail "receipt file was written INTO the directory (mv onto a directory moves into it)"
+else test_pass; fi
+
+# --- R7: v1 receipt (56b6a55a format) ----------------------------------------
+test_start "R7: v1 single-record receipt covers its (canonicalized) target -> survives; a write for another target upgrades to v2 and still covers the v1 target"
+row_world
+A="$SB/real/settings.json"; B="$SB/realB/settings.json"
+printf '%s\n' "{\"enabledPlugins\":{\"$FW_FIRE\":true,\"mine@x\":true}}" > "$A"
+printf '%s\n' "$SEED_ALL" > "$B"
+# v1 exactly as 56b6a55a wrote it: raw (un-canonicalized) target string
+jq -n -c --arg t "$A" '{ticket:"XACA-1227",target:$t,removed:["frontend-design@claude-plugins-official"],backup:null,at:"2026-11-06T00:00:00Z"}' > "$(receipt)"
+ck="$(cksum_of "$A")"
+th_helper "$SB/real/" "$GOOD_TMPL_DIR"      # trailing-slash spelling vs the raw v1 string
+_rc_a="$RC"; _out_a="$OUT"
+th_helper "$SB/realB" "$GOOD_TMPL_DIR"; _rc_b="$RC"
+th_helper "$SB/real" "$GOOD_TMPL_DIR"; _rc_a2="$RC"; _out_a2="$OUT"
+if [ "$_rc_a" != "0" ] || [[ "$_out_a" != *"already migrated"* ]]; then test_fail "v1 receipt not honored: rc=$_rc_a out=$_out_a"
+elif [ "$_rc_b" != "2" ]; then test_fail "migrating B rc=$_rc_b (want 2)"
+elif ! key_is_true "$A" "$FW_FIRE" || [ "$(cksum_of "$A")" != "$ck" ]; then test_fail "A's key removed or file modified"
+elif ! receipt_v2_has "$(canon_path "$A")" || ! receipt_v2_has "$(canon_path "$B")"; then test_fail "receipt after B write is not a v2 set covering both A and B: $(cat "$(receipt)")"
+elif [ "$_rc_a2" != "0" ] || [[ "$_out_a2" != *"already migrated"* ]]; then test_fail "A rerun after v2 upgrade rc=$_rc_a2 out=$_out_a2"
+else test_pass; fi
+
+# --- R8: unreadable receipt ----------------------------------------------------
+test_start "R8: unreadable receipt (garbage / truncated) -> 'untouched (receipt ... unreadable' rc 3; settings AND receipt unchanged; no backup"
+_r8_fail=""
+_r8_i=0
+for _g in 'not json at all' '{"ticket":"XACA-1227","version":2,"targets":{'; do
+    _r8_i=$((_r8_i + 1))
+    row_world
+    printf '%s\n' "$SEED_ALL" > "$SB/real/settings.json"
+    printf '%s' "$_g" > "$(receipt)"
+    ck="$(cksum_of "$SB/real/settings.json")"; rk="$(cksum_of "$(receipt)")"
+    th_helper "$SB/real" "$GOOD_TMPL_DIR"
+    if [ "$RC" != "3" ]; then _r8_fail="$_r8_fail [#$_r8_i rc=$RC (want 3): $OUT]"
+    elif [[ "$OUT" != *"legacy-plugins: untouched (receipt"*"unreadable"* ]]; then _r8_fail="$_r8_fail [#$_r8_i wrong message: $OUT]"
+    elif [ "$(cksum_of "$SB/real/settings.json")" != "$ck" ]; then _r8_fail="$_r8_fail [#$_r8_i settings changed]"
+    elif [ "$(cksum_of "$(receipt)")" != "$rk" ]; then _r8_fail="$_r8_fail [#$_r8_i receipt changed]"
+    elif [ "$(count_backups)" != "0" ]; then _r8_fail="$_r8_fail [#$_r8_i backup created]"; fi
+done
+if [ -z "$_r8_fail" ]; then test_pass; else test_fail "$_r8_fail"; fi
+
+# --- R9: removed=0 + receipt-write failure (documented residual) --------------
+test_start "R9: removed=0 and the receipt cannot be written -> rc 0, settings unchanged, the output REPORTS it could not record (documented residual)"
+if [ "$(id -u)" = "0" ]; then
+    test_skip_loud "running as root: chmod cannot make the receipt unwritable"
+else
+    row_world
+    printf '%s\n' '{"enabledPlugins":{"mine@x":true}}' > "$SB/real/settings.json"
+    cp "$SB/real/settings.json" "$SB/pre.json"
+    lock_aitf
+    th_helper "$SB/real" "$GOOD_TMPL_DIR"
+    unlock_aitf
+    if [ "$RC" != "0" ]; then test_fail "rc=$RC (want 0); out: $OUT"
+    elif ! cmp -s "$SB/real/settings.json" "$SB/pre.json"; then test_fail "settings changed"
+    elif ! printf '%s' "$OUT" | grep -Eq 'could not (record|write)'; then test_fail "output does not report the receipt failure: $OUT"
+    elif [[ "$OUT" == *"receipt recorded"* ]]; then test_fail "output claims a receipt was recorded: $OUT"
+    elif [ -e "$(receipt)" ]; then test_fail "receipt exists"
+    else test_pass; fi
+fi
+
+# --- R10: order guard on a FRESH install ---------------------------------------
+test_start "R10: fresh install while the template still ships legacy keys -> NO receipt recorded (setup re-adds the keys; recording would be wrong)"
+row_world
+th_install "$SB/real" "$UT_LIBEXEC" "$BAD_TMPL_DIR"
+if [ ! -f "$SB/real/settings.json" ] || [ "$(legacy_true_count "$SB/real/settings.json")" != "5" ]; then test_fail "precondition: fresh install from legacy template should carry 5 legacy keys: $IOUT"
+elif [ -e "$(receipt)" ]; then test_fail "receipt recorded despite a legacy-bearing template: $(cat "$(receipt)")"
+else test_pass; fi
+
+# --- R11: positive control (the table must not pass by never removing) --------
+test_start "R11: genuine pre-fix legacy file, no receipt -> all 5 keys ARE removed, user key kept, v2 receipt written, report uses kept= (not kept-user=)"
+row_world
+S="$SB/real/settings.json"
+jq '.enabledPlugins["mine@x"] = true' <<<"$SEED_ALL" > "$S"
+th_helper "$SB/real" "$GOOD_TMPL_DIR"
+if [ "$RC" != "2" ]; then test_fail "rc=$RC (want 2); out: $OUT"
+elif [ "$(legacy_present_count "$S")" != "0" ]; then test_fail "legacy keys remain: $(jq -c .enabledPlugins "$S")"
+elif ! key_is_true "$S" "mine@x"; then test_fail "user key lost"
+elif ! receipt_v2_has "$(canon_path "$S")"; then test_fail "no v2 receipt for the target: $(cat "$(receipt)" 2>/dev/null)"
+elif [[ "$OUT" != *"removed=5"* ]] || [[ "$OUT" != *"kept=1"* ]] || [[ "$OUT" == *"kept-user="* ]]; then test_fail "report wrong: $OUT"
+else test_pass; fi
+
+# --- NEGATIVE CONTROLS: the same rows against tap 56b6a55a ---------------------
+PRIOR_SHA=56b6a55a
+PRIOR_LIBEXEC="$TEST_TMP_DIR/prior-libexec"
+mkdir -p "$PRIOR_LIBEXEC/installers"
+PRIOR_OK=true
+if ! command -v git >/dev/null 2>&1 \
+   || ! git -C "$TAP_ROOT" show "$PRIOR_SHA:libexec/installers/install-claude-config.sh" > "$PRIOR_LIBEXEC/installers/install-claude-config.sh" 2>/dev/null \
+   || [ ! -s "$PRIOR_LIBEXEC/installers/install-claude-config.sh" ] \
+   || ! grep -q '_xaca1227_remove_legacy_template_plugins' "$PRIOR_LIBEXEC/installers/install-claude-config.sh"; then
+    PRIOR_OK=false
+fi
+
+# control_row <label> <function> [args...]: passes ONLY when the row assertion is RED (rc 1) on the prior code
+control_row() {
+    local label="$1" fn="$2" r
+    shift 2
+    test_start "$label CONTROL: this row FAILS on tap $PRIOR_SHA (single-slot, string-keyed receipt) - proves the table discriminates"
+    if [ "$PRIOR_OK" != true ]; then
+        test_skip_loud "tap $PRIOR_SHA not obtainable from git history; control NOT exercised"
+        return
+    fi
+    "$fn" "$@" "$PRIOR_LIBEXEC"; r=$?
+    if [ "$r" = 1 ]; then
+        echo "     CONTROL OK: red on $PRIOR_SHA as required: $ROW_MSG"
+        test_pass
+    elif [ "$r" = 2 ]; then
+        test_fail "control could not run (harness problem, not a discrimination proof): $ROW_MSG"
+    else
+        test_fail "row is GREEN on pre-fix code: the row is vacuous for this variant"
+    fi
+}
+control_row R1 row_fresh_then_upgrade
+control_row R2 row_two_targets
+while IFS='|' read -r _id _spell _desc; do
+    [ -n "$_id" ] || continue
+    control_row "$_id" row_survive "$_spell"
+done <<EOT
+$TABLE_SURVIVE
+EOT
 
 # ===========================================================================
 # S1 - wiring: the function is defined AND called from both paths
