@@ -35,7 +35,9 @@ if [ -z "${_AITEAMFORGE_PATHS_LOADED:-}" ]; then
     _kb_loader_sourced=0
     for _kb_loader_candidate in \
         "${HOME}/dev-team/homebrew-tap/libexec/lib/aiteamforge-paths.sh" \
-        "$(brew --prefix 2>/dev/null)/share/aiteamforge/libexec/lib/aiteamforge-paths.sh" \
+        "${AITEAMFORGE_HOME:-}/libexec/lib/aiteamforge-paths.sh" \
+        "/opt/homebrew/opt/aiteamforge/libexec/libexec/lib/aiteamforge-paths.sh" \
+        "/usr/local/opt/aiteamforge/libexec/libexec/lib/aiteamforge-paths.sh" \
         "${HOME}/.aiteamforge/lib/aiteamforge-paths.sh"; do
         if [ -f "$_kb_loader_candidate" ]; then
             # shellcheck source=/dev/null
@@ -44,6 +46,21 @@ if [ -z "${_AITEAMFORGE_PATHS_LOADED:-}" ]; then
             break
         fi
     done
+    # XACA-1752: slow fallbacks (forks brew) only when no cheap candidate matched.
+    # Formula does `libexec.install Dir["*"]`, so the loader is at
+    # <prefix>/libexec/libexec/lib/ (NOT <prefix>/share/aiteamforge/..., which
+    # nothing creates; kept last for backward compatibility only).
+    if [ -z "${_AITEAMFORGE_PATHS_LOADED:-}" ]; then
+        for _kb_loader_candidate in \
+            "$(brew --prefix 2>/dev/null)/opt/aiteamforge/libexec/libexec/lib/aiteamforge-paths.sh" \
+            "$(brew --prefix 2>/dev/null)/share/aiteamforge/libexec/lib/aiteamforge-paths.sh"; do
+            if [ -f "$_kb_loader_candidate" ]; then
+                # shellcheck source=/dev/null
+                source "$_kb_loader_candidate"
+                break
+            fi
+        done
+    fi
     unset _kb_loader_candidate _kb_loader_sourced
 fi
 
@@ -26799,6 +26816,49 @@ sys.exit(1)
     _kb_overlay_retry_read "$cfg" "_kb_overlay_code_to_slug(${code})" python3 -c "$_script" "$cfg" "$code"
 }
 
+# _kb_registry_lcars_port <team> (XACA-1752)
+# Reads teams.<team>.lcars_port DIRECTLY from the per-machine registry
+# (honouring $AITEAMFORGE_CONFIG via _kb_overlay_config_path, the same path
+# resolution the XACA-0628/XACA-0649 overlay readers use). It exists for the case
+# where the canonical loader (aiteamforge-paths.sh) could not be sourced: without
+# it the hardcoded fallback table silently disagreed with a registry that the
+# installer had populated (measured: consumer registry 8200 vs table 8203, so every
+# server-backed kb-* call died with curl exit 7).
+# Prints the port and returns 0 ONLY for a plain integer in 1..65535 (JSON int or
+# digit-string; booleans, floats, "null" and absent entries are rejected). No
+# team_code gate (unlike _kb_overlay_lookup): built-in teams must resolve too.
+# Returns 1 with no output on any miss so the caller falls through to the table.
+_kb_registry_lcars_port() {
+    local team="${1-}"
+    [[ -z "$team" ]] && return 1
+    command -v python3 >/dev/null 2>&1 || return 1
+    local cfg
+    cfg=$(_kb_overlay_config_path)
+    [[ -f "$cfg" ]] || return 1
+    local _script='
+import json, sys
+try:
+    with open(sys.argv[1]) as fh:
+        data = json.load(fh)
+    p = data["teams"][sys.argv[2]]["lcars_port"]
+except Exception:
+    sys.exit(1)
+if isinstance(p, bool):
+    sys.exit(1)
+if isinstance(p, str):
+    p = p.strip()
+    if not p.isdigit():
+        sys.exit(1)
+elif not isinstance(p, int):
+    sys.exit(1)
+p = int(p)
+if p < 1 or p > 65535:
+    sys.exit(1)
+print(p)
+'
+    python3 -c "$_script" "$cfg" "$team" 2>/dev/null
+}
+
 # _kb_team_lcars_port <team>
 # Resolution order — kept in lockstep with dev-team/kanban-helpers.sh's
 # _kb_team_lcars_port():
@@ -26807,6 +26867,8 @@ sys.exit(1)
 #      registry it was provisioned into.
 #   2. aiteamforge_team_lcars_port — the canonical loader sourced at the top
 #      of this file. Authoritative for every other registered team.
+#   2b. (XACA-1752) _kb_registry_lcars_port — teams.<team>.lcars_port read straight
+#      from team-paths.json when the loader is absent or returned nothing.
 #   3. Built-in fallback table — only the well-known non-freelance teams this
 #      file has always shipped, for the case the loader is unavailable (e.g.
 #      a bare shell without the tap lib on PATH). Freelance client slugs are
@@ -26841,12 +26903,24 @@ _kb_team_lcars_port() {
         fi
     fi
 
+    # (a2) XACA-1752: loader absent or silent -> read the registry directly BEFORE the
+    # hardcoded table. The registry is the authority (XACA-0590/0792); the table is
+    # a last resort. Validated as an integer port inside the helper.
+    local _reg_port
+    if _reg_port=$(_kb_registry_lcars_port "$team") && [[ "$_reg_port" =~ ^[0-9]+$ ]]; then
+        echo "$_reg_port"
+        return 0
+    fi
+
     # (b) Built-in fallback table — keep in sync with aiteamforge-paths.sh defaults
     local _port=""
     case "$team" in
         ios)                                    _port="8260" ;;
         android)                                _port="8280" ;;
         firebase)                               _port="8240" ;;
+        # XACA-1752: LAST-RESORT value only (registry first, see (a)/(a2) above). 8203 is the
+        # legacy home-host pin; a fresh consumer install is allocated the band base 8200 and
+        # records it in team-paths.json, which wins at runtime.
         academy)                                _port="8203" ;;
         dns)                                    _port="8180" ;;
         # Freelance per-client/project slugs resolve their port via the

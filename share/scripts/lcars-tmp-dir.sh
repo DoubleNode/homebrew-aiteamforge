@@ -29,8 +29,10 @@ if [ -z "${_AITEAMFORGE_PATHS_LOADED:-}" ]; then
     _lctd_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     for _lctd_candidate in \
         "${HOME}/dev-team/homebrew-tap/libexec/lib/aiteamforge-paths.sh" \
-        "$(brew --prefix 2>/dev/null)/share/aiteamforge/libexec/lib/aiteamforge-paths.sh" \
         "${_lctd_script_dir}/../homebrew-tap/libexec/lib/aiteamforge-paths.sh" \
+        "${AITEAMFORGE_HOME:-}/libexec/lib/aiteamforge-paths.sh" \
+        "/opt/homebrew/opt/aiteamforge/libexec/libexec/lib/aiteamforge-paths.sh" \
+        "/usr/local/opt/aiteamforge/libexec/libexec/lib/aiteamforge-paths.sh" \
         "${HOME}/.aiteamforge/lib/aiteamforge-paths.sh"; do
         if [ -f "$_lctd_candidate" ]; then
             # shellcheck source=/dev/null
@@ -38,6 +40,21 @@ if [ -z "${_AITEAMFORGE_PATHS_LOADED:-}" ]; then
             break
         fi
     done
+    # XACA-1752: slow fallbacks (forks brew) only when no cheap candidate matched.
+    # Formula does `libexec.install Dir["*"]`, so the loader is at
+    # <prefix>/libexec/libexec/lib/ (NOT <prefix>/share/aiteamforge/..., which
+    # nothing creates; kept last for backward compatibility only).
+    if [ -z "${_AITEAMFORGE_PATHS_LOADED:-}" ]; then
+        for _lctd_candidate in \
+            "$(brew --prefix 2>/dev/null)/opt/aiteamforge/libexec/libexec/lib/aiteamforge-paths.sh" \
+            "$(brew --prefix 2>/dev/null)/share/aiteamforge/libexec/lib/aiteamforge-paths.sh"; do
+            if [ -f "$_lctd_candidate" ]; then
+                # shellcheck source=/dev/null
+                source "$_lctd_candidate"
+                break
+            fi
+        done
+    fi
     unset _lctd_script_dir _lctd_candidate
 fi
 

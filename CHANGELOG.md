@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1752: kb-* LCARS port resolves from the registry on brew consumers (XACA-1752)
+- Tap files updated in this publish: `share/kanban-hooks/aiteamforge_paths.py`,`share/scripts/lcars-tmp-dir.sh` `share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1762: Tap kb-retro-path finds plans/<ID>/ plan docs (XACA-1762)
 - Tap files updated in this publish: `share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1708: CI pool gates on memory pressure, not sticky swap; idle Lima VM recycle (XACA-1708)

@@ -309,6 +309,8 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "working_dir": f"{_HOME}/dev-team",
         "lcars_port_base": 8200,
         "lcars_port_range": 10,
+        # XACA-1752: 8203 is the legacy home-host pin; fresh consumer installs are allocated
+        # the band base (8200) and the registry value wins at runtime.
         "lcars_port": 8203,
         # XACA-1644: arms kb-release-version-gate for platform "other". Without
         # it the gate SKIPS for academy ("no version_source configured").
