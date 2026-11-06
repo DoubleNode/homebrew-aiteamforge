@@ -282,11 +282,15 @@ if [ "$(jget "$CD/settings.json" '.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE')" = "$EX
 else
     test_fail "got $(jget "$CD/settings.json" '.env')"
 fi
-test_start "U1c: upgrade preserves unrelated user content (custom env key, permissions arrays, model, hooks) exactly"
+# XACA-1753-005: the upgrade now ALSO union-adds the template's hook
+# registrations (add-only), so .hooks is no longer byte-identical; every OTHER
+# key must still be exactly preserved, and the user's own hook must survive.
+test_start "U1c: upgrade preserves unrelated user content (custom env key, permissions arrays, model; user hook survives) exactly"
 _expect="$(printf '%s' "$SEED_ABSENT" | jq -S -c --argjson p "$EXPECT_P" \
-    '.skipDangerousModePermissionPrompt=true | .cleanupPeriodDays=30 | if $p != null then .env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=$p else . end')"
-_got="$(jq -S -c . "$CD/settings.json" 2>/dev/null)"
-if [ -n "$_got" ] && [ "$_got" = "$_expect" ]; then
+    '.skipDangerousModePermissionPrompt=true | .cleanupPeriodDays=30 | if $p != null then .env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=$p else . end | del(.hooks)')"
+_got="$(jq -S -c 'del(.hooks)' "$CD/settings.json" 2>/dev/null)"
+_hook_kept="$(jq '[.hooks.Stop[]?.hooks[]? | select(.command == "echo mine")] | length' "$CD/settings.json" 2>/dev/null)"
+if [ -n "$_got" ] && [ "$_got" = "$_expect" ] && [ "$_hook_kept" = "1" ]; then
     test_pass
 else
     test_fail "expected $_expect ; got $_got"

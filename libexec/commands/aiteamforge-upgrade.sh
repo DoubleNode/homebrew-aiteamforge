@@ -3338,6 +3338,21 @@ PYEOF
 # it makes `aiteamforge-paths init` exit 1. It is *.py, so the glob reaches it.
 # XACA-1607: kb-where is extensionless too, so it needs the same pair of entries
 # (this list + the sweep loop) or an upgraded consumer never receives it.
+# XACA-1753: the fleet session-guard set. These are SessionStart/Stop hook
+# guards (kb-*-guard.sh, kanban-crash-detect.sh, kb-session-knowledge-check.sh,
+# kb-where-refresh.sh), the checkers they exec (kb-*-check.sh/.py, resolved
+# beside the guard via its own dirname) and aitf-root.sh (the shared root
+# resolver every one of them sources). BRAND-NEW on every already-installed
+# box: sync-tap.sh only started mirroring them into share/scripts/ in this
+# ticket, so the "refresh only what exists" default would skip all of them
+# forever on an upgraded (not freshly installed) machine -- same gap class as
+# XACA-1342-019. Guards without their checker/aitf-root fail open silently, so
+# the whole set must land together. All are .sh/.py, so the glob sweep in
+# update_runtime_helpers() reaches them once listed here; none is aux-owned
+# (_xaca0608_aux_script_map) and none carries a ~/dev-team placeholder, so
+# _xaca0608_render_team_script copies them byte-identically and sets +x.
+# A follow-on guard (e.g. XACA-1753-006's kb-live-config-drift-guard.sh /
+# kb-live-config-drift-check.sh) is a ONE-LINE addition below.
 _xaca0673_mandatory_materialize_basenames() {
   cat <<'EOF'
 iterm2_venv_bootstrap.py
@@ -3384,6 +3399,38 @@ kb-release-version-gate
 kb-wiki
 kb-where
 aiteamforge-team-paths-wizard.py
+aitf-root.sh
+kb-gh-credential-guard.sh
+kb-knowledge-sync-guard.sh
+kanban-crash-detect.sh
+kb-session-knowledge-check.sh
+kb-team-registry-loss-guard.sh
+kb-lcars-port-drift-guard.sh
+kb-where-refresh.sh
+kb-gh-credential-check.sh
+kb-team-registry-loss-check.py
+kb-knowledge-sync-health-check.sh
+kb-lcars-port-drift-check.sh
+kb-live-config-drift-guard.sh
+kb-live-config-drift-check.sh
+EOF
+}
+
+# XACA-1753-005: shipped scripts that must be installed VERBATIM, never through
+# _xaca0608_render_team_script. The render rewrites every `~/dev-team`,
+# `$HOME/dev-team` and /Users/<u>/dev-team literal to this machine's WORKING_DIR.
+# aitf-root.sh, kb-knowledge-sync-health-check.sh and kb-live-config-drift-check.sh
+# carry such literals ON PURPOSE (aitf-root.sh: "the ONLY place a hardcoded
+# dev-team path is allowed to live" -- the legacy-checkout fallback), and a fresh
+# install copies them byte-for-byte (install-shell.sh cp), so rendering on
+# upgrade made upgrade and install DISAGREE about the file's content (measured:
+# 3 of the 14 session-guard files differed from source after a render).
+# Newline-delimited exact basenames; add a name here, not a sed exception.
+_xaca1753_verbatim_basenames() {
+  cat <<'EOF'
+aitf-root.sh
+kb-knowledge-sync-health-check.sh
+kb-live-config-drift-check.sh
 EOF
 }
 
@@ -3441,7 +3488,11 @@ update_runtime_helpers() {
     print_info "Updating scripts/${name}..."
     if [ "$DRY_RUN" = false ]; then
       # Rewrite-aware render (sets exec bit). No-op rewrite for plain files.
-      _xaca0608_render_team_script "$src" "$target"
+      # XACA-1753-005: verbatim set is copied byte-for-byte (atomic, +x) instead.
+      case $'\n'"$(_xaca1753_verbatim_basenames)"$'\n' in
+        *$'\n'"${name}"$'\n'*) _aitf_atomic_write_script "$target" cat "$src" ;;
+        *) _xaca0608_render_team_script "$src" "$target" ;;
+      esac
       print_success "Updated scripts/${name}"
     else
       echo "Would update: scripts/${name}"
@@ -6651,6 +6702,7 @@ update_claude_settings() {
         _xaca1227_remove_legacy_template_plugins --dry-run
       )" || true
     echo "${_xaca1227_dry:-legacy-plugins: dry-run (could not evaluate)}"
+    echo "settings-hooks: dry-run (XACA-1753: would append any template hook not already registered; box-local hooks untouched)"
     return 0
   fi
 
@@ -6693,6 +6745,27 @@ update_claude_settings() {
     2) print_success "${_xaca1227_result:-legacy-plugins: removed (count unavailable)}" ;;
     3) print_warning "${_xaca1227_result:-legacy-plugins: untouched}" ;;
     *) print_warning "${_xaca1227_result:-legacy-plugins: skipped (non-fatal; upgrade continues)}" ;;
+  esac
+
+  # XACA-1753-005: hook REGISTRATIONS. The fill-absent pass above only manages a
+  # fixed scalar key list, so the fleet session-guard hooks in the template would
+  # otherwise never be wired on an upgraded box (scripts materialised, never run).
+  # Add-only union, backed up, idempotent, fail-soft -- see
+  # _xaca1753_refresh_settings_hooks() in install-claude-config.sh.
+  local _xaca1753_result="" _xaca1753_rc=0
+  _xaca1753_result="$(
+      AITEAMFORGE_DIR="${WORKING_DIR}"
+      TEMPLATE_DIR="${FRAMEWORK_DIR}/share/templates"
+      export AITEAMFORGE_DIR TEMPLATE_DIR
+      # shellcheck source=/dev/null
+      source "$installer" >/dev/null 2>&1
+      _xaca1753_refresh_settings_hooks
+    )" && _xaca1753_rc=0 || _xaca1753_rc=$?
+  case "$_xaca1753_rc" in
+    0) print_success "${_xaca1753_result:-settings-hooks: added=0 (no-op)}" ;;
+    2) print_success "${_xaca1753_result:-settings-hooks: added}" ;;
+    3) print_warning "${_xaca1753_result:-settings-hooks: untouched}" ;;
+    *) print_warning "${_xaca1753_result:-settings-hooks: skipped (non-fatal; upgrade continues)}" ;;
   esac
 
   return 0

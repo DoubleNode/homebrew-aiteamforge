@@ -263,11 +263,28 @@ install_helper_scripts() {
     # invoked directly (cc-account-routing.sh is `source`d; vault-fetch.sh is
     # exec'd by the routing core). Missing cc-account-routing.sh = cc/ccc
     # refuse (fail-closed, design §6) rather than launch unrouted.
+    # XACA-1753: the trailing block of names is the fleet session-guard set
+    # (hook guards + their checkers + aitf-root.sh); all exec'd or sourced, so
+    # chmod +x. Mirrors _xaca0673_mandatory_materialize_basenames on upgrade.
     for helper in agent-panel-display.sh display-agent-avatar.sh iterm2_window_manager.py \
                   set-lcars-profile-browser.py create-lcars-profile.py lcars-tmp-dir.sh \
                   kanban-backup.py fleet-reporter.sh \
                   session-account-map-headless.sh session-account-map-record.sh session-account-map.py \
                   cc-account-routing.sh vault-fetch.sh cc-credential-team-resolver.sh \
+                  aitf-root.sh \
+                  kb-gh-credential-guard.sh \
+                  kb-knowledge-sync-guard.sh \
+                  kanban-crash-detect.sh \
+                  kb-session-knowledge-check.sh \
+                  kb-team-registry-loss-guard.sh \
+                  kb-lcars-port-drift-guard.sh \
+                  kb-where-refresh.sh \
+                  kb-gh-credential-check.sh \
+                  kb-team-registry-loss-check.py \
+                  kb-knowledge-sync-health-check.sh \
+                  kb-lcars-port-drift-check.sh \
+                  kb-live-config-drift-guard.sh \
+                  kb-live-config-drift-check.sh \
                   msg-client.sh msg-inbox-check.sh kb-api-key team-account-display.sh; do
         if [ -f "$scripts_src/$helper" ]; then
             cp "$scripts_src/$helper" "$scripts_dest/$helper"

@@ -83,6 +83,21 @@ _write_scripts() {
         # display-agent-avatar.sh and the nine banners. Executable, like the
         # other sourced *.sh libraries the installer chmod +x's.
         "team-account-display.sh"
+        # XACA-1753: fleet session-guard set (guards + checkers + aitf-root)
+        "aitf-root.sh"
+        "kb-gh-credential-guard.sh"
+        "kb-knowledge-sync-guard.sh"
+        "kanban-crash-detect.sh"
+        "kb-session-knowledge-check.sh"
+        "kb-team-registry-loss-guard.sh"
+        "kb-lcars-port-drift-guard.sh"
+        "kb-where-refresh.sh"
+        "kb-gh-credential-check.sh"
+        "kb-team-registry-loss-check.py"
+        "kb-knowledge-sync-health-check.sh"
+        "kb-lcars-port-drift-check.sh"
+        "kb-live-config-drift-guard.sh"
+        "kb-live-config-drift-check.sh"
     )
     for s in "${names[@]}"; do
         touch "$scripts_dir/$s"
@@ -446,9 +461,9 @@ assert_equal "0" "$_VAL_FAIL"
 assert_equal "0" "$_VAL_WARN"
 # 8 required executables (4 original [XACA-1228 retired init-agent-panel-json.py]
 # + XACA-0796 fleet-reporter.sh, msg-client.sh + XACA-1225-002 msg-inbox-check.sh
-# + XACA-1184-008 team-account-display.sh) + 4 relay data files (msg-client.js,
-# vault-keygen.js, package.json, package-lock.json) + root copy = 13 passes
-assert_equal "13" "$_VAL_PASS"
+# + XACA-1184-008 team-account-display.sh + 14 XACA-1753 session-guard scripts) + 4 relay data files (msg-client.js,
+# vault-keygen.js, package.json, package-lock.json) + root copy = 27 passes
+assert_equal "27" "$_VAL_PASS"
 test_pass
 
 test_start "_val_check_scripts: warns for missing script file"
