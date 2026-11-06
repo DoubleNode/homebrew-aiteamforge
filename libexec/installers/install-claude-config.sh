@@ -1310,12 +1310,30 @@ install_settings_json() {
         # Apply template substitution
         apply_template "$template" "$temp_file"
 
+        # XACA-1227: before merging, drop the legacy template-force-enabled
+        # plugin keys from an existing target (one-time, receipt-guarded,
+        # verified backup). Fail-soft: a skip never blocks the settings install.
+        if [[ -f "$target" || -L "$target" ]]; then
+            _xaca1227_remove_legacy_template_plugins || true
+        fi
+
         # If user has existing settings, merge them
         if [[ -f "$target" ]]; then
             log_info "Merging with existing settings..."
             local merged_file="/tmp/claude-settings-merged-$$.json"
-            merge_settings_json "$target" "$temp_file" "$merged_file"
-            mv "$merged_file" "$target"
+            # XACA-1227: only replace the target when the merge succeeded AND
+            # produced a JSON object. merge_settings_json's `> "$output_file"`
+            # creates an EMPTY file before jq fails (e.g. invalid-JSON target),
+            # and errexit is off in if/||/&& call contexts, so an unguarded mv
+            # truncated the user's settings.json to 0 bytes.
+            if merge_settings_json "$target" "$temp_file" "$merged_file" \
+                && jq -e 'type == "object"' "$merged_file" >/dev/null 2>&1; then
+                mv "$merged_file" "$target"
+            else
+                rm -f "$merged_file" "$temp_file"
+                log_warning "Could not merge settings.json (is ${target} valid JSON?); existing file left untouched"
+                return 0
+            fi
         else
             mv "$temp_file" "$target"
         fi
@@ -1549,6 +1567,212 @@ _xaca1283_refresh_settings_json_keys() {
     rm -f "$candidate"
     echo "settings-keys: skipped (failed to install the updated settings.json; existing file left in place)"
     return 1
+}
+
+# XACA-1227: one-time cleanup of the 5 enabledPlugins keys the shipped
+# settings.json.template force-enabled before XACA-1227 (decision doc:
+# kanban/plans/XACA-1227/XACA-1227-002-decision.md, section C). Four of them
+# cannot resolve on a generic consumer (claude-plugins-official is not
+# registered at user scope) and kanban-integration@local is an MCP server,
+# not a plugin, so each produced a `claude doctor` plugin error.
+#
+# SINGLE SOURCE OF TRUTH for the closed legacy list. kotlin-lsp is excluded:
+# it was only ever shipped as `false`, never `true`.
+_xaca1227_legacy_template_plugins() {
+    printf '%s\n' '["frontend-design@claude-plugins-official","atlassian@claude-plugins-official","firebase@claude-plugins-official","swift-lsp@claude-plugins-official","kanban-integration@local"]'
+}
+
+# Receipt: ${AITEAMFORGE_DIR}/.xaca1227-legacy-plugins.receipt, one JSON line
+# recording the settings.json path it covers. "Done" only when it parses AND
+# its .target equals the current target; anything else means "not done", which
+# is safe (a re-run that finds no legacy pairs is a no-op).
+_xaca1227_receipt_path() {
+    printf '%s' "${AITEAMFORGE_DIR}/.xaca1227-legacy-plugins.receipt"
+}
+
+_xaca1227_receipt_covers() {
+    local target="$1" receipt
+    receipt="$(_xaca1227_receipt_path)"
+    [[ -f "$receipt" ]] || return 1
+    jq -e --arg t "$target" '.target == $t' "$receipt" >/dev/null 2>&1
+}
+
+# $1 target, $2 JSON array of removed ids, $3 backup path or ""
+_xaca1227_write_receipt() {
+    local target="$1" removed="$2" backup="$3" receipt tmp
+    receipt="$(_xaca1227_receipt_path)"
+    mkdir -p "$(dirname "$receipt")" 2>/dev/null || return 1
+    tmp="$(mktemp "${receipt}.XXXXXX" 2>/dev/null)" || return 1
+    if ! jq -n -c --arg t "$target" --argjson r "$removed" --arg b "$backup" \
+            --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{ticket:"XACA-1227",target:$t,removed:$r,backup:(if $b=="" then null else $b end),at:$at}' \
+            > "$tmp" 2>/dev/null \
+        || ! mv -f "$tmp" "$receipt" 2>/dev/null; then
+        rm -f "$tmp"
+        return 1
+    fi
+    return 0
+}
+
+# One-time, receipt-guarded, exact-pair migration. Removes ONLY
+# enabledPlugins[<id>] == true (JSON true; not "true", 1, false or objects) for
+# the 5 legacy ids, once per settings file. Never touches any other key. An
+# emptied enabledPlugins stays {}.
+#
+# Usage: _xaca1227_remove_legacy_template_plugins [--dry-run]
+# Env:   CLAUDE_CONFIG_DIR (target = $CLAUDE_CONFIG_DIR/settings.json),
+#        AITEAMFORGE_DIR (receipt + .backups), TEMPLATE_DIR (order guard).
+# Every outcome prints ONE line starting with the stable token "legacy-plugins:".
+#   legacy-plugins: removed=N kept-user=M keys=<a,b> backup=<dir> (...)
+#   legacy-plugins: removed=0 kept-user=M (...)    legacy-plugins: already migrated
+#   legacy-plugins: untouched (...)                legacy-plugins: skipped (...)
+#   legacy-plugins: dry-run (...)
+# Return codes: 0 nothing to do / already done / dry-run, 2 pairs removed,
+#   3 left untouched (symlink, invalid JSON), 1 skipped/error (file untouched).
+_xaca1227_remove_legacy_template_plugins() {
+    local dry_run=false
+    [[ "${1:-}" == "--dry-run" ]] && dry_run=true
+
+    local target="${CLAUDE_CONFIG_DIR}/settings.json"
+    local template="${TEMPLATE_DIR}/claude/settings.json.template"
+    local ids
+    ids="$(_xaca1227_legacy_template_plugins)"
+
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "legacy-plugins: skipped (jq not available)"
+        return 1
+    fi
+    if _xaca1227_receipt_covers "$target"; then
+        echo "legacy-plugins: already migrated"
+        return 0
+    fi
+
+    # Order guard (fail closed): if the shipped template still enables any
+    # legacy key, setup's template-wins merge would put it straight back after
+    # we recorded the receipt. Skip WITHOUT a receipt; a later run retries.
+    if [[ ! -f "$template" ]]; then
+        echo "legacy-plugins: skipped (shipped settings.json.template not found)"
+        return 1
+    fi
+    local rendered
+    rendered="$(mktemp "${TMPDIR:-/tmp}/xaca1227-tmpl.XXXXXX" 2>/dev/null)" || {
+        echo "legacy-plugins: skipped (could not create a temp file)"
+        return 1
+    }
+    if ! apply_template "$template" "$rendered" >/dev/null 2>&1 \
+        || ! jq -e 'type == "object"' "$rendered" >/dev/null 2>&1; then
+        rm -f "$rendered"
+        echo "legacy-plugins: skipped (rendering settings.json.template failed; existing file untouched)"
+        return 1
+    fi
+    local still_shipped
+    still_shipped="$(jq -r --argjson ids "$ids" '
+        (.enabledPlugins // {}) as $e
+        | if ($e | type) == "object" then [$ids[] | . as $k | select($e | has($k))] | join(",") else "" end' \
+        "$rendered" 2>/dev/null)" || still_shipped="?"
+    rm -f "$rendered"
+    if [[ -n "$still_shipped" ]]; then
+        echo "legacy-plugins: skipped (shipped template still enables legacy plugins: ${still_shipped}; no receipt written)"
+        return 1
+    fi
+
+    if [[ -L "$target" ]]; then
+        echo "legacy-plugins: untouched (${target} is a symlink -- user-managed; neither the link nor its destination was modified)"
+        return 3
+    fi
+    if [[ ! -f "$target" ]]; then
+        echo "legacy-plugins: skipped (${target} not installed -- nothing to migrate)"
+        return 1
+    fi
+    if ! jq -e 'type == "object" and ((.enabledPlugins // {}) | type) == "object"' \
+            "$target" >/dev/null 2>&1; then
+        echo "legacy-plugins: untouched (${target} is not a valid JSON object, or enabledPlugins is not an object)"
+        return 3
+    fi
+
+    local removed removed_n kept_n removed_csv
+    removed="$(jq -c --argjson ids "$ids" '
+        (.enabledPlugins // {}) as $e | [$ids[] | select($e[.] == true)]' "$target" 2>/dev/null)" || {
+        echo "legacy-plugins: untouched (could not read ${target})"
+        return 3
+    }
+    removed_n="$(jq -r 'length' <<<"$removed" 2>/dev/null)" || removed_n=""
+    case "$removed_n" in ''|*[!0-9]*)
+        echo "legacy-plugins: untouched (could not evaluate ${target})"
+        return 3 ;;
+    esac
+    removed_csv="$(jq -r 'join(",")' <<<"$removed" 2>/dev/null)" || removed_csv=""
+    kept_n="$(jq -r --argjson r "$removed" '((.enabledPlugins // {}) | keys | length) - ($r | length)' "$target" 2>/dev/null)" || kept_n="?"
+
+    if [[ "$dry_run" == true ]]; then
+        if [[ "$removed_n" -eq 0 ]]; then
+            echo "legacy-plugins: dry-run (nothing to remove; kept-user=${kept_n}; a receipt would be recorded)"
+        else
+            echo "legacy-plugins: dry-run (would remove ${removed_n}: ${removed_csv}; kept-user=${kept_n}; backup first, then a receipt)"
+        fi
+        return 0
+    fi
+
+    if [[ "$removed_n" -eq 0 ]]; then
+        if _xaca1227_write_receipt "$target" "[]" ""; then
+            echo "legacy-plugins: removed=0 kept-user=${kept_n} (no legacy plugin keys present; receipt recorded)"
+        else
+            echo "legacy-plugins: removed=0 kept-user=${kept_n} (no legacy plugin keys present; could not write receipt, will re-check next run)"
+        fi
+        return 0
+    fi
+
+    # Verified backup first: no verified backup, no write.
+    local backup_dir backup_file_path
+    backup_dir="${AITEAMFORGE_DIR}/.backups/xaca1227-legacy-plugins-$(date +%Y%m%d-%H%M%S)"
+    [[ -e "$backup_dir" ]] && backup_dir="${backup_dir}-$$"
+    backup_file_path="${backup_dir}/settings.json"
+    if ! mkdir -p "$backup_dir" 2>/dev/null \
+        || ! cp -p "$target" "$backup_file_path" 2>/dev/null \
+        || ! cmp -s "$target" "$backup_file_path"; then
+        echo "legacy-plugins: skipped (could not create a verified backup in ${backup_dir}; existing file untouched)"
+        return 1
+    fi
+
+    local candidate
+    candidate="$(mktemp "${target}.XXXXXX" 2>/dev/null)" || {
+        echo "legacy-plugins: skipped (could not create a temp file next to ${target}; existing file untouched)"
+        return 1
+    }
+    # Candidate = source minus exactly the removed pairs; then prove it with an
+    # independent check (valid object, none of the removed ids remain, and
+    # deleting them from the source reproduces the candidate exactly).
+    if ! jq --argjson r "$removed" 'reduce $r[] as $k (.; del(.enabledPlugins[$k]))' \
+            "$target" > "$candidate" 2>/dev/null \
+        || ! jq -e 'type == "object"' "$candidate" >/dev/null 2>&1 \
+        || ! jq -e -n --argjson r "$removed" --slurpfile a "$target" --slurpfile b "$candidate" '
+              ($b[0].enabledPlugins // {}) as $e
+              | ([$r[] | . as $k | select($e | has($k))] | length) == 0
+              and ($a[0] | delpaths([$r[] | ["enabledPlugins", .]])) == $b[0]' >/dev/null 2>&1; then
+        rm -f "$candidate"
+        echo "legacy-plugins: skipped (candidate validation failed; existing file untouched)"
+        return 1
+    fi
+
+    local _mode=""
+    if command -v _aitf_file_mode >/dev/null 2>&1; then
+        _mode="$(_aitf_file_mode "$target")"
+    else
+        _mode="$(_xaca1283_file_mode "$target")"
+    fi
+    case "$_mode" in ''|*[!0-7]*) _mode=644 ;; esac
+    chmod "$_mode" "$candidate" 2>/dev/null || true
+
+    if ! mv -f "$candidate" "$target" 2>/dev/null; then
+        rm -f "$candidate"
+        echo "legacy-plugins: skipped (failed to install the updated settings.json; existing file left in place)"
+        return 1
+    fi
+    local _receipt_note="receipt recorded"
+    _xaca1227_write_receipt "$target" "$removed" "$backup_file_path" \
+        || _receipt_note="could not write receipt; will re-check (a no-op) next run"
+    echo "legacy-plugins: removed=${removed_n} kept-user=${kept_n} keys=${removed_csv} backup=${backup_dir} (${_receipt_note}; re-enable any of these deliberately with /plugin or 'claude plugin install <id>')"
+    return 2
 }
 
 #------------------------------------------------------------------------------

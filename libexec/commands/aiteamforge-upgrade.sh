@@ -6640,6 +6640,17 @@ update_claude_settings() {
 
   if [ "$DRY_RUN" = true ]; then
     echo "settings-keys: dry-run (would add any ABSENT upgrade-managed keys to ~/.claude/settings.json from the shipped template; existing values, including user-changed ones, would be left as they are)"
+    # XACA-1227: read-only report (no backup, no receipt, no temp beside the target).
+    local _xaca1227_dry=""
+    _xaca1227_dry="$(
+        AITEAMFORGE_DIR="${WORKING_DIR}"
+        TEMPLATE_DIR="${FRAMEWORK_DIR}/share/templates"
+        export AITEAMFORGE_DIR TEMPLATE_DIR
+        # shellcheck source=/dev/null
+        source "$installer" >/dev/null 2>&1
+        _xaca1227_remove_legacy_template_plugins --dry-run
+      )" || true
+    echo "${_xaca1227_dry:-legacy-plugins: dry-run (could not evaluate)}"
     return 0
   fi
 
@@ -6660,6 +6671,27 @@ update_claude_settings() {
     2) print_success "${_xaca1283_result:-settings-keys: added (count unavailable)}" ;;
     3) print_warning "${_xaca1283_result:-settings-keys: untouched}" ;;
     *) print_warning "${_xaca1283_result:-settings-keys: skipped (non-fatal; upgrade continues)}" ;;
+  esac
+
+  # XACA-1227: one-time, receipt-guarded removal of the 5 enabledPlugins keys
+  # the pre-fix template force-enabled. Single source of truth for the id list,
+  # receipt and backup rules: _xaca1227_remove_legacy_template_plugins() in
+  # install-claude-config.sh. Same subshell/fail-soft pattern as above.
+  local _xaca1227_result="" _xaca1227_rc=0
+  _xaca1227_result="$(
+      AITEAMFORGE_DIR="${WORKING_DIR}"
+      TEMPLATE_DIR="${FRAMEWORK_DIR}/share/templates"
+      export AITEAMFORGE_DIR TEMPLATE_DIR
+      # shellcheck source=/dev/null
+      source "$installer" >/dev/null 2>&1
+      _xaca1227_remove_legacy_template_plugins
+    )" && _xaca1227_rc=0 || _xaca1227_rc=$?
+
+  case "$_xaca1227_rc" in
+    0) print_success "${_xaca1227_result:-legacy-plugins: removed=0 (no-op)}" ;;
+    2) print_success "${_xaca1227_result:-legacy-plugins: removed (count unavailable)}" ;;
+    3) print_warning "${_xaca1227_result:-legacy-plugins: untouched}" ;;
+    *) print_warning "${_xaca1227_result:-legacy-plugins: skipped (non-fatal; upgrade continues)}" ;;
   esac
 
   return 0
