@@ -31926,6 +31926,11 @@ print(len(d) if isinstance(d, dict) else "notdict")' "$map_path" 2>/dev/null)
             ;;
     esac
 
+    # XACA-1104-005: set when the provisioner could not RUN (--check crashed or
+    # hit an environment problem). The tier-2 row below already reports that
+    # fault; the remote-routes block must not report the SAME crash a second time
+    # (the double-count XACA-1078 round 3 already paid for once on the map row).
+    local prov_unrunnable=0
     if [[ -n "$prov" ]]; then
         local prov_out prov_rc
         prov_out=$("$prov" --check 2>&1); prov_rc=$?
@@ -31939,6 +31944,7 @@ print(len(d) if isinstance(d, dict) else "notdict")' "$map_path" 2>/dev/null)
             _kb_msg_row "[GAP]" "tier-2 setup" "environment problem — see below"
             printf '%s\n' "$prov_out" | sed "s/^/$_KB_MSG_PAD/"
             gaps=$((gaps + 1))
+            prov_unrunnable=1
         else
             # Stays [GAP]: kb-msg-provision demonstrably closes this one. It is
             # the RECEIVE row below that it could not close, not this one — and
@@ -31986,6 +31992,7 @@ print(len(d) if isinstance(d, dict) else "notdict")' "$map_path" 2>/dev/null)
                 _kb_msg_row "[??]" "tier-2 setup" "kb-msg-provision exited $prov_rc with no parseable gap list — see below"
                 printf '%s\n' "$prov_out" | sed "s/^/$_KB_MSG_PAD/"
                 unknown=$((unknown + 1))
+                prov_unrunnable=1
             elif [[ -n "$_kb_other_gaps" ]]; then
                 _kb_msg_row "[GAP]" "tier-2 setup" "incomplete — cross-machine send will fail closed"
                 printf '%s\n' "$_kb_other_gaps" | sed "s/^/${_KB_MSG_PAD}- /"
@@ -32000,6 +32007,146 @@ print(len(d) if isinstance(d, dict) else "notdict")' "$map_path" 2>/dev/null)
         # could not be made, which is not the same as a confirmed gap. Flipping
         # this to `gaps` would silently change the doctor's exit semantics.
         unknown=$((unknown + 1))
+    fi
+
+    # ── 3b. Remote routes (XACA-1104-005) ───────────────────────────────────
+    # What the FLEET SERVER says about where teams live that this map has no
+    # entry for. Fed by `kb-msg-provision --check-remote` (read-only; one TAB-
+    # separated finding per line plus a STATE line), so this block owns no
+    # classification logic of its own — same single-source discipline as the
+    # `--check` consumption above (k501). Placed AFTER the routing-map/tier-2
+    # rows and it NEVER re-reports ABSENT/EMPTY/MALFORMED: that is
+    # XACA-1078-005's row. A malformed map makes --check-remote exit 2 and
+    # this block deliberately says nothing (the MALFORMED row owns it); any
+    # other non-zero exit is a [??], never a silent pass.
+    #
+    # Exit semantics (contract §5): R1-R4 are [GAP], R8 and a failed/odd read are
+    # [??] — those drive the exit. R5-R7 are [!] and S-OLD is [BLOCKED]: they are
+    # information (or a condition an operator cannot close from this box), so
+    # they do not drive the default exit. `[!]` has no counter anywhere in this
+    # function (the `inbox` row above uses it the same way), which is what makes
+    # it non-exit-driving.
+    if [[ -n "$prov" && "$map_state" != "malformed" && $prov_unrunnable -eq 0 ]]; then
+        local rr_out rr_rc
+        rr_out=$("$prov" --check-remote 2>/dev/null); rr_rc=$?
+        if [[ $rr_rc -eq 0 ]]; then
+            # Whole-feed ALLOWLIST (XACA-1104-017). The feed is validated as a unit,
+            # consumer-side (this block never trusts the producer to have validated
+            # itself), BEFORE any row is rendered. Grammar, one TAB-separated line each,
+            # no CR / no leading or trailing whitespace on any field, printable ASCII,
+            # line <= 600 bytes, nothing empty, exactly 3 fields:
+            #   R1..R8 TAB <group> TAB <detail>      finding
+            #   S-UNKNOWN TAB - TAB <reason>         marker (state read failed)
+            #   S-OLD TAB - TAB <detail>             marker (server predates machines map)
+            #   STATE TAB <S-OK|S-EMPTY|S-OLD|S-UNKNOWN> TAB <digits>   exactly one, LAST
+            # Whole-feed consistency (mirrors run_check_remote): S-UNKNOWN <=> exactly
+            # one S-UNKNOWN marker and nothing else; S-OLD <=> exactly one S-OLD marker
+            # and nothing else; S-EMPTY => no markers and no findings; S-OK => no
+            # markers (findings allowed). Anything else is invalid, and an invalid feed
+            # renders ONLY the one unparseable row: no partial trust of a bad feed.
+            # awk, not `read`: read collapses empty TAB fields and lumps extras into
+            # the last variable, which is how malformed lines used to look fine.
+            # Byte gate FIRST (XACA-1104, tester round 3): awk ends a record at a
+            # NUL while zsh `read` drops it and keeps the suffix, so the validator
+            # and the renderer used to read DIFFERENT bytes. Any byte outside TAB,
+            # newline and 0x20-0x7e makes the whole feed invalid before either
+            # parser sees it. Counted through a pipe so no $(...) ever holds a NUL.
+            # Fail closed on tool failure too (XACA-1104-023): a tr that dies with
+            # no output would make wc print 0, so a failing tr appends a marker
+            # (nonzero count), and an empty/odd wc result is != "0".
+            local rr_valid rr_badbytes
+            rr_badbytes=$( { printf '%s' "$rr_out" | LC_ALL=C tr -d '\t\n\040-\176' || printf 'TR-FAILED'; } | wc -c | tr -d ' ')
+            rr_valid=$(printf '%s\n' "$rr_out" | LC_ALL=C awk -F'\t' '
+                BEGIN { invalid = 0; nstate = 0; nmu = 0; nmo = 0; nf = 0; state = ""; seen = 0
+                        fld = "^[!-~]([ -~]*[!-~])?$" }
+                {
+                    if (seen) invalid = 1
+                    if (length($0) > 600 || NF != 3 || $2 !~ fld || $3 !~ fld) { invalid = 1; next }
+                    if ($1 == "STATE") {
+                        if ($2 !~ /^(S-OK|S-EMPTY|S-OLD|S-UNKNOWN)$/ || $3 !~ /^[0-9]+$/) invalid = 1
+                        nstate++; seen = 1; state = $2; next
+                    }
+                    if ($1 ~ /^R[1-8]$/) { nf++; next }
+                    if ($1 == "S-UNKNOWN" && $2 == "-") { nmu++; next }
+                    if ($1 == "S-OLD" && $2 == "-") { nmo++; next }
+                    invalid = 1
+                }
+                END {
+                    if (NR == 0 || nstate != 1) invalid = 1
+                    if (state == "S-UNKNOWN" && !(nmu == 1 && nmo == 0 && nf == 0)) invalid = 1
+                    if (state == "S-OLD" && !(nmo == 1 && nmu == 0 && nf == 0)) invalid = 1
+                    if (state == "S-EMPTY" && !(nmu == 0 && nmo == 0 && nf == 0)) invalid = 1
+                    if (state == "S-OK" && !(nmu == 0 && nmo == 0)) invalid = 1
+                    print (invalid ? "INVALID" : "VALID")
+                }' 2>/dev/null)
+            if [[ "$rr_badbytes" != "0" || "$rr_valid" != "VALID" ]]; then
+                _kb_msg_row "[??]" "remote routes" "--check-remote output unparseable"
+                unknown=$((unknown + 1))
+            else
+                local rr_code rr_group rr_detail rr_state="" rr_n=0 rr_findings=0
+                while IFS=$'\t' read -r rr_code rr_group rr_detail; do
+                    case "$rr_code" in
+                        STATE)
+                            rr_state="$rr_group"; rr_n="$rr_detail"
+                            ;;
+                        R1)
+                            _kb_msg_row "[GAP]" "remote routes" "$rr_detail"
+                            _kb_msg_cont "fix: $fix_base/scripts/kb-msg-provision"
+                            gaps=$((gaps + 1))
+                            rr_findings=$((rr_findings + 1))
+                            ;;
+                        R2)
+                            _kb_msg_row "[GAP]" "remote routes" "$rr_detail"
+                            _kb_msg_cont "fix: confirm the real host and add the entry by hand; retire the stale server assertion"
+                            gaps=$((gaps + 1))
+                            rr_findings=$((rr_findings + 1))
+                            ;;
+                        R3)
+                            _kb_msg_row "[GAP]" "remote routes" "$rr_detail"
+                            _kb_msg_cont "fix: confirm which is right and edit the map by hand (kb-msg-provision never retargets from server data)"
+                            gaps=$((gaps + 1))
+                            rr_findings=$((rr_findings + 1))
+                            ;;
+                        R4)
+                            _kb_msg_row "[GAP]" "remote routes" "$rr_detail"
+                            _kb_msg_cont "fix: confirm the real host; primary_host in team-paths.json or the server registration is wrong"
+                            gaps=$((gaps + 1))
+                            rr_findings=$((rr_findings + 1))
+                            ;;
+                        R5|R6|R7)
+                            _kb_msg_row "[!]" "remote routes" "$rr_detail"
+                            rr_findings=$((rr_findings + 1))
+                            ;;
+                        R8)
+                            _kb_msg_row "[??]" "remote routes" "$rr_detail"
+                            unknown=$((unknown + 1))
+                            rr_findings=$((rr_findings + 1))
+                            ;;
+                        S-UNKNOWN)
+                            _kb_msg_row "[??]" "remote routes" "could not read GET /api/registered-teams ($rr_detail) — remote coverage not checked"
+                            unknown=$((unknown + 1))
+                            rr_findings=$((rr_findings + 1))
+                            ;;
+                        S-OLD)
+                            _kb_msg_row "[BLOCKED]" "remote routes" "fleet server predates the machines map (XACA-1089) — remote routes cannot be sourced"
+                            blocked=$((blocked + 1))
+                            rr_findings=$((rr_findings + 1))
+                            ;;
+                    esac
+                done <<< "$rr_out"
+                # [ok] is reachable only from a fully valid feed with nothing to report.
+                if [[ $rr_findings -eq 0 && ( "$rr_state" == "S-OK" || "$rr_state" == "S-EMPTY" ) ]]; then
+                    _kb_msg_row "[ok]" "remote routes" "${rr_n:-0} server teams checked, no remote-route findings"
+                fi
+            fi
+        else
+            # XACA-1104-019: rc 2 is NOT silent. The malformed-map case that
+            # used to own rc 2 is already gated out above (map_state), so rc 2
+            # here means a --check/--check-remote divergence or a provisioner
+            # too old to know the flag -- either way coverage is unknown.
+            _kb_msg_row "[??]" "remote routes" "kb-msg-provision --check-remote exited $rr_rc — remote coverage not checked"
+            unknown=$((unknown + 1))
+        fi
     fi
 
     # ── 4. Reporter liveness (Tier 2 RECEIVE) ───────────────────────────────

@@ -27,25 +27,54 @@ POST /api/team-register nor GET /api/registered-teams anywhere.
 So the server-side mapping now genuinely exists for any team this machine has
 registered since that shipped and deployed (fleet-monitor has no auto-deploy;
 "merged" is not "shipped" -- confirm against the live endpoint, not this
-source tree). Consuming it here -- to populate team-machines.json entries for
-teams that live on OTHER machines -- is a real follow-on capability (FILED as
-XACA-1104, 2026-09-05; see XACA-1089-012 for the measurement of the
-consumer-side gap it closes) and is DELIBERATELY not done in this
-file: XACA-1078-001's
-contract permanently forbids a machine guessing where another machine's teams
-live, and a team the new server data shows asserted by MORE than one machine
-at once is a hard-error-shaped fact to name, never a case to pick a winner
-from. Until that follow-on lands, this function's authority stays exactly
-what it was: what a machine CAN state authoritatively is which teams live on
-itself. So this maps every locally-present team to this machine and leaves
-every other entry exactly as found. A team we cannot see is recorded as
+source tree).
+
+STATUS UPDATE (XACA-1104, 2026-11): the follow-on is DONE, and the paragraph
+that stood here -- "consuming it ... is DELIBERATELY not done in this file" --
+is corrected rather than silently dropped. This file now calls
+GET /api/registered-teams (once per run) and may ADD routing-map entries for
+teams that live on OTHER machines, under the merge contract
+(kanban/plans/XACA-1104/merge-contract.md, gitignored; section numbers below
+are that file's). The reasoning that kept it out earlier still governs how it
+is done: XACA-1078-001 permanently forbids a machine guessing where another
+machine's teams live, so the remote pass is deliberately narrow:
+
+  * VACANCY-ONLY, ADD-ONLY. A key already present in the routing map -- or
+    added by this run's local merge -- with ANY value (string, "", null, list,
+    object) is established and is never changed, filled or retargeted, in
+    manual or unattended mode. A team and its INSTANCE_TO_TEMPLATE alias are one
+    group: if either is established, neither is filled. Server data never
+    touches a self-entry (contract P1-P4).
+  * LOCAL CLASSIFICATION OUTRANKS THE SERVER. A team the local classifier calls
+    local (any tier, including tier-4 `deferred` under --unattended),
+    spacedock, or board_less/alias_of is skipped; a declared primary_host on
+    another machine is written only if the server names exactly that machine
+    (P6/P7).
+  * A team the server shows on MORE THAN ONE machine is a hard error for that
+    team only: nothing is written for it, every candidate is named, and NO
+    liveness filter is applied before counting -- it is never a case to pick a
+    winner from (§3, §4 #3). A server that names THIS machine for a team with
+    no local evidence is reported, never written (§4 #4).
+  * The server's answer has FOUR distinct states and only one writes: S-OK.
+    S-UNKNOWN (unreachable / bad body / malformed / mixed records), S-OLD (no
+    record has a `machines` key -- a pre-XACA-1089 server) and S-EMPTY (zero
+    teams) are reported and write nothing remote; "not deployed" is never read
+    as "no remote teams". The LOCAL half of the run proceeds exactly as before
+    under every one of them.
+  * Local adds and remote adds are ONE atomic write (a single
+    _write_json_atomic call; one backup).
+
+What a machine CAN state authoritatively is still which teams live on itself;
+the remote pass only fills a vacancy the operator never recorded, and every
+server-written entry then becomes tier-3 recorded authority on later runs --
+which is why the bar for writing is high. A team we cannot see is recorded as
 unknown, never guessed: a wrong mapping routes mail to the wrong box and
-fails there, which is strictly worse than the current honest fail-closed
-error.
+fails there, which is strictly worse than the honest fail-closed error.
 
 Usage:
-    kb-msg-provision [--check] [--dry-run] [--no-keygen]
+    kb-msg-provision [--check] [--dry-run] [--no-keygen] [--no-remote]
                      [--server <url>] [--machine-id <slug>] [--quiet]
+    kb-msg-provision --check-remote [--server <url>] [--machine-id <slug>]
     kb-msg-provision --add-team <team-id> [--unattended] [--quiet]
     kb-msg-provision --unattended [--server <url>] [--quiet]
     <token-source> | kb-msg-provision --fleet-token-stdin [--quiet]
@@ -123,6 +152,23 @@ superset invariant above). A reader who assumed the two names were
 synonyms would be wrong about the safety-critical half, so they stay
 distinct on purpose.
 
+REMOTE ROUTES (XACA-1104) — flags and output
+------------------------------------------------
+Every full run (manual or --unattended) does the remote pass after the local
+merge unless --no-remote is given ("remote: skipped"). --add-team and
+--fleet-token-stdin never do it; --check never does it and its exit code is
+unchanged by anything remote. --dry-run DOES perform the (read-only) GET and
+prints `+ <team> -> <slug> (server)` lines. Adds are reported via stdout;
+ambiguity/disagreement findings R2/R3/R4/R5/R8 go to stderr via _notice so they
+survive --quiet, and are NOT provisioning failures (exit stays 0).
+
+`--check-remote` is the read-only feed for `kb-msg doctor`'s `remote routes`
+rows: one TAB-separated `<CODE> TAB <team-group> TAB <detail>` line per finding
+(codes R1..R8, S-UNKNOWN, S-OLD) and a final `STATE TAB <S-*> TAB <n>` line; exit 0
+unless the environment is broken (2, including a malformed routing map, which
+is refused BEFORE any GET). The tap upgrade path calls
+`kb-msg-provision --unattended --quiet`, which reaches this pass unchanged.
+
 Exit codes (unchanged in meaning for every invocation shape above):
     0  provisioned (or already provisioned) / --check found everything
     1  --check found a gap, or provisioning declined (retarget attempt,
@@ -131,6 +177,7 @@ Exit codes (unchanged in meaning for every invocation shape above):
 """
 
 import argparse
+import base64
 import glob
 import ipaddress
 import json
@@ -960,6 +1007,161 @@ def _registration_lookup(keygen_js, slug):
     return result if result in ("registered", "not-registered") else "unknown"
 
 
+# ── Remote routes: GET /api/registered-teams (XACA-1104-002) ─────────────────
+# Contract: kanban/plans/XACA-1104/merge-contract.md (gitignored; sections are
+# cited below as "contract §N"). A wrong route is strictly worse than no route,
+# so every doubt below resolves to "write nothing for that team and say so".
+#
+# TEST-ONLY SEAMS (never set these outside a test sandbox). They exist so a test
+# never touches the network; each one is announced on the `remote :` line of the
+# report when it is active, so a run using one cannot be mistaken for a real one.
+#   KB_MSG_PROVISION_TEST_REGISTERED_TEAMS_FILE  path to a file whose bytes ARE the
+#                                                GET response body (replaces the node fetch)
+#   KB_MSG_PROVISION_TEST_REGISTERED_TEAMS_FAIL  a transport-failure reason string
+#                                                (timeout / 500 / redirect ...): the
+#                                                fetch "fails" with exactly that text
+#   KB_MSG_PROVISION_TEST_REGISTERED_TEAMS_LOG   file that gets one line appended per
+#                                                fetch attempt (so a test can assert
+#                                                that NO GET was made)
+REMOTE_FETCH_TIMEOUT = 15
+ENV_REMOTE_FIXTURE = "KB_MSG_PROVISION_TEST_REGISTERED_TEAMS_FILE"
+ENV_REMOTE_FAIL = "KB_MSG_PROVISION_TEST_REGISTERED_TEAMS_FAIL"
+ENV_REMOTE_LOG = "KB_MSG_PROVISION_TEST_REGISTERED_TEAMS_LOG"
+
+# Mirrors fleet-monitor/server/lib/vault-store.js SLUG_RE / MAX_SLUG_LEN. Python
+# cannot import a JS constant: keep in sync by hand. fullmatch, never `$` -- `$`
+# would accept a trailing newline.
+REMOTE_SLUG_RE = re.compile(r"[a-z][a-z0-9-]*")
+REMOTE_MAX_SLUG_LEN = 64
+
+S_OK, S_UNKNOWN, S_OLD, S_EMPTY = "S-OK", "S-UNKNOWN", "S-OLD", "S-EMPTY"
+
+
+def _remote_fixture_active():
+    return bool(os.environ.get(ENV_REMOTE_FIXTURE) or os.environ.get(ENV_REMOTE_FAIL))
+
+
+def _fetch_registered_teams_text(keygen_js, server_override=None):
+    """One GET /api/registered-teams. Returns (ok, text_or_reason). Never raises.
+
+    The HTTP call is delegated to vault-keygen.js's own resolveFleetUrl() /
+    fleetRequestHeaders() / fleetFetchInit() / assertNoRedirect() via a throwaway
+    `node -e`, exactly like _registration_lookup() -- no URL, auth or redirect
+    logic is reimplemented in Python. The body crosses the process boundary
+    base64-encoded so a multi-line or hostile body cannot forge the framing.
+
+    `server_override` (an explicit --server on a --check/--dry-run/--check-remote
+    run, where the URL is NOT persisted) goes through kg.acceptFleetUrl(), which
+    VALIDATES it and, when refused, fails closed -- it never falls back to the
+    configured server (that would silently query a different one).
+    """
+    log = os.environ.get(ENV_REMOTE_LOG)
+    if log:
+        try:
+            with open(log, "a") as fh:
+                fh.write("GET\n")
+        except OSError:
+            pass
+    fail = os.environ.get(ENV_REMOTE_FAIL)
+    if fail:
+        return False, fail
+    fixture = os.environ.get(ENV_REMOTE_FIXTURE)
+    if fixture:
+        try:
+            with open(fixture, "r") as fh:
+                return True, fh.read()
+        except (OSError, UnicodeDecodeError) as exc:
+            return False, "test fixture unreadable: %s" % exc.__class__.__name__
+
+    if not shutil.which("node"):
+        return False, "node not found on PATH"
+    script = (
+        "(async () => {"
+        "  const out = (s) => console.log(s);"
+        "  const kg = require(%s);"
+        "  try {"
+        "    const override = %s;"
+        "    const base = override ? kg.acceptFleetUrl(override, '--server') : kg.resolveFleetUrl();"
+        "    if (!base) { out('ERR no fleet server URL configured (or the one given was refused)'); return; }"
+        "    const url = base.replace(/\\/+$/, '') + '/api/registered-teams';"
+        "    const hdrs = typeof kg.fleetRequestHeaders === 'function' ? await kg.fleetRequestHeaders(url) : {};"
+        "    const res = kg.assertNoRedirect(await fetch(url, Object.assign({}, kg.fleetFetchInit(), { headers: hdrs })), url);"
+        "    if (!res.ok) { out('ERR HTTP ' + res.status); return; }"
+        "    out('OK ' + Buffer.from(await res.text(), 'utf8').toString('base64'));"
+        "  } catch (e) {"
+        "    out('ERR ' + (e && e.code === 'FLEET_REDIRECT_REFUSED' ? 'redirect refused' : 'request failed'));"
+        "  }"
+        "})();"
+    ) % (json.dumps(keygen_js), json.dumps(server_override or ""))
+    try:
+        out = subprocess.run(["node", "-e", script], capture_output=True, text=True,
+                             timeout=REMOTE_FETCH_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return False, "timed out after %ds" % REMOTE_FETCH_TIMEOUT
+    except OSError as exc:
+        return False, "node could not run: %s" % exc.__class__.__name__
+    lines = out.stdout.strip().splitlines()
+    last = lines[-1] if lines else ""
+    if last.startswith("OK "):
+        try:
+            return True, base64.b64decode(last[3:], validate=True).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            return False, "response body undecodable"
+    if last.startswith("ERR "):
+        return False, last[4:].strip()[:120] or "request failed"
+    return False, "no usable answer from node"
+
+
+def _clean(value, limit=120):
+    """Server-supplied text is DATA: printable ASCII only, bounded, no tabs or
+    newlines (the --check-remote output is TAB-separated, one finding per line).
+    Stripped after truncation too: the doctor's feed grammar allows no leading or
+    trailing whitespace on a field (XACA-1104-017)."""
+    return re.sub(r"[^\x20-\x7e]", "?", str(value))[:limit].strip()
+
+
+def parse_registered_teams(ok, text):
+    """Classify a fetch result into the contract §2 states.
+
+    Returns (state, reason, records). `records` is a list of (team, machines)
+    only for S-OK. S-UNKNOWN and S-OLD are NEVER read as "no remote teams".
+    """
+    if not ok:
+        return S_UNKNOWN, text, []
+    try:
+        body = json.loads(text)
+    except (ValueError, RecursionError, MemoryError):
+        # RecursionError: a deeply nested body overflows the C parser's stack. It is
+        # NOT a ValueError, and an uncaught one would abort the whole run -- including
+        # the LOCAL self-entry write -- over a body we only had to refuse.
+        return S_UNKNOWN, "response body is not JSON", []
+    teams = body.get("teams") if isinstance(body, dict) else None
+    if not isinstance(teams, list):
+        return S_UNKNOWN, "response body is not {teams: [...]}", []
+    if not teams:
+        return S_EMPTY, "server lists 0 teams", []
+    with_machines = 0
+    records = []
+    for rec in teams:
+        if not isinstance(rec, dict):
+            return S_UNKNOWN, "a team record is not an object", []
+        team = rec.get("team")
+        if not isinstance(team, str) or not team.strip():
+            return S_UNKNOWN, "a team record has no usable `team` id", []
+        if "machines" in rec:
+            if not isinstance(rec["machines"], dict):
+                return S_UNKNOWN, "`machines` is not an object on team %s" % _clean(team, 60), []
+            with_machines += 1
+            records.append((team.strip(), rec["machines"]))
+        else:
+            records.append((team.strip(), None))
+    if with_machines == 0:
+        return S_OLD, "no team record carries a `machines` map", []
+    if with_machines != len(teams):
+        return S_UNKNOWN, "some team records carry `machines` and some do not", []
+    return S_OK, "", records
+
+
 # ── Template/instance aliases ────────────────────────────────────────────────
 # MIRROR of _kb_template_to_instance / _kb_instance_to_template in
 # kanban-helpers.sh (~1840, XACA-0576). Keep the three cases in lock-step; that
@@ -1314,6 +1516,181 @@ def _refuse_retarget_under_unattended(unattended, retargeted, slug, say):
     return False
 
 
+# ── Remote routes: the merge (XACA-1104-003) ─────────────────────────────────
+def _alias_group(team):
+    """The alias group a team id belongs to, as a sorted list (contract §1 P2 / §4 #7).
+
+    Both directions of INSTANCE_TO_TEMPLATE: `medical-general` and `medical` are
+    ONE group, whichever of them the server (or the registry) names."""
+    canon = INSTANCE_TO_TEMPLATE.get(team, team)
+    names = {canon} | {i for i, t in INSTANCE_TO_TEMPLATE.items() if t == canon}
+    return sorted(names)
+
+
+def _group_label(names):
+    return "/".join(names)
+
+
+def _machine_evidence(by_slug, slug):
+    """('lastSeen ts', 'online y/n/?') for reporting ONLY -- liveness never
+    filters candidates (contract §4 #3)."""
+    seen, online = "?", set()
+    for entry in by_slug.get(slug, []):
+        if not isinstance(entry, dict):
+            continue
+        ls = entry.get("lastSeen")
+        if isinstance(ls, str) and (seen == "?" or ls > seen):
+            seen = ls
+        info = entry.get("machineInfo")
+        if isinstance(info, dict) and isinstance(info.get("online"), bool):
+            online.add(info["online"])
+    if online == {True}:
+        on = "y"
+    elif online == {False}:
+        on = "n"
+    else:
+        on = "?"
+    return _clean(seen, 40), on
+
+
+def plan_remote_routes(records, registry, merged, disk_map, slug):
+    """Decide which REMOTE entries to add. Pure: reads, never writes. S-OK only.
+
+    records    [(team, machines_dict)] from parse_registered_teams (S-OK)
+    registry   team-paths.json `teams` dict
+    merged     the map AFTER this run's local merge (defines "established", P1)
+    disk_map   the map as read from disk (tier-3 input to _classify_team, same
+               snapshot local classification used)
+    slug       this machine's slug
+
+    Returns (adds, findings): adds is {team_key: server_slug} to write, findings
+    a list of (code, group_label, detail) in stable order. Contract §3/§4.
+    """
+    slug_norm = (slug or "").strip().lower()
+    adds, findings = {}, []
+
+    groups = {}      # alias-group key (tuple) -> {"slugs": {slug: [entry,...]}}
+    bad_groups = set()   # alias groups an invalid (case-folding) team id aliases into
+    for team, machines in records:
+        # A team id becomes a routing-map KEY. Hold it to the server's own team-id
+        # shape (notify-team-routes.js TEAM_RE) so a garbled or hostile record cannot
+        # plant whitespace/control-character/oversized keys (or pre-seed a sticky
+        # route for an id no team will ever have). Skipped and reported, never written.
+        if not (len(team) <= REMOTE_MAX_SLUG_LEN and REMOTE_SLUG_RE.fullmatch(team)):
+            findings.append(("R8", _clean(team, 60), "%s: server returned an invalid team id -- record skipped"
+                             % _clean(team, 60)))
+            # An invalid id that case-folds into an alias group poisons the WHOLE
+            # group (same reasoning as the bad-slug rule below): dropping it alone
+            # could shrink |S| from 2 hosts to 1 and turn ambiguity into a pick.
+            bad_groups.add(tuple(_alias_group(team.strip().lower())))
+            continue
+        g = tuple(_alias_group(team))
+        ent = groups.setdefault(g, {})
+        for s, entry in machines.items():
+            ent.setdefault(s, []).append(entry)
+
+    for names_t in sorted(groups):
+        names = list(names_t)
+        label = _group_label(names)
+        if names_t in bad_groups:
+            findings.append(("R8", label, "%s: server returned an invalid team id aliasing into this "
+                             "group -- group skipped" % label))
+            continue
+        by_slug = groups[names_t]
+        S = sorted(by_slug)
+        if not S:
+            continue            # machines: {} -- no evidence either way
+        S_ci = {s.lower() for s in S}
+        shown = ", ".join(_clean(s, 70) for s in S)
+
+        # P1/P2: established if ANY key of the group is present, any value shape.
+        est_keys = [n for n in names if n in merged]
+        if est_keys:
+            vals = [merged[k].strip() for k in est_keys
+                    if isinstance(merged[k], str) and merged[k].strip()]
+            if vals:
+                hits = [v for v in vals if v.lower() in S_ci]
+                if hits:
+                    if len(S) > 1:
+                        others = ", ".join(_clean(s, 70) for s in S if s.lower() != hits[0].lower())
+                        findings.append(("R7", label, "%s routes to %s; server also lists %s -- "
+                                         "verify %s still hosts it" % (label, _clean(hits[0], 70), others,
+                                                                      _clean(hits[0], 70))))
+                else:
+                    findings.append(("R3", label, "%s routes to %s; server lists only %s -- not changed"
+                                     % (label, _clean(vals[0], 70), shown)))
+            continue            # never retargeted, never filled (P3)
+
+        # P6: local classification outranks the server.
+        if any(n in PER_MACHINE_ALWAYS_LOCAL_TEAMS for n in names):
+            continue
+        buckets = [(n,) + _classify_team(n, registry[n], slug_norm, disk_map)
+                   for n in names if n in registry]
+        if any(b == "skip" for _n, b, _t, _o in buckets):
+            continue
+        if any(b == "local" for _n, b, _t, _o in buckets):
+            if S_ci != {slug_norm}:
+                findings.append(("R5", label, "%s has a local board here; server lists only %s -- "
+                                 "local classification kept" % (label, shown)))
+            continue
+
+        # Slug validation applies to the WHOLE group (contract §3 step 2): dropping
+        # only the bad slug could shrink |S| from 2 to 1 and turn ambiguity into a pick.
+        if any(not (len(s) <= REMOTE_MAX_SLUG_LEN and REMOTE_SLUG_RE.fullmatch(s)) for s in S):
+            findings.append(("R8", label, "%s: server returned an invalid slug -- group skipped" % label))
+            continue
+
+        # P7: declared foreign owner needs the server to corroborate EXACTLY it.
+        declared = sorted({(o or "").strip() for _n, b, _t, o in buckets if b == "foreign" and o})
+        if declared:
+            if len({d.lower() for d in declared}) == 1 and S_ci == {declared[0].lower()}:
+                for n in names:
+                    adds[n] = S[0]
+            else:
+                findings.append(("R4", label, "%s primary_host %s; server lists %s -- not written"
+                                 % (label, ", ".join(_clean(d, 70) for d in declared), shown)))
+            continue
+
+        if len(S) > 1:
+            parts = []
+            for s in S:
+                seen, on = _machine_evidence(by_slug, s)
+                parts.append("%s (lastSeen %s, online %s)" % (s, seen, on))
+            findings.append(("R2", label, "%s has no route; server lists %d hosts: %s -- not picked"
+                             % (label, len(S), ", ".join(parts))))
+            continue
+        if S_ci == {slug_norm}:
+            findings.append(("R6", label, "server records this machine (%s) as a host of %s, but there "
+                             "is no local evidence -- stale registration?" % (_clean(slug, 70), label)))
+            continue
+        for n in names:
+            adds[n] = S[0]
+        findings.append(("R1", label, "%s has no route; server lists exactly one host (%s)" % (label, S[0])))
+
+    return adds, findings
+
+
+# R1 is "this would be written": in a write run it is reported as an add line, so
+# only the doctor feed (--check-remote) shows it as a finding. R2-R5 and R8 are the
+# ones an operator must see even under --quiet (contract §4 #8; the PR #825 rule-12
+# lesson: an exit-0 run that withheld a decision nobody can read is a silent failure).
+# R6 (stale self-registration) and R7 (server lists extra hosts) are deliberately
+# NOT here: they are information only, surfaced by `kb-msg doctor` as [!], and
+# nothing about them blocks or alters a write.
+_REMOTE_NOTICE_CODES = ("R2", "R3", "R4", "R5", "R8")
+
+
+def remote_pass(keygen_js, args, registry, merged, disk_map, slug):
+    """Fetch, classify and plan. Returns (state, reason, adds, findings, n_teams).
+    Never raises on server trouble: every failure is a state, never an exception."""
+    ok, text = _fetch_registered_teams_text(keygen_js, args.server)
+    state, reason, records = parse_registered_teams(ok, text)
+    if state != S_OK:
+        return state, reason, {}, [], 0
+    adds, findings = plan_remote_routes(records, registry, merged, disk_map, slug)
+    return state, "", adds, findings, len(records)
+
+
 def run_add_team(keygen_js, args, say):
     """`--add-team <team-id>` — narrow additive single-team assertion.
 
@@ -1435,6 +1812,28 @@ def run_add_team(keygen_js, args, say):
     return 0
 
 
+def run_check_remote(keygen_js, args, merged, disk_map, slug):
+    """`--check-remote`: the doctor's feed (XACA-1104-005, contract §4 #8 / §5).
+
+    stdout is machine-readable and ONLY machine-readable (--quiet is irrelevant):
+      <CODE> TAB <team-group> TAB <detail>     one per finding (R1-R8, S-UNKNOWN, S-OLD)
+      STATE TAB <S-OK|S-EMPTY|S-OLD|S-UNKNOWN> TAB <server team count>   always last
+    Exit 0 regardless of findings (a finding is information for the doctor, not a
+    provisioning failure); exit 2 comes only from the environment (_die_env).
+    Never writes anything.
+    """
+    registry = _load_teams_registry()
+    state, reason, adds, findings, n = remote_pass(keygen_js, args, registry, merged, disk_map, slug)
+    if state == S_UNKNOWN:
+        print("%s\t-\t%s" % (S_UNKNOWN, _clean(reason)))
+    elif state == S_OLD:
+        print("%s\t-\tfleet server predates the machines map (XACA-1089)" % S_OLD)
+    for code, group, detail in findings:
+        print("%s\t%s\t%s" % (code, _clean(group), _clean(detail, 400)))
+    print("STATE\t%s\t%d" % (state, n))
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(add_help=True)
     ap.add_argument("--check", action="store_true", help="Report state; never write. Exit 1 on a gap.")
@@ -1465,6 +1864,17 @@ def main():
                           "generate a keypair, does not touch the routing map, and "
                           "never echoes the token. Mutually exclusive with "
                           "--add-team, --server, --check, and --dry-run.")
+    ap.add_argument("--no-remote", action="store_true",
+                     help="Skip the GET /api/registered-teams remote-route pass entirely "
+                          "(offline operators, tests). Reported as 'remote: skipped'. "
+                          "XACA-1104.")
+    ap.add_argument("--check-remote", action="store_true",
+                     help="Read-only feed for `kb-msg doctor`: print one TAB-separated "
+                          "line per remote-route finding (<CODE>\\t<team-group>\\t<detail>) "
+                          "and a final STATE line. Exit 0 unless the environment is broken "
+                          "(2, e.g. a malformed routing map). Never writes. Does not combine "
+                          "with --check, --dry-run, --add-team, --no-remote or "
+                          "--fleet-token-stdin. XACA-1104.")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
 
@@ -1483,6 +1893,11 @@ def main():
             )
         return run_fleet_token_stdin(say)
 
+    if args.check_remote and (args.check or args.dry_run or args.add_team
+                              or args.no_remote or args.fleet_token_stdin):
+        _die_env("--check-remote does not combine with --check, --dry-run, --add-team, "
+                 "--no-remote or --fleet-token-stdin.")
+
     # ── --add-team implications and guards (Decision 1/5, rule 8) ──────────
     if args.add_team and args.server:
         _die_env(
@@ -1500,14 +1915,15 @@ def main():
     if args.add_team:
         return run_add_team(keygen_js, args, say)
 
-    if args.server and (args.check or args.dry_run):
+    readonly_server = args.check or args.dry_run or args.check_remote
+    if args.server and readonly_server:
         # REVIEW-GATE FINDING XACA-0885-057. These modes skipped _relay_endpoint
         # entirely, so a credential-bearing or malformed --server passed silently
         # in exactly the mode an operator runs as a PREFLIGHT. Dry-run should be
         # the safest place to catch it, not the one place that does not look.
         # Validate (which refuses on its own) and discard the result.
         _relay_endpoint(args.server)
-    if args.server and not (args.check or args.dry_run):
+    if args.server and not readonly_server:
         changed, prev = persist_relay_url(args.server)
         if changed:
             say("  Recorded relay URL in %s%s"
@@ -1534,6 +1950,13 @@ def main():
         deferred = []
     loc = with_aliases(loc)   # template ids too, or kb-msg looks up a name we never wrote
     merged, added, retargeted = merge_local(existing, loc, slug)
+
+    # ── --check-remote (XACA-1104-005 feed): read-only, before any report/keygen/
+    # write. The map was already loaded above (load_map() refuses a malformed one
+    # with exit 2 BEFORE any GET, contract test 31) and merge_local() has run, so
+    # `merged` carries every key this run's local half would establish (P1).
+    if args.check_remote:
+        return run_check_remote(keygen_js, args, merged, existing, slug)
 
     say("kb-msg provisioning")
     say("  machine slug : %s" % slug)
@@ -1732,8 +2155,36 @@ def main():
                 % (slug, keygen_js, slug)
             )
 
+    # ── remote routes (XACA-1104) ──
+    # Add-only, vacancy-only, and it can only run AFTER merge_local() so every
+    # self-entry is established before the remote pass looks (contract P4). Its adds
+    # ride the SAME single _write_json_atomic call as the local merge below.
+    remote_adds = {}
+    if args.no_remote:
+        say("  remote       : skipped (--no-remote)")
+    else:
+        r_state, r_reason, remote_adds, r_findings, r_n = remote_pass(
+            keygen_js, args, _load_teams_registry(), merged, existing, slug)
+        fixture_note = " [TEST FIXTURE]" if _remote_fixture_active() else ""
+        if r_state == S_OK:
+            say("  remote       : %s, %d server team(s) read, %d route(s) to add%s"
+                % (r_state, r_n, len(remote_adds), fixture_note))
+        elif r_state == S_EMPTY:
+            say("  remote       : %s, server lists 0 teams%s" % (r_state, fixture_note))
+        elif r_state == S_OLD:
+            say("  remote       : %s, fleet server predates the machines map (XACA-1089) -- "
+                "remote routes cannot be sourced%s" % (r_state, fixture_note))
+        else:
+            say("  remote       : %s, could not read GET /api/registered-teams (%s) -- "
+                "nothing remote written%s" % (r_state, _clean(r_reason), fixture_note))
+        for code, group, detail in r_findings:
+            if code in _REMOTE_NOTICE_CODES:
+                _notice("remote %s %s" % (code, detail))
+            elif code != "R1":
+                say("  remote %s : %s" % (code, detail))
+
     # ── routing map ──
-    if not added and not retargeted:
+    if not added and not retargeted and not remote_adds:
         say("  Routing map already correct for every local team — no change.")
         return 0
 
@@ -1753,6 +2204,8 @@ def main():
             say("    + %s -> %s" % (t, slug))
         for t, was in retargeted:
             say("    ~ %s -> %s (was %s)" % (t, slug, was))
+        for t in sorted(remote_adds):
+            say("    + %s -> %s (server)" % (t, remote_adds[t]))
         return 0
 
     # No try/except here. This previously caught `Exception`, which became DEAD
@@ -1761,6 +2214,12 @@ def main():
     # not an Exception, so the handler could never fire (review finding, PR #764).
     # Leaving it would tell the next reader that write_map failures are handled
     # here, and they are not; they exit 2 from inside the helper.
+    # Remote adds are vacancy-only by construction (plan_remote_routes skips every
+    # established key), so this update can never overwrite a value; this check is a
+    # tripwire for a future edit that breaks that, not a runtime path.
+    if set(remote_adds) & set(merged):
+        _die_env("internal error: a remote add would overwrite an established key; nothing written.")
+    merged.update(remote_adds)
     write_map(merged)
 
     say("\n  Wrote %s" % TEAM_MACHINES)
@@ -1768,6 +2227,8 @@ def main():
         say("    + %s -> %s" % (t, slug))
     for t, was in retargeted:
         say("    ~ %s -> %s (was %s)" % (t, slug, was))
+    for t in sorted(remote_adds):
+        say("    + %s -> %s (server)" % (t, remote_adds[t]))
     return 0
 
 
