@@ -6,6 +6,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1227: Shipped settings templates stop force-enabling unresolvable plugins (XACA-1227)
+- XACA-1718: CI dispatcher reserves started slots until a newer report; no-slot not a ghost (XACA-1718)
+- Tap files updated in this publish: `fleet-monitor/server/lib/ci-dispatcher.js`,`fleet-monitor/server/package.json` `fleet-monitor/server/tests/xaca-1441-dispatcher.test.js`,`fleet-monitor/server/tests/xaca-1718-started-slot-reservation.test.js` `share/templates/claude/settings.json.template`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1752: kb-* LCARS port resolves from the registry on brew consumers (XACA-1752)
 - Tap files updated in this publish: `share/kanban-hooks/aiteamforge_paths.py`,`share/scripts/lcars-tmp-dir.sh` `share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1762: Tap kb-retro-path finds plans/<ID>/ plan docs (XACA-1762)

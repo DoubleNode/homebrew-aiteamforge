@@ -843,7 +843,7 @@ describe('ghost backstop counts unpicked runners, not mints (033)', () => {
         s.clock.t += 61 * 1000;
     }
     /** One more runner for job A that GitHub hands to job `other`: it binds and runs. */
-    async function mintAndBindElsewhere(s, other) {
+    async function mintAndBindElsewhere(s, other, finish = true) {
         s.report('m4mini', {}, 2);
         await s.d.tick();
         const before = s.assignments.snapshot().filter((x) => x.state === 'pending' && x.intendedJob.id === A);
@@ -851,6 +851,9 @@ describe('ghost backstop counts unpicked runners, not mints (033)', () => {
         s.assignments.takeForMachine('m4mini');
         s.d.onJob(rec(other, { status: 'in_progress', runnerName: before[0].runnerName }), 'pickup');
         assert.equal(s.assignments.get(before[0].id).boundJob.id, other, 'fixture: bound to the other job');
+        // XACA-1718: the other job finishes before the next round. A runner left `running` while the
+        // stored report still shows its slot idle keeps that slot reserved, so it would block the mint.
+        if (finish) assert.equal(s.assignments.report(before[0].id, 'm4mini', { state: 'completed' }).status, 'ok');
         s.clock.t += 5 * 1000;
     }
 
@@ -886,7 +889,7 @@ describe('ghost backstop counts unpicked runners, not mints (033)', () => {
         const s = setup({ machines: ['m4mini'] });
         s.d.onJob(rec(A), 'queued');
         for (let i = 0; i < 7; i++) {
-            await mintAndBindElsewhere(s, 700 + i);
+            await mintAndBindElsewhere(s, 700 + i, false);
             const mine = s.assignments.snapshot().find((x) => x.state === 'running' && x.intendedJob.id === A);
             assert.equal(s.assignments.report(mine.id, 'm4mini', { state: 'failed', reason: 'runner-lost' }).status, 'ok');
         }

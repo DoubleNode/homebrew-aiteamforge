@@ -41,7 +41,18 @@
  * SLOTS: a pending/delivered assignment has not started its listener yet, so the agent's
  * report still shows its slot as idle. Before ranking, those slots (plus mints made earlier in
  * the same tick) are marked `reserved` on a COPY of the report, so one idle slot is never
- * promised twice. `started` assignments are not reserved: the agent already reports them busy.
+ * promised twice. A `started` or `running` assignment is ALSO reserved, unless the stored report ACCOUNTS FOR it by
+ * identity (XACA-1718, XACA-1718-013): report.slots has a slot with assignmentId === A.id whose state is
+ * not idle. The agent sets its slot to `starting` with A's id BEFORE it acks `started`, and reports the id
+ * for starting/busy/cleaning, so any poll BUILT after the claim lists A. A poll built before the claim shows
+ * the slot idle and does not list A, even if it ARRIVES after the ack, so a receivedAt-vs-startedAt
+ * comparison cannot tell them apart; identity can. withReservations() flips only IDLE slots, so an
+ * accounted-for A (already non-idle in the report) plus no reservation never double counts. Everything else
+ * stays reserved (fail closed): no report, missing/non-array slots, a report that does not list A, or A
+ * already finished on the agent with its terminal ack not yet in (a brief, safe under-mint). A `running`
+ * assignment gets the same rule: GitHub can bind the job (delivered/started -> running) before the agent's
+ * next poll, so the stored report can still show that slot idle (XACA-1718-014). Timestamps
+ * play no part; receivedAt is still used by placement for poll staleness only.
  *
  * Secrets: this module never sees a JIT config (assignments.mint keeps it) and never logs
  * anything but ids, counts and reason codes.
@@ -64,6 +75,17 @@ const MINT_FAIL_ALERT_AFTER = 3;
 // not mints made. Under label contention GitHub may hand job A's runner to job B; that runner did
 // pick work up, so it says nothing about whether job A is a ghost. (Name kept: it is the same cap.)
 const MAX_MINTS_PER_JOB = 5;
+
+/**
+ * XACA-1718-013: true when the stored report lists the started/running assignment in a non-idle slot, i.e. the
+ * agent's own capacity view already includes it. Identity, not time: see the SLOTS note above. Fails closed.
+ */
+function reportAccountsFor(report, assignment) {
+    const id = assignment && assignment.id;
+    if (typeof id !== 'string' || !id || !report || !Array.isArray(report.slots)) return false;
+    return report.slots.some((s) => !!s && s.assignmentId === id && s.state !== 'idle');
+}
+
 const MAX_TRACKED_MS = 24 * 60 * 60 * 1000;
 // XACA-1441-029: still-queued jobs rejected for a reason a config PUT can change are remembered
 // (bounded) so onConfigChanged() can re-evaluate them. Fork reasons are never in this set: a fork
@@ -613,21 +635,31 @@ function createDispatcher(deps) {
         const pcfg = { now: nowMs, thresholds: cfg.thresholds, jobClasses: cfg.jobClasses, poolLabel: cfg.poolLabel };
         const base = reportsObject();
 
-        // Slots promised to runners whose listener has not started yet.
+        // Slots promised to runners whose listener has not started yet, plus started/running assignments
+        // the stored report does not list in a non-idle slot (identity rule, XACA-1718-013; running:
+        // GitHub can bind the job before the agent's next poll, XACA-1718-014).
         const reserved = new Map();
         // XACA-1441-033: per job id, runners minted FOR it that ended without ever binding a job.
         // A runner that bound a different job (label contention) did work, so it is not counted;
         // a restart-expiry says nothing about the job either.
         const unpicked = new Map();
+        const noSlot = new Map();   // XACA-1718-012: per job id, runners the agent refused as no-slot
         for (const a of assignments.snapshot()) {
-            if (a.state === 'pending' || a.state === 'delivered') {
+            if (a.state === 'pending' || a.state === 'delivered' ||
+                ((a.state === 'started' || a.state === 'running') && !reportAccountsFor(base[a.machine], a))) {
                 const k = `${a.machine}|${a.os}`;
                 reserved.set(k, (reserved.get(k) || 0) + 1);
             }
+            // XACA-1718-003: 'no-slot' is the agent refusing a runner the dispatcher over-minted into a
+            // busy slot; that says nothing about the job, so it must not count toward the ghost bound.
             if ((a.state === 'expired' || a.state === 'cancelled' || a.state === 'failed') && !a.boundJob &&
-                a.reason !== 'restart' && a.intendedJob && a.intendedJob.id !== null) {
+                a.reason !== 'restart' && a.reason !== 'no-slot' && a.intendedJob && a.intendedJob.id !== null) {
                 if (!unpicked.has(a.intendedJob.id)) unpicked.set(a.intendedJob.id, []);
                 unpicked.get(a.intendedJob.id).push(a.id);
+            }
+            if (a.state === 'failed' && a.reason === 'no-slot' && a.intendedJob && a.intendedJob.id !== null) {
+                if (!noSlot.has(a.intendedJob.id)) noSlot.set(a.intendedJob.id, []);
+                noSlot.get(a.intendedJob.id).push(a.id);
             }
         }
 
@@ -639,6 +671,21 @@ function createDispatcher(deps) {
         for (const [key, t] of tracked) {
             if (!t.unpickedIds) t.unpickedIds = new Set();
             for (const id of unpicked.get(t.rec.jobId) || []) t.unpickedIds.add(id);
+            // XACA-1718-012: no-slot refusals do not retire the job, but a run of them means the agent and
+            // the dispatcher disagree about a slot; say so once per job instead of re-minting silently.
+            if (!t.noSlotIds) t.noSlotIds = new Set();
+            for (const id of noSlot.get(t.rec.jobId) || []) t.noSlotIds.add(id);
+            if (!t.noSlotAlerted && t.noSlotIds.size >= maxMintsPerJob) {
+                t.noSlotAlerted = true;
+                writeAudit('alert', { repo: `${t.rec.owner}/${t.rec.repo}`, jobId: t.rec.jobId, runAttempt: t.rec.runAttempt, state: 'tracked', reason: `no-slot-repeated: ${t.noSlotIds.size}` });
+                say('warn', `job ${t.rec.jobId}: ${t.noSlotIds.size} runners refused as no-slot`);
+                alerts.raise('ci-dispatcher-degraded', {
+                    severity: 'warning',
+                    title: `CI dispatcher keeps over-minting a job in ${t.rec.owner}/${t.rec.repo}`,
+                    body: `Job "${clean(t.rec.name).slice(0, 80)}" (${t.rec.jobId}): ${t.noSlotIds.size} runners were refused by the agent as no-slot. The dispatcher and the machine agent disagree about a slot; check the agent's capacity reports.`,
+                    ref: `noslot:${key}`,
+                });
+            }
             const n = t.unpickedIds.size;
             const why = n >= maxMintsPerJob ? `${n} runners expired unpicked`
                 : (nowMs - t.trackedAt > maxTrackedMs ? `tracked over ${Math.round(maxTrackedMs / 3600000)} h` : null);
@@ -1092,5 +1139,5 @@ function wireCiPool(app, opts) {
 
 module.exports = {
     createDispatcher, wireCiPool, hasCredentials, dormantReason, globalMode, priorityRank, surgePlan,
-    NO_CAPACITY_AFTER_MS, FALLBACK_DELAY_MS, MAX_MINTS_PER_JOB, MAX_TRACKED_MS, MAX_CONFIG_REJECTED,
+    NO_CAPACITY_AFTER_MS, FALLBACK_DELAY_MS, MAX_MINTS_PER_JOB, MAX_TRACKED_MS, MAX_CONFIG_REJECTED, reportAccountsFor,
 };
