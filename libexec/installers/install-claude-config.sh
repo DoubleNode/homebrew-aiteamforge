@@ -1934,13 +1934,14 @@ _xaca1227_remove_legacy_template_plugins() {
 # (one new matcher-less group per template group, keeping only the missing
 # hooks). Box-local hooks, every non-hook key and existing registrations survive.
 #
-# FAIL-CLOSED on stale entries: a base hook counts as "already registered" only
-# if its script (see _xaca1753_hook_script_token) names an EXISTING file, OR its
-# canonical path equals a registration under the same event (so the exact shipped
-# command already present is "registered" even if its script is not on disk yet
-# and re-runs never pile up duplicates). A dead registration (e.g.
-# ~/dev-team/claude-hooks/X.sh on a consumer with no ~/dev-team) must not
-# suppress adding the working path; it is left in place and reported.
+# FAIL-CLOSED on stale entries: a shipped guard counts as "already registered"
+# under an event only if some base registration under THAT event has a LIVE piece
+# naming it (_xaca1753_presence: the exact rule is documented there -- the command
+# is split on whitespace + shell metacharacters, no "which word is the script"
+# grammar). Live = canonicalises to the shipped path, or names an existing file.
+# A dead registration (e.g. ~/dev-team/claude-hooks/X.sh on a consumer with no
+# ~/dev-team) must not suppress adding the working path; it is left in place and
+# reported.
 #
 # PER-EVENT (XACA-1753-021): liveness is scoped to the event. A guard live only
 # under SessionStart does not suppress its Stop registration (kb-where-refresh.sh
@@ -1962,7 +1963,9 @@ _xaca1227_remove_legacy_template_plugins() {
 # path is registered under that event.
 #
 # BACKUP FAILS => NO WRITE: if the pre-change backup cannot be written and
-# verified, nothing is written (rc 1, file untouched, visible message).
+# verified, nothing is written (rc 1, file untouched, visible message). The backup
+# lives in its own dir (never BACKUP_DIR/settings.json, which XACA-1283 also uses
+# in the same second), is never overwritten, and its path is printed.
 #
 # Usage: _xaca1753_refresh_settings_hooks [--dry-run]
 #   --dry-run: read-only. Computes and prints what WOULD be added (count +
@@ -2000,62 +2003,68 @@ _xaca1753_canon_path() {
     printf '%s' "$p"
 }
 
-# Pick the script path out of a hook command, ~ / $HOME / ${HOME} expanded.
-# Rules (first match wins, scanning left to right, first simple command only):
-#   - words are split on whitespace; a "double"/'single' quoted word (even one
-#     containing spaces) is one word and its quotes are stripped
-#   - stop at a control operator (|| && ; | &)
-#   - skip redirections (2>/dev/null, >file, > file, 2>&1), env assignments
-#     (FOO=bar), options (-x, --quiet) and interpreter words (bash sh zsh dash
-#     ksh python python3[.x] uv env node exec nohup sudo command time nice
-#     stdbuf, with or without a directory)
-#   - the script is the first remaining word that contains a '/' and either
-#     ends in .sh/.py or names an existing regular file
-# Prints nothing and returns 1 when no word qualifies.
-_xaca1753_hook_script_token() {
-    local cmd="$1" w q base rest skip_next=false i=0 n
-    local -a words=()
-    read -r -a words <<< "$cmd"
-    n=${#words[@]}
-    while [[ $i -lt $n ]]; do
-        w="${words[$i]}"
-        case "$w" in
-            \"*|\'*)
-                q="${w:0:1}"
-                while [[ $((i + 1)) -lt $n ]] && ! { [[ ${#w} -ge 2 ]] && [[ "${w: -1}" == "$q" ]]; }; do
-                    i=$((i + 1)); w="$w ${words[$i]}"
-                done
-                w="${w#?}"; w="${w%"$q"}"
-                ;;
+# Expand ~ / $HOME / ${HOME} / $AITEAMFORGE_DIR / ${AITEAMFORGE_DIR} at the start
+# of one piece, using the rendered values.
+_xaca1753_expand_piece() {
+    local p="$1"
+    case "$p" in
+        "~"|"~/"*) p="${HOME}${p#\~}" ;;
+        "\$HOME"|"\$HOME/"*) p="${HOME}${p#\$HOME}" ;;
+        "\${HOME}"|"\${HOME}/"*) p="${HOME}${p#\$\{HOME\}}" ;;
+        "\$AITEAMFORGE_DIR"|"\$AITEAMFORGE_DIR/"*) p="${AITEAMFORGE_DIR}${p#\$AITEAMFORGE_DIR}" ;;
+        "\${AITEAMFORGE_DIR}"|"\${AITEAMFORGE_DIR}/"*) p="${AITEAMFORGE_DIR}${p#\$\{AITEAMFORGE_DIR\}}" ;;
+    esac
+    printf '%s' "$p"
+}
+
+# XACA-1753-023/-025: STRUCTURAL presence check (replaces the old "which word is
+# the script" grammar parser, which each review round found a new spelling for).
+#
+# Usage: _xaca1753_presence <command> <basename B> <shipped path S>
+# Prints "live" (rc 0), "stale" (rc 2) or "none" (rc 1).
+#
+# THE RULE. The command is split into pieces on whitespace and on the shell
+# metacharacters ; | & < > ( ) ' " \ and backtick. Each piece has ~, $HOME,
+# ${HOME}, $AITEAMFORGE_DIR and ${AITEAMFORGE_DIR} expanded (rendered values).
+# A piece NAME=Z also yields its value Z (env assignments, --opt=/path). A piece is
+# a CANDIDATE when it contains a '/', or follows a `cd <dir>` piece (then it, and
+# any relative path, resolves against that dir). A candidate whose basename == B is:
+#   live  - it canonicalises to S (the shipped path itself, on disk or not), OR it
+#           names an existing file;
+#   stale - otherwise (a missing file that is not S).
+# Any live candidate wins. A bare word with no '/' and no preceding cd is never a
+# candidate (`echo B`). Pieces are not wire-format aware: a path containing
+# whitespace is split and so is never live (shipped dirs contain none).
+_xaca1753_presence() {
+    local cmd="$1" bn="$2" ship="$3" p v r have_cd=false pend_cd=false cd_dir="" st="none" canon_ship
+    local -a cands=()
+    canon_ship="$(_xaca1753_canon_path "$ship")"
+    if [[ "$cmd" == "$ship" ]]; then printf 'live'; return 0; fi
+    while IFS= read -r p || [[ -n "$p" ]]; do
+        [[ -n "$p" ]] || continue
+        cands+=("$p")
+        case "$p" in *=?*) cands+=("${p#*=}") ;; esac
+    done < <(printf '%s' "$cmd" | tr ';|&<>()'"'"'"\\`[:space:]' '\n')
+    for p in ${cands[@]+"${cands[@]}"}; do
+        p="$(_xaca1753_expand_piece "$p")"
+        if [[ "$pend_cd" == true ]]; then
+            case "$p" in -*) continue ;; esac
+            pend_cd=false; have_cd=true; cd_dir="$p"; continue
+        fi
+        if [[ "$p" == "cd" ]]; then pend_cd=true; continue; fi
+        r=""
+        case "$p" in
+            /*) r="$p" ;;
+            */*) if [[ "$have_cd" == true ]]; then r="${cd_dir}/${p}"; else r="$p"; fi ;;
+            *) if [[ "$have_cd" == true ]]; then r="${cd_dir}/${p}"; fi ;;
         esac
-        i=$((i + 1))
-        case "$w" in
-            '||'|'&&'|';'|'|'|'&') break ;;
-        esac
-        if [[ "$skip_next" == true ]]; then skip_next=false; continue; fi
-        case "$w" in
-            *[\<\>]*)
-                rest="${w##*[<>]}"
-                [[ -n "$rest" ]] || skip_next=true
-                continue ;;
-            -*) continue ;;
-        esac
-        if [[ "$w" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then continue; fi
-        case "$w" in
-            "~"|"~/"*) w="${HOME}${w#\~}" ;;
-            "\$HOME"*) w="${HOME}${w#\$HOME}" ;;
-            "\${HOME}"*) w="${HOME}${w#\$\{HOME\}}" ;;
-        esac
-        base="${w##*/}"
-        case "$base" in
-            bash|sh|zsh|dash|ksh|python|python3|python3.*|uv|env|node|exec|nohup|sudo|command|time|nice|stdbuf) continue ;;
-        esac
-        case "$w" in */*) ;; *) continue ;; esac
-        case "$w" in
-            *.sh|*.py) printf '%s' "$w"; return 0 ;;
-        esac
-        if [[ -f "$w" ]]; then printf '%s' "$w"; return 0; fi
+        [[ -n "$r" && "${r##*/}" == "$bn" ]] || continue
+        v="$(_xaca1753_canon_path "$r")"
+        if [[ "$v" == "$canon_ship" ]] || [[ -f "$r" ]]; then printf 'live'; return 0; fi
+        st="stale"
     done
+    printf '%s' "$st"
+    [[ "$st" == "stale" ]] && return 2
     return 1
 }
 
@@ -2084,14 +2093,28 @@ merge_settings_json_hooks_union() {
     ' "$base_file" "$overlay_file" > "$output_file"
 }
 
-# Copy the file into ${BACKUP_DIR} and verify the copy. Non-zero on ANY failure.
+# XACA-1753-024/-026: own backup dir, never overwrite, verified, path printed.
+# BACKUP_DIR/settings.json is the SAME second-resolution path that XACA-1283's
+# backup_file writes, so a same-second run would overwrite the pre-upgrade copy
+# with a post-1283 state. Like XACA-1227 (_xaca1227_remove_legacy_template_plugins),
+# use a dir of our own (nested under BACKUP_DIR) and, when the name is taken, add
+# a suffix instead of reusing it. Sets _XACA1753_BACKUP_PATH. Non-zero on ANY failure.
 _xaca1753_backup_settings() {
-    local f="$1" bp
+    local f="$1" base d n=0 stamp
+    _XACA1753_BACKUP_PATH=""
     [[ -n "${BACKUP_DIR:-}" ]] || return 1
-    bp="${BACKUP_DIR}/$(basename "$f")"
-    mkdir -p "$BACKUP_DIR" 2>/dev/null || return 1
-    cp "$f" "$bp" 2>/dev/null || return 1
-    cmp -s "$f" "$bp" || return 1
+    base="$(basename "$f")"
+    stamp="${BACKUP_DIR}/xaca1753-settings-hooks-$(date +%Y%m%d-%H%M%S)"
+    d="$stamp"
+    [[ -e "$d" ]] && d="${stamp}-$$"
+    while [[ -e "$d" && $n -lt 100 ]]; do
+        n=$((n + 1)); d="${stamp}-$$-${n}"
+    done
+    [[ -e "$d" ]] && return 1
+    mkdir -p "$d" 2>/dev/null || return 1
+    cp -p "$f" "${d}/${base}" 2>/dev/null || return 1
+    cmp -s "$f" "${d}/${base}" || return 1
+    _XACA1753_BACKUP_PATH="${d}/${base}"
 }
 
 _xaca1753_refresh_settings_hooks() {
@@ -2120,54 +2143,52 @@ _xaca1753_refresh_settings_hooks() {
     fi
 
     local prefix="${AITEAMFORGE_DIR}/scripts/" tab=$'\t' nl=$'\n'
-    local ev cmd tok canon bn
-    local live_set="" reg_set="" exact_set="" stale_set="" add_lines="" shipped_map=""
+    local ev cmd bn rest
+    local live_set="" stale_set="" add_lines="" shipped_list=""
 
-    # Base registrations, per event: live (script exists) vs dead.
+    # Shipped guards from the rendered template: command == "<prefix><basename>"
+    # exactly (plain, no wrapper). A wrapped guard is NOT silently dropped: it is
+    # reported and skipped (a test asserts the template stays plain).
     while IFS=$'\t' read -r ev cmd; do
         [[ -n "$cmd" ]] || continue
-        exact_set="${exact_set}${ev}${tab}${cmd}${nl}"
-        tok="$(_xaca1753_hook_script_token "$cmd")" || tok=""
-        [[ -n "$tok" ]] || continue
-        canon="$(_xaca1753_canon_path "$tok")"
-        bn="${tok##*/}"
-        reg_set="${reg_set}${ev}${tab}${canon}${nl}"
-        if [[ -e "$tok" ]]; then
-            live_set="${live_set}${ev}${tab}${bn}${nl}"
-        else
-            stale_set="${stale_set}${ev}${tab}${cmd}${tab}${bn}${nl}"
-        fi
+        case "$cmd" in "${prefix}"*) ;; *) continue ;; esac
+        rest="${cmd#"$prefix"}"
+        case "$rest" in
+            ''|*/*|*[[:space:]\;\|\&\<\>\(\)\'\"\\\`]*)
+                echo "settings-hooks: template guard is not a plain ${prefix}<script> path, skipped: ${cmd}"
+                continue ;;
+        esac
+        shipped_list="${shipped_list}${ev}${tab}${rest}${tab}${cmd}${nl}"
+    done < <(_xaca1753_hook_entries "$rendered")
+
+    # Base registrations vs the shipped guards of the SAME event.
+    local bev bcmd sev sbn sship pres
+    while IFS=$'\t' read -r bev bcmd; do
+        [[ -n "$bcmd" ]] || continue
+        while IFS=$'\t' read -r sev sbn sship; do
+            [[ "$sev" == "$bev" ]] || continue
+            pres="$(_xaca1753_presence "$bcmd" "$sbn" "$sship")" || true
+            case "$pres" in
+                live)  live_set="${live_set}${sev}${tab}${sbn}${nl}" ;;
+                stale) stale_set="${stale_set}${sev}${tab}${bcmd}${tab}${sbn}${tab}${sship}${nl}" ;;
+            esac
+        done <<< "$shipped_list"
     done < <(_xaca1753_hook_entries "$target")
 
-    # Template guards (command under the rendered scripts/ prefix) that are not
-    # already present UNDER THEIR OWN EVENT.
-    while IFS=$'\t' read -r ev cmd; do
+    # Shipped guards not live UNDER THEIR OWN EVENT are added (once each).
+    while IFS=$'\t' read -r ev bn cmd; do
         [[ -n "$cmd" ]] || continue
-        tok="$(_xaca1753_hook_script_token "$cmd")" || tok=""
-        [[ -n "$tok" ]] || continue
-        case "$tok" in "${prefix}"*) ;; *) continue ;; esac
-        canon="$(_xaca1753_canon_path "$tok")"
-        bn="${tok##*/}"
-        case "$shipped_map" in
-            *"${nl}${bn}${tab}"*) ;;
-            *) shipped_map="${shipped_map}${nl}${bn}${tab}${tok}${nl}" ;;
-        esac
         if printf '%s' "$live_set" | grep -Fxq -- "${ev}${tab}${bn}" \
-            || printf '%s' "$reg_set" | grep -Fxq -- "${ev}${tab}${canon}" \
-            || printf '%s' "$exact_set" | grep -Fxq -- "${ev}${tab}${cmd}"; then
+            || printf '%s' "$add_lines" | grep -Fxq -- "${ev}${tab}${cmd}"; then
             continue
         fi
         add_lines="${add_lines}${ev}${tab}${cmd}${nl}"
-        reg_set="${reg_set}${ev}${tab}${canon}${nl}"
-    done < <(_xaca1753_hook_entries "$rendered")
+    done <<< "$shipped_list"
 
     # Dead registrations that name a shipped guard: reported, never removed.
-    local sev scmd sbn shipped
-    while IFS=$'\t' read -r sev scmd sbn; do
+    while IFS=$'\t' read -r sev bcmd sbn sship; do
         [[ -n "$sbn" ]] || continue
-        shipped="$(printf '%s' "$shipped_map" | awk -F'\t' -v b="$sbn" '$1==b{print $2; exit}')"
-        [[ -n "$shipped" ]] || continue
-        echo "settings-hooks: stale registration ${scmd} (script missing) -- left in place (upgrade is add-only). To remove it, edit ${target} and delete that entry under ${sev}; removal is safe once the shipped path ${shipped} is registered."
+        echo "settings-hooks: stale registration ${bcmd} (script missing) -- left in place (upgrade is add-only). To remove it, edit ${target} and delete that entry under ${sev}; removal is safe once the shipped path ${sship} is registered."
     done <<< "$stale_set"
 
     local _n
@@ -2208,6 +2229,7 @@ _xaca1753_refresh_settings_hooks() {
         echo "settings-hooks: skipped (backup failed; existing file untouched)"
         return 1
     fi
+    echo "settings-hooks: backup=${_XACA1753_BACKUP_PATH}"
     local _mode
     if command -v _aitf_file_mode >/dev/null 2>&1; then _mode="$(_aitf_file_mode "$target")"; else _mode="$(_xaca1283_file_mode "$target")"; fi
     case "$_mode" in ''|*[!0-7]*) _mode=644 ;; esac

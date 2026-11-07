@@ -333,9 +333,9 @@ if [ "$_ok" = true ]; then test_pass; else test_fail "union added hooks outside 
 
 test_start "(d) MUTATION: with the script-existence check disabled, (a) fails (dead entry suppresses the add)"
 MUT="$SANDBOX/install-claude-config.mutant.sh"
-sed 's/if \[\[ -e "\$tok" \]\]; then/if true; then/' "$REAL_INSTALLER" > "$MUT"
+sed 's/|| \[\[ -f "\$r" \]\]; then printf/|| true; then printf/' "$REAL_INSTALLER" > "$MUT"
 if cmp -s "$REAL_INSTALLER" "$MUT"; then
-    test_fail "mutation did not apply (existence-check line changed?) -- control is vacuous"
+    test_fail "mutation did not apply (existence-check line in _xaca1753_presence changed?) -- control is vacuous"
 else
     printf '%s' "{\"hooks\":{\"SessionStart\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$DEAD\"}]}]}}" > "$SETTINGS"
     _run_refresh "$MUT" >/dev/null
@@ -368,75 +368,180 @@ _with_cmd_under() { # event command -> writes settings.json with one registratio
 _guard_count() { # registrations of the credential guard (any spelling) under GUARD_EV
     jq --arg e "$GUARD_EV" '[.hooks[$e][]?.hooks[]? | select(.command | contains("kb-gh-credential-guard.sh"))] | length' "$SETTINGS"
 }
-_tok() { # installer command
-    ( AITEAMFORGE_DIR="$SW"; TEMPLATE_DIR="$TAP_ROOT/share/templates"; export AITEAMFORGE_DIR TEMPLATE_DIR
-      source "$1" >/dev/null 2>&1; set +e +u +o pipefail
-      _xaca1753_hook_script_token "$2" )
-}
 
-test_start "(e) Token parser: every wrapped form resolves to the script path"
-_ok=true
+# ═══════════════════════════════════════════════════════════════════════════
+# XACA-1753-023/-025: STRUCTURAL presence (replaces the old script-token grammar
+# parser tests (e)/(g): that function no longer exists, so its parser-table unit
+# rows have nothing to call. The same spellings are now asserted END TO END as
+# "live => the guard is not added again", which is the behaviour that matters.)
+# ═══════════════════════════════════════════════════════════════════════════
 P="$WRAP/kb-gh-credential-guard.sh"
-while IFS= read -r _row; do
-    [ -n "$_row" ] || continue
-    form="${_row%%@@*}"; want="${_row##*@@}"
-    got="$(_tok "$REAL_INSTALLER" "$form")"
-    [ "$got" = "$want" ] || { _ok=false; echo "     form [$form] -> [$got] want [$want]" >&2; }
-done <<EOT
-bash "$P"@@$P
-$P --quiet@@$P
-$P 2>/dev/null@@$P
-$P 2>/dev/null || true@@$P
-$P || true@@$P
-python3 $WRAP/helper.py arg@@$WRAP/helper.py
-uv run $WRAP/helper.py arg@@$WRAP/helper.py
-env FOO=bar $P@@$P
-bash "\$HOME/wrapped/kb-gh-credential-guard.sh"@@$P
-\${HOME}/wrapped/kb-gh-credential-guard.sh 2>&1@@$P
-~/wrapped/kb-gh-credential-guard.sh --x@@$P
-bash "$WRAP/with space/kb-gh-credential-guard.sh" --quiet@@$WRAP/with space/kb-gh-credential-guard.sh
-$P > /dev/null@@$P
-EOT
-[ -z "$(_tok "$REAL_INSTALLER" 'echo hello')" ] || { _ok=false; echo "     no-path command returned a token" >&2; }
-if [ "$_ok" = true ]; then test_pass; else test_fail "script-token parser picked the wrong word"; fi
+DP='~/dev-team/claude-hooks/kb-gh-credential-guard.sh'
 
-test_start "(f) Each wrapped LIVE registration is recognised: the guard is not added a second time"
+test_start "(e) Template guards are PLAIN \${AITEAMFORGE_DIR}/scripts/X paths (a wrapped guard would never be added)"
 _ok=true
-for form in "bash \"$P\"" "$P --quiet" "$P 2>/dev/null" "$P || true" "bash \"\$HOME/wrapped/kb-gh-credential-guard.sh\""; do
+_n_guards="$(jq --arg p "$SW/scripts/" '[.hooks[][]?.hooks[]? | .command | select(startswith($p))] | length' "$RENDERED")"
+[ "$_n_guards" -ge 8 ] || { _ok=false; echo "     only $_n_guards guards under the scripts/ prefix (vacuous)" >&2; }
+_bad="$(jq -r --arg p "$SW/scripts/" '.hooks[][]?.hooks[]? | .command | select(contains("/scripts/"))
+        | select((startswith($p) and (.[($p|length):] | test("^[A-Za-z0-9._-]+$"))) | not)' "$RENDERED")"
+[ -z "$_bad" ] || { _ok=false; echo "     non-plain template guard(s): $_bad" >&2; }
+printf '%s' '{"model":"opus"}' > "$SETTINGS"
+_out_e="$(_run_refresh "$REAL_INSTALLER" --dry-run)"
+case "$_out_e" in *"not a plain"*) _ok=false; echo "     installer rejected a template guard: $_out_e" >&2 ;; esac
+if [ "$_ok" = true ]; then test_pass; else test_fail "template guards are not plain scripts/ paths"; fi
+
+# Every spelling here MUST count as already registering the guard (live: P is an
+# existing file, or the form spells the shipped path itself).
+LIVE_FORMS_FILE="$SANDBOX/live-forms.txt"
+cat > "$LIVE_FORMS_FILE" <<EOT
+$P; echo done
+$P>/dev/null
+$P 2>&1
+cd $WRAP && ./kb-gh-credential-guard.sh
+sh -c '$P args'
+bash -c "$P"
+\$AITEAMFORGE_DIR/scripts/$GUARD_BASE
+\${AITEAMFORGE_DIR}/scripts/$GUARD_BASE
+[ -f $P ] && $P || true
+($P)
+$DP || $P
+bash "$P"
+$P --quiet
+$P 2>/dev/null
+$P 2>/dev/null || true
+$P || true
+env FOO=bar $P
+bash "\$HOME/wrapped/$GUARD_BASE"
+\${HOME}/wrapped/$GUARD_BASE 2>&1
+~/wrapped/$GUARD_BASE --x
+$P > /dev/null
+EOT
+_N_LIVE="$(grep -c . "$LIVE_FORMS_FILE")"
+
+test_start "(f) Every live spelling is recognised: the guard is not added a second time"
+_ok=true
+while IFS= read -r form <&3; do
+    [ -n "$form" ] || continue
     _with_cmd_under "$GUARD_EV" "$form"
     _run_refresh "$REAL_INSTALLER" >/dev/null
     c="$(_guard_count)"
     [ "$c" = "1" ] || { _ok=false; echo "     form [$form]: $c registrations (want 1)" >&2; }
-done
-if [ "$_ok" = true ]; then test_pass; else test_fail "wrapped live registration was duplicated"; fi
+done 3< "$LIVE_FORMS_FILE"
+[ "$_N_LIVE" -ge 20 ] || { _ok=false; echo "     live table shrank to $_N_LIVE rows" >&2; }
+if [ "$_ok" = true ]; then test_pass; else test_fail "a live registration spelling was duplicated"; fi
 
-test_start "(g) MUTATION: token parser reverted to last-word makes (f) red (duplicates appear)"
+test_start "(f2) Every DEAD wrapped spelling still gets the shipped path added, is kept, and is reported stale"
+_ok=true
+DEAD_FORMS_FILE="$SANDBOX/dead-forms.txt"
+cat > "$DEAD_FORMS_FILE" <<EOT
+$DP; echo done
+$DP>/dev/null
+$DP 2>&1
+cd ~/dev-team/claude-hooks && ./$GUARD_BASE
+sh -c '$DP args'
+bash -c "$DP"
+[ -f $DP ] && $DP || true
+($DP)
+$DP || true
+bash "$DP"
+\$HOME/dev-team/claude-hooks/$GUARD_BASE
+\${HOME}/dev-team/claude-hooks/$GUARD_BASE --x
+EOT
+while IFS= read -r form <&3; do
+    [ -n "$form" ] || continue
+    _with_cmd_under "$GUARD_EV" "$form"
+    _out_f2="$(_run_refresh "$REAL_INSTALLER")"
+    [ "$(_count "$SETTINGS" "$GUARD_EV" "$GUARD")" = "1" ] || { _ok=false; echo "     form [$form]: shipped path NOT added" >&2; }
+    [ "$(_count "$SETTINGS" "$GUARD_EV" "$form")" = "1" ] || { _ok=false; echo "     form [$form]: dead entry not kept" >&2; }
+    case "$_out_f2" in *"stale registration $form (script missing)"*) : ;; *) _ok=false; echo "     form [$form]: not reported stale: $_out_f2" >&2 ;; esac
+done 3< "$DEAD_FORMS_FILE"
+# a bare word that merely mentions the name is not a registration (and not stale)
+_with_cmd_under "$GUARD_EV" "echo $GUARD_BASE"
+_out_f2="$(_run_refresh "$REAL_INSTALLER")"
+[ "$(_count "$SETTINGS" "$GUARD_EV" "$GUARD")" = "1" ] || { _ok=false; echo "     bare-word mention suppressed the add" >&2; }
+case "$_out_f2" in *"stale registration"*) _ok=false; echo "     bare-word mention reported stale" >&2 ;; esac
+if [ "$_ok" = true ]; then test_pass; else test_fail "dead wrapped registration handling incorrect"; fi
+
+test_start "(g) MUTATION: presence reverted to the OLD token parser makes the live table red"
 MUT_TOK="$SANDBOX/install-claude-config.mut-token.sh"
-{ cat "$REAL_INSTALLER"; cat <<'EOM'
-
-# MUTANT: the pre-fix last-word parser
+{ cat "$REAL_INSTALLER"; printf '\n# MUTANT: the pre-XACA-1753-023 grammar-style script-word parser\n'; cat <<'EOM'
+# Pick the script path out of a hook command, ~ / $HOME / ${HOME} expanded.
+# Rules (first match wins, scanning left to right, first simple command only):
+#   - words are split on whitespace; a "double"/'single' quoted word (even one
+#     containing spaces) is one word and its quotes are stripped
+#   - stop at a control operator (|| && ; | &)
+#   - skip redirections (2>/dev/null, >file, > file, 2>&1), env assignments
+#     (FOO=bar), options (-x, --quiet) and interpreter words (bash sh zsh dash
+#     ksh python python3[.x] uv env node exec nohup sudo command time nice
+#     stdbuf, with or without a directory)
+#   - the script is the first remaining word that contains a '/' and either
+#     ends in .sh/.py or names an existing regular file
+# Prints nothing and returns 1 when no word qualifies.
 _xaca1753_hook_script_token() {
-    local cmd="$1" tok
-    tok="${cmd##* }"
-    case "$tok" in
-        "~"|"~/"*) tok="${HOME}${tok#\~}" ;;
-        "\$HOME"*) tok="${HOME}${tok#\$HOME}" ;;
-        "\${HOME}"*) tok="${HOME}${tok#\$\{HOME\}}" ;;
-    esac
-    printf '%s' "$tok"
+    local cmd="$1" w q base rest skip_next=false i=0 n
+    local -a words=()
+    read -r -a words <<< "$cmd"
+    n=${#words[@]}
+    while [[ $i -lt $n ]]; do
+        w="${words[$i]}"
+        case "$w" in
+            \"*|\'*)
+                q="${w:0:1}"
+                while [[ $((i + 1)) -lt $n ]] && ! { [[ ${#w} -ge 2 ]] && [[ "${w: -1}" == "$q" ]]; }; do
+                    i=$((i + 1)); w="$w ${words[$i]}"
+                done
+                w="${w#?}"; w="${w%"$q"}"
+                ;;
+        esac
+        i=$((i + 1))
+        case "$w" in
+            '||'|'&&'|';'|'|'|'&') break ;;
+        esac
+        if [[ "$skip_next" == true ]]; then skip_next=false; continue; fi
+        case "$w" in
+            *[\<\>]*)
+                rest="${w##*[<>]}"
+                [[ -n "$rest" ]] || skip_next=true
+                continue ;;
+            -*) continue ;;
+        esac
+        if [[ "$w" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then continue; fi
+        case "$w" in
+            "~"|"~/"*) w="${HOME}${w#\~}" ;;
+            "\$HOME"*) w="${HOME}${w#\$HOME}" ;;
+            "\${HOME}"*) w="${HOME}${w#\$\{HOME\}}" ;;
+        esac
+        base="${w##*/}"
+        case "$base" in
+            bash|sh|zsh|dash|ksh|python|python3|python3.*|uv|env|node|exec|nohup|sudo|command|time|nice|stdbuf) continue ;;
+        esac
+        case "$w" in */*) ;; *) continue ;; esac
+        case "$w" in
+            *.sh|*.py) printf '%s' "$w"; return 0 ;;
+        esac
+        if [[ -f "$w" ]]; then printf '%s' "$w"; return 0; fi
+    done
+    return 1
+}
+_xaca1753_presence() {
+    local tok
+    tok="$(_xaca1753_hook_script_token "$1")" || tok=""
+    if [[ -z "$tok" || "${tok##*/}" != "$2" ]]; then printf none; return 1; fi
+    if [[ -e "$tok" || "$(_xaca1753_canon_path "$tok")" == "$(_xaca1753_canon_path "$3")" ]]; then printf live; return 0; fi
+    printf stale; return 2
 }
 EOM
 } > "$MUT_TOK"
 _red=0
-for form in "bash \"$P\"" "$P --quiet" "$P 2>/dev/null" "$P || true"; do
+while IFS= read -r form <&3; do
+    [ -n "$form" ] || continue
     _with_cmd_under "$GUARD_EV" "$form"
     _run_refresh "$MUT_TOK" >/dev/null
     c="$(_guard_count)"
     if [ "$c" -ge 2 ]; then _red=$((_red + 1)); fi
-done
-# and the parser unit row goes red too
-if [ "$(_tok "$MUT_TOK" "$P --quiet")" != "$P" ]; then _red=$((_red + 1)); fi
-if [ "$_red" = "5" ]; then test_pass; else test_fail "mutant (last-word) was red in only $_red of 5 rows -- control is not discriminating"; fi
+done 3< "$LIVE_FORMS_FILE"
+echo "     (old-parser mutant red on $_red of $_N_LIVE live rows)"
+if [ "$_red" -ge 8 ]; then test_pass; else test_fail "old-parser mutant was red on only $_red of $_N_LIVE live rows -- control is not discriminating"; fi
 
 test_start "(h) Spelling drift (// in the path) and a symlinked directory are not re-added"
 _ok=true
@@ -539,6 +644,59 @@ case "$_out_n" in
     *) test_fail "stale line not actionable: $_out_n" ;;
 esac
 
+
+# ═══════════════════════════════════════════════════════════════════════════
+# XACA-1753-024/-026: same-second backup collision with XACA-1283's backup_file
+# (BACKUP_DIR/settings.json). Both files must survive with distinct content.
+# ═══════════════════════════════════════════════════════════════════════════
+_collide() { # installer-file -> sets BK, ORIG_MARK; runs one refresh into BK
+    BK="$SANDBOX/bk-collide"
+    find "$BK" -delete 2>/dev/null
+    mkdir -p "$BK"
+    printf '%s' 'ORIGINAL-1283-PRE-UPGRADE-BACKUP' > "$BK/settings.json"
+    printf '%s' '{"model":"opus","marker":"pre-upgrade-state"}' > "$SETTINGS"
+    cp "$SETTINGS" "$SANDBOX/pre-upgrade.json"
+    _out_c="$(_TEST_BACKUP_DIR="$BK" _run_refresh "$1")"; _rc_c=$?
+}
+
+test_start "(o) Same-second collision: pre-existing BACKUP_DIR/settings.json AND our backup both survive; path printed; verified"
+_ok=true
+_collide "$REAL_INSTALLER"
+[ "$_rc_c" = "2" ] || { _ok=false; echo "     rc=$_rc_c (want 2)" >&2; }
+[ "$(cat "$BK/settings.json")" = "ORIGINAL-1283-PRE-UPGRADE-BACKUP" ] || { _ok=false; echo "     pre-existing backup was overwritten" >&2; }
+_ours="$(find "$BK" -mindepth 2 -name settings.json -type f 2>/dev/null)"
+[ "$(printf '%s\n' "$_ours" | grep -c .)" = "1" ] || { _ok=false; echo "     expected exactly 1 backup of our own, got: $_ours" >&2; }
+cmp -s "$_ours" "$SANDBOX/pre-upgrade.json" || { _ok=false; echo "     our backup does not hold the pre-upgrade bytes" >&2; }
+case "$_out_c" in *"settings-hooks: backup=$_ours"*) : ;; *) _ok=false; echo "     backup path not printed; output: $_out_c" >&2 ;; esac
+# second run in (likely) the same second: restore the pre-upgrade file, run again
+cp "$SANDBOX/pre-upgrade.json" "$SETTINGS"
+_out_c2="$(_TEST_BACKUP_DIR="$BK" _run_refresh "$REAL_INSTALLER")"
+[ "$(find "$BK" -mindepth 2 -name settings.json -type f 2>/dev/null | grep -c .)" = "2" ] || { _ok=false; echo "     second run overwrote/reused the first run's backup" >&2; }
+[ "$(cat "$BK/settings.json")" = "ORIGINAL-1283-PRE-UPGRADE-BACKUP" ] || { _ok=false; echo "     pre-existing backup lost on second run" >&2; }
+if [ "$_ok" = true ]; then test_pass; else test_fail "backup collision handling incorrect"; fi
+
+test_start "(p) MUTATION: backup writing BACKUP_DIR/settings.json (old behaviour) makes the collision test (o) red"
+MUT_BK="$SANDBOX/install-claude-config.mut-backup.sh"
+{ cat "$REAL_INSTALLER"; cat <<'EOM'
+
+# MUTANT: the pre-XACA-1753-024 backup (overwrites BACKUP_DIR/settings.json)
+_xaca1753_backup_settings() {
+    local f="$1" bp
+    [[ -n "${BACKUP_DIR:-}" ]] || return 1
+    bp="${BACKUP_DIR}/$(basename "$f")"
+    mkdir -p "$BACKUP_DIR" 2>/dev/null || return 1
+    cp "$f" "$bp" 2>/dev/null || return 1
+    cmp -s "$f" "$bp" || return 1
+    _XACA1753_BACKUP_PATH="$bp"
+}
+EOM
+} > "$MUT_BK"
+_collide "$MUT_BK"
+if [ "$(cat "$BK/settings.json")" != "ORIGINAL-1283-PRE-UPGRADE-BACKUP" ]; then
+    test_pass
+else
+    test_fail "with the old overwrite-prone backup the original was still intact -- (o) does not exercise the collision"
+fi
 
 if [ "$_STANDALONE" = true ]; then
     echo ""
