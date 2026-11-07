@@ -181,6 +181,35 @@ def branch_tip(repo_root, branch, *, run=subprocess.run):
         return None
 
 
+def remote_tag_sha(repo_root, tag, *, run=subprocess.run):
+    """XACA-1698: the commit SHA tag `tag` points at, as the REMOTE has it, or None. An annotated tag's peeled
+    (`^{}`) line wins over its tag-object line; a lightweight tag has only the direct line. Same convention as
+    branch_tip (first remote, ls-remote only, never fetches: the server calls it under the board lock). Any bad
+    input, missing remote/tag or git error gives None so callers keep their fail-closed paths."""
+    if not isinstance(tag, str):
+        return None
+    tag = tag.strip()
+    if not tag or tag.startswith("-") or not _SAFE_REF.fullmatch(tag):
+        return None
+    try:
+        git = _Git(repo_root, run)
+        git("check-ref-format", "refs/tags/" + tag)
+        ref = "refs/tags/" + tag
+        out = git("ls-remote", "--", _remote(git), ref, ref + "^{}").stdout or ""
+    except (ValueError, RuntimeError, OSError):
+        return None
+    direct = peeled = None
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) != 2 or not _SHA.fullmatch(parts[0]):
+            continue
+        if parts[1] == ref:
+            direct = parts[0]
+        elif parts[1] == ref + "^{}":
+            peeled = parts[0]
+    return peeled or direct
+
+
 def is_trunk_release(release, release_config):
     """XACA-1446-011: True only when this release's branch IS the trunk: mode "trunk", a non-hotfix release, and
     release.branch == the integration branch. A hotfix is cut from production onto its own hotfix/ branch (not

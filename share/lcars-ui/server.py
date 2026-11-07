@@ -9823,6 +9823,27 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             return None
         return _release_branches.branch_tip(root, release.get('branch'))
 
+    @staticmethod
+    def _closeout_delete_done(release):
+        co = release.get('closeOut') if isinstance(release, dict) else None
+        steps = co.get('steps') if isinstance(co, dict) else None
+        st = steps.get('deleteBranch') if isinstance(steps, dict) else None
+        return isinstance(st, dict) and st.get('status') == 'done'
+
+    def _release_remote_tag_sha(self, release, team):
+        """XACA-1698: the commit the release's `v<version>` tag points at on the REMOTE, or None (fail closed).
+        Tag name is the close-out's own (kanban-helpers.sh: tag_name="v${version}"). Tests replace it."""
+        if _release_branches is None:
+            return None
+        root = self._release_repo_root(team)
+        if root is None:
+            return None
+        try:
+            tag = "v" + _release_branches.release_version(release)
+        except ValueError:
+            return None
+        return _release_branches.remote_tag_sha(root, tag)
+
     def _dev_sha_reachable(self, release, team):
         """XACA-1446-011: True/False/None, is stageSha.DEV an ancestor of (or equal to) the release branch's REMOTE
         tip. None (unknown: no repo/remote/objects, any git error) fails the trunk DEV exit closed. Tests replace it."""
@@ -9856,6 +9877,12 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         head = self._release_branch_head(release, team)
         if head:
             ctx["branch_head"] = head
+        # XACA-1698: close-out deletes the (non-trunk) release branch before the gated PROD promote, so the remote
+        # tip is gone. Give the gate the remote tag SHA to verify against the close-out binding. Only then.
+        if not head and self._closeout_delete_done(release) and not (
+                _release_branches is not None
+                and _release_branches.is_trunk_release(release, board_raw.get('releaseConfig'))):
+            ctx["closeout_tag_sha"] = self._release_remote_tag_sha(release, team)
         # XACA-1347-006: a new commit reported while the release is in CR or later is recorded as
         # release.pendingSha (stageSha.CR is NOT overwritten). Feeding it to the gate as the branch
         # HEAD makes the CR exit check ("HEAD != stageSha.CR") refuse GAMMA even if the local git

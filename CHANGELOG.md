@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1698: PROD promote verifies close-out tag after deleteBranch (XACA-1698)
+- Tap files updated in this publish: `share/kanban-hooks/release_branches.py`,`share/kanban-hooks/release_gate.py` `share/lcars-ui/server.py`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1753: Ship the SessionStart guards fleet-wide via the tap (XACA-1753)
 - Tap files updated in this publish: `share/scripts/aitf-root.sh`,`share/scripts/kanban-crash-detect.sh` `share/scripts/kb-gh-credential-check.sh`,`share/scripts/kb-gh-credential-guard.sh` `share/scripts/kb-knowledge-sync-guard.sh`,`share/scripts/kb-knowledge-sync-health-check.sh` `share/scripts/kb-lcars-port-drift-check.sh`,`share/scripts/kb-lcars-port-drift-guard.sh` (+7 more). Run `brew upgrade aiteamforge` to receive them.
 - XACA-1104: kb-msg-provision consumes server machine registry for remote routes (XACA-1104)

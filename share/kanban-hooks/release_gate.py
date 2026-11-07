@@ -47,7 +47,7 @@ whose data is absent is UNMET ("cannot verify"), never assumed satisfied.
 from datetime import datetime, timezone
 
 from release_schema import STAGES  # single source of truth (XACA-1346-003); re-exported here
-from release_closeout import first_incomplete as _closeout_first_incomplete, binding_gap as _closeout_binding_gap, close_out_binding as _closeout_binding  # pure stdlib (XACA-1353-004)
+from release_closeout import first_incomplete as _closeout_first_incomplete, binding_gap as _closeout_binding_gap, close_out_binding as _closeout_binding, _valid_sha  # pure stdlib (XACA-1353-004)
 
 # GAMMA is deliberately NOT here: it follows flowConfig, EXCEPT that it is forced on when crSupport is on
 # (enabled_stages, XACA-1375-017).
@@ -688,6 +688,38 @@ def item_blocks_dev_exit(item):
     return not (item.get("prMerged") or pr_exempt_reason(item))
 
 
+def _closeout_branch_head(release, cur, ctx):
+    """XACA-1698: (sha, None) | (None, why). Close-out deletes the release branch before the gated PROD promote, so
+    no remote tip exists. Stand in closeOut.sha as the branch head only when the record is bound to this build and
+    stage, tag and deleteBranch are done, and the REMOTE tag (ctx closeout_tag_sha, read by the server) points at
+    that same sha. why is None when there is no close-out past deleteBranch (original refusal text unchanged)."""
+    co = release.get("closeOut") if isinstance(release, dict) else None
+    steps = co.get("steps") if isinstance(co, dict) else None
+    dele = steps.get("deleteBranch") if isinstance(steps, dict) else None
+    if not (isinstance(dele, dict) and dele.get("status") == "done"):
+        return None, None
+    br = release.get("branch")
+    if not isinstance(br, str) or not br.strip():
+        return None, "release records no branch"
+    gap = _closeout_binding_gap(release)
+    if gap is not None:
+        return None, gap
+    bound = _closeout_binding(co)
+    if bound is None or bound[0] != cur:
+        return None, "close-out is bound to stage %s, not %s" % (bound[0] if bound else None, cur)
+    tag = steps.get("tag")
+    if not (isinstance(tag, dict) and tag.get("status") == "done"):
+        return None, "close-out tag step is not done"
+    if "closeout_tag_sha" not in ctx:   # the server never looked the tag up (trunk release, or no tag applies)
+        return None, "remote tag lookup not applicable (trunk release or no close-out tag lookup)"
+    ver = _valid_sha(ctx.get("closeout_tag_sha"))
+    if ver is None:
+        return None, "remote release tag missing/unreadable"
+    if ver != bound[1]:
+        return None, "remote tag at %s != closeOut.sha %s" % (ver[:12], bound[1][:12])
+    return bound[1], None
+
+
 def _exit_conditions(release, cur, cr_on, ctx):
     """Stage-specific unmet conditions for leaving `cur` (spec 3.2), all collected."""
     r = Reasons()
@@ -735,8 +767,12 @@ def _exit_conditions(release, cur, cr_on, ctx):
                     r.append("DEV: item %s is not completed with its PR merged into the release branch "
                              "(or an explicit prExempt reason)" % it.get("id"))
         head = ctx.get("branch_head")
+        why = None
         if not head:
-            r.append("DEV: cannot verify DEV deploy SHA == branch HEAD (context.branch_head absent)")
+            head, why = _closeout_branch_head(release, cur, ctx)   # XACA-1698
+        if not head:
+            r.append("DEV: cannot verify DEV deploy SHA == branch HEAD (context.branch_head absent)"
+                     + ("; close-out fallback not applicable: %s" % why if why else ""))
         elif sha != head:
             if ctx.get("branch_mode") != "trunk":
                 r.append("DEV: stageSha.DEV %s != release branch HEAD %s" % (sha, head))
