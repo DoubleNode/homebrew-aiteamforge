@@ -287,8 +287,9 @@ _run_refresh() {
         export AITEAMFORGE_DIR TEMPLATE_DIR
         # shellcheck source=/dev/null
         source "$1" >/dev/null 2>&1
+        if [ -n "${_TEST_BACKUP_DIR:-}" ]; then BACKUP_DIR="$_TEST_BACKUP_DIR"; fi
         set +e +u +o pipefail
-        _xaca1753_refresh_settings_hooks
+        _xaca1753_refresh_settings_hooks "${@:2}"
     ) 2>&1
 }
 REAL_INSTALLER="$TAP_ROOT/libexec/installers/install-claude-config.sh"
@@ -344,6 +345,200 @@ else
         test_fail "with the existence check disabled the working path was still added: the check is not what protects (a)"
     fi
 fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# XACA-1753-019/-020/-021/-022 advisory fixes
+# ═══════════════════════════════════════════════════════════════════════════
+WRAP="$HOME/wrapped"
+mkdir -p "$WRAP"
+printf '#!/bin/bash\n' > "$WRAP/kb-gh-credential-guard.sh"
+printf '#!/bin/bash\n' > "$WRAP/kb-where-refresh.sh"
+printf '#!/usr/bin/env python3\n' > "$WRAP/helper.py"
+mkdir -p "$WRAP/with space"
+printf '#!/bin/bash\n' > "$WRAP/with space/kb-gh-credential-guard.sh"
+GUARD_BASE="kb-gh-credential-guard.sh"
+GUARD_EV="$(jq -r '.hooks | to_entries[] | .key as $e | .value[].hooks[]? | select(.command | endswith("/kb-gh-credential-guard.sh")) | $e' "$RENDERED" | head -1)"
+WHERE_EVS="$(jq -r '.hooks | to_entries[] | .key as $e | .value[].hooks[]? | select(.command | endswith("/kb-where-refresh.sh")) | $e' "$RENDERED")"
+WHERE_E1="$(printf '%s\n' "$WHERE_EVS" | sed -n 1p)"
+WHERE_E2="$(printf '%s\n' "$WHERE_EVS" | sed -n 2p)"
+
+_with_cmd_under() { # event command -> writes settings.json with one registration
+    jq -n --arg e "$1" --arg c "$2" '{hooks: {($e): [{hooks: [{type: "command", command: $c}]}]}}' > "$SETTINGS"
+}
+_guard_count() { # registrations of the credential guard (any spelling) under GUARD_EV
+    jq --arg e "$GUARD_EV" '[.hooks[$e][]?.hooks[]? | select(.command | contains("kb-gh-credential-guard.sh"))] | length' "$SETTINGS"
+}
+_tok() { # installer command
+    ( AITEAMFORGE_DIR="$SW"; TEMPLATE_DIR="$TAP_ROOT/share/templates"; export AITEAMFORGE_DIR TEMPLATE_DIR
+      source "$1" >/dev/null 2>&1; set +e +u +o pipefail
+      _xaca1753_hook_script_token "$2" )
+}
+
+test_start "(e) Token parser: every wrapped form resolves to the script path"
+_ok=true
+P="$WRAP/kb-gh-credential-guard.sh"
+while IFS= read -r _row; do
+    [ -n "$_row" ] || continue
+    form="${_row%%@@*}"; want="${_row##*@@}"
+    got="$(_tok "$REAL_INSTALLER" "$form")"
+    [ "$got" = "$want" ] || { _ok=false; echo "     form [$form] -> [$got] want [$want]" >&2; }
+done <<EOT
+bash "$P"@@$P
+$P --quiet@@$P
+$P 2>/dev/null@@$P
+$P 2>/dev/null || true@@$P
+$P || true@@$P
+python3 $WRAP/helper.py arg@@$WRAP/helper.py
+uv run $WRAP/helper.py arg@@$WRAP/helper.py
+env FOO=bar $P@@$P
+bash "\$HOME/wrapped/kb-gh-credential-guard.sh"@@$P
+\${HOME}/wrapped/kb-gh-credential-guard.sh 2>&1@@$P
+~/wrapped/kb-gh-credential-guard.sh --x@@$P
+bash "$WRAP/with space/kb-gh-credential-guard.sh" --quiet@@$WRAP/with space/kb-gh-credential-guard.sh
+$P > /dev/null@@$P
+EOT
+[ -z "$(_tok "$REAL_INSTALLER" 'echo hello')" ] || { _ok=false; echo "     no-path command returned a token" >&2; }
+if [ "$_ok" = true ]; then test_pass; else test_fail "script-token parser picked the wrong word"; fi
+
+test_start "(f) Each wrapped LIVE registration is recognised: the guard is not added a second time"
+_ok=true
+for form in "bash \"$P\"" "$P --quiet" "$P 2>/dev/null" "$P || true" "bash \"\$HOME/wrapped/kb-gh-credential-guard.sh\""; do
+    _with_cmd_under "$GUARD_EV" "$form"
+    _run_refresh "$REAL_INSTALLER" >/dev/null
+    c="$(_guard_count)"
+    [ "$c" = "1" ] || { _ok=false; echo "     form [$form]: $c registrations (want 1)" >&2; }
+done
+if [ "$_ok" = true ]; then test_pass; else test_fail "wrapped live registration was duplicated"; fi
+
+test_start "(g) MUTATION: token parser reverted to last-word makes (f) red (duplicates appear)"
+MUT_TOK="$SANDBOX/install-claude-config.mut-token.sh"
+{ cat "$REAL_INSTALLER"; cat <<'EOM'
+
+# MUTANT: the pre-fix last-word parser
+_xaca1753_hook_script_token() {
+    local cmd="$1" tok
+    tok="${cmd##* }"
+    case "$tok" in
+        "~"|"~/"*) tok="${HOME}${tok#\~}" ;;
+        "\$HOME"*) tok="${HOME}${tok#\$HOME}" ;;
+        "\${HOME}"*) tok="${HOME}${tok#\$\{HOME\}}" ;;
+    esac
+    printf '%s' "$tok"
+}
+EOM
+} > "$MUT_TOK"
+_red=0
+for form in "bash \"$P\"" "$P --quiet" "$P 2>/dev/null" "$P || true"; do
+    _with_cmd_under "$GUARD_EV" "$form"
+    _run_refresh "$MUT_TOK" >/dev/null
+    c="$(_guard_count)"
+    if [ "$c" -ge 2 ]; then _red=$((_red + 1)); fi
+done
+# and the parser unit row goes red too
+if [ "$(_tok "$MUT_TOK" "$P --quiet")" != "$P" ]; then _red=$((_red + 1)); fi
+if [ "$_red" = "5" ]; then test_pass; else test_fail "mutant (last-word) was red in only $_red of 5 rows -- control is not discriminating"; fi
+
+test_start "(h) Spelling drift (// in the path) and a symlinked directory are not re-added"
+_ok=true
+find "$SW/scripts" -name "$GUARD_BASE" -delete 2>/dev/null
+_with_cmd_under "$GUARD_EV" "$SW/scripts//$GUARD_BASE"   # script NOT on disk: canonical match only
+_run_refresh "$REAL_INSTALLER" >/dev/null
+[ "$(_guard_count)" = "1" ] || { _ok=false; echo "     // spelling re-added the guard" >&2; }
+printf '#!/bin/bash\n' > "$SW/scripts/$GUARD_BASE"
+ln -s "$SW/scripts" "$SANDBOX/scripts-link"
+_with_cmd_under "$GUARD_EV" "$SANDBOX/scripts-link/$GUARD_BASE"
+_run_refresh "$REAL_INSTALLER" >/dev/null
+[ "$(_guard_count)" = "1" ] || { _ok=false; echo "     symlinked dir re-added the guard" >&2; }
+find "$SW/scripts" -name "$GUARD_BASE" -delete 2>/dev/null
+find "$SANDBOX" -maxdepth 1 -name scripts-link -delete 2>/dev/null
+if [ "$_ok" = true ]; then test_pass; else test_fail "path spelling drift re-added a registered guard"; fi
+
+test_start "(i) MUTATION: canonicalisation disabled makes the // case (h) red"
+MUT_CANON="$SANDBOX/install-claude-config.mut-canon.sh"
+{ cat "$REAL_INSTALLER"; printf '\n_xaca1753_canon_path() { printf "%%s" "$1"; }\n'; } > "$MUT_CANON"
+_with_cmd_under "$GUARD_EV" "$SW/scripts//$GUARD_BASE"
+_run_refresh "$MUT_CANON" >/dev/null
+if [ "$(_guard_count)" -ge 2 ]; then
+    test_pass
+else
+    test_fail "without canonicalisation the // spelling was still deduped -- (h) does not exercise it"
+fi
+
+test_start "(j) Per-event: a guard live only under one event still gets its other-event entry; live under both adds nothing"
+_ok=true
+{ [ -n "$WHERE_E1" ] && [ -n "$WHERE_E2" ]; } || { _ok=false; echo "     template no longer ships kb-where-refresh under two events" >&2; }
+SHIPPED_WHERE="$SW/scripts/kb-where-refresh.sh"
+_with_cmd_under "$WHERE_E1" "$WRAP/kb-where-refresh.sh"
+_run_refresh "$REAL_INSTALLER" >/dev/null
+[ "$(_count "$SETTINGS" "$WHERE_E1" "$SHIPPED_WHERE")" = "0" ] || { _ok=false; echo "     added under $WHERE_E1 although live there" >&2; }
+[ "$(_count "$SETTINGS" "$WHERE_E2" "$SHIPPED_WHERE")" = "1" ] || { _ok=false; echo "     NOT added under $WHERE_E2 (global-basename suppression)" >&2; }
+jq -n --arg a "$WHERE_E1" --arg b "$WHERE_E2" --arg c "$WRAP/kb-where-refresh.sh" \
+    '{hooks: {($a): [{hooks: [{type: "command", command: $c}]}], ($b): [{hooks: [{type: "command", command: $c}]}]}}' > "$SETTINGS"
+_run_refresh "$REAL_INSTALLER" >/dev/null
+if [ "$(_count "$SETTINGS" "$WHERE_E1" "$SHIPPED_WHERE")" != "0" ] || [ "$(_count "$SETTINGS" "$WHERE_E2" "$SHIPPED_WHERE")" != "0" ]; then
+    _ok=false; echo "     added although live under both events" >&2
+fi
+if [ "$_ok" = true ]; then test_pass; else test_fail "liveness is not scoped per event"; fi
+
+test_start "(k) Backup cannot be written: NO write, visible message, rc 1, file byte-identical, no stray temp"
+RO="$SANDBOX/ro"
+mkdir -p "$RO"
+chmod 500 "$RO"
+if mkdir "$RO/probe" 2>/dev/null; then
+    rmdir "$RO/probe"; chmod 700 "$RO"
+    echo "     (skipped: this user can write to a chmod 500 dir, e.g. root)"
+    test_pass
+else
+    printf '%s' '{"model":"opus"}' > "$SETTINGS"
+    _before="$(cksum < "$SETTINGS")"
+    _out_k="$(_TEST_BACKUP_DIR="$RO/sub" _run_refresh "$REAL_INSTALLER")"; _rc_k=$?
+    _ok=true
+    [ "$_before" = "$(cksum < "$SETTINGS")" ] || { _ok=false; echo "     settings.json was written despite the failed backup" >&2; }
+    case "$_out_k" in *"settings-hooks: skipped (backup failed; existing file untouched)"*) : ;; *) _ok=false; echo "     no visible message; output: $_out_k" >&2 ;; esac
+    [ "$_rc_k" = "1" ] || { _ok=false; echo "     rc=$_rc_k (want 1)" >&2; }
+    [ -z "$(find "$CLAUDE_CONFIG_DIR" -maxdepth 1 -name 'settings.json.*' 2>/dev/null)" ] || { _ok=false; echo "     temp files left beside target" >&2; }
+    chmod 700 "$RO"
+    if [ "$_ok" = true ]; then test_pass; else test_fail "failed backup did not fail closed"; fi
+fi
+
+test_start "(l) DRY-RUN prints the computed list (count + commands) and leaves everything byte-identical"
+printf '%s' '{"model":"opus"}' > "$SETTINGS"
+_snap() { cksum < "$SETTINGS"; find "$CLAUDE_CONFIG_DIR" "$SW/.backups" -print 2>/dev/null | sort | cksum; }
+_before="$(_snap)"
+_out_l="$(_run_refresh "$REAL_INSTALLER" --dry-run)"; _rc_l=$?
+_after="$(_snap)"
+_ok=true
+[ "$_rc_l" = "0" ] || { _ok=false; echo "     dry-run rc=$_rc_l" >&2; }
+[ "$_before" = "$_after" ] || { _ok=false; echo "     dry-run changed the file/dir listing" >&2; }
+_N="$(printf '%s\n' "$_out_l" | sed -n 's/.*dry-run would add=\([0-9][0-9]*\).*/\1/p' | head -1)"
+{ [ -n "$_N" ] && [ "$_N" -ge 8 ]; } || { _ok=false; echo "     no/low computed count: [$_N]" >&2; }
+_listed="$(printf '%s\n' "$_out_l" | grep -c 'dry-run would add [A-Za-z]*: ')"
+[ "$_listed" = "$_N" ] || { _ok=false; echo "     listed $_listed commands but count is $_N" >&2; }
+printf '%s\n' "$_out_l" | grep -qF "dry-run would add ${GUARD_EV}: ${SW}/scripts/kb-gh-credential-guard.sh" || { _ok=false; echo "     guard command not listed" >&2; }
+_out_real="$(_run_refresh "$REAL_INSTALLER")"
+case "$_out_real" in *"added=${_N}"*) : ;; *) _ok=false; echo "     real run did not add the dry-run count ($_N): $_out_real" >&2 ;; esac
+if [ "$_ok" = true ]; then test_pass; else test_fail "dry-run output/side effects wrong"; fi
+
+test_start "(m) update_claude_settings with DRY_RUN=true prints the computed list and writes nothing"
+printf '%s' '{"model":"opus"}' > "$SETTINGS"
+_before="$(_snap)"
+_run_settings true
+_after="$(_snap)"
+if [ "$_before" = "$_after" ] && grep -q "settings-hooks: dry-run would add=[0-9]" "$SANDBOX/settings-run.out" \
+    && grep -q "settings-hooks: dry-run would add .*: .*kb-where-refresh.sh" "$SANDBOX/settings-run.out"; then
+    test_pass
+else
+    test_fail "upgrade dry-run branch still prints a fixed line or wrote something; out: $(cat "$SANDBOX/settings-run.out")"
+fi
+
+test_start "(n) Stale line is actionable: names the file to edit and says removal is safe once the shipped path is registered"
+_with_cmd_under "$GUARD_EV" "~/dev-team/claude-hooks/$GUARD_BASE"
+_out_n="$(_run_refresh "$REAL_INSTALLER")"
+case "$_out_n" in
+    *"stale registration ~/dev-team/claude-hooks/$GUARD_BASE (script missing)"*"edit ${SETTINGS}"*"removal is safe once the shipped path ${SW}/scripts/$GUARD_BASE is registered"*) test_pass ;;
+    *) test_fail "stale line not actionable: $_out_n" ;;
+esac
+
 
 if [ "$_STANDALONE" = true ]; then
     echo ""

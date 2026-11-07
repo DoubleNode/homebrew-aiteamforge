@@ -6702,7 +6702,18 @@ update_claude_settings() {
         _xaca1227_remove_legacy_template_plugins --dry-run
       )" || true
     echo "${_xaca1227_dry:-legacy-plugins: dry-run (could not evaluate)}"
-    echo "settings-hooks: dry-run (XACA-1753: would append any template hook not already registered; box-local hooks untouched)"
+    # XACA-1753: same read-only evaluation for hook registrations -- computes and
+    # prints what WOULD be added (count + commands); no temp beside the target, no backup.
+    local _xaca1753_dry=""
+    _xaca1753_dry="$(
+        AITEAMFORGE_DIR="${WORKING_DIR}"
+        TEMPLATE_DIR="${FRAMEWORK_DIR}/share/templates"
+        export AITEAMFORGE_DIR TEMPLATE_DIR
+        # shellcheck source=/dev/null
+        source "$installer" >/dev/null 2>&1
+        _xaca1753_refresh_settings_hooks --dry-run
+      )" || true
+    echo "${_xaca1753_dry:-settings-hooks: dry-run (could not evaluate)}"
     return 0
   fi
 

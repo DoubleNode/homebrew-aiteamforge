@@ -1935,66 +1935,168 @@ _xaca1227_remove_legacy_template_plugins() {
 # hooks). Box-local hooks, every non-hook key and existing registrations survive.
 #
 # FAIL-CLOSED on stale entries: a base hook counts as "already registered" only
-# if its script token (leading ~ / $HOME / ${HOME} expanded) names an EXISTING
-# file. A dead registration (e.g. ~/dev-team/claude-hooks/X.sh on a consumer with
-# no ~/dev-team) must not suppress adding the working path; it is left in place
-# and reported. The exact shipped command already present is always "registered"
-# (even if its script is not on disk yet), so re-runs never pile up duplicates. Matching is by script BASENAME among live entries, so a dev box
-# that wires the same guard from its own (existing) checkout is not double-wired.
+# if its script (see _xaca1753_hook_script_token) names an EXISTING file, OR its
+# canonical path equals a registration under the same event (so the exact shipped
+# command already present is "registered" even if its script is not on disk yet
+# and re-runs never pile up duplicates). A dead registration (e.g.
+# ~/dev-team/claude-hooks/X.sh on a consumer with no ~/dev-team) must not
+# suppress adding the working path; it is left in place and reported.
 #
-# Output: "settings-hooks:" lines. Returns 0 no-op, 2 added, 3 untouched
+# PER-EVENT (XACA-1753-021): liveness is scoped to the event. A guard live only
+# under SessionStart does not suppress its Stop registration (kb-where-refresh.sh
+# ships under both). Within one event, matching is by script BASENAME among live
+# entries, so a dev box that wires the same guard from its own (existing)
+# checkout is not double-wired.
+#
+# CANONICAL PATHS (XACA-1753-019/-022): "already present" compares expanded,
+# //-collapsed, symlink-resolved paths, never literal command text, so a
+# WORKING_DIR spelling drift or a symlinked directory does not re-add a guard.
+#
+# ALWAYS-RESTORE (XACA-1753-020) is INTENTIONAL: the 2026-11-05 user directive
+# is that every fleet machine runs these guards, so a shipped guard a user
+# deleted from settings.json is re-added on the next upgrade. No opt-out exists
+# in this ticket; if one is ever needed, the follow-up is an opt-out marker
+# (e.g. a per-guard marker file/key that this union honours), not an edit here.
+# Dead registrations stay ADD-ONLY (never deleted by upgrade): the per-entry
+# stale line names the file to edit and says removal is safe once the shipped
+# path is registered under that event.
+#
+# BACKUP FAILS => NO WRITE: if the pre-change backup cannot be written and
+# verified, nothing is written (rc 1, file untouched, visible message).
+#
+# Usage: _xaca1753_refresh_settings_hooks [--dry-run]
+#   --dry-run: read-only. Computes and prints what WOULD be added (count +
+#   commands). No temp beside the target, no backup, no write.
+# Output: "settings-hooks:" lines. Returns 0 no-op/dry-run, 2 added, 3 untouched
 # (symlink/invalid), 1 skipped/error (existing file never modified).
 
-# Last whitespace-separated word of a hook command, ~ / $HOME / ${HOME} expanded.
-_xaca1753_hook_script_token() {
-    local cmd="$1" tok
-    tok="${cmd##* }"
-    case "$tok" in
-        "~"|"~/"*) tok="${HOME}${tok#\~}" ;;
-        "\$HOME"*) tok="${HOME}${tok#\$HOME}" ;;
-        "\${HOME}"*) tok="${HOME}${tok#\$\{HOME\}}" ;;
-    esac
-    printf '%s' "$tok"
+# Normalise a path: collapse //, drop /./ and a trailing /. Lexical only.
+_xaca1753_norm_lex() {
+    local p
+    p="$(printf '%s' "$1" | sed -e 's#//*#/#g' -e 's#/\./#/#g' -e 's#/\.$##')"
+    if [[ "$p" != "/" ]]; then p="${p%/}"; fi
+    printf '%s' "$p"
 }
 
-# Prints "live<TAB>basename" or "stale<TAB>command" for each base hook command.
-_xaca1753_hook_liveness() {
-    local base_file="$1" cmd tok
-    while IFS= read -r cmd; do
-        [[ -n "$cmd" ]] || continue
-        tok="$(_xaca1753_hook_script_token "$cmd")"
-        if [[ -e "$tok" ]]; then
-            printf 'live\t%s\n' "${tok##*/}"
-        else
-            printf 'stale\t%s\n' "$cmd"
+# Lexically normalise and, when the path exists, resolve symlinks (the file
+# itself and its directory). Missing paths are only lexically normalised.
+_xaca1753_canon_path() {
+    local p d b t n=0
+    p="$(_xaca1753_norm_lex "$1")"
+    case "$p" in */*) ;; *) printf '%s' "$p"; return 0 ;; esac
+    if [[ -e "$p" ]]; then
+        while [[ -L "$p" && $n -lt 20 ]]; do
+            t="$(readlink "$p")"
+            case "$t" in /*) p="$t" ;; *) p="${p%/*}/$t" ;; esac
+            p="$(_xaca1753_norm_lex "$p")"
+            n=$((n + 1))
+        done
+        d="${p%/*}"; b="${p##*/}"
+        [[ -n "$d" ]] || d="/"
+        if d="$(cd "$d" 2>/dev/null && pwd -P)"; then
+            if [[ "$d" == "/" ]]; then p="/$b"; else p="$d/$b"; fi
         fi
-    done < <(jq -r '.hooks // {} | .[]? | .[]? | .hooks[]? | .command // empty' "$base_file" 2>/dev/null)
+    fi
+    printf '%s' "$p"
 }
 
-# Args: base_file template_rendered_file output_file live_basenames_json scripts_prefix
+# Pick the script path out of a hook command, ~ / $HOME / ${HOME} expanded.
+# Rules (first match wins, scanning left to right, first simple command only):
+#   - words are split on whitespace; a "double"/'single' quoted word (even one
+#     containing spaces) is one word and its quotes are stripped
+#   - stop at a control operator (|| && ; | &)
+#   - skip redirections (2>/dev/null, >file, > file, 2>&1), env assignments
+#     (FOO=bar), options (-x, --quiet) and interpreter words (bash sh zsh dash
+#     ksh python python3[.x] uv env node exec nohup sudo command time nice
+#     stdbuf, with or without a directory)
+#   - the script is the first remaining word that contains a '/' and either
+#     ends in .sh/.py or names an existing regular file
+# Prints nothing and returns 1 when no word qualifies.
+_xaca1753_hook_script_token() {
+    local cmd="$1" w q base rest skip_next=false i=0 n
+    local -a words=()
+    read -r -a words <<< "$cmd"
+    n=${#words[@]}
+    while [[ $i -lt $n ]]; do
+        w="${words[$i]}"
+        case "$w" in
+            \"*|\'*)
+                q="${w:0:1}"
+                while [[ $((i + 1)) -lt $n ]] && ! { [[ ${#w} -ge 2 ]] && [[ "${w: -1}" == "$q" ]]; }; do
+                    i=$((i + 1)); w="$w ${words[$i]}"
+                done
+                w="${w#?}"; w="${w%"$q"}"
+                ;;
+        esac
+        i=$((i + 1))
+        case "$w" in
+            '||'|'&&'|';'|'|'|'&') break ;;
+        esac
+        if [[ "$skip_next" == true ]]; then skip_next=false; continue; fi
+        case "$w" in
+            *[\<\>]*)
+                rest="${w##*[<>]}"
+                [[ -n "$rest" ]] || skip_next=true
+                continue ;;
+            -*) continue ;;
+        esac
+        if [[ "$w" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then continue; fi
+        case "$w" in
+            "~"|"~/"*) w="${HOME}${w#\~}" ;;
+            "\$HOME"*) w="${HOME}${w#\$HOME}" ;;
+            "\${HOME}"*) w="${HOME}${w#\$\{HOME\}}" ;;
+        esac
+        base="${w##*/}"
+        case "$base" in
+            bash|sh|zsh|dash|ksh|python|python3|python3.*|uv|env|node|exec|nohup|sudo|command|time|nice|stdbuf) continue ;;
+        esac
+        case "$w" in */*) ;; *) continue ;; esac
+        case "$w" in
+            *.sh|*.py) printf '%s' "$w"; return 0 ;;
+        esac
+        if [[ -f "$w" ]]; then printf '%s' "$w"; return 0; fi
+    done
+    return 1
+}
+
+# Prints "event<TAB>command" for every hook command in a settings-shaped file.
+_xaca1753_hook_entries() {
+    jq -r '.hooks // {} | to_entries[]? | .key as $e | (.value | arrays)[]? | objects
+           | .hooks[]? | objects | (.command | strings) | "\($e)\t\(.)"' "$1" 2>/dev/null
+}
+
+# Args: base_file template_rendered_file output_file add_json
+# add_json: [{"e":"<event>","c":"<command>"},...] -- exactly the template hooks to
+# append (one new matcher-less group per template group, keeping only those).
 merge_settings_json_hooks_union() {
-    local base_file="$1" overlay_file="$2" output_file="$3" live_json="${4:-[]}" prefix="${5:-}"
+    local base_file="$1" overlay_file="$2" output_file="$3" add_json="${4:-[]}"
     command -v jq &>/dev/null || { log_error "jq is required for JSON merging"; return 1; }
-    [[ -n "$prefix" ]] || { log_error "hooks union needs the rendered scripts/ prefix"; return 1; }
-    jq -s --argjson live "$live_json" --arg prefix "$prefix" '
-      def tok: (tostring | split(" ") | map(select(length>0)) | last // "");
-      def key: (tok | split("/") | last);
+    jq -s --argjson add "$add_json" '
       .[0] as $base | .[1] as $ovl |
       reduce (($ovl.hooks // {}) | keys_unsorted[]) as $e ($base;
-        ((.hooks[$e] // []) | map(.hooks[]? | .command)) as $exact
-        | ( ($ovl.hooks[$e] // [])
+        ( ($ovl.hooks[$e] // [])
             | map(.hooks = [ .hooks[]?
                 | select(.command as $c
-                         | ($c | tok | startswith($prefix))
-                           and (($exact | index($c)) == null)
-                           and (($live | index($c | key)) == null)) ])
+                         | any($add[]; .e == $e and .c == $c)) ])
             | map(select((.hooks | length) > 0)) ) as $missing
         | if ($missing | length) > 0
           then .hooks[$e] = ((.hooks[$e] // []) + $missing) else . end)
     ' "$base_file" "$overlay_file" > "$output_file"
 }
 
+# Copy the file into ${BACKUP_DIR} and verify the copy. Non-zero on ANY failure.
+_xaca1753_backup_settings() {
+    local f="$1" bp
+    [[ -n "${BACKUP_DIR:-}" ]] || return 1
+    bp="${BACKUP_DIR}/$(basename "$f")"
+    mkdir -p "$BACKUP_DIR" 2>/dev/null || return 1
+    cp "$f" "$bp" 2>/dev/null || return 1
+    cmp -s "$f" "$bp" || return 1
+}
+
 _xaca1753_refresh_settings_hooks() {
+    local dry_run=false
+    [[ "${1:-}" == "--dry-run" ]] && dry_run=true
     local target="${CLAUDE_CONFIG_DIR}/settings.json"
     local template="${TEMPLATE_DIR}/claude/settings.json.template"
     [[ -f "$template" ]] || { echo "settings-hooks: skipped (shipped settings.json.template not found)"; return 1; }
@@ -2006,49 +2108,112 @@ _xaca1753_refresh_settings_hooks() {
         echo "settings-hooks: untouched (${target} is not a valid JSON object)"; return 3
     fi
     local rendered candidate
-    rendered="$(mktemp "${target}.tmpl.XXXXXX" 2>/dev/null)" || { echo "settings-hooks: skipped (temp file)"; return 1; }
+    if [[ "$dry_run" == true ]]; then
+        # Read-only: the render goes to TMPDIR, never beside the target.
+        rendered="$(mktemp "${TMPDIR:-/tmp}/xaca1753-tmpl.XXXXXX" 2>/dev/null)" || { echo "settings-hooks: skipped (temp file)"; return 1; }
+    else
+        rendered="$(mktemp "${target}.tmpl.XXXXXX" 2>/dev/null)" || { echo "settings-hooks: skipped (temp file)"; return 1; }
+    fi
     if ! apply_template "$template" "$rendered" >/dev/null 2>&1 \
         || ! jq -e 'type == "object"' "$rendered" >/dev/null 2>&1; then
         rm -f "$rendered"; echo "settings-hooks: skipped (template render failed; existing file untouched)"; return 1
     fi
 
-    # Which base registrations are live (script exists) vs dead. Dead ones that
-    # name a shipped guard are reported, never removed.
-    local prefix="${AITEAMFORGE_DIR}/scripts/" live_lines kind val live_json _b
-    live_lines="$(_xaca1753_hook_liveness "$target")"
-    live_json="$(printf '%s\n' "$live_lines" | awk -F'\t' '$1=="live"{print $2}' | jq -R . | jq -s -c .)"
-    [[ -n "$live_json" ]] || live_json="[]"
-    local guard_keys
-    guard_keys="$(jq -r --arg prefix "$prefix" '.hooks // {} | .[]? | .[]? | .hooks[]? | .command // empty
-        | split(" ") | map(select(length>0)) | last // "" | select(startswith($prefix)) | split("/") | last' "$rendered" 2>/dev/null)"
-    while IFS=$'\t' read -r kind val; do
-        [[ "$kind" == "stale" ]] || continue
-        _b="${val##* }"; _b="${_b##*/}"
-        case $'\n'"$guard_keys"$'\n' in
-            *$'\n'"${_b}"$'\n'*)
-                echo "settings-hooks: stale registration ${val} (script missing) -- left in place" ;;
-        esac
-    done <<< "$live_lines"
+    local prefix="${AITEAMFORGE_DIR}/scripts/" tab=$'\t' nl=$'\n'
+    local ev cmd tok canon bn
+    local live_set="" reg_set="" exact_set="" stale_set="" add_lines="" shipped_map=""
 
+    # Base registrations, per event: live (script exists) vs dead.
+    while IFS=$'\t' read -r ev cmd; do
+        [[ -n "$cmd" ]] || continue
+        exact_set="${exact_set}${ev}${tab}${cmd}${nl}"
+        tok="$(_xaca1753_hook_script_token "$cmd")" || tok=""
+        [[ -n "$tok" ]] || continue
+        canon="$(_xaca1753_canon_path "$tok")"
+        bn="${tok##*/}"
+        reg_set="${reg_set}${ev}${tab}${canon}${nl}"
+        if [[ -e "$tok" ]]; then
+            live_set="${live_set}${ev}${tab}${bn}${nl}"
+        else
+            stale_set="${stale_set}${ev}${tab}${cmd}${tab}${bn}${nl}"
+        fi
+    done < <(_xaca1753_hook_entries "$target")
+
+    # Template guards (command under the rendered scripts/ prefix) that are not
+    # already present UNDER THEIR OWN EVENT.
+    while IFS=$'\t' read -r ev cmd; do
+        [[ -n "$cmd" ]] || continue
+        tok="$(_xaca1753_hook_script_token "$cmd")" || tok=""
+        [[ -n "$tok" ]] || continue
+        case "$tok" in "${prefix}"*) ;; *) continue ;; esac
+        canon="$(_xaca1753_canon_path "$tok")"
+        bn="${tok##*/}"
+        case "$shipped_map" in
+            *"${nl}${bn}${tab}"*) ;;
+            *) shipped_map="${shipped_map}${nl}${bn}${tab}${tok}${nl}" ;;
+        esac
+        if printf '%s' "$live_set" | grep -Fxq -- "${ev}${tab}${bn}" \
+            || printf '%s' "$reg_set" | grep -Fxq -- "${ev}${tab}${canon}" \
+            || printf '%s' "$exact_set" | grep -Fxq -- "${ev}${tab}${cmd}"; then
+            continue
+        fi
+        add_lines="${add_lines}${ev}${tab}${cmd}${nl}"
+        reg_set="${reg_set}${ev}${tab}${canon}${nl}"
+    done < <(_xaca1753_hook_entries "$rendered")
+
+    # Dead registrations that name a shipped guard: reported, never removed.
+    local sev scmd sbn shipped
+    while IFS=$'\t' read -r sev scmd sbn; do
+        [[ -n "$sbn" ]] || continue
+        shipped="$(printf '%s' "$shipped_map" | awk -F'\t' -v b="$sbn" '$1==b{print $2; exit}')"
+        [[ -n "$shipped" ]] || continue
+        echo "settings-hooks: stale registration ${scmd} (script missing) -- left in place (upgrade is add-only). To remove it, edit ${target} and delete that entry under ${sev}; removal is safe once the shipped path ${shipped} is registered."
+    done <<< "$stale_set"
+
+    local _n
+    _n="$(printf '%s' "$add_lines" | grep -c . || true)"
+    if [[ "${_n:-0}" -eq 0 ]]; then
+        rm -f "$rendered"
+        if [[ "$dry_run" == true ]]; then
+            echo "settings-hooks: dry-run would add=0 (no-op; every shipped guard hook already registered)"
+        else
+            echo "settings-hooks: added=0 (no-op; every shipped guard hook already registered)"
+        fi
+        return 0
+    fi
+    if [[ "$dry_run" == true ]]; then
+        rm -f "$rendered"
+        echo "settings-hooks: dry-run would add=${_n} (nothing written; no backup taken)"
+        while IFS=$'\t' read -r ev cmd; do
+            [[ -n "$cmd" ]] || continue
+            echo "settings-hooks: dry-run would add ${ev}: ${cmd}"
+        done <<< "$add_lines"
+        return 0
+    fi
+
+    local add_json
+    add_json="$(printf '%s' "$add_lines" | jq -R -s -c 'split("\n") | map(select(length>0) | split("\t") | {e: .[0], c: .[1]})' 2>/dev/null)"
+    if [[ -z "$add_json" ]]; then
+        rm -f "$rendered"; echo "settings-hooks: skipped (merge failed; existing file untouched)"; return 1
+    fi
     candidate="$(mktemp "${target}.XXXXXX" 2>/dev/null)" || { rm -f "$rendered"; echo "settings-hooks: skipped (temp file)"; return 1; }
-    if ! merge_settings_json_hooks_union "$target" "$rendered" "$candidate" "$live_json" "$prefix" 2>/dev/null \
+    if ! merge_settings_json_hooks_union "$target" "$rendered" "$candidate" "$add_json" 2>/dev/null \
         || ! jq -e 'type == "object"' "$candidate" >/dev/null 2>&1; then
         rm -f "$rendered" "$candidate"; echo "settings-hooks: skipped (merge failed; existing file untouched)"; return 1
     fi
     rm -f "$rendered"
-    if jq -e -n --slurpfile a "$target" --slurpfile b "$candidate" '$a[0] == $b[0]' >/dev/null 2>&1; then
-        rm -f "$candidate"; echo "settings-hooks: added=0 (no-op; every shipped guard hook already registered)"; return 0
+    # Fail closed: no verified backup, no write.
+    if ! _xaca1753_backup_settings "$target"; then
+        rm -f "$candidate"
+        echo "settings-hooks: skipped (backup failed; existing file untouched)"
+        return 1
     fi
-    local _n
-    _n="$(jq -n --slurpfile a "$target" --slurpfile b "$candidate" \
-        '([$b[0].hooks[]?[]?.hooks[]?] | length) - ([$a[0].hooks[]?[]?.hooks[]?] | length)' 2>/dev/null)"
-    backup_file "$target" >/dev/null 2>&1 || true
     local _mode
     if command -v _aitf_file_mode >/dev/null 2>&1; then _mode="$(_aitf_file_mode "$target")"; else _mode="$(_xaca1283_file_mode "$target")"; fi
     case "$_mode" in ''|*[!0-7]*) _mode=644 ;; esac
     chmod "$_mode" "$candidate" 2>/dev/null || true
     if mv -f "$candidate" "$target" 2>/dev/null; then
-        echo "settings-hooks: added=${_n:-?}"; return 2
+        echo "settings-hooks: added=${_n}"; return 2
     fi
     rm -f "$candidate"
     echo "settings-hooks: skipped (failed to install updated settings.json; existing file left in place)"; return 1
