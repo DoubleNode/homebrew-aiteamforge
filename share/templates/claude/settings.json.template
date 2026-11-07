@@ -23,6 +23,70 @@
             "command": "python3 {{AITEAMFORGE_DIR}}/kanban-hooks/kanban-session-start.py"
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{{AITEAMFORGE_DIR}}/scripts/kb-session-knowledge-check.sh",
+            "timeout": 20
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{{AITEAMFORGE_DIR}}/scripts/kanban-crash-detect.sh",
+            "timeout": 20
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{{AITEAMFORGE_DIR}}/scripts/kb-lcars-port-drift-guard.sh",
+            "timeout": 20
+          },
+          {
+            "type": "command",
+            "command": "{{AITEAMFORGE_DIR}}/scripts/kb-live-config-drift-guard.sh",
+            "timeout": 20
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{{AITEAMFORGE_DIR}}/scripts/kb-team-registry-loss-guard.sh",
+            "timeout": 20
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{{AITEAMFORGE_DIR}}/scripts/kb-knowledge-sync-guard.sh",
+            "timeout": 20
+          },
+          {
+            "type": "command",
+            "command": "{{AITEAMFORGE_DIR}}/scripts/kb-gh-credential-guard.sh",
+            "timeout": 20
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{{AITEAMFORGE_DIR}}/scripts/kb-where-refresh.sh",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "PreToolUse": [
@@ -108,6 +172,15 @@
             "type": "command",
             "command": "python3 {{AITEAMFORGE_DIR}}/kanban-hooks/subagent-track.py cleanup_if_empty",
             "timeout": 3
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{{AITEAMFORGE_DIR}}/scripts/kb-where-refresh.sh",
+            "timeout": 10
           }
         ]
       }
