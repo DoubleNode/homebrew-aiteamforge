@@ -119,6 +119,12 @@ if [ -e "$NOBREW_BIN/brew" ] || [ -e "$NOJQ_BIN/brew" ] || [ -e "$NOJQ_BIN/jq" ]
     exit 1
 fi
 
+# python3 builds the Unix-domain-socket fixture (B6). Fail LOUDLY, never skip.
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "FATAL: python3 is required (B6 socket fixture)" >&2
+    exit 1
+fi
+
 _mtime() { stat -f '%m' "$1" 2>/dev/null || stat -c '%Y' "$1" 2>/dev/null; }
 
 # Run a bash program in a hermetic child. $1 = PATH dir, $2 = AITEAMFORGE_DIR,
@@ -365,21 +371,22 @@ else
     test_pass
 fi
 
-test_start "B5: backfill FAILS CLOSED on an unreadable stamp (mode 000 / 200 / symlink to unreadable): content untouched, no stderr; dangling symlink IS repaired"
+test_start "B5: backfill FAILS CLOSED on an unreadable stamp (mode 000 / 200 / symlink to mode-000 / symlink to mode-200 file): content untouched, no stderr; dangling symlink IS repaired"
 _b5_bad=""
-for _case in mode000 mode200 link-unreadable dangling; do
+for _case in mode000 mode200 link-unreadable link-mode200 dangling; do
     _d="$W/b5-$_case/aiteamforge"; mk_never_upgraded "$_d" "0.11.6"
     _s="$_d/.installed-version"
     case "$_case" in
         mode000) printf '0.20.0\n' > "$_s"; chmod 000 "$_s" ;;
         mode200) printf '0.20.0\n' > "$_s"; chmod 200 "$_s" ;;
         link-unreadable) printf '0.20.0\n' > "$_d/real-stamp"; chmod 000 "$_d/real-stamp"; ln -s "$_d/real-stamp" "$_s" ;;
+        link-mode200) printf '0.20.0\n' > "$_d/real-stamp"; chmod 200 "$_d/real-stamp"; ln -s "$_d/real-stamp" "$_s" ;;
         dangling) ln -s "$_d/no-such-target" "$_s" ;;
     esac
     _rc=0; _err="$(_run "$NOBREW_BIN" "$_d" "$BACKFILL_PROG" 2>&1 >/dev/null)" || _rc=$?
     case "$_case" in
         mode000|mode200) chmod 644 "$_s"; _want="0.20.0"; _got="$(cat "$_s")" ;;
-        link-unreadable) chmod 644 "$_d/real-stamp"; _want="0.20.0"; _got="$(cat "$_d/real-stamp")"
+        link-unreadable|link-mode200) chmod 644 "$_d/real-stamp"; _want="0.20.0"; _got="$(cat "$_d/real-stamp")"
                          [ -L "$_s" ] || _b5_bad="$_b5_bad $_case:symlink-replaced" ;;
         dangling) _want="0.11.6"; _got="$(cat "$_s" 2>/dev/null)"
                   [ -L "$_s" ] && _b5_bad="$_b5_bad $_case:still-a-dangling-link" ;;
@@ -397,33 +404,50 @@ else
     test_pass
 fi
 
-test_start "B6: backfill never READS a non-regular stamp (FIFO / symlink->FIFO / symlink->/dev/zero): returns promptly, leaves it in place (timeout-guarded)"
+test_start "B6: backfill never READS a non-regular stamp (FIFO / symlink->FIFO / symlink->/dev/zero / socket / symlink->/dev/null): returns promptly with rc 0 and empty stderr, leaves it in place (timeout-guarded)"
 _b6_bad=""
-for _case in fifo link-fifo link-devzero; do
+for _case in fifo link-fifo link-devzero socket link-devnull; do
     _d="$W/b6-$_case/aiteamforge"; mk_never_upgraded "$_d" "0.11.6"
     _s="$_d/.installed-version"
+    _errf="$W/b6-$_case.err"; : > "$_errf"
+    _fixok=true
     case "$_case" in
         fifo)         mkfifo "$_s" ;;
         link-fifo)    mkfifo "$_d/a-fifo"; ln -s "$_d/a-fifo" "$_s" ;;
         link-devzero) ln -s /dev/zero "$_s" ;;
+        link-devnull) ln -s /dev/null "$_s" ;;
+        socket)
+            # Bind via a RELATIVE path from inside the dir: sun_path is ~104 bytes on macOS.
+            if ! ( cd "$_d" && python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])' .installed-version ) 2>/dev/null \
+                || [ ! -S "$_s" ]; then
+                _fixok=false; _b6_bad="$_b6_bad $_case:socket:fixture-failed"
+            fi ;;
     esac
+    [ "$_fixok" = true ] || continue
     # No coreutils `timeout` on macOS: background the child and poll for <=5 s.
-    ( _run "$NOBREW_BIN" "$_d" "$BACKFILL_PROG" >/dev/null 2>&1 ) &
+    ( _run "$NOBREW_BIN" "$_d" "$BACKFILL_PROG" >/dev/null 2>"$_errf" ) &
     _pid=$!; _hung=true
     for _i in 1 2 3 4 5 6 7 8 9 10; do
         if ! kill -0 "$_pid" 2>/dev/null; then _hung=false; break; fi
         sleep 0.5
     done
+    _rc=0
     if [ "$_hung" = true ]; then
         pkill -P "$_pid" 2>/dev/null || true; kill "$_pid" 2>/dev/null || true
         # Unblock any reader still parked on the FIFO so nothing outlives the suite.
         case "$_case" in fifo) : > "$_s" & ;; link-fifo) : > "$_d/a-fifo" & ;; esac
         _b6_bad="$_b6_bad $_case:HUNG(>5s)"
+        wait "$_pid" 2>/dev/null || true
+    else
+        wait "$_pid" 2>/dev/null || _rc=$?
+        _err="$(cat "$_errf" 2>/dev/null)"
+        [ "$_rc" -ne 0 ] && _b6_bad="$_b6_bad $_case:rc=$_rc"
+        [ -n "$_err" ] && _b6_bad="$_b6_bad $_case:stderr='$_err'"
     fi
-    wait "$_pid" 2>/dev/null || true
     case "$_case" in
         fifo)         [ -p "$_s" ] || _b6_bad="$_b6_bad $_case:fifo-replaced" ;;
-        link-fifo|link-devzero) [ -L "$_s" ] || _b6_bad="$_b6_bad $_case:link-replaced" ;;
+        socket)       [ -S "$_s" ] || _b6_bad="$_b6_bad $_case:socket-replaced" ;;
+        link-fifo|link-devzero|link-devnull) [ -L "$_s" ] || _b6_bad="$_b6_bad $_case:link-replaced" ;;
     esac
 done
 if [ -n "$_b6_bad" ]; then
