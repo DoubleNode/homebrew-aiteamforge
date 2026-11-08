@@ -476,6 +476,32 @@ _ok=true
 if [ "$_ok" = true ]; then test_pass; else test_fail "lib not reachable in installed layout"; fi
 
 # ════════════════════════════════════════════════════════════════════════════
+# 4b. XACA-1624-017: hints stay copy-pasteable when AITEAMFORGE_DIR has a space or a quote
+# ════════════════════════════════════════════════════════════════════════════
+QDIR="$T/at f'x"
+mkdir -p "$QDIR/scripts"
+cp "$T/atf/scripts/kb-sync-plugins" "$QDIR/scripts/kb-sync-plugins"
+# qhint_tool <hint>: the argv word after `python3` on the Install: line, as a shell would parse it
+qhint_tool() {
+    local line
+    line="$(printf '%s\n' "$1" | sed -n 's/^Install: //p' | head -1)"
+    [ -n "$line" ] || return 1
+    bash -c 'eval "set -- $1"; printf "%s|%s|%s" "$1" "$2" "$#"' _ "$line"
+}
+for SH in $SHELLS; do
+    TAG="[$(basename "$SH") $($SH -c 'echo ${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}')]"
+    echo absent > "$QDIR/scripts/case"
+    mp_eval "$SH" "$LIB" "$QDIR" "$T/home/.claude"
+    eq "$TAG quoted dir: absent -> ACTION" "ACTION" "$MP_V"
+    eq "$TAG quoted dir: the pasted install command parses to python3 + the real tool path (4 words)" \
+        "python3|$QDIR/scripts/kb-sync-plugins|4" "$(qhint_tool "$MP_H")"
+    setcase absent
+    mp_eval "$SH" "$LIB" "$T/atf" "$T/home/.claude"
+    eq "$TAG plain dir: the install line is printed unquoted (unchanged)" \
+        "$INSTALL_LINE" "$(printf '%s\n' "$MP_H" | sed -n 's/^Install: //p' | head -1)"
+done
+
+# ════════════════════════════════════════════════════════════════════════════
 # 5. Mutation sentinels (IN-FILE, on temp copies; each proves its sed changed the file)
 # ════════════════════════════════════════════════════════════════════════════
 mutate() { # mutate <src> <dest> <sed-expr>  -> 0 only when the copy differs from the source
@@ -555,6 +581,13 @@ mutate "$UPGRADE" "$T/up-d4.sh" 's/^  surface_managed_policy_status || true$/  :
 ok "sentinel (d4): sed matched" $?
 test_start "sentinel (d4): call-site check goes RED when the call runs outside the success branch"
 if call_site_check "$T/up-d4.sh"; then test_fail "call_site_check still passes (sentinel is not sensitive)"; else test_pass; fi
+
+# (e) XACA-1624-017: drop the quoting -> the space/quote row goes RED
+mutate_lib e 's/^    \*\[!A-Za-z0-9_\.\/~+:@%=-\]\*|"") printf .*# GUARD:mp-shq$/    __never__) : ;;  # GUARD:mp-shq/'; ok "sentinel (e): sed matched" $?
+echo absent > "$QDIR/scripts/case"
+mp_eval "$BASH3" "$MUT_LIB" "$QDIR" "$T/home/.claude"
+test_start "sentinel (e): unquoted hint goes RED (pasted command no longer parses to the real path)"
+if [ "$(qhint_tool "$MP_H")" = "python3|$QDIR/scripts/kb-sync-plugins|4" ]; then test_fail "mutant still parses correctly (sentinel is not sensitive)"; else test_pass; fi
 
 # ════════════════════════════════════════════════════════════════════════════
 if [ "$_STANDALONE" = true ]; then

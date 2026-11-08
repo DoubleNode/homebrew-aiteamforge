@@ -65,11 +65,23 @@ atf_mp_skip_reason() {
   return 1
 }
 
+# _atf_mp_shq <word>: print <word> so it can be pasted into a shell as one argument. Plain paths
+# are printed as is; anything else is single-quoted ('\'' for an embedded quote). XACA-1624-017:
+# an AITEAMFORGE_DIR with a space must still give a copy-pasteable command.
+_atf_mp_shq() {
+  case "$1" in
+    *[!A-Za-z0-9_./~+:@%=-]*|"") printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")" ;;  # GUARD:mp-shq
+    *) printf '%s' "$1" ;;
+  esac
+}
+
 _atf_mp_evaluate_core() {
   local dir="${1:-${HOME}/aiteamforge}"
   local tool="${dir}/scripts/kb-sync-plugins"
-  local install_cmd="python3 ${tool} managed-policy --install"
-  local verify_cmd="python3 ${tool} check --host --probe"
+  local qtool
+  qtool="$(_atf_mp_shq "$tool")"
+  local install_cmd="python3 ${qtool} managed-policy --install"
+  local verify_cmd="python3 ${qtool} check --host --probe"
   local reason out rc line1 status
 
   ATF_MP_VERDICT=""
