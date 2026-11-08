@@ -78,6 +78,14 @@ if [ -f "$AITEAMFORGE_HOME/libexec/lib/vault-readiness.sh" ]; then
   . "$AITEAMFORGE_HOME/libexec/lib/vault-readiness.sh" && _VAULT_READINESS_LIB_OK=true
 fi
 
+# XACA-1624-003: managed-policy status — the SAME lib the other doctor and `aiteamforge upgrade`
+# source, so none of them can disagree. Defensive like the libs above: absent => WARN, never PASS.
+_MANAGED_POLICY_LIB_OK=false
+if [ -f "$AITEAMFORGE_HOME/libexec/lib/managed-policy-status.sh" ]; then
+  # shellcheck source=/dev/null
+  . "$AITEAMFORGE_HOME/libexec/lib/managed-policy-status.sh" && _MANAGED_POLICY_LIB_OK=true
+fi
+
 # Working directory
 AITEAMFORGE_DIR="${AITEAMFORGE_DIR:-$HOME/aiteamforge}"
 
@@ -117,6 +125,7 @@ Components:
   mandatory-teams Missing/unprovisioned mandatory team fleet install (XACA-1070)
   vault-readiness node + libsodium-wrappers + vault-fetch smoke for routed teams (XACA-1225-021)
   plugin-binaries LSP binaries for enabled Claude Code plugins + claude version floor (XACA-1599-007; in the default run since PR-B)
+  managed-policy  Claude Code L1 managed policy installed and current (XACA-1624)
   all             Run all checks (default)
 
 Examples:
@@ -1272,6 +1281,36 @@ check_install() {
   fi
 }
 
+# XACA-1624-003: Claude Code L1 managed policy (root-owned; blocks superpowers, commit-commands,
+# ralph-loop). Verdicts come from libexec/lib/managed-policy-status.sh (shared with the other
+# doctor and `aiteamforge upgrade`): OK is the only PASS; absent/stale is a WARN with the exact
+# full-path install command; anything unreadable is a WARN "cannot determine", never a PASS.
+# Skipped (INFO, not counted) on the dev machine and for staged/sandbox CLAUDE_CONFIG_DIR.
+# This check never installs anything and never runs sudo. Mirrored in
+# libexec/commands/aiteamforge-doctor.sh.
+check_managed_policy() {
+  echo -e "${CYAN}Checking Claude Code managed policy...${NC}"
+  echo ""
+
+  if [ "$_MANAGED_POLICY_LIB_OK" != true ]; then
+    check_result warn "Claude Code managed policy: cannot determine status (managed-policy-status.sh not available)" \
+      "Expected: ${AITEAMFORGE_HOME}/libexec/lib/managed-policy-status.sh (XACA-1624). Run: aiteamforge upgrade"
+    echo ""
+    return 0
+  fi
+
+  atf_mp_evaluate "$AITEAMFORGE_DIR"
+  case "$ATF_MP_VERDICT" in
+    SKIP) echo -e "${BLUE}ℹ${NC} ${ATF_MP_SUMMARY}" ;;
+    OK) check_result pass "$ATF_MP_SUMMARY" ;;
+    *)
+      check_result warn "$ATF_MP_SUMMARY"
+      printf '%s\n' "$ATF_MP_HINT" | sed 's/^/    /'
+      ;;
+  esac
+  echo ""
+}
+
 # Run checks based on component
 case "$CHECK_COMPONENT" in
   dependencies)
@@ -1304,6 +1343,9 @@ case "$CHECK_COMPONENT" in
   plugin-binaries)
     check_plugin_binaries
     ;;
+  managed-policy)
+    check_managed_policy
+    ;;
   all)
     check_dependencies
     check_framework
@@ -1315,6 +1357,7 @@ case "$CHECK_COMPONENT" in
     check_mandatory_teams
     check_vault_readiness
     check_plugin_binaries
+    check_managed_policy
     ;;
   *)
     echo -e "${RED}ERROR: Unknown component: ${CHECK_COMPONENT}${NC}" >&2

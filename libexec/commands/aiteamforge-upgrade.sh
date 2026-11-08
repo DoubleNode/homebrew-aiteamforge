@@ -61,6 +61,14 @@ source "${LIBEXEC_DIR}/lib/persona-targets.sh"
 # shellcheck source=../lib/aiteamforge-paths.sh
 [ -f "${LIBEXEC_DIR}/lib/aiteamforge-paths.sh" ] && source "${LIBEXEC_DIR}/lib/aiteamforge-paths.sh" 2>/dev/null || true
 
+# XACA-1624-004: managed-policy status — the SAME lib both doctors source. Guarded like the
+# libs above; if absent the summary says "cannot determine", never a pass.
+_UPGRADE_MANAGED_POLICY_LIB_OK=false
+if [ -f "${LIBEXEC_DIR}/lib/managed-policy-status.sh" ]; then
+  # shellcheck source=../lib/managed-policy-status.sh
+  source "${LIBEXEC_DIR}/lib/managed-policy-status.sh" 2>/dev/null && _UPGRADE_MANAGED_POLICY_LIB_OK=true
+fi
+
 # Version — read from VERSION file (single source of truth)
 _find_version() { for p in "${LIBEXEC_DIR}/../VERSION" "${LIBEXEC_DIR}/../../VERSION"; do [ -f "$p" ] && cat "$p" | tr -d '[:space:]' && return; done; echo "unknown"; }
 VERSION="$(_find_version)"
@@ -7467,6 +7475,30 @@ if [ "$DRY_RUN" = false ]; then
   show_changelog
 fi
 
+# XACA-1624-004: SURFACE-ONLY report of the Claude Code L1 managed policy in the end summary.
+# The policy is root-owned, so this NEVER runs sudo, NEVER runs `managed-policy --install` and
+# never prompts, TTY or not (auto-upgrade runs non-interactively). It reads the status through the
+# shared libexec/lib/managed-policy-status.sh (same guards and verdicts as both doctors: skipped
+# on the dev machine and for staged/sandbox CLAUDE_CONFIG_DIR) and prints the exact command for a
+# human to run. Always returns 0 and never changes the exit status: the status read runs in a
+# command substitution guarded with `|| true`, so `set -eo pipefail` cannot abort the upgrade.
+surface_managed_policy_status() {
+  if [ "$_UPGRADE_MANAGED_POLICY_LIB_OK" != true ]; then
+    print_warning "Claude Code managed policy: cannot determine status (managed-policy-status.sh not available)"
+    return 0
+  fi
+  atf_mp_evaluate "${WORKING_DIR:-${AITEAMFORGE_DIR:-$HOME/aiteamforge}}" || true
+  case "${ATF_MP_VERDICT:-}" in
+    SKIP) print_info "$ATF_MP_SUMMARY" ;;
+    OK) print_success "$ATF_MP_SUMMARY" ;;
+    *)
+      print_warning "$ATF_MP_SUMMARY"
+      printf '%s\n' "$ATF_MP_HINT" | sed 's/^/    /' || true
+      ;;
+  esac
+  return 0
+}
+
 # Summary
 print_section "Upgrade Complete"
 
@@ -7506,6 +7538,7 @@ else
     print_warning "Completed with warnings: ${UPGRADE_PERSONA_DEPLOY_WARNING_SUMMARY}"
     print_warning "See the 'Deploying Personas to Project Directories' and 'Deploying Personas to Flat Team Working Directories' sections above for detail."
   fi
+  surface_managed_policy_status || true
   print_success "Dev-team has been upgraded successfully!"
   echo ""
   print_info "Next steps:"

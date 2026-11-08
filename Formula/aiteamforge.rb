@@ -196,6 +196,12 @@ class Aiteamforge < Formula
     # that quietly never runs on every consumer.
     assert_path_exists libexec/"libexec/lib/vault-drift.sh"
 
+    # XACA-1624-003/004: managed-policy-status.sh is the SINGLE shared reader of the Claude Code
+    # managed-policy status, sourced by both doctors and `aiteamforge upgrade`. All three source
+    # it defensively, so a missing file degrades to a WARN "cannot determine" rather than a crash;
+    # assert it here so a packaging regression fails the Formula test.
+    assert_path_exists libexec/"libexec/lib/managed-policy-status.sh"
+
     # Verify alias templates exist (must ship in released package for install-shell.sh)
     assert_path_exists libexec/"share/templates/aliases/agent-aliases.sh"
     assert_path_exists libexec/"share/templates/aliases/cc-aliases.sh"

@@ -49,6 +49,14 @@ source "${LIBEXEC_DIR}/lib/launchagents.sh"
 # shellcheck source=../lib/mandatory-teams.sh
 [ -f "${LIBEXEC_DIR}/lib/mandatory-teams.sh" ] && source "${LIBEXEC_DIR}/lib/mandatory-teams.sh" 2>/dev/null || true
 
+# XACA-1624-003: managed-policy status — the SAME lib bin/aiteamforge-doctor.sh and
+# `aiteamforge upgrade` source. Defensive: absent => WARN "cannot determine", never PASS.
+_MANAGED_POLICY_LIB_OK=false
+if [ -f "${LIBEXEC_DIR}/lib/managed-policy-status.sh" ]; then
+  # shellcheck source=../lib/managed-policy-status.sh
+  source "${LIBEXEC_DIR}/lib/managed-policy-status.sh" 2>/dev/null && _MANAGED_POLICY_LIB_OK=true
+fi
+
 # Version — read from VERSION file (single source of truth)
 _find_version() { for p in "${LIBEXEC_DIR}/../VERSION" "${LIBEXEC_DIR}/../../VERSION"; do [ -f "$p" ] && cat "$p" | tr -d '[:space:]' && return; done; echo "unknown"; }
 VERSION="$(_find_version)"
@@ -90,6 +98,7 @@ Components:
   vault-drift     vault-fetch.js / vault-keygen.js vs shipped copy byte drift (XACA-1322)
   vault-readiness node + libsodium-wrappers + vault-fetch smoke for routed teams (XACA-1225-021)
   plugin-binaries LSP binaries for enabled Claude Code plugins + claude version floor (XACA-1599-007; in the default run since PR-B)
+  managed-policy  Claude Code L1 managed policy installed and current (XACA-1624)
   config          Configuration files and validity
   board           Kanban board resolution + template/stub-collision detection (XACA-0655)
   connect         Cockpit connect scripts vs installed team instances (XACA-0845)
@@ -1284,6 +1293,32 @@ check_plugin_binaries() {
   if [ "$rc" -ne 0 ]; then
     printf '%s\n' "$report" | sed 's/^/    /'
   fi
+}
+
+# XACA-1624-003: Claude Code L1 managed policy (root-owned; blocks superpowers, commit-commands,
+# ralph-loop). Verdicts come from lib/managed-policy-status.sh (shared with the other doctor and
+# `aiteamforge upgrade`): OK is the only PASS; absent/stale is a WARN with the exact full-path
+# install command; anything unreadable is a WARN "cannot determine", never a PASS. Skipped (INFO,
+# not counted) on the dev machine and for staged/sandbox CLAUDE_CONFIG_DIR. Never installs
+# anything, never runs sudo. Mirrored in bin/aiteamforge-doctor.sh.
+check_managed_policy() {
+  print_section "Checking Claude Code Managed Policy"
+
+  if [ "$_MANAGED_POLICY_LIB_OK" != true ]; then
+    check_result warn "Claude Code managed policy: cannot determine status (managed-policy-status.sh not available)" \
+      "Expected: ${LIBEXEC_DIR}/lib/managed-policy-status.sh (XACA-1624). Run: aiteamforge upgrade"
+    return 0
+  fi
+
+  atf_mp_evaluate "$(get_working_dir)"
+  case "$ATF_MP_VERDICT" in
+    SKIP) print_info "$ATF_MP_SUMMARY" ;;
+    OK) check_result pass "$ATF_MP_SUMMARY" ;;
+    *)
+      check_result warn "$ATF_MP_SUMMARY"
+      printf '%s\n' "$ATF_MP_HINT" | sed 's/^/    /'
+      ;;
+  esac
 }
 
 # Check: Configuration
@@ -2642,6 +2677,9 @@ case "$CHECK_COMPONENT" in
   plugin-binaries)
     check_plugin_binaries
     ;;
+  managed-policy)
+    check_managed_policy
+    ;;
   config)
     check_config
     ;;
@@ -2688,6 +2726,7 @@ case "$CHECK_COMPONENT" in
     check_vault_keygen_drift
     check_vault_readiness
     check_plugin_binaries
+    check_managed_policy
     check_config
     check_board_resolution
     check_connect_scripts
