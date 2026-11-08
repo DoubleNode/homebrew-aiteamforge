@@ -6782,6 +6782,136 @@ update_claude_settings() {
   return 0
 }
 
+# XACA-1740: the Claude config dir, using the same precedence as
+# install-claude-config.sh (XACA-0773) and update_claude_hooks' assert block:
+# a caller/test CLAUDE_CONFIG_DIR wins, then CLAUDE_SANDBOX=1 staging, then
+# the real $HOME/.claude. Keep the three in step if the precedence changes.
+_xaca1740_claude_config_dir() {
+  if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+    printf '%s\n' "$CLAUDE_CONFIG_DIR"
+  elif [ "${CLAUDE_SANDBOX:-0}" = "1" ]; then
+    printf '%s\n' "${WORKING_DIR}/.claude-staging"
+  else
+    printf '%s\n' "$HOME/.claude"
+  fi
+}
+
+# XACA-1740: keep ~/.claude/skills in step with ${WORKING_DIR}/skills.
+#
+# install_skills() (install-claude-config.sh) makes one symlink per skill,
+# ~/.claude/skills/<name> -> ${AITEAMFORGE_DIR}/skills/<name>, at INSTALL time
+# only. update_skills() refreshes ${WORKING_DIR}/skills on every upgrade but
+# never linked a skill that shipped after the machine's first install, so
+# every such skill was silently missing on every consumer (measured on M1Pro,
+# M4Mini and M1Mini 2026-11-03: RELNOTES Manager, Team Mission Status).
+#
+# Rules:
+#   - A skill dir with no entry in ~/.claude/skills is linked.
+#   - An existing entry is never replaced. A real dir (user-owned or a local
+#     skill) and a link that points anywhere else get a warning and are left.
+#   - Only DANGLING links that point into ${WORKING_DIR}/skills (we made them;
+#     the skill was removed upstream) are pruned. A dangling link pointing
+#     elsewhere is not ours and is left alone.
+#   - DRY_RUN writes nothing.
+#   - Fail-soft: nothing here can abort the upgrade (the script runs set -e).
+_xaca1740_link_claude_skills() {
+  local skills_src="${WORKING_DIR}/skills"
+  local config_dir
+  config_dir="$(_xaca1740_claude_config_dir)"
+  local skills_dst="${config_dir}/skills"
+
+  if [ ! -d "$skills_src" ]; then
+    return 0
+  fi
+
+  # A link is "ours" when its target sits directly in the working skills dir,
+  # spelled either as given or as its physical path (the working dir can be
+  # reached through a symlink).
+  local src_physical
+  src_physical="$(cd -P "$skills_src" 2>/dev/null && pwd)" || src_physical="$skills_src"
+
+  if [ ! -d "$skills_dst" ]; then
+    if [ "$DRY_RUN" = true ]; then
+      echo "Would create ${skills_dst}"
+    elif ! mkdir -p "$skills_dst" 2>/dev/null; then
+      print_warning "Could not create ${skills_dst} — skipping skill links"
+      return 0
+    fi
+  fi
+
+  local linked=0 ok=0 pruned=0 skipped=0
+  local skill_dir name entry target target_parent owned
+
+  # Prune dangling links we own first, so a name freed by a removed skill
+  # can be relinked in the same run.
+  if [ -d "$skills_dst" ]; then
+    for entry in "$skills_dst"/*; do
+      [ -L "$entry" ] || continue
+      [ -e "$entry" ] && continue
+      target="$(readlink "$entry" 2>/dev/null)" || continue
+      target_parent="$(dirname "$target")"
+      if [ "$target_parent" != "$skills_src" ] && [ "$target_parent" != "$src_physical" ]; then
+        continue
+      fi
+      name="$(basename "$entry")"
+      if [ "$DRY_RUN" = true ]; then
+        echo "Would remove dangling skill link: ${name}"
+        pruned=$((pruned + 1))
+      elif rm -f "$entry" 2>/dev/null; then
+        print_info "Removed dangling skill link: ${name}"
+        pruned=$((pruned + 1))
+      else
+        print_warning "Could not remove dangling skill link: ${entry}"
+      fi
+    done
+  fi
+
+  for skill_dir in "$skills_src"/*/; do
+    [ -d "$skill_dir" ] || continue
+    skill_dir="${skill_dir%/}"
+    name="$(basename "$skill_dir")"
+    entry="${skills_dst}/${name}"
+
+    if [ -L "$entry" ]; then
+      target="$(readlink "$entry" 2>/dev/null)" || target=""
+      target_parent="$(dirname "$target")"
+      owned=false
+      if [ "$target_parent" = "$skills_src" ] || [ "$target_parent" = "$src_physical" ]; then
+        owned=true
+      fi
+      if [ "$owned" = true ] && [ -e "$entry" ]; then
+        ok=$((ok + 1))
+      elif [ "$owned" = true ] && [ "$DRY_RUN" = true ]; then
+        # Dangling and ours: the prune pass above would remove it in a real run.
+        echo "Would link skill: ${name}"
+        linked=$((linked + 1))
+      else
+        print_warning "Skill '${name}': ${entry} links to ${target:-<unreadable>}, not the aiteamforge copy — left unchanged"
+        skipped=$((skipped + 1))
+      fi
+    elif [ -e "$entry" ]; then
+      print_warning "Skill '${name}': ${entry} is a real file or directory — left unchanged (remove it to use the aiteamforge copy)"
+      skipped=$((skipped + 1))
+    elif [ "$DRY_RUN" = true ]; then
+      echo "Would link skill: ${name}"
+      linked=$((linked + 1))
+    elif ln -s "$skill_dir" "$entry" 2>/dev/null; then
+      print_info "Linked skill: ${name}"
+      linked=$((linked + 1))
+    else
+      print_warning "Could not link skill '${name}' into ${skills_dst}"
+      skipped=$((skipped + 1))
+    fi
+  done
+
+  if [ "$DRY_RUN" = true ]; then
+    echo "Skill links: ${linked} to add, ${pruned} to prune, ${ok} current, ${skipped} left unchanged"
+  else
+    print_success "Skill links: ${linked} added, ${pruned} pruned, ${ok} current, ${skipped} left unchanged"
+  fi
+  return 0
+}
+
 # Update skills
 update_skills() {
   print_section "Updating Skills"
@@ -6833,6 +6963,9 @@ update_skills() {
       echo "Would sync: ${skills_source}/ -> ${skills_target}/"
     fi
   fi
+
+  # XACA-1740: link skills added since install; prune links to removed ones.
+  _xaca1740_link_claude_skills
 }
 
 # Cleanup helper invoked by update_launchagents' RETURN trap.
