@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1624: Probe reply unwrap, pinned framed-word contract, quoted hints (XACA-1624)
+- Tap files updated in this publish: `share/scripts/kb-sync-plugins`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1627: No source-time mkdir of hard-coded worktree dirs (XACA-1627)
 - Tap files updated in this publish: `share/scripts/worktree-helpers.sh`. Run `brew upgrade aiteamforge` to receive them.
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """kb-sync-plugins -- fleet-standard Claude Code plugin delivery (XACA-1599).
 
-Usage: kb-sync-plugins <subcommand> [args]
+Usage: python3 <path to this script> <subcommand> [args]
 Subcommands: list, check, sync, diff, sync-worktrees, binaries, skills, managed-policy, help
 
 Source of truth: .claude/plugins-manifest.json, schema 2 (XACA-1643): ONE `fleet.plugins`
@@ -37,6 +37,19 @@ Exit code 70: an unexpected Python exception, so a caller can tell a crash of th
 tool from "binary missing" (1) or drift (1).
 Exit codes (managed-policy): 0 done or already current, 1 failed, 2 usage,
 3 invalid policy, 4 not performed (non-interactive or declined: PENDING).
+managed-policy --status (XACA-1624) is read-only (no sudo, no claude call, no prompt) and
+prints `POLICY_STATUS=<OK|POLICY_ABSENT|POLICY_STALE|UNVERIFIABLE> path=<file>`, plus an
+`install: python3 <this script> managed-policy --install` line when it is not OK. Exit 0 OK,
+1 ABSENT or STALE, 3 UNVERIFIABLE (unreadable file, manifest without a baseline, render
+failure), 2 usage.
+
+Commands this tool prints for a human to run always use `python3 <absolute path of this
+script>`: the bare name is not on PATH in non-interactive login shells on consumer hosts.
+
+check --host --probe (XACA-1624): the probe reads one framed reply
+(`AITEAMFORGE_MANAGED_POLICY=<value>`) from `claude -p`; any other reply is UNVERIFIABLE.
+Over SSH the probe is PROBE_UNVERIFIABLE (locked login keychain: 'OAuth session expired and
+could not be refreshed'): run it from a local terminal.
 
 Runs on python3 >= 3.8, stdlib only (tap hosts have only the system python).
 """
@@ -60,6 +73,9 @@ import time
 PROG = "kb-sync-plugins"
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 DEV_TEAM = os.path.dirname(SCRIPT_DIR)
+# What this tool prints for a human to run (XACA-1624-013): the bare PROG name is not on PATH in
+# non-interactive login shells on consumer hosts, so always the interpreter plus the real path.
+TOOL_CMD = "python3 %s" % shlex.quote(os.path.join(SCRIPT_DIR, os.path.basename(os.path.realpath(__file__))))
 
 MANIFEST = os.environ.get("KBSPL_MANIFEST") or os.path.join(DEV_TEAM, ".claude", "plugins-manifest.json")
 PERSONAS_MANIFEST = os.environ.get("KBSPL_PERSONAS_MANIFEST") or os.path.join(DEV_TEAM, ".claude", "personas-manifest.json")
@@ -1093,7 +1109,7 @@ def load_valid_manifest(catalog=None):
         for p in problems:
             err("manifest invalid: %s" % p)
         raise ToolError("manifest has %d validation problem(s); nothing was written "
-                        "(run `%s check --manifest`)" % (len(problems), PROG), 3)
+                        "(run `%s check --manifest`)" % (len(problems), TOOL_CMD), 3)
     return m
 
 
@@ -2302,10 +2318,35 @@ def policy_env_keys(m):
     return keys
 
 
+# One markdown wrapper around a single line: `X` or a ```fence``` (optional language tag).
+PROBE_WRAP_RES = (re.compile(r"```[A-Za-z0-9_-]*[ \t]*\n([^`\n]*)\n```"), re.compile(r"`([^`\n]*)`"))
+
+
+def unwrap_probe_reply(text):
+    """claude -p often wraps a one-line answer in inline backticks or a code fence. Strip exactly
+    ONE such wrapper around exactly one line; anything else is returned unchanged, so prose, a
+    second line or a nested wrapper still fails the frame (XACA-1624-015)."""
+    for rx in PROBE_WRAP_RES:
+        m = rx.fullmatch(text)
+        if m:  # GUARD:probe-unwrap
+            return m.group(1).strip()
+    return text
+
+
 def probe_marker(want, strip_keys=None):
     """Behavioural probe: did claude actually load the L1 drop-in? One `claude -p` model call
     reading the marker env var (the one probe that does not depend on claude's version).
     Returns ("LOADED"|"NOT_LOADED"|"UNVERIFIABLE", detail).
+
+    Framed reply (XACA-1624): claude is told to answer with exactly one line,
+    `<POLICY_ENV>=<printed value>` or `<POLICY_ENV>=NOT_SET`. The stripped reply must match that
+    whole frame; our revision is LOADED, NOT_SET or another revision is NOT_LOADED, and anything
+    else (a bare word such as `Denied.`, a bare revision, prose, a refusal, the frame inside
+    prose, several lines) is UNVERIFIABLE, because it does not prove claude ran printenv. One
+    markdown wrapper (`...` or a code fence) around the single line is stripped first.
+    Contract (XACA-1624-014): ANY framed REVISION_RE value other than ours is NOT_LOADED, even a
+    word such as `Denied.`. Revisions are free-form REVISION_RE tokens, so a framed value cannot be
+    told apart from another revision; refusal words are deliberately not denylisted.
 
     Isolation: the child gets NONE of the keys the baseline sets (an inherited marker would be
     printed by printenv and read as LOADED), runs from a fresh temp cwd (no project hooks or
@@ -2313,8 +2354,9 @@ def probe_marker(want, strip_keys=None):
     prompt (dontAsk denies anything not allowed) and has exactly one tool, Bash(printenv:*)."""
     strip = set(strip_keys or ()) | {POLICY_ENV}
     child_env = {k: v for k, v in os.environ.items() if k not in strip}  # GUARD:probe-env
-    prompt = ("Run exactly this and reply with only its output: printenv %s . If it prints nothing, "
-              "reply with exactly %s." % (POLICY_ENV, PROBE_NOT_SET))
+    prompt = ("Run exactly this: printenv %s . Then reply with exactly one line and nothing else: "
+              "%s=<the value it printed>, or %s=%s if it printed nothing."
+              % (POLICY_ENV, POLICY_ENV, POLICY_ENV, PROBE_NOT_SET))
     argv = [CLAUDE_BIN, "-p", prompt,
             "--tools", "Bash", "--allowedTools", "Bash(printenv:*)", "--permission-mode", "dontAsk",
             "--strict-mcp-config", "--setting-sources", "", "--disable-slash-commands",
@@ -2323,16 +2365,34 @@ def probe_marker(want, strip_keys=None):
         rc, so, se = run(argv, cwd=cwd, timeout=180, env=child_env)
     if rc != 0:  # GUARD:probe-unverifiable
         return "UNVERIFIABLE", "claude -p exited %d: %s" % (rc, (se or so).strip()[:120])
-    out_text = so.strip()
+    out_text = unwrap_probe_reply(so.strip())
     if not out_text:
         return "UNVERIFIABLE", "claude -p printed nothing"
-    if re.search(r"(?<![A-Za-z0-9._-])%s(?![A-Za-z0-9._-])" % re.escape(want), out_text):
+    framed = re.fullmatch(r"%s=([A-Za-z0-9._-]+)" % re.escape(POLICY_ENV), out_text)
+    if framed is None:  # GUARD:probe-verdict
+        return "UNVERIFIABLE", "claude -p did not answer the expected frame %s=<value|%s>: %s" % (
+            POLICY_ENV, PROBE_NOT_SET, out_text[:100])
+    value = framed.group(1)
+    if value == want:  # GUARD:probe-loaded
         return "LOADED", out_text[:80]
-    # Only a bare revision-shaped token (another revision) or the explicit NOT_SET answer proves
-    # claude ran printenv and the marker was not ours. A denied tool, a refusal or any prose does not.
-    if out_text == PROBE_NOT_SET or REVISION_RE.match(out_text):  # GUARD:probe-verdict
-        return "NOT_LOADED", out_text[:80]
-    return "UNVERIFIABLE", "claude -p answered neither the marker nor %s: %s" % (PROBE_NOT_SET, out_text[:100])
+    return "NOT_LOADED", out_text[:80]
+
+
+def policy_file_status(text):
+    """Shared by host_policy and `managed-policy --status`, so the two cannot drift.
+    Compares the installed drop-in with the canonical text. Returns (status, installed_sha) with
+    status OK | POLICY_ABSENT | POLICY_STALE | UNREADABLE (present but not readable)."""
+    _base, _dropin, installed = policy_paths()
+    if not os.path.lexists(installed):
+        return "POLICY_ABSENT", None
+    try:
+        got = sha256_file(installed)
+    except OSError:
+        return "UNREADABLE", None
+    canonical = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    if got == canonical:  # GUARD:policy-status-compare
+        return "OK", got
+    return "POLICY_STALE", got
 
 
 def host_policy(m, probe):
@@ -2349,14 +2409,11 @@ def host_policy(m, probe):
         return None, info
     text = render_policy(m)
     info["canonicalSha"] = hashlib.sha256(text.encode("utf-8")).hexdigest()
-    _base, _dropin, installed = policy_paths()
-    status = "OK"
-    if not os.path.exists(installed):
-        status = "POLICY_ABSENT"
-    else:
-        info["installedSha"] = sha256_file(installed)
-        if info["installedSha"] != info["canonicalSha"]:
-            status = "POLICY_STALE"
+    status, info["installedSha"] = policy_file_status(text)
+    if status == "UNREADABLE":
+        info["status"] = "PROBE_UNVERIFIABLE"
+        return {"team": "-", "dir": MANAGED_BASE, "plugin": POLICY_FILE, "expected": "installed==canonical",
+                "actual": "installed policy file is not readable", "status": "PROBE_UNVERIFIABLE"}, info
     row = {"team": "-", "dir": MANAGED_BASE, "plugin": POLICY_FILE, "expected": "installed==canonical",
            "actual": status, "status": status}
     if probe and status == "OK":
@@ -2759,7 +2816,7 @@ def policy_install(text, args):
         return 0
     ok, why = policy_confirm("Install the Claude Code managed policy to %s (requires sudo)?" % dest, args)
     if not ok:
-        out("managed policy: PENDING (%s). Not installed. Run `%s managed-policy --install` from a terminal." % (why, PROG))
+        out("managed policy: PENDING (%s). Not installed. Run `%s managed-policy --install` from a terminal." % (why, TOOL_CMD))
         return 4
     fd, stage = tempfile.mkstemp(prefix="kbspl-policy-")
     try:
@@ -2795,7 +2852,7 @@ def policy_install(text, args):
             err("rollback %s" % ("complete" if rolled else "FAILED: inspect %s by hand" % dest))
             return 1
         out("managed policy: installed %s%s" % (dest, " (previous copy backed up to %s)" % backup if backup else ""))
-        out("verify: %s check --host --probe" % PROG)
+        out("verify: %s check --host --probe   (from a local terminal; over SSH the probe is unverifiable)" % TOOL_CMD)
         return 0
     finally:
         try:
@@ -2838,10 +2895,34 @@ def policy_remove(args):
     return 0
 
 
+def policy_status(args):
+    """Read-only `managed-policy --status` (XACA-1624): no sudo, no claude call, no prompt.
+    Exit 0 OK, 1 ABSENT/STALE, 3 UNVERIFIABLE."""
+    guard_default_managed_dir()
+    _base, _dropin, dest = policy_paths()
+    try:
+        text = render_policy(load_manifest())
+        status, _sha = policy_file_status(text)
+        if status == "UNREADABLE":
+            status = "UNVERIFIABLE"
+    except ToolError as exc:
+        err("cannot determine the managed policy status: %s" % exc)
+        status = "UNVERIFIABLE"
+    out("POLICY_STATUS=%s path=%s" % (status, dest))
+    if status != "OK":
+        out("install: %s managed-policy --install" % TOOL_CMD)
+    if status == "OK":  # GUARD:status-exit
+        return 0
+    return 3 if status == "UNVERIFIABLE" else 1
+
+
 def do_managed_policy(args):
-    chosen = [n for n, v in (("--print", args.print_policy), ("--install", args.install), ("--remove", args.remove)) if v]
+    chosen = [n for n, v in (("--print", args.print_policy), ("--install", args.install), ("--remove", args.remove),
+                             ("--status", args.status)) if v]
     if len(chosen) != 1:
-        raise ToolError("managed-policy needs exactly one of --print, --install, --remove")
+        raise ToolError("managed-policy needs exactly one of --print, --install, --remove, --status")
+    if args.status:
+        return policy_status(args)
     if args.remove:
         guard_default_managed_dir()
         return policy_remove(args)
@@ -2918,7 +2999,9 @@ def build_parser():
     p.add_argument("--host", action="store_true", help="live check of this host via `claude plugin list`")
     p.add_argument("--probe", "--deep", dest="probe", action="store_true",
                    help="--host: behavioural probe, one `claude -p` model call reading the policy marker "
-                        "(exit 3 when it cannot be verified)")
+                        "(exit 3 when it cannot be verified; over SSH it is always PROBE_UNVERIFIABLE because "
+                        "the login keychain is locked ('OAuth session expired and could not be refreshed'): "
+                        "run it from a local terminal)")
     p.set_defaults(fn=do_check)
 
     for name, fn, helptxt in (("sync", do_sync, "write session dirs (and, with --all, linked worktrees)"),
@@ -2953,6 +3036,9 @@ def build_parser():
     p.add_argument("--print", dest="print_policy", action="store_true", help="print the generated policy and exit")
     p.add_argument("--install", action="store_true", help="install %s (sudo, explicit confirm, terminal only)" % POLICY_FILE)
     p.add_argument("--remove", action="store_true", help="remove ONLY %s (and the dirs, if left empty)" % POLICY_FILE)
+    p.add_argument("--status", action="store_true",
+                   help="read-only: POLICY_STATUS=<OK|POLICY_ABSENT|POLICY_STALE|UNVERIFIABLE> (exit 0/1/3); "
+                        "no sudo, no claude call")
     p.add_argument("--yes", action="store_true", help="skip the typed [y/N]; a terminal is still required")
     p.add_argument("--dry-run", action="store_true", help="show the diff and the exact sudo commands, change nothing")
     p.set_defaults(fn=do_managed_policy)
