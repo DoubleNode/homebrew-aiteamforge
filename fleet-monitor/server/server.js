@@ -47,6 +47,7 @@ const { wireNotifyHub } = require('./lib/notify-routes');
 // XACA-1407: fleet-originated notices (machine offline/recovered, accessory on-battery/restored).
 const { emitFleetNotice } = require('./lib/fleet-notices');
 const { createMachineNoticeTracker, createAccessoryNoticeTracker } = require('./lib/fleet-notice-sources');
+const { createTapLockWatcher } = require('./lib/tap-lock-watcher');
 // XACA-1392: accessory registry (UPS auto-discovery, attachment, derived power state).
 const { createRegistry: createAccessoryRegistry } = require('./lib/accessories');
 const { registerAccessoriesRoutes } = require('./lib/accessories-routes');
@@ -4249,6 +4250,10 @@ setInterval(() => {
 // on first read rather than waiting a full TTL for this interval to fire.
 getLatestTapVersion();
 setInterval(getLatestTapVersion, TAP_VERSION_CACHE_TTL_MS);
+
+// XACA-1622-003: read-only stale tap-writer-lock watcher (lib/tap-lock-watcher.js). Auto-disabled where
+// scripts/kb-tap-lock.sh is absent (consumer installs); FLEET_TAP_LOCK_WATCH=0/1 overrides. Never breaks the lock.
+createTapLockWatcher({ emit: emitFleetNotice }).start();
 
 // ============================================================================
 // AUTH GATE STARTUP NOTICE (XACA-0395-005)

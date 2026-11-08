@@ -2297,6 +2297,24 @@ _kb_release_close_out_ready() {
     return 0
 }
 
+# XACA-1705-003: has production moved past the bound build? Asks the SAME promote dry-run gate (a dry-run to PROD) for
+# PRODUCTION_NOT_IN_BUILD only. Close-out's fresh start already refuses it through _kb_release_close_out_ready, but a
+# RESUMED record (record exists, tag/mergeProduction not done yet) skips that preflight, so a hotfix shipped to production
+# between the interruption and the resume would still be tagged over. This is the guard for ALL paths: consulted before the
+# first git action (tag) for a fresh run, a resume and --dry-run. The gate itself stops asking once the record's own
+# mergeProduction is done (production then descends FROM the build by construction), so a late resume is not refused.
+# rc 0 not flagged | 1 flagged (reasons + the next action on stderr), or the gate cannot be asked / answers garbage (fails closed).
+_kb_release_close_out_production_ok() {
+    local release_id="${1-}" n
+    _kb_release_close_out_gate_info "$release_id" || return 1
+    n=$(printf '%s' "$_KB_REL_BODY" | jq -r '[.reasonCodes[]? | select(. == "PRODUCTION_NOT_IN_BUILD")] | length' 2>/dev/null)
+    [[ "$n" == "0" ]] && return 0
+    echo "Error: $release_id close-out refused: production is not contained in the build it would tag (PRODUCTION_NOT_IN_BUILD):" >&2
+    printf '%s' "$_KB_REL_BODY" | jq -r '[range(0; (.reasons | length)) as $i | select(.reasonCodes[$i] == "PRODUCTION_NOT_IN_BUILD") | .reasons[$i]][] | "  - " + .' >&2 2>/dev/null
+    echo "  next: regress to the stage before ${_KB_CO_STAGE:-the close-out stage} (or DEV), merge production into the integration/release branch, re-record stageSha.${_KB_CO_STAGE:-<S>}, then re-run close-out" >&2
+    return 1
+}
+
 # XACA-1446 round 2 (-019): the lead question alone, asked of the promote dry-run (actor + confirmDeploy), BEFORE a
 # git action. $2 = the release JSON as the caller last read it. rc 1 (reasons on stderr) when the dry-run carries
 # GAMMA_ACTOR_NOT_LEAD or LEADS_NOT_CONFIGURED, or when the gate cannot be asked (fails closed). A release already AT PROD
@@ -2364,6 +2382,16 @@ _kb_release_close_out_run() {
     if [[ "$dry_run" != "1" ]]; then
         _kb_release_close_out_lead_ok "$release_id" "$rj" \
             || { echo "Error: close-out of $release_id refused before any git action" >&2; return 1; }
+    fi
+    # XACA-1705-003: production must be inside the build BEFORE any git action, on EVERY path (fresh, resumed, --dry-run).
+    # A fresh start already passed this through _kb_release_close_out_ready; a resumed record never does, so it is asked here.
+    local _co_pout _co_prc
+    _co_pout=$(_kb_release_close_out_production_ok "$release_id" 2>&1); _co_prc=$?
+    if (( _co_prc != 0 )); then
+        [[ "$dry_run" == "1" ]] && echo "[dry-run] would refuse:" >&2
+        printf '%s\n' "$_co_pout" >&2
+        [[ "$dry_run" == "1" ]] || echo "Error: close-out of $release_id refused before any git action" >&2
+        return 1
     fi
     [[ "$dry_run" != "1" && "$_KB_CO_CONFIRM" == "PROD" ]] && confirm=yes   # PROD is the deploy-confirm stage (no GAMMA)
     mode=$(_kb_get_release_branch_role "$board_file" mode) || { echo "Error: cannot read release branch config" >&2; return 1; }

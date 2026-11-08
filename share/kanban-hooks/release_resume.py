@@ -67,7 +67,7 @@ def _slots(scheduled, tests, sha, t0, now):
 
 
 def resume_plan(release, *, flow_config, cr_support_enabled, items=None, other_releases=None, manual_tests=(),
-                scheduled=(), cr=None, branch_head=None, now=None, board=None):
+                scheduled=(), cr=None, branch_head=None, now=None, board=None, production=None):
     """-> plan dict {release, stage, stageSha, branch, row, action, headline, lines[], offer, run{}}.
 
     row = the spec 5.2 table row (planned | dev-items-open | dev-deploy-pending | tests-running | tests-failed |
@@ -76,7 +76,11 @@ def resume_plan(release, *, flow_config, cr_support_enabled, items=None, other_r
     action = what the session does next. `items` [{id,title,status,prMerged}], `scheduled` [{provider, schedule[],
     tests[]}], `cr` {id, crState, draftApproved, feed} (feed = approval_providers.release_cr_feed) are pre-resolved by
     the loader; None means "could not read" and fails closed. `board` (optional) only feeds the
-    PLANNED hint's branch name (XACA-1524); None = default releaseConfig."""
+    PLANNED hint's branch name (XACA-1524); None = default releaseConfig.
+    `production` (XACA-1705-003, optional) = {"inBuild": True|False|None, "check": None|"client-merge"|"same-branch"} as
+    the loader resolved it (the SAME two facts the server hands the gate as production_in_build / production_check);
+    None = not evaluated (no repo to ask), which adds nothing. At the close-out stage it feeds the gate's own
+    PRODUCTION_NOT_IN_BUILD refusal into the row as a next-action hint."""
     now = now or datetime.now(timezone.utc)
     cur, rid = G.current_stage(release), release.get("id")
     sha = G.graded_sha(release, cur)
@@ -93,6 +97,31 @@ def resume_plan(release, *, flow_config, cr_support_enabled, items=None, other_r
     def promote_offer(target, **kw):
         return dict({"promote": target, "confirmDeploy": target == G.deploy_confirm_stage(
             G.enabled_stages(flow_config, cr_support_enabled=cr_support_enabled))}, **kw)
+
+    def production_hint():
+        """XACA-1705-003: the close-out rows' hint when the gate would refuse PRODUCTION_NOT_IN_BUILD. Uses the gate's own
+        refusal (G._production_refusal: same skips, same bound-record exemption) so the plan and the gate cannot disagree."""
+        if not isinstance(production, dict):
+            return None
+        ctx = {"production_in_build": production.get("inBuild")}
+        if production.get("check"):
+            ctx["production_check"] = production["check"]
+        try:
+            order = G.enabled_stages(flow_config, cr_support_enabled=cr_support_enabled)
+            ref = G._production_refusal(release, order, "PROD", cur, ctx)
+        except ValueError:
+            return None
+        if not ref:
+            return None
+        s = G.closeout_stage(order)
+        if production.get("inBuild") is False:
+            return ("PRODUCTION_NOT_IN_BUILD: production has commits the build lacks, so close-out must NOT run yet "
+                    "(it would tag a build that drops them). Next: regress to the stage before %s (or DEV), merge production "
+                    "into the integration/release branch, re-record stageSha.%s on a SHA that contains production, "
+                    "then re-run `kb-release close-out %s`. [%s]" % (s, s, rid, ref[0]))
+        return ("PRODUCTION_NOT_IN_BUILD: could not verify production is contained in the build, so close-out must NOT "
+                "run yet. Next: fetch the production ref / `git submodule update --init` in the release clone, "
+                "then re-run `kb-release close-out %s`. [%s]" % (rid, ref[0]))
 
     if cur == "PROD":
         return done("terminal", "none", "Release is at PROD (terminal): nothing to resume.")
@@ -197,6 +226,7 @@ def resume_plan(release, *, flow_config, cr_support_enabled, items=None, other_r
     if cur != "GAMMA" and cur == s_stage:
         return done("closeout-ready", "offer-closeout", "%s %s: PROD close-out is next (%s is the last stage before PROD)."
                     % (cur, status, cur),
+                    production_hint(),
                     ("Run `kb-release close-out %s` (tag, merges, branch delete, CR close, then the gated promote); PROD is "
                      "the deploy-confirm stage, so only a lead (releaseConfig.leads) can run it; the gate refuses a bare "
                      "promote until it is done." % rid)
@@ -205,6 +235,7 @@ def resume_plan(release, *, flow_config, cr_support_enabled, items=None, other_r
                     offer=promote_offer("PROD") if nxt else None)
     if cur == "GAMMA":
         return done("gamma-passed", "offer-promote", "GAMMA %s: offer the PROD promote (session promote)." % status,
+                    production_hint(),
                     # XACA-1353-004: a branch-per-release release enters PROD only through the close-out
                     ("Close-out is the PROD entry: run `kb-release close-out %s` (tag, merges, branch delete, CR close, "
                      "then the gated promote); the gate refuses a bare promote until it is done." % rid)
@@ -272,6 +303,39 @@ def find_release(kanban_dir, release_id):
     raise RunnerError("release %s not found under %s" % (release_id, kanban_dir))
 
 
+def _production_fact(rel, rc, crsupport, repo_dir):
+    """XACA-1705-003: {"inBuild", "check"} for resume_plan, resolved the way the server resolves the gate facts
+    (lcars-ui/server.py _build_gate_context / _production_in_build): `check` is the affirmative skip (client-merge /
+    same-branch), `inBuild` is release_branches.production_contained_in against the bound (else stageSha.<S>) sha.
+    None when it cannot matter (not at the close-out stage / PROD, no branch, or no repo to ask: the plan then adds
+    nothing, it never invents a refusal). A malformed releaseConfig yields check=None, inBuild=None (the check applies)."""
+    if not repo_dir or not (isinstance(rel.get("branch"), str) and rel["branch"]):
+        return None
+    try:
+        cfg = release_branches.effective_branches(rc)
+    except ValueError:
+        return {"inBuild": None, "check": None}
+    if cfg["mode"] == "client-merge":
+        return {"inBuild": None, "check": "client-merge"}
+    if cfg["production"] == cfg["integration"]:
+        return {"inBuild": None, "check": "same-branch"}
+    cr_on = isinstance(crsupport, dict) and crsupport.get("enabled") is True
+    try:
+        s_stage = G.closeout_stage(G.enabled_stages(rc.get("flowConfig") or {}, cr_support_enabled=cr_on))
+    except ValueError:
+        return None
+    if G.current_stage(rel) != s_stage:
+        return None
+    # XACA-1705-012: the bound sha counts only for a valid, current record bound to S (the gate's exemption rule).
+    bound = None
+    if isinstance(rel.get("closeOut"), dict) and G._closeout_binding_gap(rel) is None:
+        bound = G._closeout_binding(rel.get("closeOut"))
+        if bound is not None and bound[0] != s_stage:
+            bound = None
+    sha = bound[1] if bound else G.graded_sha(rel, s_stage)
+    return {"inBuild": release_branches.production_contained_in(repo_dir, cfg["production"], sha), "check": None}
+
+
 def load_plan(kanban_dir, release_id, repo_dir=None, now=None):
     from release_providers import load_providers, providers_for_stage
     from release_runner import build_expected
@@ -313,7 +377,7 @@ def load_plan(kanban_dir, release_id, repo_dir=None, now=None):
                   "feed": ap.release_cr_feed(board, rel, now.isoformat())}
     plan = resume_plan(rel, flow_config=rc.get("flowConfig") or {}, cr_support_enabled=cr_on, items=items,
                        other_releases=board.get("releases") or [], manual_tests=manual, scheduled=sched, cr=cr,
-                       branch_head=head, now=now, board=board)
+                       branch_head=head, now=now, board=board, production=_production_fact(rel, rc, cs, repo_dir))
     plan["name"] = rel.get("name")
     return plan
 

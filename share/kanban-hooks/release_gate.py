@@ -43,6 +43,20 @@ whose data is absent is UNMET ("cannot verify"), never assumed satisfied.
   Client-merge mode (XACA-1521): releaseConfig.branches.mode "client-merge" is gated EXACTLY like release mode
   (exact-equality head checks; the server never sets branch_mode "trunk" for it). Its close-out record has the same
   shape and STEPS, so closeout_gap() / the PROD entry check apply unchanged; only how the steps are performed differs.
+  Production containment (XACA-1705): close-out must not tag a build that LACKS what production already holds
+  (a hotfix shipped after stageSha.<S> was recorded). The server (which owns git) sets, for a release with a branch:
+    `production_in_build`: True  = production's content is contained in stageSha.<S> (commit ancestry OR
+                                   content-subsumed); False = production holds changes the build lacks;
+                                   None = could not verify.  ABSENT is treated exactly like None (fails closed).
+    `production_check`:    the ONLY affirmative skips are the exact strings "client-merge" (releaseConfig.branches.mode
+                           == "client-merge": the engine never writes the client repo) and "same-branch" (production
+                           branch == integration branch: nothing separate to contain). Absent / None / any other value
+                           means the check APPLIES. The gate cannot see releaseConfig, so the server derives this key.
+  Fires (CODE_PRODUCTION_NOT_IN_BUILD, blocking) on False/None/absent when the check applies, at (a) the exit of
+  S = closeout_stage(order) and (b) a PROD-target promote, ONCE per evaluate (reasonData.at lists both when both hold).
+  It is NOT enforced once close-out's mergeProduction is `done` for a record bound to the current S/stageSha: from then on
+  production's tip descends FROM the build, so containment reads False by construction, and the check already passed
+  before the tag. A stale / unbound / malformed record never excuses it.
 """
 from datetime import datetime, timezone
 
@@ -88,11 +102,14 @@ CODE_ROLLBACK_OVERRIDE_CONFLICT = "ROLLBACK_OVERRIDE_CONFLICT"
 # XACA-1353-004: GAMMA -> PROD before the PROD close-out finished. XACA-1353-013 (PR #1063 round 1): a HARD
 # refusal in BOTH gate modes (report mode used to land the release at PROD, untagged and unmerged).
 CODE_CLOSEOUT_INCOMPLETE = "CLOSEOUT_INCOMPLETE"
+# XACA-1705: production holds changes the close-out-bound build lacks (or containment could not be verified).
+# Blocking and, like CLOSEOUT_INCOMPLETE, meant to be a HARD refusal in both gate modes (server wiring).
+CODE_PRODUCTION_NOT_IN_BUILD = "PRODUCTION_NOT_IN_BUILD"
 REASON_CODES = (CODE_OTHER, CODE_GAMMA_CONFIRM_REQUIRED, CODE_GAMMA_ACTOR_NOT_LEAD, CODE_WAIVER_NEEDED,
                 CODE_TEST_MISSING, CODE_WAIVER_VOID_SHA, CODE_WAIVER_VOID_INVALID, CODE_WAIVER_NOT_LEAD,
                 CODE_NOT_IN_LEADS, CODE_LEADS_NOT_CONFIGURED, CODE_CR_SUPPORT_DISABLED,
                 CODE_MANDATORY_STAGE_SKIPPED, CODE_ROLLBACK_SHA_UNKNOWN, CODE_ROLLBACK_OVERRIDE_CONFLICT,
-                CODE_CLOSEOUT_INCOMPLETE)
+                CODE_CLOSEOUT_INCOMPLETE, CODE_PRODUCTION_NOT_IN_BUILD)
 INFORMATIONAL_CODES = frozenset((CODE_CR_SUPPORT_DISABLED,))
 CR_SUPPORT_DISABLED_MSG = "CR support disabled"
 
@@ -641,6 +658,52 @@ def closeout_gap(release, order):
     return "close-out is incomplete (next step: %s)" % nxt if nxt else None
 
 
+PRODUCTION_CHECK_SKIPS = ("client-merge", "same-branch")   # the ONLY affirmative skips (XACA-1705)
+
+
+def _production_merged_for_build(release, S):
+    """True only when release.closeOut is bound to S and the CURRENT stageSha[S] and its mergeProduction step is
+    `done`: production's tip then descends from the build, so 'production contained in build' is False by
+    construction and must not refuse a resume. Anything malformed/unbound/stale is False (the check still applies)."""
+    co = release.get("closeOut")
+    if not isinstance(co, dict) or not isinstance(co.get("steps"), dict) or _closeout_binding_gap(release) is not None:
+        return False
+    if (_closeout_binding(co) or (None, None))[0] != S:
+        return False
+    mp = co["steps"].get("mergeProduction")
+    return isinstance(mp, dict) and mp.get("status") == "done"
+
+
+def _production_refusal(release, order, target_stage, cur, ctx):
+    """XACA-1705: the (message, data) of a PRODUCTION_NOT_IN_BUILD refusal, or None. See the module docstring."""
+    if not (isinstance(release.get("branch"), str) and release["branch"]):
+        return None   # pre-branch-model release: no build branch, nothing to contain (same scoping as closeout_gap)
+    try:
+        S = closeout_stage(order)
+    except ValueError:
+        return None   # closeout_gap() reports an unresolvable S on a PROD target
+    at = [w for w, hit in (("exit", cur == S), ("prod-entry", target_stage == "PROD")) if hit]
+    if not at:
+        return None
+    if ctx.get("production_check") in PRODUCTION_CHECK_SKIPS:
+        return None   # affirmative, server-derived skip; absence/unknown never skips
+    if _production_merged_for_build(release, S):
+        return None
+    ok = ctx.get("production_in_build")
+    if ok is True:
+        return None
+    data = {"stage": S, "sha": _graded_sha(release, S), "at": at, "releaseId": release.get("id")}
+    if ok is False:
+        return ("production branch carries commits/content this build lacks: likely a hotfix shipped after "
+                "stageSha.%s was recorded. Regress the release to the stage before %s (or DEV), bring production into "
+                "the integration/release branch, and re-record stageSha.%s on a SHA that contains production; then "
+                "re-run close-out" % (S, S, S), data)
+    return ("could not verify production is contained in stageSha.%s (context.production_in_build %s); ensure the "
+            "clone has the production remote ref fetched (`git fetch` in the team repo) and, if the repo has submodules, "
+            "that they are initialised and present (`git submodule update --init`), then retry"
+            % (S, "unknown" if "production_in_build" in ctx else "absent"), data)
+
+
 def _cr_closed_by_close_out(release, cr):
     """XACA-1353-016: the GAMMA-exit CR condition for a release whose CRs were closed BY ITS OWN close-out. crClose
     (spec 13.4, before the PROD promote) moves every linked CR to cr-closed, which release_cr_feed reads as "no open CR",
@@ -884,6 +947,9 @@ def evaluate(release, target_stage, flow_config, *, cr_support_enabled, actor=No
             reasons.append("%s: lead must explicitly confirm the production deploy" % _cs,
                            CODE_GAMMA_CONFIRM_REQUIRED, {"stage": _cs})
         reasons.extend(_exit_conditions(release, cur, cr_support_enabled, ctx))
+        _pr = _production_refusal(release, order, target_stage, cur, ctx)   # XACA-1705: exit of S and PROD entry
+        if _pr:
+            reasons.append("PROD close-out: " + _pr[0], CODE_PRODUCTION_NOT_IN_BUILD, _pr[1])
         if target_stage == "PROD":
             # XACA-1353-004 (spec 13.4) + XACA-1446-003: PROD entry is the LAST act of close-out, from whichever
             # stage S is last before PROD (GAMMA, or QA/BETA/... when GAMMA is off). Keyed on the TARGET, not the

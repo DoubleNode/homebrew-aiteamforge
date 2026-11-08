@@ -121,7 +121,22 @@ function createFleetNotices(deps) {
             return { ok: false, routed: false, reason: 'emit-failed' };
         }
     }
-    return { emitFleetNotice };
+    /**
+     * Read-only: which of `types` have NO fleet route (XACA-1622-015). {configured, missing}
+     * where configured = a fleet route set was ever stored. Null when the store cannot be read.
+     */
+    function fleetRouteCoverage(types) {
+        try {
+            const stored = store.getFleetRoutes();
+            const routes = stored && typeof stored.routes === 'object' && stored.routes ? stored.routes : {};
+            const missing = (Array.isArray(types) ? types : []).filter((t) => {
+                const ids = Object.prototype.hasOwnProperty.call(routes, t) ? routes[t] : null;
+                return !(Array.isArray(ids) && ids.length > 0);
+            });
+            return { configured: !!stored, missing };
+        } catch (_) { return null; }
+    }
+    return { emitFleetNotice, fleetRouteCoverage };
 }
 
 // ----- process-wide instance (what ci-dispatch-alerts and server.js reach via require) -----
@@ -140,4 +155,9 @@ function emitFleetNotice(input) {
     return current.emitFleetNotice(input);
 }
 
-module.exports = { createFleetNotices, configure, emitFleetNotice, _reset: () => { current = null; } };
+/** Null until configure() has run (hub not wired) or when the store cannot be read. Never throws. */
+function fleetRouteCoverage(types) {
+    try { return current ? current.fleetRouteCoverage(types) : null; } catch (_) { return null; }
+}
+
+module.exports = { createFleetNotices, configure, emitFleetNotice, fleetRouteCoverage, _reset: () => { current = null; } };

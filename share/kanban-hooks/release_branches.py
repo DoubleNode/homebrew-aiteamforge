@@ -254,6 +254,107 @@ def sha_reachable_from_tip(repo_root, branch, sha, *, run=subprocess.run):
         return None
 
 
+_CONFLICT_ENTRY = re.compile(r"(\d{6}) ([0-9a-f]{40,64}) ([123])\t(.+)", re.S)
+
+
+def _gitlink_contained(git, path, prod_link, build_link):
+    """True / False / None: is production's submodule commit an ancestor of the build's, per the submodule's OWN repo?
+    None when the submodule cannot answer (not checked out as its own repo, objects missing, any git error)."""
+    sub = Path(git.repo) / path
+    try:
+        if not sub.is_dir():
+            return None
+        subgit = _Git(sub, git.run)
+        top = (subgit("rev-parse", "--show-toplevel").stdout or "").strip()
+        # an uninitialised submodule dir is an empty folder INSIDE the superproject: git -C would silently walk up and
+        # answer about the superproject, so insist the toplevel is the submodule itself
+        if not top or os.path.realpath(top) != os.path.realpath(str(sub)):
+            return None
+        for oid in (prod_link, build_link):
+            if subgit("cat-file", "-e", oid + "^{commit}", ok=(0, 1, 128)).returncode != 0:
+                return None
+        return subgit("merge-base", "--is-ancestor", prod_link, build_link, ok=(0, 1)).returncode == 0
+    except (ValueError, RuntimeError, OSError):
+        return None
+
+
+def _judge_conflicts(git, fields):
+    """merge-tree rc 1 -> False for a GENUINE conflict, None when git merely could not evaluate a submodule.
+    Parsed from `-z` output (tree OID, then NUL-separated `<mode> <oid> <stage>TAB<path>` entries up to an empty field,
+    then the informational messages), never from the human messages: those are localized, advice-laden prose, whereas
+    the conflicted-file-info entries are machine-stable. Mode 160000 is the gitlink discriminator.
+      * any conflicted path that is not purely a gitlink -> False (production changed a regular file the build also
+        changed or lacks; a file<->submodule type conflict counts as regular);
+      * only gitlinks conflict (the XACA-1735 hand-merge shape): git conflicts on a gitlink whenever the submodule is
+        not checked out / its objects are absent ('Failed to merge submodule X (not checked out)'), even when the
+        build's pointer descends from production's, so rc 1 alone proves nothing. Ask the submodule itself: production's
+        pointer provably NOT an ancestor of the build's -> False (production's submodule commit is not in the build);
+        anything else (cannot answer, or it is an ancestor yet git still conflicted) -> None. There is deliberately no
+        True here: with the submodule present git resolves a descending pointer cleanly (rc 0, handled by the caller),
+        so a conflict that survives is not something we can vouch for.
+    Anything unparsable -> None."""
+    entries = {}
+    for f in fields[1:]:
+        if not f:
+            break
+        m = _CONFLICT_ENTRY.fullmatch(f)
+        if not m:
+            return None
+        entries.setdefault(m.group(4), {})[m.group(3)] = (m.group(1), m.group(2))
+    if not entries:
+        return None   # a conflict we cannot enumerate is not a conflict we can judge
+    if any(mode != "160000" for st in entries.values() for mode, _ in st.values()):
+        return False
+    for path, st in entries.items():
+        if "2" in st and "3" in st and _gitlink_contained(git, path, st["2"][1], st["3"][1]) is False:
+            return False
+    return None
+
+
+def production_contained_in(repo_root, production_branch, sha, *, run=subprocess.run):
+    """XACA-1705 (-001/-011): is everything on production's REMOTE tip already IN `sha`'s build? True / False / None.
+    CONTENT containment, not just commit ancestry (XACA-1735: a hand-merged production tip can be unreachable from
+    integration while integration holds all its content, and the back-merge has not landed):
+      True  production tip is an ancestor of / equal to `sha`, OR `git merge-tree --write-tree <tip> <sha>` is clean
+            (rc 0) and yields exactly `sha`'s own tree (merging production in changes nothing);
+      False ancestry is false and the merge conflicts on a regular file (rc 1) or yields a different tree (production carries a
+            change, e.g. a hotfix, that the build lacks);
+      None  any uncertainty: bad input, no remote/branch, tip or sha object not local (NEVER fetches, same rule as
+            sha_reachable_from_tip: the server calls this under the board lock; ls-remote is the only network read),
+            git too old for --write-tree (usage error / rc > 1), unrelated histories, any git error, or a conflict
+            that is only a submodule git could not evaluate (not checked out / objects missing); see
+            _judge_conflicts.
+    Callers must fail closed on None."""
+    if not isinstance(production_branch, str) or not isinstance(sha, str) or not _SHA.fullmatch(sha):
+        return None
+    branch = production_branch.strip()
+    if not branch or branch.startswith("-") or not _SAFE_REF.fullmatch(branch):
+        return None
+    try:
+        git = _Git(repo_root, run)
+        _check_ref(git, branch)
+        tip = _remote_tip(git, _remote(git), branch)
+        if not tip:
+            return None
+        if git("cat-file", "-e", tip + "^{commit}", ok=(0, 1, 128)).returncode != 0:
+            return None
+        if git("cat-file", "-e", sha + "^{commit}", ok=(0, 1, 128)).returncode != 0:
+            return None
+        if git("merge-base", "--is-ancestor", tip, sha, ok=(0, 1)).returncode == 0:
+            return True
+        mt = git("merge-tree", "--write-tree", "-z", tip, sha, ok=(0, 1))   # rc>1 (old git: 129, unrelated: 128) -> None
+        fields = (mt.stdout or "").split("\0")
+        merged = fields[0].strip()
+        want = (git("rev-parse", "--verify", sha + "^{tree}").stdout or "").strip()
+        if not _SHA.fullmatch(merged) or not _SHA.fullmatch(want):
+            return None
+        if mt.returncode == 1:
+            return _judge_conflicts(git, fields)
+        return merged == want
+    except (ValueError, RuntimeError, OSError):
+        return None
+
+
 def _branch_spec(cfg, rtype):
     """(source branch, prefix) the promote uses for `rtype` under `cfg`; prefix None = trunk mode, nothing is cut
     (the release branch IS `source`). RuntimeError for the refused hotfix combination. Shared by cut_release_branch

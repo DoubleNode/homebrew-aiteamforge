@@ -247,6 +247,7 @@ try:
 except ImportError as e:  # pragma: no cover
     _release_closeout = None
     print(f"[LCARS] Warning: release_closeout unavailable, close-out step-state writes fail closed: {e}")
+_PIB_ABSENT = object()   # XACA-1705: _production_in_build "fact does not apply" (key left out of the context)
 
 # CR approval providers (XACA-1349-014): feeds release.cr to the gate. Missing module = no feed =
 # the gate sees no CR state and refuses (fail closed).
@@ -9853,6 +9854,42 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             return None
         return _release_branches.sha_reachable_from_tip(root, release.get('branch'), sha)
 
+    def _production_in_build(self, release, team, board_raw, flow=None):
+        """XACA-1705: the `production_in_build` gate fact. True/False/None: does the close-out-bound stage S's build
+        contain everything on production's REMOTE tip (content-level, release_branches.production_contained_in).
+        Returns the sentinel _PIB_ABSENT (caller omits the key) when it cannot matter: release not at S or PROD, or
+        mode client-merge, or production == integration. Anything unreadable gives None (gate fails closed).
+        sha = the close-out record's bound sha only when that record is valid and current (binding_gap None), else
+        stageSha[S] (same S the close-out uses). Release already at PROD: absent (the gate never reads it there)."""
+        if _release_branches is None or _release_closeout is None:
+            return None
+        try:
+            cfg = _release_branches.effective_branches((board_raw or {}).get('releaseConfig'))
+            if cfg['mode'] == 'client-merge' or cfg['production'] == cfg['integration']:
+                return _PIB_ABSENT   # the gate skips these via ctx['production_check']
+            order = _release_gate.enabled_stages(
+                flow or {}, cr_support_enabled=self._crsupport_enabled(board_raw))
+            s_stage = _release_gate.closeout_stage(order)
+        except ValueError:
+            return None
+        # XACA-1705-013: the gate reads the fact only on exit of S (cur == S) or a PROD-target promote, and a release
+        # already AT PROD is terminal (evaluate never reaches the check), so skip the git/ls-remote work there.
+        if _release_gate.current_stage(release) != s_stage:
+            return _PIB_ABSENT
+        # XACA-1705-012: the bound sha counts only while the record is valid AND current (binding_gap is None, the
+        # gate's own resume-exemption rule) and bound to S; a stale/foreign record falls back to stageSha[S].
+        co = release.get('closeOut')
+        bound = None
+        if isinstance(co, dict) and _release_closeout.binding_gap(release) is None:
+            bound = _release_closeout.close_out_binding(co)
+            if bound is not None and bound[0] != s_stage:
+                bound = None
+        sha = bound[1] if bound else _release_closeout.stage_sha(release, s_stage)
+        root = self._release_repo_root(team)
+        if root is None or not isinstance(sha, str):
+            return None
+        return _release_branches.production_contained_in(root, cfg['production'], sha)
+
     def _prod_tag_lookup(self, repo_root, branch, prefix, sort):
         """XACA-1349-004: the injectable production-tag lookup (tests replace it)."""
         return _release_rollback.git_prod_tag_lookup(repo_root, branch, prefix, sort)
@@ -9898,6 +9935,22 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 and _release_branches.is_trunk_release(release, board_raw.get('releaseConfig'))):
             ctx["branch_mode"] = "trunk"
             ctx["dev_sha_reachable"] = self._dev_sha_reachable(release, team)
+        # XACA-1705: production must be contained in the close-out-bound build (None fails closed in the gate).
+        # production_check: the ONLY affirmative skips the gate honours (absent/unknown = the check applies; a
+        # malformed releaseConfig therefore applies it and fails closed).
+        try:
+            _pcfg = _release_branches.effective_branches(board_raw.get('releaseConfig')) \
+                if _release_branches is not None else None
+        except ValueError:
+            _pcfg = None
+        if _pcfg is not None:
+            if _pcfg['mode'] == 'client-merge':
+                ctx["production_check"] = "client-merge"
+            elif _pcfg['production'] == _pcfg['integration']:
+                ctx["production_check"] = "same-branch"
+        _pib = self._production_in_build(release, team, board_raw, data.get('flowConfig'))
+        if _pib is not _PIB_ABSENT:
+            ctx["production_in_build"] = _pib
         # XACA-1349-014: the release.cr feed. release_gate reads release.cr (CR exit: cr-approved +
         # approval time + deploy window; GAMMA exit: cr-completed) but nothing persists it, so it is
         # built here from the board's CRs, with due assumed approvals stamped first by the SAME core
@@ -10569,6 +10622,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         or _release_gate.CODE_ROLLBACK_SHA_UNKNOWN in reasons.codes
                         or _release_gate.CODE_ROLLBACK_OVERRIDE_CONFLICT in reasons.codes
                         or _release_gate.CODE_CLOSEOUT_INCOMPLETE in reasons.codes   # XACA-1353-013: PROD is the LAST act of close-out
+                        or _release_gate.CODE_PRODUCTION_NOT_IN_BUILD in reasons.codes   # XACA-1705: never tag/promote a build lacking production
                         or release.get('status') == _release_gate.STATUS_RELEASED   # XACA-1726-002: terminal
                         or crsupport_malformed)
                 # XACA-1375: the informational CR_SUPPORT_DISABLED reason (release stranded at CR)

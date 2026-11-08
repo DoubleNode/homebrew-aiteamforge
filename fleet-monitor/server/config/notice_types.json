@@ -12,6 +12,8 @@
     {"id": "machine-recovered",     "defaultSeverity": "info",     "description": "A previously offline fleet machine is reporting again."},
     {"id": "accessory-on-battery",  "defaultSeverity": "high",     "description": "A UPS accessory switched to battery power."},
     {"id": "accessory-restored",    "defaultSeverity": "info",     "description": "A UPS accessory is back on mains power."},
-    {"id": "ci-runner-disk-low",    "defaultSeverity": "high",     "description": "A CI runner guest VM is low on free disk space and will soon fail jobs."}
+    {"id": "ci-runner-disk-low",    "defaultSeverity": "high",     "description": "A CI runner guest VM is low on free disk space and will soon fail jobs."},
+    {"id": "tap-lock-stale",       "defaultSeverity": "high",     "description": "The tap-writer lock is held past its stale threshold, or the watcher cannot read it."},
+    {"id": "tap-lock-cleared",      "defaultSeverity": "info",     "description": "A stale or unreadable tap-writer lock condition has cleared."}
   ]
 }
