@@ -23,8 +23,14 @@
 #     8. A missing ~/.claude/skills dir is created.
 #     9. update_skills is still CALLED in the upgrade run sequence.
 #
-# NEGATIVE CONTROL: against the pre-XACA-1740 update_skills(), T1, T4, T7, T8
-# and T9b FAIL (nothing links or prunes). See the PR for the captured run.
+#    10. Under `set -e` (the upgrade script runs `set -eo`), an unwritable
+#        skills dir plus collisions never aborts the caller.
+#    11. Config-dir precedence: CLAUDE_SANDBOX=1 -> ${WORKING_DIR}/.claude-staging;
+#        neither set -> $HOME/.claude.
+#
+# NEGATIVE CONTROL: against the pre-XACA-1740 update_skills(), T1, T3-T8,
+# T8b, T9b, T10, T10b, T11 and T11b FAIL — 13 of 16 (nothing links, prunes or warns). See the PR
+# for the captured run.
 #
 # Every path is under TEST_TMP_DIR with a fake HOME and an explicit
 # CLAUDE_CONFIG_DIR. Never touches the real ~/.claude or ~/aiteamforge.
@@ -316,6 +322,89 @@ if ! _skip_if_missing; then
         test_pass
     else
         test_fail "second run changed the tree or first run linked nothing"
+    fi
+fi
+
+# ─── T10: fail-soft under set -e ─────────────────────────────────────────────
+test_start "T10: under set -e, an unwritable skills dir and collisions never abort the caller"
+if ! _skip_if_missing; then
+    _new_sandbox
+    mkdir -p "$CSK/New Skill" "$SBX/elsewhere/plain-skill"
+    ln -s "$SBX/elsewhere/plain-skill" "$CSK/plain-skill"
+    ln -s "$WORKING_DIR/skills/Removed Skill" "$CSK/Removed Skill"
+    chmod 555 "$CSK"
+    # Precondition: the dir really is unwritable (fails, not skips, as root).
+    if ( : > "$CSK/.probe" ) 2>/dev/null; then
+        chmod 755 "$CSK"
+        test_fail "precondition: $CSK is still writable (running as root?)"
+    else
+        rc=0
+        # Not inside || or if: bash ignores set -e there, which would make
+        # this test vacuous.
+        ( set -e; update_skills > "$SBX/stdout.log" 2>&1; echo REACHED > "$SBX/reached" ); rc=$?
+        chmod 755 "$CSK"
+        if [ "$rc" -eq 0 ] && [ -f "$SBX/reached" ] && grep -q "^print_warning " "$_LOG"; then
+            test_pass
+        else
+            test_fail "set -e caller aborted (rc=$rc, reached=$([ -f "$SBX/reached" ] && echo yes || echo no))"
+        fi
+    fi
+fi
+
+# ─── T10b: set -e with an unwritable Claude config dir (skills dir absent) ───
+test_start "T10b: under set -e, an uncreatable ~/.claude/skills warns and returns"
+if ! _skip_if_missing; then
+    _new_sandbox
+    mkdir -p "$CLAUDE_CONFIG_DIR"
+    chmod 555 "$CLAUDE_CONFIG_DIR"
+    if ( : > "$CLAUDE_CONFIG_DIR/.probe" ) 2>/dev/null; then
+        chmod 755 "$CLAUDE_CONFIG_DIR"
+        test_fail "precondition: $CLAUDE_CONFIG_DIR is still writable (running as root?)"
+    else
+        rc=0
+        # Not inside || or if: bash ignores set -e there, which would make
+        # this test vacuous.
+        ( set -e; update_skills > "$SBX/stdout.log" 2>&1; echo REACHED > "$SBX/reached" ); rc=$?
+        chmod 755 "$CLAUDE_CONFIG_DIR"
+        if [ "$rc" -eq 0 ] && [ -f "$SBX/reached" ] && grep -q "^print_warning .*Could not create" "$_LOG"; then
+            test_pass
+        else
+            test_fail "set -e caller aborted or no warning (rc=$rc; log: $(tr '\n' ' ' < "$_LOG"))"
+        fi
+    fi
+fi
+
+# ─── T11: CLAUDE_SANDBOX=1 targets the staging dir ───────────────────────────
+test_start "T11: CLAUDE_SANDBOX=1 links into \${WORKING_DIR}/.claude-staging/skills"
+if ! _skip_if_missing; then
+    _new_sandbox
+    unset CLAUDE_CONFIG_DIR
+    export CLAUDE_SANDBOX=1
+    _run
+    if [ -L "$WORKING_DIR/.claude-staging/skills/New Skill" ] && [ ! -e "$HOME/.claude" ]; then
+        test_pass
+    else
+        test_fail "sandbox target not used ($(ls -la "$WORKING_DIR/.claude-staging/skills" "$HOME/.claude" 2>&1 | tr '\n' ' '))"
+    fi
+    unset CLAUDE_SANDBOX
+fi
+
+# ─── T11b: neither set -> $HOME/.claude ──────────────────────────────────────
+test_start "T11b: no CLAUDE_CONFIG_DIR / CLAUDE_SANDBOX links into \$HOME/.claude/skills"
+if ! _skip_if_missing; then
+    _new_sandbox
+    unset CLAUDE_CONFIG_DIR CLAUDE_SANDBOX
+    # HOME is the sandbox's fake home (set by _new_sandbox) — guard it.
+    case "$HOME" in "$WORK_DIR"/*) _home_ok=true ;; *) _home_ok=false ;; esac
+    if [ "$_home_ok" != true ]; then
+        test_fail "precondition: HOME ($HOME) is not inside the sandbox — refusing to run"
+    else
+        _run
+        if [ -L "$HOME/.claude/skills/New Skill" ] && [ ! -e "$WORKING_DIR/.claude-staging" ]; then
+            test_pass
+        else
+            test_fail "default target not used ($(ls -la "$HOME/.claude/skills" 2>&1 | tr '\n' ' '))"
+        fi
     fi
 fi
 
