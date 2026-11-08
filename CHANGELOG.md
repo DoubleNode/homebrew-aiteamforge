@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1627: No source-time mkdir of hard-coded worktree dirs (XACA-1627)
+- Tap files updated in this publish: `share/scripts/worktree-helpers.sh`. Run `brew upgrade aiteamforge` to receive them.
 
 ## [0.21.16] - 2026-11-07
 - XACA-1698: PROD promote verifies close-out tag after deleteBranch (XACA-1698)

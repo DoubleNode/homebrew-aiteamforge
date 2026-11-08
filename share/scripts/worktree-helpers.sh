@@ -465,14 +465,14 @@ export WT_DIR=""
 export WT_MAIN=""
 export WT_PROJECT=""
 
-# Ensure worktrees directories exist for Main Event projects
-mkdir -p "$WT_IOS_DIR"
-mkdir -p "$WT_FIREBASE_DIR"
-mkdir -p "$WT_ANDROID_DIR"
-mkdir -p "$WT_ACADEMY_DIR"
-mkdir -p "$WT_COMMAND_DIR"
-mkdir -p "$WT_DNS_DIR"
-# Note: Freelance, Finance, and Medical worktrees directories created dynamically per-repo
+# XACA-1627: NEVER create worktrees directories at source time. The WT_*_DIR
+# paths above are absolute and host-specific (Main Event lives only on M3Pro,
+# DNS only on M4Mini); a source-time mkdir recreated empty repo skeletons on
+# every host and escaped sandboxed-HOME CI jobs. A team's worktrees dir is
+# created lazily by wt-new's `git worktree add`, only after its base repo is
+# reached (cd WT_MAIN).
+# Freelance, MainEvent, Finance and Medical create theirs in wt-project after
+# successful repo detection.
 
 # ═══════════════════════════════════════════════════════════════
 # Project Selection Function
@@ -875,6 +875,9 @@ wt-new() {
     echo "🌿 Branch: $branch"
     echo ""
 
+    # XACA-1627: this cd fails on hosts that don't own the team, so nothing is
+    # created there. On success, `git worktree add` below creates $WT_DIR (and
+    # any other leading dirs) lazily - no explicit mkdir needed.
     cd "$WT_MAIN" || return 1
 
     local main_branch=$(_wt_get_main_branch)
