@@ -1388,8 +1388,143 @@ def dir_collisions(m, names=None):
     return sorted(hits, key=lambda h: h["dir"])
 
 
+def _within(path, root):
+    """True when `path` is `root` or below it. Casefolded (case-insensitive APFS) and cut at an os.sep
+    boundary, so /a/foo-bar is not 'inside' /a/foo."""
+    p, r = os.path.normcase(path).casefold(), os.path.normcase(root).casefold().rstrip(os.sep)
+    return p == r or p.startswith(r + os.sep)
+
+
+def _team_root_spellings(team, cfg, wd_cache):
+    """[(lexical, real)] roots of `team`: its registry working_dir plus the working_dir of every keyed
+    `${working_dir:<key>}` ref in its sessionDirs (a second repo it owns). One registry read per
+    working_dir key per pass (`wd_cache`), not one per team pair."""
+    def wd(k):
+        if k not in wd_cache:
+            wd_cache[k] = working_dir(k)
+        return wd_cache[k]
+    out = []
+    own = wd(team)
+    if own:
+        lex = os.path.abspath(expand(own))
+        out.append((lex, os.path.realpath(lex)))
+    for d in cfg.get("sessionDirs") or []:
+        mt = WD_REF_RE.match(d)
+        if mt and mt.group(1):
+            kd = wd(mt.group(1))
+            if kd:
+                lex = os.path.abspath(expand(kd))
+                out.append((lex, os.path.realpath(lex)))
+    return out
+
+
+def _owners(real, table):
+    """Set of teams owning `real`: those whose real root is the LONGEST one containing it (an os.sep
+    boundary, casefolded). A nested team's root beats the outer team's; empty = inside no root."""
+    best, res = -1, set()
+    for team, root in table:
+        if _within(real, root):
+            ln = len(root.rstrip(os.sep))
+            if ln > best:
+                best, res = ln, {team}
+            elif ln == best:
+                res.add(team)
+    return res
+
+
+def _dir_is_linked(d, anchors):
+    """True when the dir itself, or a component between a team root and the dir, is a symlink. A symlinked
+    ANCESTOR of the root (macOS /var -> /private/var) or of a literal registry path is the spelling the
+    registry chose, not a link planted at the session dir, so it does not count (XACA-1685)."""
+    inside = [a for a in anchors if _within(d, a)]
+    # no root above it (a literal path): only the dir itself counts
+    top = max(inside, key=len) if inside else d  # GUARD:session-dir-anchor
+    p = d
+    while True:
+        if os.path.islink(p):
+            return True
+        parent = os.path.dirname(p)
+        if parent == p or os.path.normcase(p).casefold() == os.path.normcase(top).casefold():
+            return False
+        p = parent
+
+
+def session_dir_links(m, names=None):
+    """[{team, dir, target, reason, what}] for every write target of a selected team that resolves into
+    a tree that team does not own (XACA-1685). Ownership is by LONGEST real root: each hosted team
+    owns its registry working_dir plus its keyed `${working_dir:<key>}` roots, and a path belongs to the
+    team whose root is the most specific one containing it, so a team nested inside another keeps its
+    own tree. Checked for every session dir AND linked worktree: the dir, its `.claude` and its
+    `.claude/settings.json` (each only when present), by realpath. Refused: the target is owned by a
+    team OTHER than the writing one (also through a symlinked working_dir, and through nested roots);
+    a LINKED session dir that resolves outside every root of its own team. A worktree outside every
+    root is fine (they can live anywhere). A linked `.claude` / `settings.json` that stays inside the
+    team's own tree is still written through (XACA-1599). Two teams on one real dir is
+    dir_collisions' job; a plain dir in its own team's tree is never reported."""
+    hits = []
+    wd_cache = {}
+    table, own_roots, anchors_of, cfgs = [], {}, {}, {}
+    for t in sorted(m["teamTargets"]):
+        cfgs[t] = effective_team_cfg(m, t)
+        sp = _team_root_spellings(t, cfgs[t], wd_cache)
+        own_roots[t] = [r for _l, r in sp]
+        anchors_of[t] = [l for l, _r in sp]
+        table.extend((t, r) for r in own_roots[t])
+    for n in sorted(m["teamTargets"]) if names is None else names:
+        cfg = cfgs.get(n) or effective_team_cfg(m, n)
+        dirs = resolve_dirs(n, cfg)
+        if dirs is None:
+            continue
+        wd = wd_cache.get(n) or working_dir(n)
+        if wd and os.path.islink(os.path.abspath(expand(wd))):
+            real = os.path.realpath(wd)
+            foreign = _owners(real, [(t, r) for (t, r) in table if t != n])
+            if foreign:  # a working_dir that is itself a link into another team's tree
+                hits.append({"team": n, "dir": wd, "target": real, "what": "working_dir",
+                             "reason": "resolves into team %s's working dir" % sorted(foreign)[0]})
+                continue
+        cand = [(d, True) for d in dirs]
+        repos = (resolve_dirs(n, cfg, key="worktreeRepos") or []) if cfg.get("mode") == "deployed" else dirs
+        for r in repos:
+            cand.extend((w, False) for w in list_worktrees(r))
+        for d, is_session in cand:
+            if not os.path.isdir(d):
+                continue  # absent: never written (DIR_ABSENT)
+            targets = [("dir", d)]
+            for what, sub in ((".claude", ".claude"), (".claude/settings.json", ".claude/settings.json")):
+                p = os.path.join(d, sub)
+                if os.path.lexists(p):
+                    targets.append((what, p))
+            for what, p in targets:
+                real = os.path.realpath(p)
+                owners = _owners(real, table)
+                reason = None
+                if owners and n not in owners:  # GUARD:write-target-owner
+                    reason = "resolves into team %s's working dir" % sorted(owners)[0]
+                elif is_session and what == "dir" and not any(_within(real, r) for r in own_roots[n]) \
+                        and _dir_is_linked(d, anchors_of[n]):
+                    reason = "resolves outside the team root"
+                if reason:
+                    hits.append({"team": n, "dir": d, "target": real, "what": what, "reason": reason})
+                    break
+    return hits
+
+
+def guard_session_dir_links(m, names):
+    """Exit 3 before any write when a selected team's write target resolves into a tree it does not own."""
+    hits = session_dir_links(m, names)
+    if hits:  # GUARD:session-dir-link
+        for h in hits:
+            err("SESSION_DIR_LINK: %s (team %s): its %s resolves to %s, which %s"
+                % (h["dir"], h["team"], h["what"], h["target"], h["reason"]))
+        raise ToolError("%d write target(s) leave the team's own tree: a settings file or skill link written "
+                        "there would land in a tree the team does not own; nothing was written" % len(hits), 3)
+
+
 def guard_dir_collisions(m, names):
-    """Exit 3 before any write when a selected team shares a real directory with another team."""
+    """Exit 3 before any write when a selected team shares a real directory with another team, or
+    when a write target (session dir, worktree, .claude, settings.json) resolves into a tree it does
+    not own (SESSION_DIR_LINK, XACA-1685)."""
     hits = dir_collisions(m, names)
     if hits:  # GUARD:dir-collision
         for h in hits:
@@ -1398,6 +1533,7 @@ def guard_dir_collisions(m, names):
         raise ToolError("%d directory collision(s): teams cannot share a directory (one settings file per "
                         "directory, last write wins, so a connector could be switched on for a personal team); "
                         "nothing was written" % len(hits), 3)
+    guard_session_dir_links(m, names)
 
 
 def session_targets(m, names):
@@ -1773,13 +1909,16 @@ def process_skill_dir(m, team, cfg, directory, state, dry_run=False):
 
 def skill_targets(m, names, state, sessions=True, worktrees=True):
     """[(team, cfg, dir)] where group skills are (or were) delivered: group members' session dirs and
-    linked worktrees, plus any other team's dir that still holds a link this tool owns."""
+    linked worktrees, plus any other team's dir that still holds a link this tool owns (a deliver:false
+    team included: its owned links are removed, not stranded)."""
     recs = skill_link_records(state)
     owners = {r.get("team") for r in recs.values() if isinstance(r, dict)}
     res = []
     for n in names:
         cfg = effective_team_cfg(m, n)
-        if not cfg.get("deliver", True) or (not team_skills(m, n) and n not in owners):
+        # A team is skipped only when it owns no recorded link: a deliver:false team still owns the links it
+        # was given while it delivered, and plan_skill_dir (desired={}) turns those into REMOVE (XACA-1685).
+        if n not in owners and (not cfg.get("deliver", True) or not team_skills(m, n)):  # GUARD:owned-skill-sweep
             continue
         dirs = resolve_dirs(n, cfg)
         if dirs is None:
@@ -2258,7 +2397,7 @@ DRIFT_STATUSES = ("MISSING", "NOT_INSTALLED", "BLOCKED_LOADED", "FILE_DRIFT", "C
                   "POLICY_ABSENT", "POLICY_STALE", "POLICY_SKIPPED",
                   "PARITY", "UNMANAGED_TEAM", "EXCEPTION_BREACH")  # GUARD:drift-statuses
 DRIFT_STATUSES = DRIFT_STATUSES + ("SKILL_MISSING", "SKILL_GROUP_LEAK", "SKILL_GROUP_MISSING",
-                                  "DIR_COLLISION")  # GUARD:skill-drift-statuses
+                                  "DIR_COLLISION", "SESSION_DIR_LINK")  # GUARD:skill-drift-statuses
 # Informational rows: counted in no total (not warn, not drift, not unverifiable).
 INFO_STATUSES = ("OK", "OUT_OF_SCOPE", "EXCEPTED", "OPT_OUT", "UNMANAGED_LOCAL")
 WARN_STATUSES = ("EXTRA", "SKILL_EXTRA", "BUILTIN_UNAVAILABLE")  # GUARD:builtin-warn
@@ -2542,6 +2681,11 @@ def check_host(args):
         rows.append({"team": ",".join(h["teams"]), "dir": h["dir"], "plugin": "-",
                      "expected": "one team per dir", "actual": "shared by %d teams" % len(h["teams"]),
                      "status": "DIR_COLLISION"})
+    for h in session_dir_links(m):  # GUARD:host-session-dir-link
+        rows.append({"team": h["team"], "dir": h["dir"], "plugin": "-",
+                     "expected": "write targets inside the team's own tree",
+                     "actual": "%s -> %s: %s" % (h["what"], h["target"], h["reason"]),
+                     "status": "SESSION_DIR_LINK"})
     rows.extend(unmanaged_rows(m))
     rows.extend(machine_skill_rows(m))  # XACA-1643-006: machine-wide ~/.claude/skills
     for t, c, d in skill_targets(m, sorted(m["teamTargets"]), state):
