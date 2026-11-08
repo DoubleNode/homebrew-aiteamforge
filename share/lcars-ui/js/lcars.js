@@ -11777,6 +11777,16 @@ async function loadReleases() {
 }
 
 /**
+ * XACA-1706: a release whose close-out completed at PROD carries status 'released'
+ * (written by XACA-1726). Terminal: it is shipped, so it is not "active" any more.
+ * The server's status=active list still returns it (only 'archived' is split out),
+ * so the Releases tab separates it client-side.
+ */
+function isReleaseReleased(release) {
+    return !!release && release.status === 'released';
+}
+
+/**
  * Display releases in the dashboard
  * @param {Array} releases - Array of release objects
  * @param {Object} flowConfig - Optional flow configuration (XACA-0027)
@@ -11793,23 +11803,28 @@ function displayReleases(releases, flowConfig = null, projectEnvironments = {}) 
     if (releasesState.statusFilter === 'planned') {
         releases = releases.filter(r => {
             const platforms = Object.values(r.platforms || {});
-            return platforms.length > 0 && platforms.every(p => (p.environment || '') === 'PLANNED');
+            return !isReleaseReleased(r) && platforms.length > 0 && platforms.every(p => (p.environment || '') === 'PLANNED');
         });
     } else if (releasesState.statusFilter === 'active') {
+        // XACA-1706: released releases are terminal -- they leave the Active tab.
         releases = releases.filter(r => {
             const platforms = Object.values(r.platforms || {});
-            return platforms.some(p => (p.environment || '') !== 'PLANNED');
+            return !isReleaseReleased(r) && platforms.some(p => (p.environment || '') !== 'PLANNED');
         });
+    } else if (releasesState.statusFilter === 'released') {
+        releases = releases.filter(isReleaseReleased);
     }
 
     if (!releases || releases.length === 0) {
         // XACA-0056 / XACA-0238: Context-aware empty state message for all three tabs
         const filter = releasesState.statusFilter;
-        const icon = filter === 'archived' ? '📁' : filter === 'planned' ? '🗓' : '📦';
+        const icon = filter === 'archived' ? '📁' : filter === 'planned' ? '🗓' : filter === 'released' ? '🚀' : '📦';
         const title = filter === 'archived' ? 'No Archived Releases'
             : filter === 'planned' ? 'No Planned Releases'
+            : filter === 'released' ? 'No Released Releases'
             : 'No Active Releases';
         const hint = filter === 'archived' ? 'Completed releases will appear here when archived'
+            : filter === 'released' ? 'Releases show here once their close-out completes at PROD'
             : filter === 'planned' ? 'Create a release to see it here'
             : 'Releases move between stages via the kb-release CLI; they show here once active';
         dashboard.innerHTML = `
@@ -11842,8 +11857,9 @@ function displayReleases(releases, flowConfig = null, projectEnvironments = {}) 
     // 2. Non-archived: sort by targetDate ascending (earliest first), fallback to shortTitle
     // 3. Archived: sort by targetDate descending (most recent first), fallback to shortTitle
     releases.sort((a, b) => {
-        const aArchived = a.status === 'archived';
-        const bArchived = b.status === 'archived';
+        // XACA-1706: released is terminal like archived (after the live ones, newest first).
+        const aArchived = a.status === 'archived' || isReleaseReleased(a);
+        const bArchived = b.status === 'archived' || isReleaseReleased(b);
 
         // Non-archived before archived
         if (aArchived !== bArchived) return aArchived ? 1 : -1;
@@ -11923,6 +11939,9 @@ function renderReleaseCard(release, flowConfig = null, projectEnvironments = {})
     // XACA-0056-005: Detect archived status
     const isArchived = release.status === 'archived';
     const archivedClass = isArchived ? 'archived' : '';
+    // XACA-1706: inlined (not a helper call) -- the per-function test harnesses extract
+    // renderReleaseCard / releaseLifecycleHtml alone, so they must stay self-contained.
+    const releasedBadge = release.status === 'released' ? '<span class="archived-badge release-released-badge" title="Close-out completed at PROD; this release has shipped">RELEASED</span>' : '';
 
     // XACA-1001: reason text for the inert EDIT/DELETE controls when
     // archived, surfaced via both `title` (sighted hover) and
@@ -11930,6 +11949,13 @@ function renderReleaseCard(release, flowConfig = null, projectEnvironments = {})
     // ARCHIVE-button reason composed in renderArchiveAction() below.
     const editReason = 'Edit unavailable — this release is archived. Unarchive it to edit.';
     const deleteReason = 'Delete unavailable — this release is archived. Unarchive it to delete.';
+    // XACA-1706 [UX]: released releases lock DELETE/EDIT with the same aria-disabled + sr-only reason
+    // pattern as archived (inlined: the card harnesses extract renderReleaseCard alone).
+    const isReleased = release.status === 'released';
+    const releasedReason = 'Released releases are read-only — the shipped record is preserved';
+    const editLocked = isArchived || isReleased;
+    const editLockReason = isReleased ? releasedReason : editReason;
+    const deleteLockReason = isReleased ? releasedReason : deleteReason;
     const safeReleaseId = escapeAttr(release.id);
 
     // Get enabled environments based on flowConfig (XACA-0027, XACA-0163)
@@ -12067,7 +12093,7 @@ function renderReleaseCard(release, flowConfig = null, projectEnvironments = {})
     const unresolvedSuffix = unresolvedCount > 0 ? ` <span class="release-item-unresolved-count" title="${unresolvedCount} item(s) could not be resolved against a team/board and are counted as incomplete">(${unresolvedCount} unresolved)</span>` : '';
 
     // XACA-0056-007: Add archived badge for archived releases
-    const archivedBadge = (isArchived ? '<span class="archived-badge">ARCHIVED</span>' : '') +
+    const archivedBadge = (isArchived ? '<span class="archived-badge">ARCHIVED</span>' : '') + releasedBadge +
         promoteStrandedBadgeHtml(release);  // XACA-1375-015
 
     // XACA-0056: Add type badge
@@ -12165,11 +12191,11 @@ function renderReleaseCard(release, flowConfig = null, projectEnvironments = {})
             <div class="release-card-actions">
                 <button class="release-action-btn docs" data-item-id="${release.id}" onclick="event.stopPropagation(); showPlanDocModal('${release.id}', this.getAttribute('data-retro-exists') === 'true', this.getAttribute('data-cr-exists') === 'true')" style="display:none">DOCS</button>
                 <button class="release-action-btn" onclick="event.stopPropagation(); viewReleaseNotes('${release.id}')">RELNOTES</button>
-                <button class="release-action-btn edit-btn" onclick="event.stopPropagation(); if (this.getAttribute('aria-disabled') === 'true') return; showEditReleaseModal('${jsAttrEscape(release.id)}')" ${isArchived ? `aria-disabled="true" aria-describedby="release-edit-reason-${safeReleaseId}" title="${escapeAttr(editReason)}"` : ''}>EDIT</button>
-                ${isArchived ? `<span id="release-edit-reason-${safeReleaseId}" class="sr-only">${escapeHtml(editReason)}</span>` : ''}
+                <button class="release-action-btn edit-btn" onclick="event.stopPropagation(); if (this.getAttribute('aria-disabled') === 'true') return; showEditReleaseModal('${jsAttrEscape(release.id)}')" ${editLocked ? `aria-disabled="true" aria-describedby="release-edit-reason-${safeReleaseId}" title="${escapeAttr(editLockReason)}"` : ''}>EDIT</button>
+                ${editLocked ? `<span id="release-edit-reason-${safeReleaseId}" class="sr-only">${escapeHtml(editLockReason)}</span>` : ''}
                 ${renderArchiveAction(release, isArchived)}
-                <button class="release-action-btn danger delete-btn" onclick="event.stopPropagation(); if (this.getAttribute('aria-disabled') === 'true') return; deleteRelease('${jsAttrEscape(release.id)}', '${jsAttrEscape(release.name)}')" ${isArchived ? `aria-disabled="true" aria-describedby="release-delete-reason-${safeReleaseId}" title="${escapeAttr(deleteReason)}"` : ''}>DELETE</button>
-                ${isArchived ? `<span id="release-delete-reason-${safeReleaseId}" class="sr-only">${escapeHtml(deleteReason)}</span>` : ''}
+                <button class="release-action-btn danger delete-btn" onclick="event.stopPropagation(); if (this.getAttribute('aria-disabled') === 'true') return; deleteRelease('${jsAttrEscape(release.id)}', '${jsAttrEscape(release.name)}')" ${editLocked ? `aria-disabled="true" aria-describedby="release-delete-reason-${safeReleaseId}" title="${escapeAttr(deleteLockReason)}"` : ''}>DELETE</button>
+                ${editLocked ? `<span id="release-delete-reason-${safeReleaseId}" class="sr-only">${escapeHtml(deleteLockReason)}</span>` : ''}
             </div>
         </div>
     `;
@@ -12781,7 +12807,9 @@ function releaseLifecycleHtml(release, crList) {
         return `<div class="release-lifecycle" role="group" aria-label="Release lifecycle (read-only)">` +
             `<div class="release-lifecycle-head"><span class="release-lifecycle-label">STAGE</span> ` +
             `<span class="release-lifecycle-current">${cur ? escapeHtml(cur) : DASH}</span>` +
-            `<span class="release-lifecycle-ro">read-only — stages change via kb-release</span></div>` +
+            (rel.status === 'released'
+                ? '<span class="archived-badge release-released-badge" title="Close-out completed at PROD; this release has shipped">RELEASED</span>' + `<span class="release-lifecycle-ro">read-only — this release has shipped</span>`
+                : `<span class="release-lifecycle-ro">read-only — stages change via kb-release</span>`) + `</div>` +
             (rowsHtml || `<div class="release-lifecycle-row"><span class="release-lifecycle-nr">stage detail not recorded</span></div>`) +
             crHtml + `</div>`;
     } catch (err) {
@@ -13332,7 +13360,7 @@ async function showReleaseAssignModal(itemId, itemTitle, team, currentAssignment
         const allReleases = releasesData.releases || [];
 
         // XACA-0056-006: Filter out archived releases from assignment modal
-        releaseAssignModalState.releases = allReleases.filter(r => r.status !== 'archived');
+        releaseAssignModalState.releases = allReleases.filter(r => r.status !== 'archived' && !isReleaseReleased(r));  // XACA-1706: shipped = terminal
 
         // XACA-0056: Sort by targetDate ascending, fallback to shortTitle
         releaseAssignModalState.releases.sort((a, b) => {
@@ -13671,7 +13699,7 @@ function hideCreateReleaseModal() {
  */
 let releasesState = {
     expandedReleases: new Set(),
-    statusFilter: 'active'  // XACA-0056: 'planned', 'active', or 'archived'
+    statusFilter: 'active'  // XACA-0056: 'planned', 'active', 'released' (XACA-1706), or 'archived'
 };
 
 /**
@@ -13689,8 +13717,9 @@ function updateReleasesStatusToggle() {
     const plannedBtn = document.getElementById('releases-planned-btn');
     const activeBtn = document.getElementById('releases-active-btn');
     const archivedBtn = document.getElementById('releases-archived-btn');
+    const releasedBtn = document.getElementById('releases-released-btn');
 
-    [plannedBtn, activeBtn, archivedBtn].forEach(btn => {
+    [plannedBtn, activeBtn, archivedBtn, releasedBtn].forEach(btn => {
         if (btn) btn.classList.remove('active');
     });
 
@@ -13699,6 +13728,8 @@ function updateReleasesStatusToggle() {
         plannedBtn.classList.add('active');
     } else if (filter === 'archived' && archivedBtn) {
         archivedBtn.classList.add('active');
+    } else if (filter === 'released' && releasedBtn) {
+        releasedBtn.classList.add('active');
     } else if (activeBtn) {
         activeBtn.classList.add('active');
     }

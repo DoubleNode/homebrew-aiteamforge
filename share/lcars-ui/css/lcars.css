@@ -9040,6 +9040,13 @@ body {
     font-weight: bold;
 }
 
+/* XACA-1706: RELEASED pill. LCARS green on black text, distinct from gray ARCHIVED and orange STRANDED. */
+.archived-badge.release-released-badge {
+    background: var(--lcars-green, #99ff99);
+    color: var(--lcars-black, #000000);
+    font-weight: bold;
+}
+
 .release-card-header {
     display: flex;
     justify-content: space-between;

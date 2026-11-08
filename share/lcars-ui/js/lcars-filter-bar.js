@@ -593,12 +593,17 @@ function createFilterBar(options) {
             if (!activeRes.ok) return;
 
             const activeData = await activeRes.json();
-            const releases   = (activeData.releases || []).sort((a, b) => {
+            // XACA-1706 [Review]: the server's ?status=active also returns status=released releases;
+            // split them into their own group (as the Releases tab does) instead of listing them as Active.
+            const allNonArchived = activeData.releases || [];
+            const byTarget = (a, b) => {
                 const aDate = a.targetDate ? new Date(a.targetDate) : null;
                 const bDate = b.targetDate ? new Date(b.targetDate) : null;
                 if (aDate && bDate) return aDate - bDate;
                 return ((a.shortTitle || a.name || '')).localeCompare((b.shortTitle || b.name || ''));
-            });
+            };
+            const releases = allNonArchived.filter(r => r.status !== 'released').sort(byTarget);
+            const released = allNonArchived.filter(r => r.status === 'released').sort(byTarget);
 
             let archived = [];
             if (archivedRes.ok) {
@@ -636,6 +641,7 @@ function createFilterBar(options) {
             };
 
             if (releases.length)  { _addSeparator('── Active ──');   releases.forEach(r => _addRelease(r, '')); }
+            if (released.length)  { _addSeparator('── Released ──'); released.forEach(r => _addRelease(r, ' [Released]')); }
             if (archived.length)  { _addSeparator('── Archived ──'); archived.forEach(r => _addRelease(r, ' [Archived]')); }
 
             select.value = targetValue;

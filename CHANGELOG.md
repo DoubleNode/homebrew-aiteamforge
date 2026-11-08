@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1706: Treat the terminal 'released' release status as finished everywhere (XACA-1706)
+- Tap files updated in this publish: `share/kanban-hooks/release_gate.py`,`share/lcars-ui/css/lcars.css` `share/lcars-ui/index.html`,`share/lcars-ui/js/lcars-filter-bar.js` `share/lcars-ui/js/lcars.js`,`share/lcars-ui/server.py` `share/lcars-ui/tests/test-xaca-1706-filter-bar-released.js`,`share/lcars-ui/tests/test-xaca-1706-released-state.js` (+1 more). Run `brew upgrade aiteamforge` to receive them.
 - XACA-1705: Close-out refuses a build missing a later production hotfix (XACA-1705)
 - XACA-1622: Alert when the tap-writer lock is stale (XACA-1622)
 - Tap files updated in this publish: `fleet-monitor/server/config/notice_types.json`,`fleet-monitor/server/lib/fleet-notices.js` `fleet-monitor/server/lib/tap-lock-github.js`,`fleet-monitor/server/lib/tap-lock-watcher.js` `fleet-monitor/server/package.json`,`fleet-monitor/server/server.js` `fleet-monitor/server/tests/xaca-1622-003-tap-lock-watcher.test.js`,`fleet-monitor/server/tests/xaca-1622-003b-tap-lock-github.test.js` (+7 more). Run `brew upgrade aiteamforge` to receive them.

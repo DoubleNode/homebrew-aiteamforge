@@ -9367,6 +9367,11 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_error(404, f"Release not found: {release_id}")
                 return
 
+            # XACA-1706-001: a released release is closed (branch deleted, tag cut); it takes no new work.
+            if release.get('status') == 'released':
+                self.send_error(409, f"Release {release_id} is released (terminal status); assign the item to an open release")
+                return
+
             # XACA-0037: Validate team ownership - prevent cross-team contamination
             release_team = release.get('team') or data.get('team') or LCARS_TEAM
             if team and team != release_team:
@@ -11714,6 +11719,14 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 if not release:
                     raise _DeferredResponse.error(404, f"Release not found: {release_id}")
 
+                # XACA-1706-001: 'released' is written ONLY by the PROD close-out (release_gate.STATUS_RELEASED) and is
+                # terminal. Neither un-release a released release nor stamp 'released' on one that never closed out.
+                if 'status' in post_data and post_data['status'] != release.get('status'):
+                    if release.get('status') == 'released':
+                        raise _DeferredResponse.error(409, "Release %s is released (terminal status); its status cannot be changed" % release_id)
+                    if post_data['status'] == 'released':
+                        raise _DeferredResponse.error(409, "status 'released' is set only by the PROD close-out, not by release update; for a release already closed out at PROD, run `kb-release reconcile-closeout %s` (dry-run first)" % release_id)
+
                 # Update allowed fields
                 allowed_fields = ['name', 'shortTitle', 'targetDate', 'status', 'type', 'project']  # XACA-0050: Added shortTitle
                 for field in allowed_fields:
@@ -12156,8 +12169,13 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     with open(archive_file, 'r') as f:
                         release = json.load(f)
 
-                    # Restore to active status
-                    release['status'] = 'active'
+                    # Restore to active status. XACA-1706-001: a release archived from a COMPLETED PROD close-out
+                    # was 'released' (terminal); restoring it as 'active' put a finished release back in the active
+                    # buckets. Restore 'released' ONLY by the same completeness rule reconcile-closeout uses
+                    # (release_gate.closeout_complete): a legacy PROD release that never closed out stays 'active',
+                    # else the PUT guard (no stamping 'released' outside close-out) would be contradicted.
+                    release['status'] = ('released' if _release_gate is not None
+                                         and _release_gate.closeout_complete(release) else 'active')
                     if 'archivedAt' in release:
                         del release['archivedAt']
 
@@ -12350,6 +12368,15 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     release = self._find_release_by_id(data, release_id)
                     if not release:
                         raise _DeferredResponse.error(404, f"Release not found: {release_id}")
+
+                    # XACA-1706 [UX]: a released release is the preserved shipped record --
+                    # the LCARS DELETE control is locked for it, and the server refuses the
+                    # DELETE too (archiving via the toggle endpoint stays available).
+                    if release.get('status') == 'released':
+                        raise _DeferredResponse.error(
+                            409,
+                            f"Release {release_id} is released and read-only; "
+                            f"the shipped record is preserved and cannot be deleted; archive it instead (Archive toggle in LCARS)")
 
                     # XACA-0694-003: cascade-clear releaseAssignment on any
                     # backlog items still pointing at this release BEFORE it
@@ -13159,7 +13186,9 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         non-archived release with no platform data falls through to ACTIVE and is
         surfaced in the unscheduled Active bucket.
         """
-        if release.get('status') == 'archived':
+        if release.get('status') in ('archived', 'released'):
+            # XACA-1706-001: 'released' (release_gate.STATUS_RELEASED) is TERMINAL: the close-out reached PROD. It
+            # belongs in the concluded bucket, never ACTIVE (it used to fall through to ACTIVE below).
             return 'ARCHIVED'
         platforms = release.get('platforms') or {}
         vals = list(platforms.values()) if isinstance(platforms, dict) else []

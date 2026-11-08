@@ -13722,7 +13722,20 @@ _kb_require_release() {
             # (cut on promotion out of PLANNED). Mirrors server.py's gate-mode
             # resolver: explicit "report" = report; absent (since XACA-1352-014),
             # "enforce" or any unrecognised value = enforce.
-            local rel_branch rel_stage gate_mode
+            local rel_branch rel_stage gate_mode rel_status
+            # XACA-1706-001: a released release is closed out (branch deleted): refuse with the TRUE reason, in both
+            # gate modes, rather than the misleading "no release branch yet -- promote to DEV" below.
+            rel_status=$(_kb_jq_read "$board_file" \
+                '[.releases[]? | select(.id == $rid)][0].status // empty' -r \
+                --arg rid "$release_id" 2>/dev/null)
+            if [[ "$rel_status" == "released" ]]; then
+                echo "─────────────────────────────────────"
+                echo "⛔ Cannot start [$item_id]: [$item_id] is assigned to $release_id, which is released (closed out)."
+                echo "   A released release takes no new work. Reassign the item to an open release:"
+                echo "     kb-release assign $item_id <REL-ID>"
+                echo "─────────────────────────────────────"
+                return 1
+            fi
             rel_branch=$(_kb_jq_read "$board_file" \
                 '[.releases[]? | select(.id == $rid)][0].branch // empty' -r \
                 --arg rid "$release_id" 2>/dev/null)
@@ -27428,6 +27441,7 @@ kb-release-list() {
         local status_icon="●"
         case "$rel_status" in
             in_progress) status_icon="▶" ;;
+            released) status_icon="◆" ;;   # XACA-1706-001: terminal (PROD close-out finished)
             completed) status_icon="✓" ;;
             cancelled) status_icon="✗" ;;
             archived) status_icon="□" ;;
@@ -27493,6 +27507,12 @@ kb-release-assign() {
         echo "Error: Release not found: $release_id"
         echo "  Available releases:"
         kb-release-list
+        return 1
+    fi
+    # XACA-1706-001: a released release is closed out (terminal): it takes no new work.
+    if [[ "$(printf '%s' "$release_obj" | jq -r '.status // empty' 2>/dev/null)" == "released" ]]; then
+        echo "Error: Release $release_id is released (terminal status); it cannot take new items." >&2
+        echo "  Assign $item_id to an open release: kb-release list" >&2
         return 1
     fi
 

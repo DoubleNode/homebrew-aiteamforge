@@ -491,30 +491,44 @@ def reconcile_closeout(release, board, apply=False):
         return [], "release record is unreadable (%s: %s)" % (type(e).__name__, e)
 
 
+def closeout_incomplete_reason(release):
+    """Why `release` has NOT genuinely completed its PROD close-out, or None when it has: stage PROD, a closeOut
+    record with every required step present AND done, bound to the current build. THE completeness rule shared by
+    _reconcile_closeout and the LCARS unarchive path (XACA-1706), so they can never disagree. Pure; fails closed."""
+    if not isinstance(release, dict):
+        return "release record is not an object"
+    if release.get("stage") != "PROD":
+        return "release is at stage %r, not PROD; close-out has not finished" % (release.get("stage"),)
+    co = release.get("closeOut")
+    if not isinstance(co, dict):
+        return "release has no closeOut record"
+    steps = co.get("steps")
+    if not isinstance(steps, dict) or not steps:
+        return "closeOut has no steps recorded"
+    missing = [n for n in closeout_required_steps(co) if n not in steps]
+    if missing:
+        return "closeOut is missing required step(s): %s" % ", ".join(missing)
+    for name in steps:
+        rec = steps[name]
+        if not (isinstance(rec, dict) and rec.get("status") == "done"):
+            return "closeOut step %s is not done" % name
+    return _closeout_binding_gap(release)
+
+
+def closeout_complete(release):
+    """True only when closeout_incomplete_reason(release) is None (see it)."""
+    return closeout_incomplete_reason(release) is None
+
+
 def _reconcile_closeout(release, board, apply):
     import copy  # noqa: PLC0415
     if not isinstance(release, dict):
         return [], "release record is not an object"
     if release.get("status") == "archived":
         return [], "release is archived (a deliberate end state; reconcile never resurrects it)"
-    if release.get("stage") != "PROD":
-        return [], "release is at stage %r, not PROD; close-out has not finished" % (release.get("stage"),)
-    co = release.get("closeOut")
-    if not isinstance(co, dict):
-        return [], "release has no closeOut record"
-    steps = co.get("steps")
-    if not isinstance(steps, dict) or not steps:
-        return [], "closeOut has no steps recorded"
-    missing = [n for n in closeout_required_steps(co) if n not in steps]
-    if missing:
-        return [], "closeOut is missing required step(s): %s" % ", ".join(missing)
-    for name in steps:
-        rec = steps[name]
-        if not (isinstance(rec, dict) and rec.get("status") == "done"):
-            return [], "closeOut step %s is not done" % name
-    gap = _closeout_binding_gap(release)
-    if gap:
-        return [], gap
+    why = closeout_incomplete_reason(release)
+    if why:
+        return [], why
     stages = release.get("stages")
     prod = stages.get("PROD") if isinstance(stages, dict) else None
     if not isinstance(prod, dict):
