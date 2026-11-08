@@ -105,11 +105,14 @@ CODE_CLOSEOUT_INCOMPLETE = "CLOSEOUT_INCOMPLETE"
 # XACA-1705: production holds changes the close-out-bound build lacks (or containment could not be verified).
 # Blocking and, like CLOSEOUT_INCOMPLETE, meant to be a HARD refusal in both gate modes (server wiring).
 CODE_PRODUCTION_NOT_IN_BUILD = "PRODUCTION_NOT_IN_BUILD"
+# XACA-1703: at GAMMA the linked CR is not yet cr-completed. Blocking; `kb-release close-out` completes a CR that is
+# deployed-prod/emergency-deployed and bound to the current build (kb-cr complete) before it promotes.
+CODE_GAMMA_CR_NOT_COMPLETED = "GAMMA_CR_NOT_COMPLETED"
 REASON_CODES = (CODE_OTHER, CODE_GAMMA_CONFIRM_REQUIRED, CODE_GAMMA_ACTOR_NOT_LEAD, CODE_WAIVER_NEEDED,
                 CODE_TEST_MISSING, CODE_WAIVER_VOID_SHA, CODE_WAIVER_VOID_INVALID, CODE_WAIVER_NOT_LEAD,
                 CODE_NOT_IN_LEADS, CODE_LEADS_NOT_CONFIGURED, CODE_CR_SUPPORT_DISABLED,
                 CODE_MANDATORY_STAGE_SKIPPED, CODE_ROLLBACK_SHA_UNKNOWN, CODE_ROLLBACK_OVERRIDE_CONFLICT,
-                CODE_CLOSEOUT_INCOMPLETE, CODE_PRODUCTION_NOT_IN_BUILD)
+                CODE_CLOSEOUT_INCOMPLETE, CODE_PRODUCTION_NOT_IN_BUILD, CODE_GAMMA_CR_NOT_COMPLETED)
 INFORMATIONAL_CODES = frozenset((CODE_CR_SUPPORT_DISABLED,))
 CR_SUPPORT_DISABLED_MSG = "CR support disabled"
 
@@ -895,7 +898,9 @@ def _exit_conditions(release, cur, cr_on, ctx):
             # XACA-1667-003: when the CRs are all closed, say WHY the closure does not count (never completed /
             # reverted after completing) instead of the bare condition, so the operator is not left guessing.
             _why = [w for w in (_cr.get("closedNotCompleted") or []) if isinstance(w, str)]
-            r.append("GAMMA: CR must be cr-completed" + (" (%s)" % "; ".join(_why) if _why else ""))
+            r.append("GAMMA: CR must be cr-completed" + (" (%s)" % "; ".join(_why) if _why else ""),
+                     CODE_GAMMA_CR_NOT_COMPLETED,
+                     {"crIds": [i for i in (_cr.get("crIds") or []) if isinstance(i, str)], "state": _cr.get("state")})
     if cur == "GAMMA" and release.get("gammaFailure") is not None:
         # XACA-1349-005 QA (spec 13.3): a build that failed in GAMMA and was rolled back is never promoted to PROD, even
         # when every expected test reads PASS (the lead may have declared the failure with no FAIL record, or waived

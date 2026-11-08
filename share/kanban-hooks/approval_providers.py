@@ -544,6 +544,35 @@ def cr_closed_bound_to_build(cr, release):
         return False, "binding of CR to the current build could not be verified (%s: %s)" % (type(e).__name__, e)
 
 
+def cr_open_bound_to_build(cr, release):
+    """XACA-1703: True iff this OPEN deployed-prod / emergency-deployed CR belongs to the release's CURRENT build, so
+    `kb-release close-out` may complete it. Mirrors cr_closed_bound_to_build's binding (stamp vs stageSha.CR; else time
+    vs stages.GAMMA.enteredAt) but for a CR that has not completed yet, so the time evidence is the deploy stamp
+    (timestamps.cr_deployed_prod_at, or cr_emergency_deployed_at for the 13.5 path), not cr_completed_at.
+      - a recorded SHA must equal the current stageSha.CR (else stages.CR.sha); no current SHA to compare -> False
+      - a present but unreadable recorded SHA -> False (never falls back to the weaker time rule)
+      - no recorded SHA -> the deploy stamp must be at or after stages.GAMMA.enteredAt; neither present -> False
+    Fails closed: anything unreadable is False, never an exception."""
+    try:
+        if not isinstance(cr, dict) or not isinstance(release, dict):
+            return False
+        stamp = cr_stamped_sha(cr)
+        if stamp is None and is_engine_managed(cr):
+            return False
+        if stamp:
+            sha = (release.get("stageSha") or {}).get("CR") or ((release.get("stages") or {}).get("CR") or {}).get("sha")
+            if not isinstance(sha, str) or not sha.strip():
+                return False
+            return stamp.lower() == sha.strip().lower()
+        entered = ((release.get("stages") or {}).get("GAMMA") or {}).get("enteredAt")
+        deployed = cr_ts(cr, "cr_deployed_prod_at") or cr_ts(cr, "cr_emergency_deployed_at")
+        if not entered or not deployed:
+            return False
+        return parse_iso(deployed, "cr_deployed_prod_at") >= parse_iso(entered, "stages.GAMMA.enteredAt")
+    except Exception:  # noqa: BLE001 - fail closed
+        return False
+
+
 def _fail_closed_feed(reason, ids=(), stale=None, all_closed=False, closed_after_completion=False, closed_not_completed=()):
     # state None: release_gate reports "CR state is 'None', must be cr-approved" and refuses.
     # `stale` (XACA-1349 F1) carries the distinct stale-approval reason release_gate also prints.
@@ -1052,6 +1081,112 @@ def _linked_crs_cli(args):
     return 0
 
 
+GAMMA_COMPLETABLE_STATES = ("deployed-prod", "emergency-deployed")
+_CR_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+# The evidence `kb-cr complete` demands, one entry per line of scripts/kb-cr.sh `_kb_cr_state_required_evidence`'s
+# cr-completed arm ("a|b" = OR-group: any one member satisfies the line). A hand-synced mirror; XACA-1703-014's parity
+# test (tests/test_xaca1703_gamma_cr_complete.py) reads that arm and the `_kb_cr_is_v2` marker and fails if either drifts.
+GAMMA_CR_COMPLETE_EVIDENCE = ("cr_deployed_prod_at|cr_emergency_deployed_at", "cr_approved_at")
+
+
+def _gamma_cr_complete_blocker(cr):
+    """Why `kb-cr complete` would refuse this CR (None when it would not). Mirrors scripts/kb-cr.sh
+    _kb_cr_container_complete: the v2 marker (LIFECYCLE_MARKER), then _kb_cr_missing_evidence(cr-completed) =
+    GAMMA_CR_COMPLETE_EVIDENCE, each line satisfied by any one non-empty member in .timestamps. Carries kb-cr's own
+    remedy."""
+    cid = str(cr.get("id"))
+    if cr.get("cr_lifecycle") != LIFECYCLE_MARKER:
+        return ("legacy CR (no v2 lifecycle marker); kb-cr complete refuses it by CR id, "
+                "complete it by item-id (kb-cr complete <item-id>)")
+    ts = cr.get("timestamps")
+    ts = ts if isinstance(ts, dict) else {}
+
+    def has(k):
+        return ts.get(k) not in (None, False, "")
+
+    missing = [line for line in GAMMA_CR_COMPLETE_EVIDENCE if not any(has(k) for k in line.split("|"))]
+    if not missing:
+        return None
+    why = "missing evidence: %s" % " ".join(missing)
+    if cr.get("crState") == "emergency-deployed" and "cr_approved_at" in missing:
+        why += "; needs retroactive approval first: kb-cr approve %s --by <approver>" % cid
+    return why
+
+
+def gamma_cr_classify(board, release):
+    """XACA-1703: every CR linked to `release`, as (kind, id, state, why) in board order.
+      completable: deployed-prod / emergency-deployed, bound to the current build, kb-cr complete would accept it
+      unbound:     deployed-prod / emergency-deployed but belongs to an earlier build (never completed)
+      blocked:     kb-cr complete would refuse it (why carries kb-cr's remedy)
+      invalid:     id fails ^[A-Za-z0-9][A-Za-z0-9._-]*$ (never handed to a shell command); id is the repr
+      other:       any other state close-out's CR preflight does not accept (not cr-completed/cr-rejected/cr-closed)
+      missing:     listed on the release but not on the board (the server's close-out preflight refuses these too)
+    cr-completed / cr-rejected / cr-closed CRs are acceptable as-is and are not listed. Read-only; raises on a
+    malformed board (callers fail closed)."""
+    crs, missing = _linked_crs(board, release)
+    out = []
+    for c in crs:
+        state = c.get("crState")
+        if state in CLOSE_OUT_CR_CLOSABLE:
+            continue
+        raw = c.get("id")
+        cid = str(raw)
+        sdesc = state if isinstance(state, str) and state else "<none>"
+        if not isinstance(raw, str) or not _CR_ID_RE.match(cid):
+            out.append(("invalid", "%r" % cid, sdesc, ""))
+        elif state not in GAMMA_COMPLETABLE_STATES:
+            out.append(("other", cid, sdesc, ""))
+        elif not cr_open_bound_to_build(c, release):
+            out.append(("unbound", cid, state, ""))
+        else:
+            why = _gamma_cr_complete_blocker(c)
+            out.append(("blocked", cid, state, " ".join(why.split())) if why else ("completable", cid, state, ""))
+    for m in missing:
+        out.append(("missing", str(m), "<not on board>", ""))
+    return out
+
+
+def _gamma_completable_crs_cli(args):
+    """`gamma-completable-crs BOARD RELEASE_ID` (XACA-1703): the CRs `kb-release close-out` may `kb-cr complete`.
+    stdout: one CR id per line for each linked CR whose crState is deployed-prod or emergency-deployed, which is
+    bound to the release's current build (cr_open_bound_to_build) AND which kb-cr complete would accept (v2 marker +
+    evidence). stderr, one line each, never on stdout: `unbound <CR-ID> <state>` (not the current build),
+    `blocked <CR-ID> <state> <reason>` (kb-cr would refuse; the reason carries its remedy), `invalid <id-repr>`
+    (id fails ^[A-Za-z0-9][A-Za-z0-9._-]*$, so it is never handed to a shell command), and (XACA-1703-015)
+    `other <CR-ID> <state>` for a linked CR that is neither completable nor one the CR preflight accepts
+    (cr-completed / cr-rejected / cr-closed), plus `missing <CR-ID>` for an id listed on the release but absent from
+    the board: the shell refuses up-front when any of these exists beside a completable CR, so completion is
+    all-or-nothing. Read-only. rc 0 (output may be empty); rc 2 on an unreadable board, a non-list releases/crs,
+    or an unknown release."""
+    try:
+        with open(args.board, encoding="utf-8") as fh:
+            board = json.load(fh)
+        releases = board.get("releases") if isinstance(board, dict) else None
+        if not isinstance(releases, list):
+            raise TypeError("releases is missing or not a list")
+        release = next((r for r in releases if isinstance(r, dict) and r.get("id") == args.release_id), None)
+        if release is None:
+            raise ValueError("release %s not found on the board" % args.release_id)
+        out, notes = [], []
+        for kind, cid, state, why in gamma_cr_classify(board, release):
+            if kind == "completable":
+                out.append(cid)
+            elif kind == "invalid":
+                notes.append("invalid %s" % cid)
+            elif kind == "blocked":
+                notes.append("blocked %s %s %s" % (cid, state, why))
+            else:   # unbound | other | missing
+                notes.append("%s %s %s" % (kind, cid, state) if kind != "missing" else "missing %s" % cid)
+    except (OSError, ValueError, TypeError, AttributeError) as e:
+        sys.stderr.write("approval_providers gamma-completable-crs: %s\n" % e)
+        return 2
+    for n in notes:
+        sys.stderr.write(n + "\n")
+    for cid in out:
+        sys.stdout.write(cid + "\n")
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="approval_providers.py")
     sub = ap.add_subparsers(dest="mode", required=True)
@@ -1095,6 +1230,9 @@ def main(argv=None):
     rl.add_argument("--actor", required=True)
     rl.add_argument("--old-status", default=None)
     rl.add_argument("--changes", default="[]")
+    gc = sub.add_parser("gamma-completable-crs")   # XACA-1703: close-out completes these via kb-cr complete
+    gc.add_argument("board")
+    gc.add_argument("release_id")
     r = sub.add_parser("is-engine-managed")
     r.add_argument("--board", required=True)
     g = r.add_mutually_exclusive_group(required=True)
@@ -1104,6 +1242,8 @@ def main(argv=None):
     try:
         if args.mode == "linked-crs":
             return _linked_crs_cli(args)
+        if args.mode == "gamma-completable-crs":
+            return _gamma_completable_crs_cli(args)
         if args.mode == "cr-close-block":
             return _cr_close_block_cli(args)
         if args.mode == "is-engine-managed":

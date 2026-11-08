@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1703: Close-out completes the current build's CR when the GAMMA gate holds (XACA-1703)
+- Tap files updated in this publish: `share/kanban-hooks/approval_providers.py`,`share/kanban-hooks/release_gate.py` `share/kanban-hooks/release_resume.py`,`share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1685: kb-sync-plugins session-dir link boundary; deliver:false removes owned skill links (XACA-1685)
 - Tap files updated in this publish: `share/scripts/kb-sync-plugins`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1706: Treat the terminal 'released' release status as finished everywhere (XACA-1706)

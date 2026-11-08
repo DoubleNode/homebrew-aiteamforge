@@ -2071,6 +2071,7 @@ _kb_co_cr_preflight() {
         case "$cst" in
             cr-completed|cr-rejected|cr-closed) ;;
             *)
+                [[ "${_KB_CO_DRY_ACTIVE-}" == 1 && "${_KB_CO_DRY_COMPLETE-} " == *" $cid "* ]] && continue   # XACA-1703 --dry-run ONLY: kb-cr complete is planned for it
                 (( bad )) || echo "Error: close-out refused (nothing was tagged, merged or deleted): linked CR(s) the crClose step cannot handle:" >&2
                 echo "  - CR $cid is '${cst:-<none>}': close-out closes only cr-completed, cr-rejected or already-closed CRs; take it to cr-completed, or 'kb-cr close $cid --reason \"<why>\"' if it is abandoned, then re-run" >&2
                 bad=1 ;;
@@ -2285,15 +2286,149 @@ _kb_release_close_out_gate_info() {
 # rc 0 ready | 1 not ready (reasons on stderr) or the gate is unreachable.
 # The server enforces the same predicate on op=init (handle_release_close_out); this is the early, friendly refusal.
 _kb_release_close_out_ready() {
-    local release_id="${1-}" codes
+    local release_id="${1-}" codes ig=""
+    [[ "${_KB_CO_DRY_ACTIVE-}" == 1 ]] && ig="${_KB_CO_DRY_IGNORE_GAMMA-}"   # XACA-1703: honoured in --dry-run only
     _kb_release_close_out_gate_info "$release_id" || return 1
-    codes=$(printf '%s' "$_KB_REL_BODY" | jq -r --arg cs "$_KB_CO_CONFIRM" '[.reasonCodes[]?
-        | select(. != "CLOSEOUT_INCOMPLETE" and ((. == "GAMMA_CONFIRM_REQUIRED" and $cs == "PROD") | not))] | length' 2>/dev/null)
+    codes=$(printf '%s' "$_KB_REL_BODY" | jq -r --arg cs "$_KB_CO_CONFIRM" --arg ig "$ig" '[.reasonCodes[]?
+        | select(. != "CLOSEOUT_INCOMPLETE" and ((. == "GAMMA_CONFIRM_REQUIRED" and $cs == "PROD") | not)
+                 and ((. == "GAMMA_CR_NOT_COMPLETED" and $ig == "1") | not))] | length' 2>/dev/null)   # XACA-1703: --dry-run only, when kb-cr complete is planned
     if [[ "$codes" != "0" ]]; then
         echo "Error: $release_id is not ready for close-out (${_KB_CO_STAGE} has not passed):" >&2
         printf '%s' "$_KB_REL_BODY" | jq -r '.reasons[]? | "  - " + .' >&2 2>/dev/null
         return 1
     fi
+    return 0
+}
+
+# XACA-1703: GAMMA holds but the CR is still deployed-prod -> nothing ran `kb-cr complete`. At the FRESH start of
+# close-out (before _kb_co_cr_preflight) complete the linked, current-build CR(s) through kb-cr (state machine, activity
+# log, cr-record refresh), shell-side and BEFORE any server lock (kb-cr takes the same board lock the server holds).
+# Gate: the promote dry-run's blocking codes are ONLY CLOSEOUT_INCOMPLETE / GAMMA_CR_NOT_COMPLETED (any other blocker
+# -> do nothing, the readiness check refuses as before). Build-bound + open-state selection is
+# approval_providers.py gamma-completable-crs (cr_open_bound_to_build). Idempotent: an already cr-completed CR is
+# skipped. Fails closed: unreachable gate, unreadable board, an unbound CR or a failed kb-cr refuse (rc 1).
+# --dry-run (3rd arg 1) prints the plan, writes nothing, and sets _KB_CO_DRY_COMPLETE (space-wrapped CR ids) and
+# _KB_CO_DRY_IGNORE_GAMMA so the read-only preflight/readiness checks that follow treat those CRs as completed.
+# rc 0 nothing to do / done / planned | 1 refused (reason on stderr)
+_kb_co_gamma_cr_complete() {
+    local board_file="${1-}" release_id="${2-}" dry="${3:-0}" _ap _bs n others cid cst after crc out
+    local errf cid_list line unbound_list="" blocked_list="" invalid_list="" other_list="" stage tl bad=0
+    _KB_CO_DRY_COMPLETE=""; _KB_CO_DRY_IGNORE_GAMMA=""
+    _kb_release_close_out_gate_info "$release_id" || return 1
+    stage="${_KB_CO_STAGE:-GAMMA}"
+    n=$(printf '%s' "$_KB_REL_BODY" | jq -r '[.reasonCodes[]? | select(. == "GAMMA_CR_NOT_COMPLETED")] | length' 2>/dev/null)
+    others=$(printf '%s' "$_KB_REL_BODY" | jq -r --arg cs "$_KB_CO_CONFIRM" '[.reasonCodes[]?
+        | select(. != "CLOSEOUT_INCOMPLETE" and . != "GAMMA_CR_NOT_COMPLETED" and ((. == "GAMMA_CONFIRM_REQUIRED" and $cs == "PROD") | not))] | length' 2>/dev/null)
+    # Portable digit check (bash parses this file when sourced by kb-release-version-gate; zsh <-> would truncate it).
+    if ! [[ "$n" =~ ^[0-9]+$ && "$others" =~ ^[0-9]+$ ]]; then
+        echo "Error: $release_id close-out refused: the gate answer could not be read; not completing any CR" >&2; return 1
+    fi
+    (( n > 0 )) || return 0
+    (( others == 0 )) || return 0
+    _bs=$(_kb_board_settings_script) || { echo "Error: cannot locate kanban-hooks/" >&2; return 1; }
+    _ap="$(dirname "$_bs")/approval_providers.py"
+    [[ -f "$_ap" ]] || { echo "Error: missing $_ap" >&2; return 1; }
+    errf=$(mktemp "${TMPDIR:-/tmp}/kb-co-gcr.XXXXXX") || return 1
+    cid_list=$(python3 "$_ap" gamma-completable-crs "$board_file" "$release_id" 2>"$errf") && crc=0 || crc=$?
+    if (( crc != 0 )); then
+        echo "Error: $release_id close-out refused: cannot determine which CRs belong to the current build (gamma-completable-crs exit $crc): $(tail -n 1 "$errf")" >&2
+        rm "$errf"; return 1
+    fi
+    unbound_list=$(grep '^unbound ' "$errf" 2>/dev/null)
+    blocked_list=$(grep '^blocked ' "$errf" 2>/dev/null)
+    invalid_list=$(grep '^invalid' "$errf" 2>/dev/null)
+    other_list=$(grep -E '^(other|missing) ' "$errf" 2>/dev/null)
+    rm "$errf"
+    # A malformed id is never handed to kb-cr; a CR kb-cr would refuse is named with kb-cr's own remedy. Both refuse
+    # BEFORE any kb-cr call, dry-run and real alike.
+    if [[ -n "$invalid_list" ]]; then
+        while IFS= read -r line; do
+            [[ -n "$line" ]] || continue
+            echo "Error: $release_id close-out refused (nothing was tagged, merged or deleted): linked CR id ${line#invalid } is malformed; fix the board link" >&2
+        done <<EOF_INV
+$invalid_list
+EOF_INV
+        return 1
+    fi
+    if [[ -n "$blocked_list" ]]; then
+        echo "Error: $release_id close-out refused (nothing was tagged, merged or deleted): kb-cr complete would refuse the linked CR(s), so none were completed:" >&2
+        while IFS= read -r line; do
+            [[ -n "$line" ]] || continue
+            line="${line#blocked }"; cid="${line%% *}"; line="${line#* }"; cst="${line%% *}"
+            echo "  - CR $cid ($cst) cannot be completed: ${line#* }; fix that, then re-run: kb-release close-out $release_id" >&2
+        done <<EOF_BLK
+$blocked_list
+EOF_BLK
+        return 1
+    fi
+    # XACA-1703-015: all-or-nothing. A CR belonging to an earlier build, or ANY linked CR that _kb_co_cr_preflight would
+    # refuse once the completable set is done, refuses HERE, before any kb-cr call, so a refused close-out has changed
+    # no CR (never "completed CR-1, then the preflight refused CR-2").
+    if [[ -n "$unbound_list" ]]; then
+        echo "Error: $release_id close-out refused (nothing was tagged, merged or deleted): the linked CR(s) belong to an earlier build, not the current $stage build, so they were NOT completed${cid_list:+ (and nothing else was completed either)}:" >&2
+        while IFS= read -r line; do
+            [[ -n "$line" ]] || continue
+            line="${line#unbound }"; cid="${line%% *}"; cst="${line#* }"
+            echo "  - CR $cid ($cst) belongs to an earlier build; deploy and link the CR for this build, or complete it by hand if it is genuinely this build's: kb-cr complete $cid; then re-run: kb-release close-out $release_id" >&2
+        done <<EOF_UNB
+$unbound_list
+EOF_UNB
+        bad=1
+    fi
+    if [[ -n "$cid_list" && -n "$other_list" ]]; then
+        echo "Error: $release_id close-out refused (nothing was tagged, merged or deleted): other linked CR(s) would still block the close-out after the completable CR(s) were completed, so NONE were completed:" >&2
+        while IFS= read -r line; do
+            [[ -n "$line" ]] || continue
+            if [[ "$line" == missing\ * ]]; then
+                echo "  - CR ${line#missing } is listed on the release but is not on the board; unlink it (or restore it), then re-run: kb-release close-out $release_id" >&2
+            else
+                line="${line#other }"; cid="${line%% *}"; cst="${line#* }"
+                echo "  - CR $cid is '$cst': close-out closes only cr-completed, cr-rejected or already-closed CRs; take it to cr-completed, or 'kb-cr close $cid --reason \"<why>\"' if it is abandoned, then re-run: kb-release close-out $release_id" >&2
+            fi
+        done <<EOF_OTH
+$other_list
+EOF_OTH
+        bad=1
+    fi
+    (( bad == 0 )) || return 1
+    [[ -n "$cid_list" ]] || return 0
+    if (( ! dry )); then
+        typeset -f kb-cr >/dev/null 2>&1 \
+            || { echo "Error: $release_id close-out refused: kb-cr is not available in this shell; run: kb-cr complete <CR-ID>, then re-run: kb-release close-out $release_id" >&2; return 1; }
+    fi
+    while IFS= read -r cid; do
+        [[ -n "$cid" ]] || continue
+        cst=$(_kb_jq_read "$board_file" '[.crs[]? | select(.id == $c) | .crState] | first // ""' -r --arg c "$cid")
+        [[ "$cst" == "cr-completed" ]] && continue
+        if (( dry )); then
+            echo "[dry-run] would run: kb-cr complete $cid ($cst)"
+            _KB_CO_DRY_COMPLETE="${_KB_CO_DRY_COMPLETE} ${cid}"
+            _KB_CO_DRY_IGNORE_GAMMA=1
+            continue
+        fi
+        echo "  gammaCrComplete: kb-cr complete $cid ($cst)"
+        out=$(KB_CR_ACTOR="kb-release close-out" kb-cr complete "$cid" 2>&1) && crc=0 || crc=$?
+        [[ -z "$out" ]] || printf '%s\n' "$out"
+        if (( crc == 6 )); then
+            echo "  gammaCrComplete: WARNING: $cid completed, but its Release & CR Status page was not refreshed (kb-cr complete exit 6); re-run: kb-cr publish-record $release_id" >&2
+        elif (( crc != 0 )); then
+            after=$(_kb_jq_read "$board_file" '[.crs[]? | select(.id == $c) | .crState] | first // ""' -r --arg c "$cid")
+            if [[ "$after" == "cr-completed" ]]; then
+                echo "  gammaCrComplete: $cid is already cr-completed (kb-cr complete exited $crc; treated as done)"
+                continue
+            fi
+            tl=$(printf '%s' "$out" | tail -n 1)
+            echo "Error: close-out refused: CR $cid is ${after:-$cst} and the engine could not complete it (kb-cr complete exited $crc: $tl); resolve that, then run: kb-cr complete $cid (or re-run: kb-release close-out $release_id, which completes it for you)" >&2
+            return 1
+        fi
+        after=$(_kb_jq_read "$board_file" '[.crs[]? | select(.id == $c) | .crState] | first // ""' -r --arg c "$cid")
+        if [[ "$after" != "cr-completed" ]]; then
+            echo "Error: close-out refused: CR $cid is ${after:-$cst} and the engine could not complete it (kb-cr complete exited $crc: returned success but the CR is not cr-completed); resolve that, then run: kb-cr complete $cid (or re-run: kb-release close-out $release_id, which completes it for you)" >&2
+            return 1
+        fi
+    done <<EOF_GCR
+$cid_list
+EOF_GCR
     return 0
 }
 
@@ -30000,13 +30135,17 @@ kb-release-chain() {
 # Exit: 0 complete (release at PROD) or ALREADY closed out (XACA-1726-012: reported, nothing run) | 1 a step failed or was refused | 2 usage | 3 at PROD but the final status page refresh did not land
 kb-release-close-out() {
     local release_id="" opt_repo="$PWD" opt_dry=0 bf rj ctx team dry codes
+    # XACA-1703-013: the --dry-run plan state is FUNCTION-scoped (zsh dynamic scope: the callees below read and write
+    # these locals), so an interrupted dry-run cannot leak it into kb-run's resume or the belt preflight. The consumers
+    # honour it only while _KB_CO_DRY_ACTIVE is 1, which only this function's --dry-run sets.
+    local _KB_CO_DRY_COMPLETE="" _KB_CO_DRY_IGNORE_GAMMA="" _KB_CO_DRY_ACTIVE=0
     local usage="Usage: kb-release close-out <release-id> [--repo-dir <path>] [--dry-run]"
     while [[ $# -gt 0 ]]; do
         case "${1-}" in
             --repo-dir)
                 if [[ $# -lt 2 ]]; then echo "Error: --repo-dir needs a value" >&2; echo "$usage" >&2; return 2; fi
                 opt_repo="${2-}"; shift 2 ;;
-            --dry-run) opt_dry=1; shift ;;
+            --dry-run) opt_dry=1; _KB_CO_DRY_ACTIVE=1; shift ;;
             --help|-h)
                 echo "$usage"; echo ""
                 echo "PROD close-out: bound to the LAST ENABLED stage before PROD (GAMMA when the team has it, else BETA,"
@@ -30043,7 +30182,7 @@ kb-release-close-out() {
         if (( opt_dry )); then
             local _co_errf _co_rc
             _co_errf=$(mktemp "${TMPDIR:-/tmp}/kb-co-dry.XXXXXX") || return 1
-            { _kb_co_cr_preflight "$bf" "$release_id" && _kb_release_close_out_ready "$release_id"; } 2>"$_co_errf"
+            { _kb_co_gamma_cr_complete "$bf" "$release_id" 1 && _kb_co_cr_preflight "$bf" "$release_id" && _kb_release_close_out_ready "$release_id"; } 2>"$_co_errf"
             _co_rc=$?
             if (( _co_rc != 0 )); then
                 echo "[dry-run] would refuse:" >&2
@@ -30053,12 +30192,15 @@ kb-release-close-out() {
             fi
             rm "$_co_errf"
         else
+            _kb_co_gamma_cr_complete "$bf" "$release_id" 0 || return 1   # XACA-1703: GAMMA holds + CR deployed-prod -> kb-cr complete, before the CR preflight
             _kb_co_cr_preflight "$bf" "$release_id" || return 1
             _kb_release_close_out_ready "$release_id" || return 1
         fi
     fi
     local -a args=(--repo "$opt_repo")
     (( opt_dry )) && args+=(--dry-run)
+    # XACA-1703: the --dry-run plan locals (_KB_CO_DRY_COMPLETE/_KB_CO_DRY_IGNORE_GAMMA) stay visible through the plan's
+    # own belt preflight inside _kb_release_close_out and vanish when this function returns, however it exits.
     _kb_release_close_out "$bf" "$release_id" "${args[@]}"
 }
 

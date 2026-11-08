@@ -233,6 +233,35 @@ def resume_plan(release, *, flow_config, cr_support_enabled, items=None, other_r
                     if release.get("branch") else
                     "PROD is the deploy-confirm stage: the lead confirms the production deploy with the session promote.",
                     offer=promote_offer("PROD") if nxt else None)
+    if cur == "GAMMA" and cr_support_enabled and isinstance(cr, dict) and cr.get("id") \
+            and cr.get("crState") in ("deployed-prod", "emergency-deployed"):
+        # XACA-1703: the GAMMA gate also wants the CR cr-completed, and nothing but close-out completes it. A bare
+        # promote would be refused (GAMMA_CR_NOT_COMPLETED), so no promote is offered here. A plan built without the
+        # classification (completable/stuck absent) treats `cr` itself as the one completable CR.
+        ready = cr["completable"] if isinstance(cr.get("completable"), list) else [cr]
+        stuck = [x for x in (cr.get("stuck") or []) if isinstance(x, dict)]
+        names = ", ".join("%s (%s)" % (x["id"], x["crState"]) for x in ready)
+        ids = ", ".join(str(x["id"]) for x in ready)
+        if ready and not stuck:
+            return done("gamma-cr-complete-pending", "offer-closeout",
+                        "GAMMA %s: CR %s %s and not yet cr-completed; the PROD promote is refused until %s."
+                        % (status, names, "is" if len(ready) == 1 else "are", "it is" if len(ready) == 1 else "they are"),
+                        production_hint(),
+                        "`kb-release close-out %s` completes %s for you (it runs `kb-cr complete`), then tags, merges and "
+                        "promotes; do not run the promote by hand." % (rid, ids))
+        why = "; ".join("CR %s (%s): %s" % (x["id"], x["crState"], x.get("why") or
+                        {"unbound": "belongs to an earlier build, not the current GAMMA build",
+                         "other": "is not in a state close-out accepts (cr-completed, cr-rejected or cr-closed)",
+                         "missing": "is listed on the release but not on the board"}.get(x.get("kind"), "cannot be completed"))
+                        for x in stuck)
+        head = ("GAMMA %s: CR %s deployed and not yet cr-completed, but `kb-release close-out %s` will refuse to complete "
+                "%s until the other linked CR(s) are fixed; the PROD promote is refused until then."
+                % (status, names, rid, "it" if len(ready) == 1 else "them")) if ready else \
+               ("GAMMA %s: a deployed CR is not yet cr-completed and `kb-release close-out %s` cannot complete it; the PROD "
+                "promote is refused until the CR is cr-completed." % (status, rid))
+        return done("gamma-cr-complete-pending", "offer-closeout", head, production_hint(),
+                    "Close-out completes CRs all-or-nothing, so fix first: %s. Then re-run `kb-release close-out %s`; do "
+                    "not run the promote by hand." % (why or "no completable CR", rid))
     if cur == "GAMMA":
         return done("gamma-passed", "offer-promote", "GAMMA %s: offer the PROD promote (session promote)." % status,
                     production_hint(),
@@ -365,6 +394,20 @@ def load_plan(kanban_dir, release_id, repo_dir=None, now=None):
             sched.append({"provider": p["name"], "schedule": p["schedule"],
                           "tests": [e if isinstance(e, str) else e["test"] for e in names]})
     cr = None
+    if cur == "GAMMA" and cr_on:   # XACA-1703: a deployed-prod CR still needs `kb-cr complete` before the promote
+        import approval_providers as ap
+        # Same classification close-out acts on (gamma-completable-crs), so this row never promises a completion the
+        # engine will refuse: `completable` = what close-out will complete; `stuck` = why it will refuse instead.
+        try:
+            cls = ap.gamma_cr_classify(board, rel)
+        except Exception:  # noqa: BLE001 -- unreadable linkage: say nothing rather than promise
+            cls = []
+        done_ = [{"id": c, "crState": st} for k, c, st, _w in cls if k == "completable"]
+        stuck = [{"id": c, "crState": st, "kind": k, "why": w} for k, c, st, w in cls if k != "completable"]
+        pend = [c for c in cls if c[0] in ("completable", "unbound", "blocked")]   # a deployed CR exists
+        if pend:
+            first = (done_ or [{"id": pend[0][1], "crState": pend[0][2]}])[0]
+            cr = {"id": first["id"], "crState": first["crState"], "completable": done_, "stuck": stuck}
     if cur == "CR" and cr_on:
         import approval_providers as ap
         from release_cr_stage import is_gamma_held, RETIRED_STATES
