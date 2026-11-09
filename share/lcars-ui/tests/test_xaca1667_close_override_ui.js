@@ -194,3 +194,16 @@ test('XACA-1667-004: CLOSE ANYWAY with a reason resubmits the same payload plus 
     assert.deepEqual(h.fetched[1], { targetState: 'cr-closed', expectedUpdatedAt: 'u1', actor: 'lcars-ui', override: true, reason: 'closed by hand' });
     assert.equal(h.fetched[0].override, undefined, 'the first attempt must not carry an override');
 });
+
+test('XACA-1683: the close-guard RACE 409 body (releaseId + server message, no currentUpdatedAt) renders UI wording, not CLI text', async () => {
+    // The client cannot tell the race 409 from the pre-check 409; the server now sends the same shape on both, so this pins that
+    // shape (closeBlocked + releaseId + the CLI-flavoured message) rendering as UI wording with no CLI text leaking through.
+    var raceBody = { ok: false, conflict: true, closeBlocked: true, releaseId: 'REL-1', error: BLOCKED + ' override with `--force-close --reason "<why>"`.' };
+    var h = harness(function () { return { status: 409, body: raceBody }; });
+    h.submit({ targetState: 'cr-closed' });
+    await tick();
+    var html = h.errorDiv.innerHTML;
+    assert.ok(html.indexOf('Linked to REL-1, whose close-out has not run.') !== -1, 'UI wording missing: ' + html);
+    assert.ok(html.indexOf('--force-close') === -1 && html.indexOf('`') === -1 && html.indexOf('kb-release') === -1, 'CLI text leaked: ' + html);
+    assert.ok(html.indexOf('id="cr-sc-override-btn"') !== -1 && html.indexOf('cr-sc-reload-btn') === -1);
+});

@@ -17995,8 +17995,27 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 # XACA-1667-004: the shell close guard refused inside the write (the board changed after the pre-check).
                 msg = next((ln.split("refused to close", 1)[1].split(": ", 1)[-1].strip()
                             for ln in result.stderr.splitlines() if "kb-cr: refused to close" in ln), "")
+                # XACA-1683: carry the releaseId so the EDIT STATE words this like the pre-check 409 (it falls back to
+                # the CLI text only when releaseId is ""). Re-evaluate the rule against the board the shell guard just
+                # refused on; if that cannot be read or no longer blocks, parse the release id out of kb-cr's refusal
+                # line ("is linked to release <REL>,"); fail soft to "".
+                race_release_id, race_message = "", ""
+                try:
+                    with open(board_file, "r", encoding="utf-8") as f:
+                        fresh_board = json.load(f)
+                    fresh_block = (_approval_providers.cr_close_block(fresh_board, cr_id)
+                                   if _approval_providers is not None else None)
+                    if fresh_block and fresh_block.get("releaseId"):
+                        race_release_id = str(fresh_block["releaseId"])
+                        race_message = fresh_block.get("message", "") or ""
+                except Exception:  # noqa: BLE001 - fail soft: the UI handles "" by showing the CLI text
+                    race_release_id, race_message = "", ""
+                if not race_release_id and _approval_providers is not None:
+                    m = re.search(r"linked to release (\S+?),", msg)
+                    race_release_id = m.group(1) if m else ""
                 self._send_json_response(
-                    {"ok": False, "conflict": True, "closeBlocked": True, "error": msg or result.stderr.strip()}, status=409)
+                    {"ok": False, "conflict": True, "closeBlocked": True, "releaseId": race_release_id,
+                     "error": race_message or msg or result.stderr.strip()}, status=409)
                 return
 
             if result.returncode != 0:

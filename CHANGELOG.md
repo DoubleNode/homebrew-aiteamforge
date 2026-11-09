@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1683: LCARS close-guard race 409 carries releaseId (XACA-1683)
+- Tap files updated in this publish: `share/lcars-ui/server.py`,`share/lcars-ui/tests/test_xaca1667_close_override_ui.js`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1684: CR remedy hints name --force-close where a bare kb-cr close is refused (XACA-1684)
 - Tap files updated in this publish: `share/kanban-hooks/approval_providers.py`,`share/kanban-hooks/release_cr_stage.py` `share/kanban-hooks/release_gamma_failure.py`,`share/kanban-hooks/release_resume.py` `share/scripts/cr-confluence-poller.py`,`share/scripts/kb-cr.sh` `share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1678: Two-line tmux tab bar adapts label width to narrow clients (XACA-1678)
