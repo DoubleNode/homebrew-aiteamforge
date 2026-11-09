@@ -237,6 +237,17 @@ _brew_installed_version() {
 _run_brew_upgrade_checked() {
   local pre_version="${1:-}"
   local brew_exit_nonzero=false
+  # XACA-1781 (PR #1312 review): the version-pin sentinel is honoured only by the
+  # unattended auto-upgrade job (dev-team scripts/auto-upgrade.sh, same
+  # ${AITEAMFORGE_DIR:-$HOME/aiteamforge}/version-pin path). This explicit run goes
+  # past it — say so instead of silently overriding the hold.
+  local _pin_file="${WORKING_DIR:-$(get_working_dir)}/version-pin" _pin=""
+  if [ -f "$_pin_file" ]; then
+    _pin="$(head -n 1 "$_pin_file" 2>/dev/null | tr -d '[:space:]' || true)"
+  fi
+  if [ -n "$_pin" ]; then
+    print_warning "version-pin is set (${_pin}, ${_pin_file}). The pin holds only the unattended auto-upgrade job; this explicit upgrade goes past it."
+  fi
   # XACA-0702: never let a non-zero brew exit kill the script before we can
   # report it. Capture the outcome, then compare pre/post installed versions.
   if brew upgrade aiteamforge; then

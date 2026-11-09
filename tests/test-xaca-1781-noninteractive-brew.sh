@@ -291,6 +291,36 @@ for tok in AITEAMFORGE_BREW_UPGRADE_DONE tap-refused caller-upgrade-did-not-adva
 done
 if [ "$_static_ok" = true ]; then test_pass; else test_fail "upgrade.sh lacks contract tokens"; fi
 
+# Version pin (PR #1312 review): an explicit no-marker run that upgrades brew must
+# WARN that it goes past a set pin; the marker path never runs brew, so no warning;
+# no pin file => no warning.
+_PIN_FILE="$_AITEAMFORGE_DIR/version-pin"
+for _pc in pinned-nomarker pinned-marker unpinned-nomarker; do
+    test_start "PIN: $_pc"
+    case "$_pc" in
+        pinned-*) echo "v0.15.0" > "$_PIN_FILE" ;;
+        *) rm -f "$_PIN_FILE" ;;
+    esac
+    case "$_pc" in
+        *-marker) _scenario stale_probe; _run_upgrade 1 --non-interactive ;;
+        *)        _scenario advance;     _run_upgrade @unset --non-interactive ;;
+    esac
+    _calls="$(grep -c '^upgrade aiteamforge' "$BREW_CALL_LOG" 2>/dev/null || true)"
+    case "$_pc" in
+        pinned-nomarker)
+            _x_eq 1 "${_calls:-0}" "pinned no-marker run must still upgrade (calls)" && \
+            _x_has "$UPGRADE_OUTPUT" "version-pin is set (v0.15.0" "missing version-pin warning" && \
+            _x_has "$UPGRADE_OUTPUT" "goes past it" "warning must say the run goes past the pin" && test_pass ;;
+        pinned-marker)
+            _x_eq 0 "${_calls:-0}" "marker run must not upgrade (calls)" && \
+            _x_hasnt "$UPGRADE_OUTPUT" "version-pin is set" "marker path must not warn (it runs no brew)" && test_pass ;;
+        unpinned-nomarker)
+            _x_eq 1 "${_calls:-0}" "unpinned no-marker run must upgrade (calls)" && \
+            _x_hasnt "$UPGRADE_OUTPUT" "version-pin is set" "no pin file => no warning" && test_pass ;;
+    esac
+done
+rm -f "$_PIN_FILE"
+
 # Unit: tap_load_refused() under the caller's `set -eo pipefail`, with a refusing
 # brew that exits NON-ZERO and prints the refusal first, then a LOT of output. A
 # `printf | grep -q` match SIGPIPEs on large input and pipefail turns it into a
