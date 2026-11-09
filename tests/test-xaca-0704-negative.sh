@@ -353,6 +353,13 @@ test_start "Case A — N4: no false success message"
 assert_not_contains "$UPGRADE_OUTPUT" "upgraded successfully" \
     "Stuck upgrade must NOT print 'upgraded successfully'" && test_pass
 
+# XACA-1781: the failure box must name the real cause, not blame an untrusted tap.
+test_start "Case A — XACA-1781: Reason is brew-upgrade-did-not-advance, no UNTRUSTED blame"
+assert_contains "$UPGRADE_OUTPUT" "Reason: brew-upgrade-did-not-advance" \
+    "No-op upgrade must report 'Reason: brew-upgrade-did-not-advance'" && \
+assert_not_contains "$UPGRADE_OUTPUT" "UNTRUSTED" \
+    "No-op upgrade must NOT blame an untrusted tap" && test_pass
+
 # ASSERT N5: .installed-version stamp does NOT advance to 0.15.0
 test_start "Case A — N5: .installed-version stamp not advanced to 0.15.0"
 _stamped="$(cat "$_AITEAMFORGE_DIR/.installed-version" 2>/dev/null | tr -d '[:space:]')"
@@ -427,8 +434,10 @@ echo "aiteamforge"        > "$MOCK_BREW_LIST_OUTPUT_FILE"
 echo "aiteamforge 0.15.0" > "$MOCK_BREW_LIST_VERSIONS_FILE"
 # EMPTY file = empty stdout from brew outdated = up to date (stdout-presence detection)
 : > "$MOCK_BREW_OUTDATED_OUTPUT_FILE"
-# No upgrade-exit-file needed — --non-interactive skips 'brew upgrade'
-# No post-version-file needed — no upgrade call is made
+# No upgrade-exit-file needed — the formula is NOT outdated, so no 'brew upgrade' is made.
+# XACA-1781: --non-interactive WITHOUT the AITEAMFORGE_BREW_UPGRADE_DONE marker now runs
+# 'brew upgrade' itself, but only when 'brew outdated' is non-empty. A current box
+# (empty stdout) must still short-circuit to 'up to date' with zero upgrade calls.
 
 _run_upgrade --non-interactive
 
@@ -440,6 +449,12 @@ assert_exit_code 0 "$UPGRADE_EXIT" \
 # Anti-vacuity: output non-empty
 test_start "Case C — anti-vacuity: output is non-empty"
 assert_not_empty "$UPGRADE_OUTPUT" "Case C upgrade output must not be empty (check subprocess invocation)" && test_pass
+
+# XACA-1781: a current box must not trigger a brew upgrade even without the caller marker.
+test_start "Case C — XACA-1781: no 'brew upgrade' call on a current box (marker absent)"
+_c_upg_calls="$(grep -c '^upgrade aiteamforge' "$BREW_CALL_LOG" 2>/dev/null || true)"
+assert_equal "0" "${_c_upg_calls:-0}" \
+    "current box must make 0 'brew upgrade' calls, got ${_c_upg_calls:-0}" && test_pass
 
 # ASSERT N10: output does NOT contain FAILURE banner
 test_start "Case C — N10: no FAILURE banner for current box under --non-interactive"

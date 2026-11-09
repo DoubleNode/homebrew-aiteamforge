@@ -384,8 +384,13 @@ _aitf_tap_name() {
 # guessing from config.
 tap_load_refused() {
     command -v brew >/dev/null 2>&1 || return 1
-    brew info aiteamforge 2>&1 \
-        | grep -qiE "untrusted tap|refus(e|ing) to load"
+    # XACA-1781: capture FIRST, then match. The old `brew info … | grep -q` pipeline
+    # was false-negative under a caller's `set -o pipefail`: a refusing brew exits
+    # non-zero (and `grep -q` closing early can SIGPIPE it), so the pipeline failed
+    # even though the refusal text matched — the refused tap was reported as fine.
+    local _info=""
+    _info="$(brew info aiteamforge 2>&1 || true)"
+    printf '%s\n' "$_info" | grep -qiE "untrusted tap|refus(e|ing) to load"
 }
 
 # ensure_tap_trusted — idempotently trust the aiteamforge tap so Homebrew can

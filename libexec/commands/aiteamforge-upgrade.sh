@@ -86,6 +86,11 @@ NON_INTERACTIVE=false  # XACA-0571: auto-answer 'yes' to all prompts; for cron /
 # of the old unconditional "upgraded successfully!" + exit 0. Default false so a
 # box with no brew install (or already-current) still reports success normally.
 UPGRADE_BREW_FAILED=false
+# XACA-1781: WHY the brew step failed, so the final box names the real cause instead
+# of one generic "UNTRUSTED tap" paragraph. One of: tap-refused,
+# caller-upgrade-did-not-advance, brew-upgrade-did-not-advance,
+# brew-upgrade-exit-nonzero. Empty = not recorded (the box then says "unknown").
+UPGRADE_BREW_FAILED_REASON=""
 # Whether aiteamforge is installed via Homebrew (decides version-stamp source and
 # whether the no-advance check applies at all). Resolved in check_brew_updates().
 UPGRADE_VIA_BREW=false
@@ -117,7 +122,9 @@ Usage: aiteamforge upgrade [options]
 Options:
   --dry-run         Show what would be updated without making changes
   --force           Force upgrade even if up to date
-  --non-interactive Auto-answer 'yes' to all prompts (for cron / auto-upgrade)
+  --non-interactive Auto-answer 'yes' to all prompts (for cron / auto-upgrade); runs
+                    'brew upgrade aiteamforge' itself unless the caller set
+                    AITEAMFORGE_BREW_UPGRADE_DONE=1 (it already ran it)
   -v, --version     Show version
   -h, --help        Show this help
 
@@ -223,6 +230,38 @@ _brew_installed_version() {
 }
 
 # Check for Homebrew formula updates
+# XACA-1781: the brew-upgrade step + pre/post no-advance check, shared by the
+# interactive "yes" path and the --non-interactive no-caller-marker path so the
+# two can never drift. $1 = installed version BEFORE the upgrade ("" = unknown).
+# Sets UPGRADE_BREW_VERSION, and on a no-advance UPGRADE_BREW_FAILED(+_REASON).
+_run_brew_upgrade_checked() {
+  local pre_version="${1:-}"
+  local brew_exit_nonzero=false
+  # XACA-0702: never let a non-zero brew exit kill the script before we can
+  # report it. Capture the outcome, then compare pre/post installed versions.
+  if brew upgrade aiteamforge; then
+    print_success "Formula upgraded"
+  else
+    brew_exit_nonzero=true
+    print_warning "brew upgrade aiteamforge exited non-zero"
+  fi
+  local post_version=""
+  post_version="$(_brew_installed_version || true)"
+  UPGRADE_BREW_VERSION="${post_version:-$UPGRADE_BREW_VERSION}"
+  # No-advance detection: a brew upgrade that left the installed version
+  # unchanged means the box is stuck (refused tap, pinned, etc.). Only flag
+  # when we have BOTH a pre and post token to compare (empty = can't tell).
+  if [ -n "$pre_version" ] && [ -n "$post_version" ] && [ "$pre_version" = "$post_version" ]; then
+    print_warning "Installed brew version did not advance (still ${post_version})."
+    UPGRADE_BREW_FAILED=true
+    if [ "$brew_exit_nonzero" = true ]; then
+      UPGRADE_BREW_FAILED_REASON="brew-upgrade-exit-nonzero"
+    else
+      UPGRADE_BREW_FAILED_REASON="brew-upgrade-did-not-advance"
+    fi
+  fi
+}
+
 check_brew_updates() {
   print_section "Checking for Updates"
 
@@ -271,6 +310,7 @@ check_brew_updates() {
     print_warning "Remediation:  brew trust --tap $(_aitf_tap_name)"
     print_warning "═══════════════════════════════════════════════════════════════"
     UPGRADE_BREW_FAILED=true
+    UPGRADE_BREW_FAILED_REASON="tap-refused"
     return
   fi
 
@@ -296,41 +336,37 @@ check_brew_updates() {
     print_warning "Update available: ${available_version:-unknown}"
 
     if [ "$DRY_RUN" = false ]; then
-      # XACA-0571: skip the brew step entirely under --non-interactive — the
-      # auto-upgrade LaunchAgent has already run `brew upgrade aiteamforge`
-      # before invoking this command; re-running it here would be redundant.
+      # XACA-0571 / XACA-1781: under --non-interactive the brew step is skipped ONLY
+      # when the caller says it already ran `brew upgrade aiteamforge` — the
+      # auto-upgrade LaunchAgent sets AITEAMFORGE_BREW_UPGRADE_DONE=1 right before
+      # invoking this command, so re-running it would be redundant. Any other
+      # --non-interactive caller (a human, ssh, CI) has run nothing: auto-answer the
+      # prompt "yes" (its default is y) and upgrade here. Before XACA-1781 the skip
+      # was unconditional, so a remote `aiteamforge upgrade --non-interactive` never
+      # upgraded brew and then blamed an untrusted tap for it.
       if [ "$NON_INTERACTIVE" = true ]; then
-        print_info "Skipping brew upgrade prompt (--non-interactive); caller already handled brew"
-        # XACA-0702: the LaunchAgent ran `brew upgrade` BEFORE us, so the pre-snapshot
-        # already reflects whatever brew did. We cannot bracket our own brew step here
-        # — instead detect a stuck box by re-probing `brew outdated`. XACA-0702: a
-        # non-empty stdout means STILL outdated (exit code is inverted; see the
-        # detection note above). If outdated, brew never advanced → fail loudly.
-        local _still_outdated=""
-        _still_outdated="$(brew outdated aiteamforge 2>/dev/null || true)"
-        if [ -n "$_still_outdated" ]; then
-          print_warning "Formula is STILL outdated after the caller's brew upgrade — brew did not advance."
-          UPGRADE_BREW_FAILED=true
+        if [ "${AITEAMFORGE_BREW_UPGRADE_DONE:-}" = "1" ]; then
+          print_info "Skipping brew upgrade (--non-interactive; AITEAMFORGE_BREW_UPGRADE_DONE=1: the caller already ran it)"
+          # XACA-0702: the caller ran `brew upgrade` BEFORE us, so the pre-snapshot
+          # already reflects whatever brew did. We cannot bracket its brew step here
+          # — instead detect a stuck box by re-probing `brew outdated`. A non-empty
+          # stdout means STILL outdated (exit code is inverted; see the detection
+          # note above). If outdated, brew never advanced → fail loudly.
+          local _still_outdated=""
+          _still_outdated="$(brew outdated aiteamforge 2>/dev/null || true)"
+          if [ -n "$_still_outdated" ]; then
+            print_warning "Formula is STILL outdated after the caller's brew upgrade — brew did not advance."
+            UPGRADE_BREW_FAILED=true
+            UPGRADE_BREW_FAILED_REASON="caller-upgrade-did-not-advance"
+          fi
+        else
+          print_info "--non-interactive: no caller marker (AITEAMFORGE_BREW_UPGRADE_DONE); running brew upgrade aiteamforge"
+          print_info "Upgrading via Homebrew..."
+          _run_brew_upgrade_checked "$pre_version"
         fi
       elif prompt_yes_no "Upgrade Homebrew formula?" "y"; then
         print_info "Upgrading via Homebrew..."
-        # XACA-0702: never let a non-zero brew exit kill the script before we can
-        # report it. Capture the outcome, then compare pre/post installed versions.
-        if brew upgrade aiteamforge; then
-          print_success "Formula upgraded"
-        else
-          print_warning "brew upgrade aiteamforge exited non-zero"
-        fi
-        local post_version=""
-        post_version="$(_brew_installed_version || true)"
-        UPGRADE_BREW_VERSION="${post_version:-$UPGRADE_BREW_VERSION}"
-        # No-advance detection: a brew upgrade that left the installed version
-        # unchanged means the box is stuck (refused tap, pinned, etc.). Only flag
-        # when we have BOTH a pre and post token to compare (empty = can't tell).
-        if [ -n "$pre_version" ] && [ -n "$post_version" ] && [ "$pre_version" = "$post_version" ]; then
-          print_warning "Installed brew version did not advance (still ${post_version})."
-          UPGRADE_BREW_FAILED=true
-        fi
+        _run_brew_upgrade_checked "$pre_version"
       fi
     else
       echo "Would upgrade: brew upgrade aiteamforge"
@@ -7556,13 +7592,60 @@ elif [ "$UPGRADE_BREW_FAILED" = true ]; then
   print_error "Homebrew did NOT advance the aiteamforge formula."
   print_error "This box is STILL on the OLD version: ${CURRENT_VERSION:-unknown}"
   echo ""
-  print_error "Most common cause: the tap is UNTRUSTED on a trust-gated Homebrew,"
-  print_error "so 'brew upgrade' silently no-ops while reporting success."
-  echo ""
-  print_error "Remediation:"
-  echo "  brew trust --tap $(_aitf_tap_name)"
-  echo "  brew upgrade aiteamforge"
-  echo "  aiteamforge upgrade"
+  # XACA-1781: name the ACTUAL reason. The old text blamed an UNTRUSTED tap for every
+  # failure; that is true only for tap-refused (which tap_load_refused() detects).
+  # "UNTRUSTED" / `brew trust` therefore appear ONLY in the tap-refused arm.
+  _upgrade_reason="${UPGRADE_BREW_FAILED_REASON:-unknown}"
+  case "$_upgrade_reason" in
+    tap-refused|caller-upgrade-did-not-advance|brew-upgrade-did-not-advance|brew-upgrade-exit-nonzero) ;;
+    *) _upgrade_reason="unknown" ;;
+  esac
+  print_error "Reason: ${_upgrade_reason}"
+  case "$_upgrade_reason" in
+    tap-refused)
+      print_error "Cause: the tap is UNTRUSTED on a trust-gated Homebrew, so Homebrew refuses to load the formula."
+      echo ""
+      print_error "Remediation:"
+      echo "  brew trust --tap $(_aitf_tap_name)"
+      echo "  brew upgrade aiteamforge"
+      echo "  aiteamforge upgrade"
+      ;;
+    caller-upgrade-did-not-advance)
+      print_error "Cause: the caller (the auto-upgrade job) ran 'brew upgrade aiteamforge' but the installed version did not advance."
+      echo ""
+      print_error "Remediation:"
+      echo "  brew update"
+      echo "  brew info aiteamforge"
+      echo "  brew list --pinned"
+      echo "  brew upgrade aiteamforge"
+      echo "  aiteamforge upgrade"
+      ;;
+    brew-upgrade-did-not-advance)
+      print_error "Cause: 'brew upgrade aiteamforge' ran but the installed version did not advance."
+      echo ""
+      print_error "Remediation:"
+      echo "  brew update"
+      echo "  brew info aiteamforge"
+      echo "  brew list --pinned"
+      echo "  brew upgrade aiteamforge"
+      echo "  aiteamforge upgrade"
+      ;;
+    brew-upgrade-exit-nonzero)
+      print_error "Cause: 'brew upgrade aiteamforge' exited non-zero."
+      echo ""
+      print_error "Remediation:"
+      echo "  Re-run 'brew upgrade aiteamforge' and read its output, then:"
+      echo "  aiteamforge upgrade"
+      ;;
+    *)
+      print_error "Cause: Homebrew did not advance the formula (reason not recorded)."
+      echo ""
+      print_error "Remediation:"
+      echo "  brew update"
+      echo "  brew upgrade aiteamforge"
+      echo "  aiteamforge upgrade"
+      ;;
+  esac
   echo ""
   print_error "Then re-run the health check: aiteamforge doctor"
   exit 1
