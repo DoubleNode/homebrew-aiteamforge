@@ -70,7 +70,7 @@ const DEFAULT_THRESHOLDS = Object.freeze({
     memReclaimableBytes: 1.5 * GIB,   // macOS job needs >= 1.5 GiB (XACA-1436)
     swapUsedBytes: Math.round(2.8 * GIB), // LEGACY agents only (no memPressureLevel): gate is swapUsed < this
     memFreePct: 35,                   // gate is memFreePct >= this
-    loadPerCpu: 0.75,                 // gate is load1/ncpu < this
+    loadPerCpu: 0.75,                 // refuse 'load-high' only when load1/ncpu >= this AND load5/ncpu >= this (sustained); agents without load5: load1-only (XACA-1763)
     pollStaleMs: 30000,               // gate is now - lastPoll <= this
     // XACA-1708-003: pressure-based gate for agents that report memPressureLevel.
     memPressureLevel: 2,              // refuse when kern.memorystatus_vm_pressure_level >= this (1 normal, 2 warn, 4 critical)

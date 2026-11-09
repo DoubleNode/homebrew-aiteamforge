@@ -13354,6 +13354,9 @@ else:
             fi
             echo "╚═══════════════════════════════════════════════════════════╝"
 
+            # XACA-1711: which release(s) shipped this item (survives release archive).
+            _kb_item_release_history "$board_file" "$item_id"
+
             # CR Lifecycle section — only rendered when crSupport.enabled=true AND cr_id is set.
             # When the flag is false, or cr_id is absent: render NOTHING (disabled-state parity invariant).
             local cr_enabled
@@ -27775,6 +27778,18 @@ kb-release-unassign() {
     _kb_release_sync "$item_id" "$team"
 }
 
+# XACA-1711: print an item's `releaseHistory` (which release(s) shipped it), one
+# line per entry. Archiving a release clears the live .releaseAssignment pointer
+# but keeps this record. Prints nothing when the item has no history.
+# Usage: _kb_item_release_history <board_file> <item-id>
+_kb_item_release_history() {
+    local board_file="${1-}" item_id="${2-}" hist_lines
+    hist_lines=$(_kb_jq_read "$board_file" '.backlog[]? | select(.id == $id) | (.releaseHistory // [])[]? | "    - \(.releaseName // .releaseId) (\(.releaseId))  v\(.version // "-")  \(.stage // "-")  archived \(.archivedAt // "-")"' -r --arg id "$item_id" 2>/dev/null)
+    [[ -z "$hist_lines" ]] && return 0
+    echo "  Release history:"
+    printf '%s\n' "$hist_lines"
+}
+
 # Show release assignment for an item
 # Usage: kb-release-show <item-id|REL-ID>
 kb-release-show() {
@@ -27842,6 +27857,7 @@ kb-release-show() {
 
     if [[ -z "$assignment" || "$assignment" == "null" ]]; then
         echo "$item_id: Not assigned to any release"
+        _kb_item_release_history "$board_file" "$item_id"
         return 0
     fi
 
@@ -27854,6 +27870,7 @@ kb-release-show() {
     echo "  Release: $release_name ($release_id)"
     echo "  Platform: $platform"
     echo "  Assigned: $assigned_at"
+    _kb_item_release_history "$board_file" "$item_id"
 }
 
 # Edit an existing release's metadata via PUT /api/releases/<id>

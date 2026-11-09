@@ -100,8 +100,8 @@
     }
   ],
   "liveOutOfScope": {
-    "marketplaces": ["inline"],
-    "reason": "Mods layer (CLAUDE_CODE_PLUGIN_DIRS today, a user-scope marketplace later under XACA-1605): not the team toolset"
+    "marketplaces": ["inline", "aiteamforge-mods"],
+    "reason": "Mods layer: CLAUDE_CODE_PLUGIN_DIRS (inline) and the user-scope aiteamforge-mods folder marketplace delivered by the installer/upgrade (XACA-1605): not the team toolset"
   },
   "skills": {
     "_note": "Skill classes (XACA-1643-006, design record D6). `shared` skills are machine-wide on every host and are exactly the sync-tap.sh mirrored list (tests/test-xaca-1643-skills.sh enforces it both ways). `devHost` skills are machine-wide only on hosts with a dev-team clone and stay NOT-MIRRORED, each with its reason. A `groups.<g>` skill is NOT machine-wide: kb-sync-plugins writes project-scope symlinks <session dir>/.claude/skills/<name> -> <owner source root>/<name> into the group's teams' session dirs and linked worktrees (untracked; it never writes inside the owning repo, and removes only symlinks it recorded). `owner` picks the source root from `sourceRoots`; a root is a literal path, `${dev_team}/...`, or `${working_dir:<registry key>}/...` (the registry key's working_dir on this host); skills owned outside this repo are distribution only. deploy-to-production.sh skips every group skill (it reads skills.groups itself; `kb-sync-plugins skills group-names` prints the same list and a test pins that), so a group skill never lands in the machine-wide user skills dir.",

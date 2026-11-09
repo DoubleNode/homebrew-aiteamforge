@@ -1,0 +1,4 @@
+Vendored from anthropics/claude-code-playground@569c528 (claude-code/mods/blast-radius), Apache-2.0. Pilot on M3Pro 2026-10-26.
+Local patches:
+- 2026-10-26 hooks/blast-radius.mjs: attended sessions only (pass through when $.session.surfaces() is empty, i.e. headless).
+- 2026-11-08 hooks/blast-radius.mjs (XACA-1605-016/-018): (1) reads the shared ~/.claude/mods/switches.json and defaults to OFF when its key is missing (hooks/switches.ts, identical in every claude-mods mod); (2) a subagent's tool call (e.agentId set) passes through instead of being held; (3) hold limit cut from 10 minutes to 2; (4) a command the damage-control PreToolUse hook would refuse anyway (asked of the hook itself, exit code 2) passes through instead of being held first; (5) /blast-radius on|off|status. LICENSE (Apache-2.0) is unchanged.

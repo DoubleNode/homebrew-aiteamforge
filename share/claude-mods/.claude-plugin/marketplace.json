@@ -1,0 +1,16 @@
+{
+  "name": "aiteamforge-mods",
+  "owner": { "name": "AITeamForge" },
+  "metadata": { "description": "AITeamForge Claude Code mods: status lines, panes and a safety hook for every terminal." },
+  "plugins": [
+    { "name": "agent-watch", "source": "./agent-watch", "description": "Who is doing the work: main chat, helper agents, model, task, skills." },
+    { "name": "goal-meter", "source": "./goal-meter", "description": "Task-list progress bar, ETA and running task." },
+    { "name": "inbox-lamp", "source": "./inbox-lamp", "description": "Unread kb-msg count; red on freeze/merge-order mail." },
+    { "name": "gate-board", "source": "./gate-board", "description": "Tester/reviewer bot verdicts, CI and open protected subitems." },
+    { "name": "usage-gauge", "source": "./usage-gauge", "description": "Plan usage gauge." },
+    { "name": "ticket-lamp", "source": "./ticket-lamp", "description": "This session's kanban ticket: status, subitems, release, epic." },
+    { "name": "replay-theater", "source": "./replay-theater", "description": "Replay a session's tool calls." },
+    { "name": "blast-radius", "source": "./blast-radius", "description": "Holds risky Bash commands and shows what they would change. Ships off." },
+    { "name": "mods-switchboard", "source": "./mods-switchboard", "description": "/mods: list every mod, turn each on or off, hide or show it, open its pane." }
+  ]
+}

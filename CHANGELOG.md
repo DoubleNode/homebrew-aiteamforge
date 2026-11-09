@@ -6,6 +6,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1605: Ship the AITeamForge Claude Code mods fleet-wide via the aiteamforge-mods marketplace (XACA-1605)
+- XACA-1763: CI pool gates on sustained load; stall alerts page once and announce recovery (XACA-1763)
+- XACA-1711: Backfill releaseHistory from archived releases' trails (XACA-1711, 2/2)
+- XACA-1745: gh credential guard resolves helpers like git and allowlists their forms (XACA-1745)
+- Tap files updated in this publish: `fleet-monitor/server/config/notice_types.json`,`fleet-monitor/server/lib/ci-dispatch-alerts.js` `fleet-monitor/server/lib/ci-dispatch-placement.js`,`fleet-monitor/server/lib/ci-dispatcher.js` `fleet-monitor/server/lib/ci-pool-store.js`,`fleet-monitor/server/package.json` `fleet-monitor/server/tests/xaca-1407-003-fleet-notices.test.js`,`fleet-monitor/server/tests/xaca-1407-004-adversarial.test.js` (+121 more). Run `brew upgrade aiteamforge` to receive them.
 
 ## [0.21.17] - 2026-11-09
 - XACA-1683: LCARS close-guard race 409 carries releaseId (XACA-1683)

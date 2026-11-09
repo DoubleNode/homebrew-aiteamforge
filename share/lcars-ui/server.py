@@ -8137,7 +8137,35 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 return release
         return None
 
-    def _cascade_clear_release_assignments(self, team, release_id, _lock_held=False):
+    @staticmethod
+    def _release_history_entry(release, assignment, archived_at):
+        """XACA-1711: the durable per-item record of "this ticket was in release X".
+
+        Built from the live `releaseAssignment` that is about to be cleared plus
+        the release it pointed at. `release` may be None (a caller that only
+        knows the id): version/stage are then None, releaseName falls back to the
+        assignment's own snapshot. version is the release's version for the
+        assignment's platform, else the sole platform's version when the release
+        has exactly one, else None -- never guessed across several platforms.
+        """
+        release = release if isinstance(release, dict) else {}
+        platform = assignment.get('platform')
+        plats = release.get('platforms') if isinstance(release.get('platforms'), dict) else {}
+        plat_obj = plats.get(platform) if platform in plats else (
+            next(iter(plats.values())) if len(plats) == 1 else None)
+        version = plat_obj.get('version') if isinstance(plat_obj, dict) else None
+        return {
+            'releaseId': assignment.get('releaseId'),
+            'releaseName': release.get('name') or assignment.get('releaseName'),
+            'version': version,
+            'stage': release.get('stage'),
+            'platform': platform,
+            'assignedAt': assignment.get('assignedAt'),
+            'archivedAt': archived_at,
+        }
+
+    def _cascade_clear_release_assignments(self, team, release_id, _lock_held=False,
+                                           release=None, archived_at=None):
         """XACA-0694-003: referential-integrity cascade for release archive.
 
         XACA-0692 found 154 orphaned `releaseAssignment` records across 5
@@ -8174,6 +8202,14 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         cycle, not a call to that helper, mirroring how
         `_load_releases_config`/`_save_releases_config` do their own
         `_lock_held`-gated raw I/O inside the same transaction.
+
+        XACA-1711: before the live pointer is deleted, the assignment is appended
+        to the item's `releaseHistory` list (see _release_history_entry), in this
+        same read/mutate/write, so archiving no longer erases which release a
+        ticket shipped in. Re-running is idempotent: an entry with the same
+        (releaseId, archivedAt) is never added twice. `release` / `archived_at`
+        are optional; callers pass the release dict and the timestamp they stamp
+        on release['archivedAt'] so the two agree.
 
         Returns the list of cleared item IDs (possibly empty — the common
         case where the release had no assigned items).
@@ -8213,11 +8249,23 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             with open(board_file, 'r') as f:
                 board_data = json.load(f)
 
+            stamp = archived_at or self._get_timestamp()
             cleared_ids = []
             for item in board_data.get('backlog', []):
                 assignment = item.get('releaseAssignment')
                 if assignment and assignment.get('releaseId') == release_id:
                     cleared_ids.append(item.get('id'))
+                    # XACA-1711: history FIRST, then clear (same write).
+                    entry = self._release_history_entry(release, assignment, stamp)
+                    history = item.get('releaseHistory')
+                    if not isinstance(history, list):
+                        history = []
+                    if not any(isinstance(h, dict)
+                               and h.get('releaseId') == entry['releaseId']
+                               and h.get('archivedAt') == entry['archivedAt']
+                               for h in history):
+                        history.append(entry)
+                    item['releaseHistory'] = history
                     del item['releaseAssignment']
 
             if cleared_ids:
@@ -8225,6 +8273,93 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 self._atomic_write_json(board_file, board_data)
 
             return cleared_ids
+
+        if _lock_held:
+            return _do()
+
+        import fcntl
+        lock_file = board_file.with_suffix('.json.lock')
+        with open(lock_file, 'w') as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                return _do()
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+    def _restore_release_assignments(self, team, release, trail, archived_at, _lock_held=False):
+        """XACA-1711: inverse of _cascade_clear_release_assignments, for unarchive.
+
+        `trail` is the archived release's `clearedAssignments` ([{itemId, clearedAt}]).
+        For each listed item whose live pointer is still empty, rebuild
+        `releaseAssignment` (from the item's own `releaseHistory` entry for this
+        release when present, else from the release alone) and drop that history
+        entry, since the pointer is live again. An item that now points at a
+        DIFFERENT release is never overwritten: it is reported as skipped. Same
+        raw read/mutate/write + _lock_held contract as the cascade (never call a
+        helper that re-flocks board_file from inside the transaction).
+
+        Returns (restored_ids, skipped) with skipped = [{itemId, reason, ...}].
+        """
+        board_file = self._get_board_file(team)
+        if not trail or not board_file.exists():
+            return [], []
+        release_id = release.get('id')
+
+        def _do():
+            with open(board_file, 'r') as f:
+                board_data = json.load(f)
+            by_id = {i.get('id'): i for i in board_data.get('backlog', []) if isinstance(i, dict)}
+            plats = release.get('platforms') if isinstance(release.get('platforms'), dict) else {}
+            restored, skipped = [], []
+            for rec in trail:
+                iid = rec.get('itemId') if isinstance(rec, dict) else None
+                if not iid:
+                    skipped.append({'itemId': None, 'reason': 'malformed-trail-entry'})
+                    continue
+                item = by_id.get(iid)
+                if item is None:
+                    skipped.append({'itemId': iid, 'reason': 'item-not-found'})
+                    continue
+                live = item.get('releaseAssignment')
+                if live:
+                    if live.get('releaseId') != release_id:
+                        skipped.append({'itemId': iid, 'reason': 'reassigned',
+                                        'currentReleaseId': live.get('releaseId')})
+                    continue
+                history = item.get('releaseHistory') if isinstance(item.get('releaseHistory'), list) else []
+                match = next((h for h in history if isinstance(h, dict)
+                              and h.get('releaseId') == release_id
+                              and (archived_at is None or h.get('archivedAt') == archived_at)), None)
+                # No history entry = a PRE-XACA-1711 archive (run the PR 2 backfill
+                # BEFORE unarchiving those). The platform is then only knowable when
+                # the release has exactly one; never write a partial pointer.
+                if match is None and len(plats) != 1:
+                    skipped.append({'itemId': iid, 'reason': 'no-history-ambiguous-platform'})
+                    continue
+                # A backfilled entry (scripts/kb-release-backfill-history) has platform None when the
+                # release has several platforms: same ambiguity, same skip (XACA-1711 PR 2).
+                if match is not None and not match.get('platform') and len(plats) != 1:
+                    skipped.append({'itemId': iid, 'reason': 'history-ambiguous-platform'})
+                    continue
+                assignment = {'releaseId': release_id,
+                              'releaseName': release.get('name') or (match or {}).get('releaseName')}
+                platform = (match or {}).get('platform') or (next(iter(plats)) if len(plats) == 1 else None)
+                if platform:
+                    assignment['platform'] = platform
+                if (match or {}).get('assignedAt'):
+                    assignment['assignedAt'] = match['assignedAt']
+                item['releaseAssignment'] = assignment
+                if match is not None:
+                    history.remove(match)
+                    if history:
+                        item['releaseHistory'] = history
+                    else:
+                        item.pop('releaseHistory', None)
+                restored.append(iid)
+            if restored:
+                board_data['lastUpdated'] = self._get_timestamp()
+                self._atomic_write_json(board_file, board_data)
+            return restored, skipped
 
         if _lock_held:
             return _do()
@@ -12176,6 +12311,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     # else the PUT guard (no stamping 'released' outside close-out) would be contradicted.
                     release['status'] = ('released' if _release_gate is not None
                                          and _release_gate.closeout_complete(release) else 'active')
+                    # XACA-1711: capture the archive stamp + trail BEFORE they are stripped
+                    # off the record; the trail drives the pointer restore below.
+                    archived_at = release.get('archivedAt')
+                    trail = release.pop('clearedAssignments', None)
                     if 'archivedAt' in release:
                         del release['archivedAt']
 
@@ -12189,6 +12328,11 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     with self._board_write_transaction(team):
                         data = self._load_releases_config(team, _lock_held=True)
                         data['releases'].append(release)
+                        # XACA-1711: restore releaseAssignment from the trail, same
+                        # transaction; _save_releases_config re-reads the board so
+                        # the backlog edit is kept.
+                        restored_ids, skipped_assignments = self._restore_release_assignments(
+                            team, release, trail, archived_at, _lock_held=True)
                         self._save_releases_config(data, team, _lock_held=True)
 
                     # Remove from archive
@@ -12201,7 +12345,9 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     self.wfile.write(json.dumps({
                         "success": True,
                         "archived": False,
-                        "message": "Release unarchived successfully"
+                        "message": "Release unarchived successfully",
+                        "restoredAssignments": restored_ids,
+                        "skippedAssignments": skipped_assignments
                     }).encode())
 
                 else:
@@ -12238,8 +12384,12 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         # _cascade_clear_release_assignments's docstring for
                         # why it does not call _clear_item_release_assignment
                         # (that would self-deadlock on board_file's lock).
+                        # XACA-1711: one timestamp for the history entries AND
+                        # release['archivedAt'] below, so they always agree.
+                        archived_at = self._get_timestamp()
                         cleared_ids = self._cascade_clear_release_assignments(
-                            team, release_id, _lock_held=True
+                            team, release_id, _lock_held=True,
+                            release=release, archived_at=archived_at
                         )
                         if cleared_ids:
                             print(
@@ -12255,19 +12405,19 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         data['releases'] = [r for r in data['releases'] if r['id'] != release_id]
 
                         # Move to archive
-                        release['archivedAt'] = self._get_timestamp()
+                        release['archivedAt'] = archived_at
                         release['status'] = 'archived'
                         if cleared_ids:
-                            # XACA-0694-003: preserve the trail so a future
-                            # unarchive/restore at least knows which items lost
-                            # their assignment here. NOTE (asymmetry, by
-                            # design): the unarchive branch above only
-                            # re-appends `release` to data['releases'] — it
-                            # does NOT re-read this field and restore
-                            # releaseAssignment on the listed items. That is
-                            # an accepted consequence of "warn + cascade-clear"
-                            # over "block the archive"; do not file this as a
-                            # bug without re-reading this comment.
+                            # XACA-0694-003: preserve the trail of which items
+                            # lost their assignment here. XACA-1711: the user
+                            # directive of 2026-10-31 ("archiving must not lose
+                            # ticket assignment details") SUPERSEDES the old
+                            # "unarchive does not restore" by-design note: each
+                            # item also keeps a durable `releaseHistory` entry,
+                            # and the unarchive branch above restores
+                            # releaseAssignment from this trail (items
+                            # re-assigned elsewhere since are left alone and
+                            # reported in the response).
                             release['clearedAssignments'] = [
                                 {"itemId": _cid, "clearedAt": release['archivedAt']}
                                 for _cid in cleared_ids
@@ -12389,8 +12539,11 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     # it does not call _clear_item_release_assignment (that
                     # would self-deadlock on board_file's lock, per
                     # _board_write_transaction's REENTRANCY WARNING).
+                    # XACA-1711: same single timestamp as the toggle path (parity).
+                    archived_at = self._get_timestamp()
                     cleared_ids = self._cascade_clear_release_assignments(
-                        effective_team, release_id, _lock_held=True
+                        effective_team, release_id, _lock_held=True,
+                        release=release, archived_at=archived_at
                     )
                     if cleared_ids:
                         print(
@@ -12405,7 +12558,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     data['releases'] = [r for r in data['releases'] if r['id'] != release_id]
 
                     # Move to archive
-                    release['archivedAt'] = self._get_timestamp()
+                    release['archivedAt'] = archived_at
                     release['status'] = 'archived'
                     if cleared_ids:
                         # XACA-0694-003: preserve the trail — see the identical

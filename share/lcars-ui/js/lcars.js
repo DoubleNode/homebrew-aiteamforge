@@ -13196,6 +13196,24 @@ async function deleteRelease(releaseId, releaseName) {
 }
 
 /**
+ * XACA-1711-012: one-line summary of an unarchive response's restoredAssignments /
+ * skippedAssignments (plain text: showToast and announceToScreenReader both use
+ * textContent). Returns '' for a legacy response without the fields.
+ */
+function summarizeUnarchiveAssignments(result) {
+    const restored = Array.isArray(result && result.restoredAssignments) ? result.restoredAssignments : null;
+    const skipped = Array.isArray(result && result.skippedAssignments) ? result.skippedAssignments : [];
+    if (restored === null && skipped.length === 0) return '';
+    let text = `Restored ${restored ? restored.length : 0} assignment(s).`;
+    if (skipped.length > 0) {
+        const shown = skipped.slice(0, 5).map(s => `${s.itemId || 'unknown item'} (${s.reason || 'unknown'})`);
+        const more = skipped.length > 5 ? ` and ${skipped.length - 5} more` : '';
+        text += ` ${skipped.length} skipped: ${shown.join(', ')}${more}.`;
+    }
+    return text;
+}
+
+/**
  * Toggle release archive status (XACA-0056-004)
  * Archives a release if it's complete (all platforms at PROD)
  * Unarchives a release if it's currently archived
@@ -13227,11 +13245,18 @@ async function toggleReleaseArchive(releaseId) {
         // reader user got nothing at all and had to re-discover the state.
         // announceToScreenReader() restores the confirmation without restoring
         // the popup — it is polite, so it will not interrupt.
+        const unarchived = result && result.archived === false;
+        const assignmentSummary = unarchived ? summarizeUnarchiveAssignments(result) : '';
         announceToScreenReader(
-            result && result.archived === false
+            (unarchived
                 ? 'Release unarchived and returned to the active list.'
-                : 'Release archived.'
+                : 'Release archived.') + (assignmentSummary ? ' ' + assignmentSummary : '')
         );
+        // XACA-1711-012: the restore/skip outcome was discarded; a skipped item
+        // (re-assigned elsewhere, or unrestorable) must be visible to the user.
+        if (assignmentSummary) {
+            showToast(assignmentSummary, result.skippedAssignments && result.skippedAssignments.length ? 'warning' : 'success', 8000);
+        }
 
     } catch (error) {
         console.error('Error toggling release archive:', error);

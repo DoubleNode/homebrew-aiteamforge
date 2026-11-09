@@ -1,0 +1,9 @@
+{
+  "name": "agent-watch",
+  "version": "0.1.0",
+  "description": "Shows who is doing the work: the main chat, every helper agent, its model, its task, and which skills ran.",
+  "author": {
+    "name": "AITeamForge"
+  },
+  "types": "./types/index.d.ts"
+}

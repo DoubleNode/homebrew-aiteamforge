@@ -14,6 +14,12 @@
     {"id": "accessory-restored",    "defaultSeverity": "info",     "description": "A UPS accessory is back on mains power."},
     {"id": "ci-runner-disk-low",    "defaultSeverity": "high",     "description": "A CI runner guest VM is low on free disk space and will soon fail jobs."},
     {"id": "tap-lock-stale",       "defaultSeverity": "high",     "description": "The tap-writer lock is held past its stale threshold, or the watcher cannot read it."},
-    {"id": "tap-lock-cleared",      "defaultSeverity": "info",     "description": "A stale or unreadable tap-writer lock condition has cleared."}
+    {"id": "tap-lock-cleared",      "defaultSeverity": "info",     "description": "A stale or unreadable tap-writer lock condition has cleared."},
+    {"id": "ci-no-capacity",        "defaultSeverity": "high",     "description": "No CI pool machine can take a queued job class, so CI is stalled. Paged once per incident."},
+    {"id": "ci-dispatcher-degraded","defaultSeverity": "warning",  "description": "The CI dispatcher cannot do part of its job (GitHub unreachable or runner minting failing)."},
+    {"id": "ci-fork-job-on-pool",   "defaultSeverity": "warning",  "description": "A fork pull-request job asked for a pool runner and was refused."},
+    {"id": "ci-job-misconfigured",  "defaultSeverity": "warning",  "description": "A pool job has ambiguous or invalid runner labels and cannot be placed."},
+    {"id": "ci-queue-age",          "defaultSeverity": "high",     "description": "CI jobs have waited past the queue-age threshold on a label set. Paged once per incident."},
+    {"id": "ci-capacity-restored",  "defaultSeverity": "info",     "description": "A CI no-capacity or queue-age incident has cleared (one notice per incident)."}
   ]
 }

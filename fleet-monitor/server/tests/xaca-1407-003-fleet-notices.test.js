@@ -85,13 +85,13 @@ describe('emitFleetNotice contract', () => {
     test('unknown (non-catalog) type is NOT silently dropped: warn log + ok:false receipt, nothing sent', async () => {
         const c = build();
         c.store.setFleetRoutes({ routes: { 'machine-offline': ['conn-a'] } });
-        const out = await c.fn.emitFleetNotice({ type: 'ci-no-capacity', severity: 'high', title: 't', body: 'b', ref: 'class:long' });
+        const out = await c.fn.emitFleetNotice({ type: 'ci-not-in-catalog', severity: 'high', title: 't', body: 'b', ref: 'class:long' });
         assert.deepEqual([out.ok, out.routed, out.reason], [false, false, 'unknown-type']);
         assert.equal(c.provider.calls.length, 0);
         const rec = c.receipts.recent({ team: 'fleet' });
         assert.equal(rec.length, 1);
-        assert.deepEqual([rec[0].type, rec[0].ok, rec[0].error, rec[0].severity, rec[0].ref], ['ci-no-capacity', false, 'unknown notice type', 'high', 'class:long']);
-        assert.ok(c.logs.some((l) => /ci-no-capacity.*unknown notice type/.test(l)));
+        assert.deepEqual([rec[0].type, rec[0].ok, rec[0].error, rec[0].severity, rec[0].ref], ['ci-not-in-catalog', false, 'unknown notice type', 'high', 'class:long']);
+        assert.ok(c.logs.some((l) => /ci-not-in-catalog.*unknown notice type/.test(l)));
     });
 
     test('invalid input never throws and is never sent', async () => {
@@ -144,7 +144,7 @@ describe('ci-dispatch-alerts resolves this module by the require path', () => {
         fleetNotices.configure({ dispatcher: c.dispatcher, store: c.store, receipts: c.receipts, logger: { log() {}, warn() {} } });
         assert.equal(typeof globalThis.emitFleetNotice, 'undefined');
         const alerts = createAlerts({ logger: { log() {}, warn() {} } });
-        const r = alerts.raise('ci-queue-age', { severity: 'warning', title: 'Queue old', body: 'b', ref: 'class:long' });
+        const r = alerts.raise('ci-not-in-catalog', { severity: 'warning', title: 'Queue old', body: 'b', ref: 'class:long' });
         assert.deepEqual(r, { raised: true, via: 'fleet-notice' });
         await new Promise((res) => setImmediate(res));
         const rec = c.receipts.recent({ team: 'fleet' });

@@ -1,0 +1,4 @@
+# Engine-written on every mod load (TypeScript types for the host API)
+.claude-plugin/types/
+node_modules/
+.DS_Store

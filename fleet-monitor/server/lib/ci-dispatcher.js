@@ -65,6 +65,11 @@ const policy = require('./ci-dispatch-policy');
 const derive = require('./ci-pool-derive');
 
 const NO_CAPACITY_AFTER_MS = 120 * 1000;
+// XACA-1763-004: an incident (ci-no-capacity / ci-queue-age) closes, and its ONE recovery notice fires, only
+// after it has been continuously clear this long. It is deliberately longer than NO_CAPACITY_AFTER_MS: a job
+// whose capacity blips back needs a fresh NO_CAPACITY_AFTER_MS of waiting before it is alertable again, so a
+// clear window of exactly that length would close (and re-page) on every flap.
+const INCIDENT_CLEAR_MS = 5 * 60 * 1000;
 const FALLBACK_DELAY_MS = 60 * 1000;
 const TICK_FAIL_ALERT_AFTER = 3;
 const MINT_FAIL_ALERT_AFTER = 3;
@@ -203,6 +208,7 @@ function dormantReason(env) {
  * @param {number}   [deps.maxTrackedMs]    ghost backstop (default MAX_TRACKED_MS)
  * @param {string}   [deps.shadowLogPath] decision-record file (env FLEET_CI_SHADOW_LOG wins); none = no records written
  * @param {number}   [deps.shadowLogMaxBytes] rotation cap for the decision log (env FLEET_CI_SHADOW_LOG_MAX_BYTES wins; default 5 MiB)
+ * @param {Function} [deps.routeCoverage] (types) => {configured, missing} | null; default: lib/fleet-notices fleetRouteCoverage
  * @param {Function} [deps.now]
  * @param {Function} [deps.setTimer]   (fn, ms) => handle
  * @param {Function} [deps.clearTimer]
@@ -231,6 +237,28 @@ function createDispatcher(deps) {
         const fn = log[level] || log.log;
         if (typeof fn === 'function') { try { fn.call(log, `[CI-DISPATCH] ${msg}`); } catch (_) { /* logging never throws */ } }
     };
+    // XACA-1763-004: the incident alert types must be in the FLEET ROUTE SET or the page is dropped (the
+    // 2026-11-06 stall). Mirrors lib/tap-lock-watcher.js checkRoutes(): warn LOUDLY, at most hourly; a null coverage
+    // (notify hub not wired yet) defers the check to the next tick. Never throws.
+    const INCIDENT_NOTICE_TYPES = ['ci-no-capacity', 'ci-queue-age', 'ci-capacity-restored'];
+    const routeCoverage = typeof d.routeCoverage === 'function' ? d.routeCoverage
+        : (types) => require('./fleet-notices').fleetRouteCoverage(types);
+    // Re-checked hourly (XACA-1763-013): routes can be edited at any time, and a one-shot check hid a
+    // route removed after startup. A null coverage (hub not wired) retries every tick until it answers.
+    const ROUTE_RECHECK_MS = 60 * 60 * 1000;
+    let nextRouteCheckAt = 0;
+    function checkRoutes() {
+        if (now() < nextRouteCheckAt) return;
+        try {
+            const cov = routeCoverage(INCIDENT_NOTICE_TYPES.slice());
+            if (!cov || typeof cov !== 'object') return;
+            nextRouteCheckAt = now() + ROUTE_RECHECK_MS;
+            const missing = Array.isArray(cov.missing) ? cov.missing : [];
+            if (missing.length > 0) {
+                say('warn', `WARNING: ${missing.join(', ')} not routed in the fleet routes${cov.configured ? '' : ' (no fleet routes are set at all)'} - CI stall pages will be DROPPED. Add them via PUT /api/notify/fleet-routes`);
+            }
+        } catch (_) { /* never throw */ }
+    }
     const writeAudit = (event, fields) => {
         if (!audit || typeof audit.append !== 'function') return;
         try { audit.append(event, fields); } catch (_) { /* audit never throws into the loop */ }
@@ -735,11 +763,15 @@ function createDispatcher(deps) {
         const demand = [];   // covered + needing: what computeSupply sees
         const needing = [];  // uncovered jobs that have an eligible machine: where new mints go
         let adjusted = withReservations(base, reserved);
+        const noCapActive = new Set();   // XACA-1763-004: class refs with an alertable no-capacity job this tick
+        const noCapUnobserved = new Set();   // XACA-1763-014: classes of jobs excluded because their pinned host is not live
+        const noCapObserved = new Set();     // classes with at least one job evaluated in live mode this tick: those go through sweep/hysteresis, never a silent close
         for (const t of jobs) {
             const setKey = plc.labelSetKey(t.rec.labels);
             const isCovered = coveredKeys.has(t.rec.key);
             recordPlacement(t.rec, machines, base, decRes, pcfg, isCovered, t.viaHostLabel === true);
             if (isCovered) {
+                noCapObserved.add(`class:${plc.jobClass(t.rec.name, cfg.jobClasses)}`);
                 t.noCapSince = null; demand.push(t.rec);
                 continue;
             }
@@ -749,7 +781,15 @@ function createDispatcher(deps) {
             // A job accepted ONLY through its static host label whose pinned host is not explicitly live
             // is the designed exception (014): recorded above, NOT demand, NO alert (the persistent
             // runners serve it).
-            if (via && machineMode(pinnedMachineOf(t.rec, machines), true) !== 'live') { t.noCapSince = null; continue; }
+            if (via && machineMode(pinnedMachineOf(t.rec, machines), true) !== 'live') {
+                // Only a job that WAS being evaluated as stalled (noCapSince set) and has just been excluded
+                // makes its class unobservable. A job that was always pinned to a non-live host never
+                // contributed to an incident, so it must not turn another job's observed recovery into a silent close.
+                if (t.noCapSince !== null) noCapUnobserved.add(`class:${plc.jobClass(t.rec.name, cfg.jobClasses)}`);
+                t.noCapSince = null;
+                continue;
+            }
+            noCapObserved.add(`class:${plc.jobClass(t.rec.name, cfg.jobClasses)}`);
             // Placement for minting/demand considers LIVE hosts only (XACA-1445-015): a shadow host that
             // ranks first must not strand a job a live host could take. The decision RECORD above still
             // uses the all-host ranking (that is the shadow comparison).
@@ -760,7 +800,10 @@ function createDispatcher(deps) {
             const waited = nowMs - t.noCapSince;
             if (waited >= NO_CAPACITY_AFTER_MS) {
                 const cls = plc.jobClass(t.rec.name, cfg.jobClasses);
-                const res = alerts.raise('ci-no-capacity', {
+                // XACA-1763-004: an INCIDENT per job class, not a 15-min repeating page: one page when the
+                // class first has a job with no eligible machine, silence while it stays so, one recovery.
+                noCapActive.add(`class:${cls}`);
+                const res = alerts.raiseIncident('ci-no-capacity', {
                     severity: 'high',
                     title: `No CI pool capacity for ${cls} jobs (${t.rec.owner}/${t.rec.repo})`,
                     body: `Job "${clean(t.rec.name).slice(0, 80)}" has waited ${Math.round(waited / 1000)}s with no eligible machine. ${reasonsText(evals)}`,
@@ -777,6 +820,21 @@ function createDispatcher(deps) {
         // while one JIT runner was busy and two persistent runners idled, so "capacity" existed and
         // nothing fired. Fires in shadow too: queue wait is a fact about GitHub, not about our mints.
         raiseQueueAgeAlerts(nowMs);
+        // XACA-1763-004: classes no longer stalled start (and, after the clear-hysteresis, finish) their recovery.
+        // XACA-1763-014: a clear sweep means "observed healthy", which only holds in live mode. In shadow
+        // (global) the no-capacity condition is not evaluated at all, and a class whose job is excluded
+        // because its pinned host left live is likewise unobserved: reading either as "clear" would send
+        // a FALSE ci-capacity-restored. Those incidents CLOSE SILENTLY (not frozen: a frozen incident
+        // would linger invisibly and could never be told apart from a real one). A stall that is still
+        // real when live mode returns simply pages again as a new incident.
+        if (typeof alerts.closeIncidents === 'function') {
+            if (globalShadow) alerts.closeIncidents('ci-no-capacity');
+            else alerts.closeIncidents('ci-no-capacity', [...noCapUnobserved].filter((r) => !noCapActive.has(r) && !noCapObserved.has(r)));
+        }
+        if (!globalShadow) for (const ref of alerts.sweepIncidents('ci-no-capacity', noCapActive, (r) => ({
+            title: `CI pool capacity restored for ${r.replace(/^class:/, '')} jobs`,
+            body: `No job of class ${r.replace(/^class:/, '')} has been without an eligible machine for ${Math.round(INCIDENT_CLEAR_MS / 1000)}s. The no-capacity incident is closed.`,
+        }))) say('log', `no-capacity incident cleared for ${ref}`);
 
         const supply = plc.computeSupply(demand, outstanding);
         // XACA-1479-006 SURGE. For a label set holding a priority job P, target = P's 1-based position in
@@ -871,7 +929,7 @@ function createDispatcher(deps) {
     function raiseQueueAgeAlerts(nowMs) {
         const over = new Map(queueAgeView(nowMs).filter((g) => g.overThreshold).map((g) => [g.labels, g]));
         for (const [setKey, g] of over) {
-            const res = alerts.raise('ci-queue-age', {
+            const res = alerts.raiseIncident('ci-queue-age', {
                 severity: 'high',
                 title: `CI jobs queued ${Math.round(g.oldestWaitSec / 60)} min on ${g.labels}`,
                 body: `${g.depth} job(s) queued on ${g.labels}${g.host ? ` (host ${g.host})` : ''}; oldest has waited ${g.oldestWaitSec}s (threshold ${Math.round(queueAgeThresholdMs() / 1000)}s). Runners may be busy, mis-labelled or offline; check the CI/CD tab.`,
@@ -880,9 +938,14 @@ function createDispatcher(deps) {
             if (res.raised) writeAudit('alert', { machine: g.host, waitedMs: g.oldestWaitSec * 1000, reason: 'ci-queue-age' });
             queueAlerting.add(setKey);
         }
-        for (const setKey of [...queueAlerting]) {
-            if (!over.has(setKey)) { queueAlerting.delete(setKey); say('log', `queue-age alert cleared for ${setKey}`); }
-        }
+        // XACA-1763-004: one recovery notice per incident, after the clear-hysteresis (alerts.clearMs).
+        const overRefs = Array.from(over, ([k]) => `queue:${k}`);
+        const recovered = alerts.sweepIncidents('ci-queue-age', overRefs, (r) => ({
+            title: `CI queue age recovered on ${r.replace(/^queue:/, '')}`,
+            body: `Jobs queued on ${r.replace(/^queue:/, '')} are back under the ${Math.round(queueAgeThresholdMs() / 1000)}s queue-age threshold. The incident is closed.`,
+        }));
+        for (const ref of recovered) say('log', `queue-age alert cleared for ${ref.replace(/^queue:/, '')}`);
+        for (const setKey of [...queueAlerting]) if (!over.has(setKey)) queueAlerting.delete(setKey);
     }
     const queueAge = () => queueAgeView(now());
     /**
@@ -909,7 +972,12 @@ function createDispatcher(deps) {
     /** One full cycle. Resolves to the delay (ms) until the next one, or null when dormant. Never throws. */
     function tick() {
         if (ticking) return ticking;
-        if (!isEnabled() || stopped) return Promise.resolve(null);
+        if (!isEnabled() || stopped) {
+            // Dormant: the stall can no longer be observed; close open incidents silently (see decide()).
+            if (!isEnabled() && typeof alerts.closeIncidents === 'function') { alerts.closeIncidents('ci-no-capacity'); alerts.closeIncidents('ci-queue-age'); }
+            return Promise.resolve(null);
+        }
+        checkRoutes();
         ticking = (async () => {
             let delay = FALLBACK_DELAY_MS;
             try {
@@ -1087,7 +1155,7 @@ function wireCiPool(app, opts) {
     const loaded = store.load();
     if (!loaded.ok) logger.error(`[CI-DISPATCH] ci-pool.json not loaded: ${loaded.error}`);
     const audit = createAudit({ path: path.join(o.dataDir, 'ci-dispatch-audit.jsonl'), keep: 2 });
-    const alerts = createAlerts({ now: o.now, logger });
+    const alerts = createAlerts({ now: o.now, logger, clearMs: INCIDENT_CLEAR_MS });
     const reports = new Map();
 
     let dispatcher = null;
@@ -1139,5 +1207,5 @@ function wireCiPool(app, opts) {
 
 module.exports = {
     createDispatcher, wireCiPool, hasCredentials, dormantReason, globalMode, priorityRank, surgePlan,
-    NO_CAPACITY_AFTER_MS, FALLBACK_DELAY_MS, MAX_MINTS_PER_JOB, MAX_TRACKED_MS, MAX_CONFIG_REJECTED, reportAccountsFor,
+    NO_CAPACITY_AFTER_MS, INCIDENT_CLEAR_MS, FALLBACK_DELAY_MS, MAX_MINTS_PER_JOB, MAX_TRACKED_MS, MAX_CONFIG_REJECTED, reportAccountsFor,
 };

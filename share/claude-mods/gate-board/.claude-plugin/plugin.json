@@ -1,0 +1,9 @@
+{
+  "name": "gate-board",
+  "version": "0.1.0",
+  "description": "One line above the prompt with this branch's PR gates: tester and reviewer bot verdicts, CI, and open protected subitems.",
+  "author": {
+    "name": "AITeamForge"
+  },
+  "types": "./types/index.d.ts"
+}

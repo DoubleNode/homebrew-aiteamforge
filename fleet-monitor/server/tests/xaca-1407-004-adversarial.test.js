@@ -340,20 +340,20 @@ describe('emitFleetNotice: untrusted strings', () => {
 // REGRESSION: ci-dispatch-alerts stays observable once the real emitter is resolvable
 // ---------------------------------------------------------------------------------------------
 describe('ci-dispatch-alerts keeps operator visibility through the fleet emitter', () => {
-    test('a ci-* alert (not in the catalog) leaves type + severity in a receipt AND title + body in the log', async () => {
+    test('a ci-* alert (a type that is not in the catalog) leaves type + severity in a receipt AND title + body in the log', async () => {
         const c = hub();
         const sink = (m) => c.logs.push(String(m));
         fleetNotices.configure({ dispatcher: c.dispatcher, store: c.store, receipts: c.receipts, logger: { log: sink, warn: sink } });
         const alerts = createAlerts({ logger: { warn: sink, log: sink } });
-        const r = alerts.raise('ci-no-capacity', { severity: 'high', title: 'No pool capacity for class:long', body: 'queue age 900s, 0 eligible runners', ref: 'class:long' });
+        const r = alerts.raise('ci-not-in-catalog', { severity: 'high', title: 'No pool capacity for class:long', body: 'queue age 900s, 0 eligible runners', ref: 'class:long' });
         assert.equal(r.via, 'fleet-notice');
         await new Promise((res) => setImmediate(res));
         await new Promise((res) => setImmediate(res));
         const rec = c.receipts.recent({ team: 'fleet' });
         assert.equal(rec.length, 1);
-        assert.deepEqual([rec[0].type, rec[0].severity, rec[0].ref, rec[0].ok], ['ci-no-capacity', 'high', 'class:long', false]);
+        assert.deepEqual([rec[0].type, rec[0].severity, rec[0].ref, rec[0].ok], ['ci-not-in-catalog', 'high', 'class:long', false]);
         const all = c.logs.join('\n');
-        assert.match(all, /ci-no-capacity/);
+        assert.match(all, /ci-not-in-catalog/);
         assert.match(all, /No pool capacity for class:long/, 'title must still reach an operator-visible log');
         assert.match(all, /queue age 900s, 0 eligible runners/, 'body must still reach an operator-visible log');
         assert.equal(alerts.list()[0].body, 'queue age 900s, 0 eligible runners', 'ring (GET /api/ci-pool) intact');

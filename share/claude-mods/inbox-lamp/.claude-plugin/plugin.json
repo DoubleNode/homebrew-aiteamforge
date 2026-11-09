@@ -1,0 +1,9 @@
+{
+  "name": "inbox-lamp",
+  "version": "0.1.0",
+  "description": "One line above the prompt with your unread kb-msg mail, red when a message carries a freeze or merge order.",
+  "author": {
+    "name": "AITeamForge"
+  },
+  "types": "./types/index.d.ts"
+}

@@ -220,7 +220,18 @@ function isEligible(machine, report, job, opts) {
     else if (c.memFreePct < th.memFreePct) reasons.push('mem-free-low');
 
     if (!isNum(c.load1) || !isNum(c.ncpu) || c.ncpu <= 0) reasons.push('load-missing');
-    else if (!(c.load1 / c.ncpu < th.loadPerCpu)) reasons.push('load-high');
+    else if (c.load5 === undefined) {
+        // LEGACY agent (no load5 field at all): the original load1-only gate, unchanged, so an old agent is
+        // never less gated than before XACA-1763.
+        if (!(c.load1 / c.ncpu < th.loadPerCpu)) reasons.push('load-high');
+    } else if (!isNum(c.load5) || c.load5 < 0) {
+        // Present-but-unusable (null, string, NaN, negative) must not read as "calm": fail closed.
+        reasons.push('load-malformed');
+    } else if (c.load1 / c.ncpu >= th.loadPerCpu && c.load5 / c.ncpu >= th.loadPerCpu) {
+        // Sustained load (XACA-1763): refuse only when BOTH the 1- and 5-minute averages are over the line.
+        // A load1 spike with a calm load5 (co-tenant Claude sessions on m4mini) is transient, not saturation.
+        reasons.push('load-high');
+    }
 
     if (os === 'Linux' && c.vmState !== 'running') reasons.push('vm-not-running');
 

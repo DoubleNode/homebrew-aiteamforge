@@ -1,0 +1,9 @@
+{
+  "name": "goal-meter",
+  "version": "0.1.0",
+  "description": "A live progress bar above the prompt for Claude's current task list, with /goals for the full list and recent goals.",
+  "author": {
+    "name": "AITeamForge"
+  },
+  "types": "./types/index.d.ts"
+}

@@ -1,0 +1,8 @@
+{
+  "name": "mods-switchboard",
+  "version": "0.1.0",
+  "description": "/mods: lists every AITeamForge mod with its folder and state, turns each on or off, hides or shows it, and opens its side pane. State lives in ~/.claude/mods/switches.json.",
+  "author": {
+    "name": "AITeamForge"
+  }
+}

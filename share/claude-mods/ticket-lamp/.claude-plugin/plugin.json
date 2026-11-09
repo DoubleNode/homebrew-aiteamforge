@@ -1,0 +1,9 @@
+{
+  "name": "ticket-lamp",
+  "version": "0.2.1",
+  "description": "One line above the prompt with this session's kanban ticket: status, subitems resolved/total, release and epic, green when it is really done. Follows the session onto later tickets and keeps earlier ones at the front (completed struck through in green).",
+  "author": {
+    "name": "AITeamForge"
+  },
+  "types": "./types/index.d.ts"
+}

@@ -60,7 +60,7 @@ function setup(opts = {}) {
     const assignments = createAssignments({ file: path.join(dir, 'state.json'), github: gh, audit: { append() {} }, now: () => clock.t, logger: { error() {}, warn() {} } });
     const lines = [];
     const logger = { log: (m) => lines.push(m), warn: (m) => lines.push(m), error: (m) => lines.push(m) };
-    const alerts = createAlerts({ now: () => clock.t, logger, getEmitter: () => null });
+    const alerts = createAlerts({ now: () => clock.t, logger, getEmitter: () => opts.emitter || null });
     const auditRows = [];
     const reports = new Map();
     const watcher = { async runCycle() { return 15000; }, stop() {} };
@@ -141,18 +141,19 @@ describe('queue-age alert (XACA-1444-011)', () => {
         assert.equal(s.queueAgeAlerts().length, 1);
     });
 
-    test('dedupes within 15 min, re-raises after; one alert per stuck label set', async () => {
-        const s = setup();
+    test('one incident per stuck label set: one page each, no 15-min re-page (XACA-1763-004)', async () => {
+        const s = setup({ emitter: () => ({ ok: true }) })  /* a delivering emitter: an undelivered page is retried (XACA-1763-013) */;
         s.queueN(5, 40);
         s.d.onJob(rec(900, 40, { labels: ['self-hosted', 'Linux', 'ARM64', 'fleet-pool'] }), 'queued');
         await s.d.tick();
         assert.equal(s.queueAgeAlerts().length, 2);
         s.clock.t += 5 * 60000;
         await s.d.tick();
-        assert.equal(s.queueAgeAlerts().length, 2);
         s.clock.t += 11 * 60000;
         await s.d.tick();
-        assert.equal(s.queueAgeAlerts().length, 4);
+        s.clock.t += 30 * 60000;
+        await s.d.tick();
+        assert.equal(s.queueAgeAlerts().length, 2);
     });
 
     test('clears when the queue drains: queueAge empty, noCapacity inactive, one "cleared" log line', async () => {
@@ -164,6 +165,10 @@ describe('queue-age alert (XACA-1444-011)', () => {
         await s.d.tick();
         assert.deepEqual(s.d.queueAge(), []);
         assert.equal(s.d.noCapacity().active, false);
+        // XACA-1763-004: the clear is confirmed only after the hysteresis (INCIDENT_CLEAR_MS, 5 min)
+        assert.equal(s.lines.filter((l) => /queue-age alert cleared/.test(l)).length, 0);
+        s.clock.t += 301000;
+        await s.d.tick();
         assert.equal(s.lines.filter((l) => /queue-age alert cleared/.test(l)).length, 1);
         await s.d.tick();
         assert.equal(s.lines.filter((l) => /queue-age alert cleared/.test(l)).length, 1);

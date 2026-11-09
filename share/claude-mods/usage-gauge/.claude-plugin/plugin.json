@@ -1,0 +1,9 @@
+{
+  "name": "usage-gauge",
+  "version": "0.1.0",
+  "description": "Plan usage above the prompt: each rate-limit window, when it resets, pace, and what this session costs.",
+  "author": {
+    "name": "AITeamForge"
+  },
+  "types": "./types/index.d.ts"
+}

@@ -159,10 +159,11 @@ test('isEligible: memFreePct boundary (>= 35)', () => {
     assert.ok(check(machine(), report({ capacity: { memFreePct: 34.9 } }), linuxJob).reasons.includes('mem-free-low'));
 });
 
-test('isEligible: load1/ncpu boundary (< 0.75, strict)', () => {
-    assert.ok(check(machine(), report({ capacity: { load1: 7.5, ncpu: 10 } }), linuxJob).reasons.includes('load-high'));
-    assert.equal(check(machine(), report({ capacity: { load1: 7.49, ncpu: 10 } }), linuxJob).eligible, true);
-    assert.ok(check(machine(), report({ capacity: { load1: 33, ncpu: 8 } }), linuxJob).reasons.includes('load-high'));
+test('isEligible: load1/ncpu boundary (< 0.75, strict) for a legacy agent without load5', () => {
+    const legacy = (capacity) => { const r = report({ capacity }); delete r.capacity.load5; return r; };
+    assert.ok(check(machine(), legacy({ load1: 7.5, ncpu: 10 }), linuxJob).reasons.includes('load-high'));
+    assert.equal(check(machine(), legacy({ load1: 7.49, ncpu: 10 }), linuxJob).eligible, true);
+    assert.ok(check(machine(), legacy({ load1: 33, ncpu: 8 }), linuxJob).reasons.includes('load-high'));
 });
 
 test('isEligible: Linux needs vmState running; macOS does not', () => {

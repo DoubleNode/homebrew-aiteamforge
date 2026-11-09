@@ -73,7 +73,7 @@ function setup(opts = {}) {
     const assignments = createAssignments({ file: path.join(dir, 'state.json'), github: gh, audit, now: () => clock.t, logger: { error() {}, warn() {} } });
     const lines = [];
     const logger = { log: (m) => lines.push(m), warn: (m) => lines.push(m), error: (m) => lines.push(m) };
-    const alerts = createAlerts({ now: () => clock.t, logger, getEmitter: () => null });
+    const alerts = createAlerts({ now: () => clock.t, logger, getEmitter: () => opts.emitter || null });
     const timers = { set: [], cleared: [] };
     const ref = {};
     const watcher = opts.makeWatcher
@@ -398,11 +398,11 @@ describe('no-capacity alert (Requirement 10)', () => {
         assert.equal(row.waitedMs, 120000);
     });
 
-    test('deduped per job class for 15 min; another class alerts separately; alerts again after 15 min', async () => {
-        const s = setup();                                    // no reports at all
+    test('one incident per job class: ONE page each, silent while stalled, another class pages separately (XACA-1763-004)', async () => {
+        const s = setup({ emitter: () => ({ ok: true }) })  /* a delivering emitter: an undelivered page is retried (XACA-1763-013) */;                                    // no reports at all
         s.d.onJob(rec(1, { name: 'unit' }), 'queued');
-        s.d.onJob(rec(2, { name: 'lint' }), 'queued');       // same class: deduped with job 1
-        s.d.onJob(rec(3, { name: 'shell-suite' }), 'queued'); // long: own alert
+        s.d.onJob(rec(2, { name: 'lint' }), 'queued');       // same class: same incident as job 1
+        s.d.onJob(rec(3, { name: 'shell-suite' }), 'queued'); // long: own incident
         await s.d.tick();
         s.clock.t = T0 + 120 * 1000; await s.d.tick();
         assert.deepEqual(s.alerts.list().map((a) => a.ref).sort(), ['class:long', 'class:short']);
@@ -410,8 +410,10 @@ describe('no-capacity alert (Requirement 10)', () => {
         const noCap = () => s.alerts.list().filter((x) => x.type === 'ci-no-capacity');
         s.clock.t = T0 + 600 * 1000; await s.d.tick();
         assert.equal(noCap().length, 2);
+        // the old 15-min re-page is GONE: still stalled well past the dedupe window, still exactly 2 pages
         s.clock.t = T0 + 120 * 1000 + 15 * 60 * 1000; await s.d.tick();
-        assert.equal(noCap().length, 4);
+        s.clock.t = T0 + 120 * 1000 + 45 * 60 * 1000; await s.d.tick();
+        assert.equal(noCap().length, 2);
     });
 
     test('capacity returning within the window resets the clock (continuous wait only)', async () => {

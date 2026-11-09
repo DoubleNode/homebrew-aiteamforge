@@ -16,6 +16,10 @@
 #      set and non-empty in the environment      -> ENV-TOKEN finding.
 #   3. ~/.git-credentials (or $XDG_CONFIG_HOME/git/credentials) mentioning
 #      github.com                                -> GIT-CREDENTIALS finding.
+#      Also every store file named by an effective git credential.helper (global,
+#      URL-scoped, absolute-path git-credential-store, `!` shell helper; XACA-1745).
+#      Helpers are resolved by git and classified against an allowlist; a helper
+#      form not positively recognised is UNKNOWN, never OK.
 #
 # NEVER PRINTS A TOKEN. Only the host name, a fixed type label derived from the
 # token prefix (gho_ / ghp_ / github_pat_ / other), and set/exists booleans are
@@ -274,48 +278,192 @@ check_cred_file() { # path
     esac
 }
 
-# A `credential.helper = store --file=<path>` names an arbitrary store file.
-scan_helper() { # one credential.helper value
-    local w nextfile=0 p="" found=0
+# --- git credential.helper resolution + allowlist (XACA-1745) -----------------
+# A store helper can be configured in more ways than the default paths and a
+# global `store --file=<p>`: URL-scoped (`[credential "https://github.com"]`), an
+# absolute path to git-credential-store, or a `!` shell helper. Instead of
+# hand-parsing config files, git resolves the list and an ALLOWLIST classifies
+# each value; anything not positively understood is UNKNOWN (rc 2), never OK.
+#
+# RESOLUTION (git's own semantics, measured against git 2.56):
+#   * `git config --get-urlmatch credential.helper <url>` is LAST-WINS (it returns
+#     one value), but git's credential code builds a LIST: every matching
+#     `credential.helper` and `credential.<url>.helper` is appended in config
+#     order, and an EMPTY value resets the list. So the list comes from
+#     `git config -z --get-regexp` (config order, all scopes), and
+#     --get-urlmatch is used ONLY as git's own "does this scope match" oracle,
+#     run against a one-entry scratch config. A scope that does not match but
+#     names github.com anywhere (user@host, path-scoped) is still kept: over-
+#     reporting is the safe direction. Only the empty-value reset of an
+#     APPLICABLE entry clears the list.
+#   * A helper VALUE is never printed (an inline `!` helper can embed a token);
+#     findings name only the ordinal of the helper.
+CRED_HELPERS=()
+
+# scope_applies <subsection> [strict] -> 0 when helpers under credential.<subsection>
+# can apply to https://github.com. 2 = could not decide (scratch file failed).
+# Default mode OVER-reports: any scope naming github.com anywhere counts, so extra
+# helpers stay in view. STRICT mode (used for empty-value RESETS) trusts only git's
+# own scope match (--get-urlmatch), because a reset that git does not apply must
+# not clear the list. Measured against git 2.56 with `git credential fill`: a blank
+# helper under https://gist.github.com, https://someone@github.com (URL with no
+# user), https://notgithub.com, https://github.com.evil.example or
+# https://ghe.example.com/github.com does NOT clear a global helper for
+# https://github.com, while https://*.com, https://github.com:443 and
+# https://GitHub.COM do. (A bare `github.com` scope also resets in git but is not
+# a URL for --get-urlmatch; it is left un-reset here, the over-reporting side.)
+scope_applies() {
+    local sub="$1" strict="${2:-}" f lc
+    if [ -z "$strict" ]; then
+        lc="$(printf '%s' "$sub" | tr '[:upper:]' '[:lower:]')"
+        case "$lc" in *github.com*) return 0 ;; esac
+    fi
+    f="$(mktemp 2>/dev/null)" || return 2
+    git config --file "$f" "credential.$sub.helper" x >/dev/null 2>&1 || { rm -f "$f"; return 2; }
+    git config --file "$f" --get-urlmatch credential.helper https://github.com >/dev/null 2>&1
+    local rc=$?
+    rm -f "$f"
+    case "$rc" in 0) return 0 ;; 1) return 1 ;; *) return 2 ;; esac
+}
+
+# resolve_cred_helpers -> fills CRED_HELPERS (effective list, reset applied).
+# Returns 0 ok, 1 could not resolve (UNKNOWN already recorded).
+resolve_cred_helpers() {
+    local out grc rec key val sub app
+    CRED_HELPERS=()
+    out="$(mktemp 2>/dev/null)" || {
+        add U GIT-CONFIG-UNREADABLE "-" "could not create temp file to read git credential.helper settings; cannot confirm there is no custom credential store"
+        return 1
+    }
+    git config -z --get-regexp '^credential\.(.+\.)?helper$' >"$out" 2>/dev/null
+    grc=$?
+    case "$grc" in
+        0) ;;
+        1) rm -f "$out"; return 0 ;;
+        *)
+            rm -f "$out"
+            add U GIT-CONFIG-UNREADABLE "-" "git config exited $grc; cannot confirm there is no custom credential store file"
+            return 1 ;;
+    esac
+    while IFS= read -r -d '' rec; do
+        case "$rec" in
+            *$'\n'*) key="${rec%%$'\n'*}"; val="${rec#*$'\n'}" ;;
+            *) add U GIT-HELPER-UNKNOWN "-" "a credential.helper entry has no value; cannot classify it"; continue ;;
+        esac
+        key="${key#credential.}"
+        if [ "$key" = "helper" ]; then
+            app=0
+        else
+            sub="${key%.helper}"
+            # A reset must match git's own scope test; a non-empty helper only needs
+            # to plausibly apply (over-report).
+            if [ -z "$val" ]; then scope_applies "$sub" strict; app=$?; else scope_applies "$sub"; app=$?; fi
+            case "$app" in
+                1) continue ;;
+                2) add U GIT-CONFIG-UNREADABLE "-" "could not test whether a URL-scoped credential.helper applies to github.com; cannot confirm there is no custom credential store"
+                   continue ;;
+            esac
+        fi
+        if [ -z "$val" ]; then
+            CRED_HELPERS=()      # git: an empty helper resets the list
+        else
+            CRED_HELPERS[${#CRED_HELPERS[@]}]="$val"
+        fi
+    done <"$out"
+    rm -f "$out"
+    return 0
+}
+
+# classify_helper <value> -> sets CLS = SAFE | STORE | UNRESOLVED | UNKNOWN
+# (STORE: CLS_PATH is the explicit --file path or "" for the default stores;
+#  UNRESOLVED: CLS_WHY says why the store cannot be located.)
+# ALLOWLIST. known-safe: osxkeychain, manager, manager-core, cache, and `gh auth
+# git-credential` (bare via `!`, or by absolute path). known-store: store,
+# git-credential-store, or an absolute path ending in git-credential-store, with
+# only --file[=]<p> arguments, optionally behind a `!`. Everything else: UNKNOWN.
+classify_helper() {
+    local v="$1" bang=0 w nextfile=0 p="" first rest sepword=0 quoted=0
+    CLS=UNKNOWN; CLS_PATH=""; CLS_WHY=""
+    v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"
+    case "$v" in '!'*) bang=1; v="${v#!}"; v="${v#"${v%%[![:space:]]*}"}" ;; esac
+    if [ "$bang" -eq 0 ]; then
+        case "$v" in
+            osxkeychain|manager|manager-core|cache) CLS=SAFE; return ;;
+        esac
+        if [[ "$v" =~ ^/([A-Za-z0-9._+@/-]*/)?git-credential-osxkeychain$ ]]; then CLS=SAFE; return; fi
+        if [[ "$v" =~ ^cache\ --timeout(=|\ )[0-9]+$ ]]; then CLS=SAFE; return; fi
+        if [[ "$v" =~ ^/([A-Za-z0-9._+@/-]*/)?gh\ auth\ git-credential$ ]]; then CLS=SAFE; return; fi
+    else
+        if [[ "$v" =~ ^(/[A-Za-z0-9._+@/-]*/)?gh\ auth\ git-credential$ ]]; then CLS=SAFE; return; fi
+    fi
     set -f
     # shellcheck disable=SC2086  # deliberate word-splitting, globbing disabled
-    set -- $1
+    set -- $v
     set +f
-    case "${1:-}" in
-        store|git-credential-store) ;;
+    first="${1:-}"
+    # `!git credential-store ...` is the same helper spelled as a shell command.
+    if [ "$bang" -eq 1 ] && [ "$first" = git ] && [ "${2:-}" = credential-store ]; then
+        shift; first="git-credential-store"; set -- "$first" "${@:2}"
+    fi
+    case "$first" in
+        store) [ "$bang" -eq 0 ] || return ;;
+        git-credential-store) ;;
+        /*/git-credential-store) ;;
         *) return ;;
+    esac
+    # From here the value is a store helper; any form we cannot resolve is UNRESOLVED.
+    case "$v" in
+        *'$'*|*'`'*) CLS=UNRESOLVED; CLS_WHY="a credential store helper path needs shell expansion; cannot locate the store"; return ;;
+        *\;*|*\|*|*\&*|*\<*|*\>*|*\(*|*\)*|*\{*|*\}*|*\\*) return ;;
     esac
     shift
     for w in "$@"; do
-        if [ "$nextfile" -eq 1 ]; then p="$w"; found=1; nextfile=0; continue; fi
+        if [ "$nextfile" -eq 1 ]; then p="$w"; nextfile=0; sepword=1; continue; fi
         case "$w" in
-            --file=*) p="${w#--file=}"; found=1 ;;
+            --file=*) p="${w#--file=}"; sepword=0 ;;
             --file) nextfile=1 ;;
+            *) return ;;   # an argument git-credential-store does not take
         esac
     done
     if [ "$nextfile" -eq 1 ]; then
-        add U GIT-HELPER-UNRESOLVED "-" "credential.helper store has --file with no path; cannot locate the store"
-        return
+        CLS=UNRESOLVED; CLS_WHY="credential store helper has --file with no path; cannot locate the store"; return
     fi
-    [ "$found" -eq 1 ] || return
     case "$p" in
-        \'*\'|\"*\") p="${p#?}"; p="${p%?}" ;;
-        \'*|\"*)
-            add U GIT-HELPER-UNRESOLVED "-" "credential.helper store --file path is quoted in a form this check cannot resolve"
-            return ;;
+        \'*\'|\"*\") [ "${#p}" -ge 2 ] && { p="${p#?}"; p="${p%?}"; quoted=1; } ;;
+        \'*|\"*|*\'*|*\"*)
+            CLS=UNRESOLVED; CLS_WHY="credential store --file path is quoted in a form this check cannot resolve"; return ;;
+    esac
+    # git runs the helper through sh -c (measured, git 2.56):
+    #  * an UNQUOTED separate-word path is glob-expanded (* ? [) and can find a real
+    #    file this check would look for literally -> UNRESOLVED. An attached
+    #    --file=<p> word is never globbed (the pattern would need a directory named
+    #    "--file=" in git's cwd) and a quoted path is literal, so those stay literal.
+    #  * ~ is expanded only by an unquoted separate word. An attached --file=~/x or a
+    #    quoted "~/x" reaches git as a literal relative path (./~/x) -> UNRESOLVED.
+    #  * brace expansion does not happen under sh (and { } already fail closed above).
+    if [ "$sepword" -eq 1 ] && [ "$quoted" -eq 0 ]; then
+        case "$p" in
+            *'*'*|*'?'*|*'['*)
+                CLS=UNRESOLVED; CLS_WHY="credential store --file path contains a shell glob character (*, ?, [) that sh expands; cannot locate the store"; return ;;
+        esac
+    fi
+    case "$p" in
+        "~"|"~"/*)
+            if [ "$sepword" -eq 0 ] || [ "$quoted" -eq 1 ]; then
+                CLS=UNRESOLVED; CLS_WHY="credential store --file=~ is not tilde-expanded by sh (attached or quoted), so git reads a path relative to its working directory; cannot locate the store"; return
+            fi ;;
     esac
     case "$p" in
-        *'$'*|*'`'*|"")
-            add U GIT-HELPER-UNRESOLVED "-" "credential.helper store --file path needs shell expansion; cannot locate the store"
-            return ;;
+        "") ;;
         "~"/*)
             if [ -z "$HOME_DIR" ]; then
-                add U GIT-HELPER-UNRESOLVED "-" "credential.helper store --file uses ~ but HOME is unset"
-                return
+                CLS=UNRESOLVED; CLS_WHY="credential store --file uses ~ but HOME is unset"; return
             fi
             p="$HOME_DIR/${p#\~/}" ;;
+        /*) ;;
+        *) CLS=UNRESOLVED; CLS_WHY="credential store --file path is relative or uses ~user; cannot locate the store"; return ;;
     esac
-    check_cred_file "$p"
+    CLS=STORE; CLS_PATH="$p"
 }
 
 if [ -z "$HOME_DIR" ]; then
@@ -331,19 +479,21 @@ elif [ -n "$HOME_DIR" ]; then
     check_cred_file "$HOME_DIR/.config/git/credentials"
 fi
 if command -v git >/dev/null 2>&1; then
-    HELPERS="$(git config --get-all credential.helper 2>/dev/null)"
-    GRC=$?
-    case "$GRC" in
-        0)
-            while IFS= read -r hline; do
-                [ -n "$hline" ] && scan_helper "$hline"
-            done <<EOF
-$HELPERS
-EOF
-            ;;
-        1) ;;
-        *) add U GIT-CONFIG-UNREADABLE "-" "git config exited $GRC; cannot confirm there is no custom credential store file" ;;
-    esac
+    if resolve_cred_helpers; then
+        hi=0
+        while [ "$hi" -lt "${#CRED_HELPERS[@]}" ]; do
+            classify_helper "${CRED_HELPERS[$hi]}"
+            hi=$((hi + 1))
+            case "$CLS" in
+                SAFE) ;;
+                STORE) [ -z "$CLS_PATH" ] || check_cred_file "$CLS_PATH" ;;
+                UNRESOLVED) add U GIT-HELPER-UNRESOLVED "-" "credential.helper #$hi: $CLS_WHY" ;;
+                *) add U GIT-HELPER-UNKNOWN "-" "credential.helper #$hi is not a form this check recognises (value not shown); cannot confirm it does not write a plaintext store" ;;
+            esac
+        done
+    fi
+else
+    add U GIT-CONFIG-UNREADABLE "-" "git is not installed; cannot read credential.helper, so cannot confirm there is no custom credential store"
 fi
 
 # --- 4. optional scopes (network, bounded) -----------------------------------
