@@ -7611,7 +7611,7 @@ elif [ "$UPGRADE_BREW_FAILED" = true ]; then
       echo "  aiteamforge upgrade"
       ;;
     caller-upgrade-did-not-advance)
-      print_error "Cause: the caller (the auto-upgrade job) ran 'brew upgrade aiteamforge' but the installed version did not advance."
+      print_error "Cause: the caller set AITEAMFORGE_BREW_UPGRADE_DONE=1 (the auto-upgrade or cellar-watch job: brew already ran), but the formula is still outdated."
       echo ""
       print_error "Remediation:"
       echo "  brew update"

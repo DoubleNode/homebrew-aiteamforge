@@ -291,6 +291,36 @@ for tok in AITEAMFORGE_BREW_UPGRADE_DONE tap-refused caller-upgrade-did-not-adva
 done
 if [ "$_static_ok" = true ]; then test_pass; else test_fail "upgrade.sh lacks contract tokens"; fi
 
+# Unit: tap_load_refused() under the caller's `set -eo pipefail`, with a refusing
+# brew that exits NON-ZERO and prints the refusal first, then a LOT of output. A
+# `printf | grep -q` match SIGPIPEs on large input and pipefail turns it into a
+# false "not refused" (review finding on PR #1312); the here-string match must not.
+_LRB="$TEST_TMP_DIR/large-refusal-bin"
+mkdir -p "$_LRB"
+cat > "$_LRB/brew" <<'LRB_EOF'
+#!/bin/bash
+echo "Error: Refusing to load formula aiteamforge from untrusted tap doublenode/aiteamforge"
+i=0; while [ $i -lt 20000 ]; do echo "padding line $i ................................................"; i=$((i + 1)); done
+exit 1
+LRB_EOF
+chmod +x "$_LRB/brew"
+for _lines in small large; do
+    test_start "UNIT: tap_load_refused detects a non-zero-exit refusal under pipefail ($_lines output)"
+    if [ "$_lines" = small ]; then
+        _brew_dir="$_MOCK_BIN"; _env_extra="S_UNTRUSTED=$TEST_TMP_DIR/unit-untrusted"; : > "$TEST_TMP_DIR/unit-untrusted"
+    else
+        _brew_dir="$_LRB"; _env_extra="S_UNUSED=1"
+    fi
+    _ASSERTIONS=$((_ASSERTIONS + 1))
+    if env "$_env_extra" PATH="$_brew_dir:/usr/bin:/bin" bash -c \
+        'set -eo pipefail; source "$1"; if tap_load_refused; then echo REFUSED; else echo NOT; fi' \
+        _ "$TAP_ROOT/libexec/lib/common.sh" 2>/dev/null | grep -qx REFUSED; then
+        test_pass
+    else
+        test_fail "tap_load_refused reported the refusing tap as NOT refused ($_lines output)"
+    fi
+done
+
 if [ "$_STANDALONE" = true ]; then
     echo ""
     echo "Results: ${_PASS_COUNT} passed, ${_FAIL_COUNT} failed (assertions: $_ASSERTIONS)"

@@ -388,9 +388,12 @@ tap_load_refused() {
     # was false-negative under a caller's `set -o pipefail`: a refusing brew exits
     # non-zero (and `grep -q` closing early can SIGPIPE it), so the pipeline failed
     # even though the refusal text matched — the refused tap was reported as fine.
+    # Match with a here-string, NOT `printf | grep -q`: that is still a pipeline, and
+    # on large output grep -q exits at the first match, SIGPIPEs printf and the same
+    # pipefail false negative returns (review finding on PR #1312).
     local _info=""
     _info="$(brew info aiteamforge 2>&1 || true)"
-    printf '%s\n' "$_info" | grep -qiE "untrusted tap|refus(e|ing) to load"
+    grep -qiE "untrusted tap|refus(e|ing) to load" <<< "$_info"
 }
 
 # ensure_tap_trusted — idempotently trust the aiteamforge tap so Homebrew can
