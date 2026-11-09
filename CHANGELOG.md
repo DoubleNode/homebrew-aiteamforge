@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+
+## [0.21.17] - 2026-11-09
 - XACA-1683: LCARS close-guard race 409 carries releaseId (XACA-1683)
 - Tap files updated in this publish: `share/lcars-ui/server.py`,`share/lcars-ui/tests/test_xaca1667_close_override_ui.js`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1684: CR remedy hints name --force-close where a bare kb-cr close is refused (XACA-1684)
@@ -8173,7 +8175,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.16...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.17...HEAD
+[0.21.17]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.16...v0.21.17
 [0.21.16]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.15...v0.21.16
 [0.21.15]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.14...v0.21.15
 [0.21.14]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.13...v0.21.14
