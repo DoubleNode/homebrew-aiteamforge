@@ -663,6 +663,31 @@ test_mods_user_uninstalled_not_readded() {
     log_pass "user uninstall sticks across upgrades; reinstall clears it"
 }
 
+test_mods_user_removal_survives_delist_relist() {
+    log_test "mods: a user uninstall survives the mod being delisted then relisted (XACA-1605-032)..."
+    mods_case delistrelist
+    mods_run stub _xaca1605_sync_mods
+    jq 'del(.enabledPlugins["beta@aiteamforge-mods"])' "$SETTINGS" > "$T/s.tmp" && mv "$T/s.tmp" "$SETTINGS"
+    mods_run stub _xaca1605_sync_mods
+    mods_market alpha gamma
+    mods_run stub _xaca1605_sync_mods
+    [[ "$(jq -c '.targets | to_entries[0].value.removed // []' "$RECEIPT")" == '["beta@aiteamforge-mods"]' ]] \
+        || { mods_fail "removed id forgotten while delisted: $(jq -c '.targets' "$RECEIPT")"; return 1; }
+    mods_market alpha beta gamma
+    : > "$LOG"
+    mods_run stub _xaca1605_sync_mods
+    mods_run stub _xaca1605_sync_mods
+    if grep -q 'install beta' "$LOG"; then mods_fail "relisted mod re-enabled over the user's removal"; return 1; fi
+    [[ "$(mods_plugin beta@$MP)" == absent ]] || { mods_fail "beta re-added after relist: $(mods_plugin beta@$MP)"; return 1; }
+    # Key reappears (user reinstalls) while it is delisted: the marker clears.
+    mods_market alpha gamma
+    jq '.enabledPlugins["beta@aiteamforge-mods"]=true' "$SETTINGS" > "$T/s.tmp" && mv "$T/s.tmp" "$SETTINGS"
+    mods_run stub _xaca1605_sync_mods
+    [[ "$(jq -c '.targets | to_entries[0].value.removed // []' "$RECEIPT")" == '[]' ]] \
+        || { mods_fail "removal marker not cleared when the key reappeared"; return 1; }
+    log_pass "user opt-out persists across delist/relist; key reappearing clears it"
+}
+
 test_mods_old_format_receipt_still_works() {
     log_test "mods: a pre-'removed' receipt (no removed/pending fields) still works..."
     mods_case oldreceipt
@@ -799,6 +824,7 @@ main() {
     test_mods_interim_duplicate_warning || failed=$((failed + 1))
     test_mods_uninstall_removes_ours_only || failed=$((failed + 1))
     test_mods_user_uninstalled_not_readded || failed=$((failed + 1))
+    test_mods_user_removal_survives_delist_relist || failed=$((failed + 1))
     test_mods_old_format_receipt_still_works || failed=$((failed + 1))
     test_mods_failed_install_then_success_not_user_removed || failed=$((failed + 1))
     test_mods_nonshipped_registration_left_alone || failed=$((failed + 1))

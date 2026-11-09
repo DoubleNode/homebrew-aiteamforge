@@ -2467,7 +2467,9 @@ _xaca1605_sync_mods() {
     # User removal (XACA-1605-022/027): `claude plugin uninstall` deletes the
     # enabledPlugins key, so "recorded as ours, key now absent" = the user
     # uninstalled it. That id moves to `removed` and is never re-added until the
-    # key reappears (the user ran `claude plugin install` again). Ids in
+    # key reappears (the user ran `claude plugin install` again), even across a
+    # delist/relist of the mod (XACA-1605-032: `removed` is NOT pruned to the
+    # current marketplace; only a reappearing key clears an id). Ids in
     # `pending` were written to the receipt but their install may never have run
     # (crash/failure) and are NOT user removals. A failed install is dropped from
     # `enabled` (see below), so it is simply re-added next time.
@@ -2478,7 +2480,7 @@ _xaca1605_sync_mods() {
         ($d | map(. + $s)) as $want
         | ($p | map(select(type == "string" and endswith($s)))) as $rec
         | ($rec | map(. as $i | select(($want | index($i)) != null and ($e | has($i) | not) and ($pp | index($i)) == null))) as $newrm
-        | ((($pr + $newrm) | unique) | map(. as $i | select(($want | index($i)) != null and ($e | has($i) | not)))) as $removed
+        | ((($pr + $newrm) | unique) | map(. as $i | select($e | has($i) | not))) as $removed
         | ($want | map(. as $i | select(($e | has($i) | not) and ($removed | index($i)) == null))) as $add
         | ($rec | map(select(. as $i | ($want | index($i)) == null))) as $gone
         | { add: $add,
