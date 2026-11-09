@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "lastUpdated": "2026-10-28",
+  "lastUpdated": "2026-11-08",
   "minClaudeVersion": "2.1.267",
   "_minClaudeVersionNote": "Floor = the lowest claude version measured on a fleet host in XACA-1599-001 (2.1.267, the oldest host at that time). `kb-sync-plugins check --host --probe` is the per-host behavioural probe: it asks a `claude -p` session for the L1 marker and exits 3 when it cannot verify. Record each host's probe result (host, claude version, date, verdict) in kanban/plans/XACA-1599/XACA-1599_006_probe_results.md at rollout. Raise the floor only if a host at the floor fails the probe.",
   "_schemaNote": "Schema 2 (XACA-1643): ONE fleet plugin list (`fleet.plugins`) rendered into every team in `teamTargets` by kb-sync-plugins `effective_team_cfg()`. A team block never carries `enabledPlugins` (validation rejects it). A team leaves the fleet list only through an entry in `exceptions`, which must carry a reason. `teams` was renamed `teamTargets` on purpose: a schema-1 script that meets this file fails closed (KeyError, exit 70, nothing written) instead of stripping every owned plugin. Design record: kanban/plans/XACA-1643/XACA-1643_one_fleet_toolset.md.",
@@ -51,6 +51,10 @@
       "atlassian@claude-plugins-official": { "class": "connector", "service": "Atlassian Cloud (http MCP mcp.atlassian.com)" },
       "firebase@claude-plugins-official": { "class": "connector", "service": "Firebase (stdio firebase-tools mcp)" },
       "swift-lsp@claude-plugins-official": { "class": "local" },
+      "pyright-lsp@claude-plugins-official": { "class": "local" },
+      "typescript-lsp@claude-plugins-official": { "class": "local" },
+      "playwright@claude-plugins-official": { "class": "local" },
+      "kotlin-lsp@claude-plugins-official": { "class": "local" },
       "cc-plugin-you-should-know@builtin": { "class": "local", "builtin": true, "minClaudeVersion": "2.1.287" }
     },
     "retiredPlugins": {},
@@ -121,7 +125,11 @@
     "devHost": {
       "Release Manager": { "reason": "Hard-codes a personal absolute path to a dev-host config file (SKILL.md ~L435): that must not ship. Mirror it after the path is removed (spin-out candidate)." },
       "LCARS Styling": { "reason": "Guides edits to canonical fleet-monitor CSS, which the tap publisher overwrites, and carries organisation-specific panel examples (SKILL.md 580-639)." },
-      "Initialize Team": { "reason": "Provisions canonical dev-team infra files through kb-init-team (14 sites; aiteamforge_paths.py is a mirrored canonical file), so it only means something against a dev-team clone." }
+      "Initialize Team": { "reason": "Provisions canonical dev-team infra files through kb-init-team (14 sites; aiteamforge_paths.py is a mirrored canonical file), so it only means something against a dev-team clone." },
+      "receiving-code-review": { "reason": "Vendored third-party Superpowers skill (MIT, LICENSE kept in the dir, XACA-1598). Mirroring would ship MIT-vendored content in the product, which needs the user's OK (XACA-1643 D6); not given, so dev-host only." },
+      "systematic-debugging": { "reason": "Vendored third-party Superpowers skill (MIT, LICENSE kept in the dir, XACA-1598). Mirroring would ship MIT-vendored content in the product, which needs the user's OK (XACA-1643 D6); not given, so dev-host only." },
+      "test-driven-development": { "reason": "Vendored third-party Superpowers skill (MIT, LICENSE kept in the dir, XACA-1598). Mirroring would ship MIT-vendored content in the product, which needs the user's OK (XACA-1643 D6); not given, so dev-host only." },
+      "verification-before-completion": { "reason": "Vendored third-party Superpowers skill (MIT, LICENSE kept in the dir, XACA-1598). Mirroring would ship MIT-vendored content in the product, which needs the user's OK (XACA-1643 D6); not given, so dev-host only." }
     },
     "sourceRoots": {
       "academy": "${dev_team}/skills",

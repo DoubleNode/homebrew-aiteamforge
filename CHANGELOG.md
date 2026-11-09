@@ -6,6 +6,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1678: Two-line tmux tab bar adapts label width to narrow clients (XACA-1678)
+- XACA-1598: Adopt LSP + playwright fleet plugins, vendor 4 Superpowers skills (XACA-1598)
+- XACA-1682: GAMMA exit binds an open cr-completed CR to the current build (XACA-1682)
+- Tap files updated in this publish: `share/kanban-hooks/approval_providers.py`,`share/kanban-hooks/release_gate.py` `share/kanban-hooks/release_resume.py`,`share/scripts/plugins-manifest.json` `share/templates/claude/tmux.conf`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1673: Configurable iTerm2 team window size — default 195+30 cols × 60 rows (XACA-1673)
 - Tap files updated in this publish: `docs/TROUBLESHOOTING.md`,`share/scripts/agent-panel-display.sh` `share/scripts/iterm2_window_manager.py`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1703: Close-out completes the current build's CR when the GAMMA gate holds (XACA-1703)

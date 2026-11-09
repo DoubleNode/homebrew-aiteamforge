@@ -72,7 +72,7 @@ def resume_plan(release, *, flow_config, cr_support_enabled, items=None, other_r
 
     row = the spec 5.2 table row (planned | dev-items-open | dev-deploy-pending | tests-running | tests-failed |
     cr-draft-not-approved | cr-submitted | gamma-soak-pending) or one of the follow-on rows the table implies
-    (stage-passed, gamma-ready, gamma-passed, closeout-ready, cr-stage-incomplete, cr-held, gamma-failed, stage-sha-missing, terminal).
+    (stage-passed, gamma-ready, gamma-passed, gamma-cr-unbound (XACA-1682), closeout-ready, cr-stage-incomplete, cr-held, gamma-failed, stage-sha-missing, terminal).
     action = what the session does next. `items` [{id,title,status,prMerged}], `scheduled` [{provider, schedule[],
     tests[]}], `cr` {id, crState, draftApproved, feed} (feed = approval_providers.release_cr_feed) are pre-resolved by
     the loader; None means "could not read" and fails closed. `board` (optional) only feeds the
@@ -262,6 +262,19 @@ def resume_plan(release, *, flow_config, cr_support_enabled, items=None, other_r
         return done("gamma-cr-complete-pending", "offer-closeout", head, production_hint(),
                     "Close-out completes CRs all-or-nothing, so fix first: %s. Then re-run `kb-release close-out %s`; do "
                     "not run the promote by hand." % (why or "no completable CR", rid))
+    if cur == "GAMMA" and cr_support_enabled and isinstance(cr, dict) and isinstance(cr.get("feed"), dict):
+        # XACA-1682: the GAMMA gate refuses a completed CR (open or closed) that is not bound to this build. Use the
+        # gate's own CR predicates so the plan and the gate agree; only act when the feed names a reason.
+        feed = cr["feed"]
+        why = [w for k in ("completedNotBound", "closedNotCompleted") for w in (feed.get(k) or []) if isinstance(w, str)]
+        if why and feed.get("state") != "cr-completed" and not G._cr_closed_by_close_out(release, feed) \
+                and not G._cr_closed_after_completion(feed):
+            return done("gamma-cr-unbound", "fix-cr",
+                        "GAMMA %s: the linked CR is not this build's completed CR; the PROD promote is refused." % status,
+                        "Why: %s." % "; ".join(why),
+                        "Close the earlier build's CR superseded (`kb-cr close <CR> --reason \"superseded\" "
+                        "--force-close`), then `kb-release regress %s --to CR --reason \"<why>\"` and `kb-release cr-stage %s` "
+                        "so the current build gets its own CR; do not run the promote by hand." % (rid, rid))
     if cur == "GAMMA":
         return done("gamma-passed", "offer-promote", "GAMMA %s: offer the PROD promote (session promote)." % status,
                     production_hint(),
@@ -408,6 +421,10 @@ def load_plan(kanban_dir, release_id, repo_dir=None, now=None):
         if pend:
             first = (done_ or [{"id": pend[0][1], "crState": pend[0][2]}])[0]
             cr = {"id": first["id"], "crState": first["crState"], "completable": done_, "stuck": stuck}
+        else:
+            # XACA-1682: no deployed CR pending, so the gate reads the feed. Carry it so the plan can see a completed
+            # CR that is not this build's and not offer a promote the gate refuses.
+            cr = {"id": None, "crState": None, "feed": ap.release_cr_feed(board, rel, now.isoformat())}
     if cur == "CR" and cr_on:
         import approval_providers as ap
         from release_cr_stage import is_gamma_held, RETIRED_STATES

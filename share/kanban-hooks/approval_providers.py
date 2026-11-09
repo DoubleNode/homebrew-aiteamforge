@@ -508,7 +508,14 @@ def cr_closed_bound_to_build(cr, release):
       3. Whenever stages.GAMMA.enteredAt is readable, cr_completed_at must also be at or after it (a CR that completed
          before a rollback and re-entry is not this GAMMA's CR even if the SHA still matches); a present but unparseable
          enteredAt refuses.
-    Fails closed: anything unreadable is a refusal with a reason naming the binding that failed."""
+    Fails closed: anything unreadable is a refusal with a reason naming the binding that failed.
+    The binding itself lives in completed_cr_bound_to_build (XACA-1682), shared with the OPEN cr-completed path."""
+    return completed_cr_bound_to_build(cr, release)
+
+
+def completed_cr_bound_to_build(cr, release):
+    """XACA-1682: (ok, why) -- is this COMPLETED CR (open cr-completed or cr-closed) the CURRENT build's CR?
+    The binding described in cr_closed_bound_to_build's docstring; it does not depend on crState."""
     try:
         cid = cr.get("id") if isinstance(cr, dict) else None
         stamp = cr_stamped_sha(cr)
@@ -573,7 +580,8 @@ def cr_open_bound_to_build(cr, release):
         return False
 
 
-def _fail_closed_feed(reason, ids=(), stale=None, all_closed=False, closed_after_completion=False, closed_not_completed=()):
+def _fail_closed_feed(reason, ids=(), stale=None, all_closed=False, closed_after_completion=False, closed_not_completed=(),
+                      completed_not_bound=()):
     # state None: release_gate reports "CR state is 'None', must be cr-approved" and refuses.
     # `stale` (XACA-1349 F1) carries the distinct stale-approval reason release_gate also prints.
     # `allClosed` (XACA-1353-016): True ONLY when every CR linked to the release is cr-closed (and there is >= 1).
@@ -583,8 +591,10 @@ def _fail_closed_feed(reason, ids=(), stale=None, all_closed=False, closed_after
     # genuinely completed first (cr_closed_after_completion); `closedNotCompleted` lists why the others are not, so the
     # gate can say so. The gate lets the first satisfy the GAMMA CR condition (release_gate._cr_closed_after_completion).
     # Since XACA-1667-012 "genuinely completed" also means bound to the CURRENT build (cr_closed_bound_to_build).
+    # `completedNotBound` (XACA-1682) lists why an OPEN cr-completed CR is not this build's, for the GAMMA message.
     return {"allClosed": bool(all_closed), "closedAfterCompletion": bool(closed_after_completion),
-            "closedNotCompleted": list(closed_not_completed), "state": None, "approvedAt": None,
+            "closedNotCompleted": list(closed_not_completed),
+            "completedNotBound": list(completed_not_bound), "state": None, "approvedAt": None,
             "deployWindowPlanned": None, "crIds": list(ids),
             "crStatus": None, "cr_approved_at": None, "cr_approval_expected_at": None,
             "stageSha": None, "approvalAssumed": False, "stamped": [], "refusals": [],
@@ -808,6 +818,16 @@ def _release_at_cr(release):
         return True
 
 
+def _release_at_gamma(release):
+    """XACA-1682: True when the release is at GAMMA by the gate's own derivation. Fails closed like _release_at_cr:
+    stage undeterminable -> True, so the cr-completed binding runs."""
+    try:
+        import release_gate  # noqa: PLC0415
+        return release_gate.current_stage(release) == "GAMMA"
+    except Exception:  # noqa: BLE001
+        return True
+
+
 def release_cr_feed(board, release, now, actor="lcars-release-gate"):
     """The `release.cr` dict release_gate reads, built from the board's CRs (XACA-1349-014).
 
@@ -906,8 +926,20 @@ def release_cr_feed(board, release, now, actor="lcars-release-gate"):
                            % (c.get("id"), (stamp[:12] if stamp else "<none stamped>"), str(sha)[:12], c.get("id"),
                               str(sha)[:12]))
                     return _fail_closed_feed(why, ids, stale=why)
+        # XACA-1682: at GAMMA the exit accepts cr-completed, so an OPEN completed CR must be THIS build's (same
+        # binding as a closed one). Scoped to GAMMA: the gate's only consumer of cr-completed is the GAMMA exit.
+        if state == "cr-completed" and _release_at_gamma(release):
+            unbound = []
+            for c in work["crs"]:
+                if c.get("crState") == "cr-completed":
+                    ok, why = completed_cr_bound_to_build(c, release)
+                    if not ok:
+                        unbound.append(why)
+            if unbound:
+                return _fail_closed_feed("cr-completed CR is not bound to the current build: " + "; ".join(unbound),
+                                         ids, completed_not_bound=unbound)
         return {"allClosed": False, "closedAfterCompletion": False, "closedNotCompleted": [],
-                "state": state, "approvedAt": approved, "deployWindowPlanned": window,
+                "completedNotBound": [], "state": state, "approvedAt": approved, "deployWindowPlanned": window,
                 "crIds": ids, "crStatus": state, "cr_approved_at": approved,
                 "cr_approval_expected_at": _latest(_ts("cr_approval_expected_at"), False),
                 "stageSha": sha or None, "staleApproval": None,

@@ -897,7 +897,8 @@ def _exit_conditions(release, cur, cr_on, ctx):
                 and not _cr_closed_after_completion(_cr):
             # XACA-1667-003: when the CRs are all closed, say WHY the closure does not count (never completed /
             # reverted after completing) instead of the bare condition, so the operator is not left guessing.
-            _why = [w for w in (_cr.get("closedNotCompleted") or []) if isinstance(w, str)]
+            # XACA-1682: also name why an OPEN cr-completed CR is not bound to this build (completedNotBound).
+            _why = [w for k in ("closedNotCompleted", "completedNotBound") for w in (_cr.get(k) or []) if isinstance(w, str)]
             r.append("GAMMA: CR must be cr-completed" + (" (%s)" % "; ".join(_why) if _why else ""),
                      CODE_GAMMA_CR_NOT_COMPLETED,
                      {"crIds": [i for i in (_cr.get("crIds") or []) if isinstance(i, str)], "state": _cr.get("state")})
