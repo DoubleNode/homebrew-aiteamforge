@@ -2311,7 +2311,8 @@ _xaca1605_receipt_state() {
         echo none
     elif [[ -f "$receipt" ]] && jq -e 'type == "object" and .version == 1
             and ((.targets // null) | type) == "object"
-            and ([.targets[] | (.enabled // null) | type == "array"] | all)' \
+            and ([.targets[] | (.enabled // null) | type == "array"] | all)
+            and ([.targets[] | ((.removed // []) | type == "array") and ((.pending // []) | type == "array")] | all)' \
             "$receipt" >/dev/null 2>&1; then
         echo ok
     else
@@ -2331,11 +2332,27 @@ _xaca1605_receipt_enabled() {
     esac
 }
 
-# $1 canon, $2 marketplace path, $3 JSON array of enabled ids. Merges into the
+# $1 canonical settings path, $2 field (removed|pending). Prints that JSON array
+# ("[]" when absent, which is every pre-"removed" receipt). rc 3 if unreadable.
+_xaca1605_receipt_field() {
+    local canon="$1" field="$2" state
+    state="$(_xaca1605_receipt_state)"
+    case "$state" in
+        none) echo '[]'; return 0 ;;
+        ok) jq -c --arg t "$canon" --arg f "$field" '(.targets[$t][$f] // [])' "$(_xaca1605_receipt_path)" 2>/dev/null || return 3 ;;
+        *) return 3 ;;
+    esac
+}
+
+# $1 canon, $2 marketplace path, $3 JSON array of enabled ids,
+# $4 optional JSON array "removed" (ids the user uninstalled; never re-added),
+# $5 optional JSON array "pending" (ids about to be installed; a crash between
+# the receipt write and the install must not read as a user uninstall).
+# Merges into the
 # receipt set (temp + jq -e validation + atomic mv); rc 1 on any failure, and
 # never touches an unreadable receipt.
 _xaca1605_write_receipt() {
-    local canon="$1" mp_path="$2" enabled="$3" receipt tmp state existing
+    local canon="$1" mp_path="$2" enabled="$3" removed="${4:-[]}" pending="${5:-[]}" receipt tmp state existing
     receipt="$(_xaca1605_receipt_path)"
     state="$(_xaca1605_receipt_state)"
     case "$state" in
@@ -2346,9 +2363,11 @@ _xaca1605_write_receipt() {
     mkdir -p "$(dirname "$receipt")" 2>/dev/null || return 1
     tmp="$(mktemp "${receipt}.XXXXXX" 2>/dev/null)" || return 1
     if ! jq -n -c --argjson ex "$existing" --arg k "$canon" --arg n "$_XACA1605_MP_NAME" \
-            --arg p "$mp_path" --argjson e "$enabled" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg p "$mp_path" --argjson e "$enabled" --argjson rm "$removed" --argjson pd "$pending" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             '{ticket:"XACA-1605",version:1,
-              targets:((($ex.targets) // {}) + {($k):{marketplace:{name:$n,path:$p},enabled:$e,at:$at}})}' \
+              targets:((($ex.targets) // {}) + {($k):({marketplace:{name:$n,path:$p},enabled:$e,at:$at}
+                  + (if ($rm | length) > 0 then {removed:$rm} else {} end)
+                  + (if ($pd | length) > 0 then {pending:$pd} else {} end))})}' \
             > "$tmp" 2>/dev/null \
         || ! jq -e --arg k "$canon" '.version == 1 and (.targets | has($k))' "$tmp" >/dev/null 2>&1 \
         || ! mv -f "$tmp" "$receipt" 2>/dev/null; then
@@ -2431,31 +2450,53 @@ _xaca1605_sync_mods() {
         fi
     fi
 
-    local rstate prior="[]" addonly=false rc=0
+    local rstate prior="[]" prior_removed="[]" prior_pending="[]" addonly=false rc=0
     rstate="$(_xaca1605_receipt_state)"
     if [[ "$rstate" == bad ]]; then
         addonly=true
         echo "claude-mods: WARNING receipt $(_xaca1605_receipt_path) is unreadable; add-only run (nothing retired, receipt left alone)" >&2
     else
         prior="$(_xaca1605_receipt_enabled "$canon")" || { addonly=true; prior="[]"; }
+        prior_removed="$(_xaca1605_receipt_field "$canon" removed)" || prior_removed="[]"
+        prior_pending="$(_xaca1605_receipt_field "$canon" pending)" || prior_pending="[]"
     fi
 
-    # Plan: add = desired ids with an absent key; retire = recorded, no longer
-    # desired, still true; keep = recorded AND still desired (survives in the receipt).
-    local plan add_ids retire_ids new_enabled
+    # Plan: add = desired ids with an absent key that the user has not removed;
+    # retire = recorded, no longer desired, still true; keep = recorded AND still
+    # desired (survives in the receipt).
+    # User removal (XACA-1605-022/027): `claude plugin uninstall` deletes the
+    # enabledPlugins key, so "recorded as ours, key now absent" = the user
+    # uninstalled it. That id moves to `removed` and is never re-added until the
+    # key reappears (the user ran `claude plugin install` again). Ids in
+    # `pending` were written to the receipt but their install may never have run
+    # (crash/failure) and are NOT user removals. A failed install is dropped from
+    # `enabled` (see below), so it is simply re-added next time.
+    local plan add_ids retire_ids new_enabled new_removed new_pending_changed
     plan="$(jq -n -c --argjson d "$desired_json" --argjson p "$prior" --argjson e "$live" \
+        --argjson pr "$prior_removed" --argjson pp "$prior_pending" \
         --arg s "@${_XACA1605_MP_NAME}" '
         ($d | map(. + $s)) as $want
         | ($p | map(select(type == "string" and endswith($s)))) as $rec
-        | ($want | map(. as $i | select(($e | has($i)) | not))) as $add
+        | ($rec | map(. as $i | select(($want | index($i)) != null and ($e | has($i) | not) and ($pp | index($i)) == null))) as $newrm
+        | ((($pr + $newrm) | unique) | map(. as $i | select(($want | index($i)) != null and ($e | has($i) | not)))) as $removed
+        | ($want | map(. as $i | select(($e | has($i) | not) and ($removed | index($i)) == null))) as $add
         | ($rec | map(select(. as $i | ($want | index($i)) == null))) as $gone
         | { add: $add,
+            removed: $removed,
             retire: ($gone | map(. as $i | select($e[$i] == true))),
-            enabled: ((($rec - $gone) + $add) | unique) }' 2>/dev/null)" \
+            enabled: ((($rec - $gone - $removed) + $add) | unique) }' 2>/dev/null)" \
         || { echo "claude-mods: skipped (could not compute the change plan)"; return 1; }
     add_ids="$(printf '%s' "$plan" | jq -r '.add[]')"
     retire_ids="$(printf '%s' "$plan" | jq -r '.retire[]')"
     new_enabled="$(printf '%s' "$plan" | jq -c '.enabled')"
+    new_removed="$(printf '%s' "$plan" | jq -c '.removed')"
+    new_pending_changed=false
+    # Receipt content changed without any install/retire (a newly noticed
+    # user removal, or a stale pending list): still has to be persisted.
+    if [[ "$(printf '%s' "$new_removed" | jq -c 'sort')" != "$(printf '%s' "$prior_removed" | jq -c 'sort')" \
+          || "$prior_pending" != "[]" ]]; then
+        new_pending_changed=true
+    fi
     $addonly && retire_ids=""
 
     local n_add=0 n_ret=0
@@ -2464,22 +2505,38 @@ _xaca1605_sync_mods() {
 
     _xaca1605_warn_interim_dirs "$desired_names"
 
+    # XACA-1605-028: never silently repoint a registration that is not ours. Ours
+    # = any */libexec/share/claude-mods spelling (opt, an older Cellar path) or
+    # the path we would register anyway. Anything else is the user's own folder;
+    # leave it (same rule as uninstall) unless AITEAMFORGE_MODS_REPOINT=1.
+    local cur_reg=""
+    cur_reg="$(jq -r --arg n "$_XACA1605_MP_NAME" '.extraKnownMarketplaces[$n].source.path // empty' "$target" 2>/dev/null)" || cur_reg=""
+    if [[ -n "$cur_reg" && "$cur_reg" != "$mp_dir" && "${AITEAMFORGE_MODS_REPOINT:-}" != 1 ]]; then
+        case "$cur_reg" in
+            */libexec/share/claude-mods) : ;;
+            *)
+                echo "claude-mods: WARNING marketplace ${_XACA1605_MP_NAME} is registered at ${cur_reg}, not the shipped path ${mp_dir}; leaving it alone. Set AITEAMFORGE_MODS_REPOINT=1 and re-run aiteamforge upgrade to repoint it." >&2
+                echo "claude-mods: skipped (${_XACA1605_MP_NAME} registered at a non-shipped path ${cur_reg}; nothing changed)"; return 1 ;;
+        esac
+    fi
+
     if $dry; then
         echo "${label} (would register ${_XACA1605_MP_NAME} at ${mp_dir}; add=${n_add} retire=${n_ret}; existing keys, including user-disabled ones, left as they are)"
         return 0
     fi
 
-    # Marketplace registration: idempotent, repoints a changed path (e.g. an
-    # older Cellar spelling), keeps already-installed plugins.
+    # Marketplace registration: idempotent, repoints an older shipped spelling
+    # (or anything, with AITEAMFORGE_MODS_REPOINT=1), keeps installed plugins.
     if ! _xaca1605_claude marketplace add "$mp_dir" --scope user; then
         echo "claude-mods: skipped (claude plugin marketplace add ${mp_dir} failed; nothing else changed)"; return 1
     fi
 
     if (( n_add == 0 && n_ret == 0 )); then
-        # Nothing to enable or retire; still make sure the receipt exists so a
-        # later retirement can work (add-only/bad receipts are never written).
-        if ! $addonly && [[ "$rstate" == none ]]; then
-            _xaca1605_write_receipt "$canon" "$mp_dir" "$new_enabled" || true
+        # Nothing to enable or retire; still make sure the receipt exists (and
+        # records any newly noticed user removal) so a later retirement works
+        # (add-only/bad receipts are never written).
+        if ! $addonly && { [[ "$rstate" == none ]] || $new_pending_changed; }; then
+            _xaca1605_write_receipt "$canon" "$mp_dir" "$new_enabled" "$new_removed" || true
         fi
         echo "claude-mods: added=0 retired=0 (no-op; marketplace ${_XACA1605_MP_NAME} at ${mp_dir})"
         return 0
@@ -2488,7 +2545,7 @@ _xaca1605_sync_mods() {
     # Receipt BEFORE settings (XACA-1227 ordering). A failed write aborts before
     # any plugin is touched; an unreadable receipt is never written (add-only).
     if ! $addonly; then
-        if ! _xaca1605_write_receipt "$canon" "$mp_dir" "$new_enabled"; then
+        if ! _xaca1605_write_receipt "$canon" "$mp_dir" "$new_enabled" "$new_removed" "$(printf '%s' "$plan" | jq -c '.add')"; then
             echo "claude-mods: skipped (could not record receipt $(_xaca1605_receipt_path); no plugin changed)"; return 1
         fi
     fi
@@ -2515,9 +2572,10 @@ _xaca1605_sync_mods() {
     done <<< "$retire_ids"
 
     # A failed install must not stay recorded as ours (it could then be retired
-    # from under a later user choice). Best effort.
-    if [[ -n "$failed" && "$ok_json" != "$new_enabled" ]] && ! $addonly; then
-        _xaca1605_write_receipt "$canon" "$mp_dir" "$ok_json" || true
+    # from under a later user choice, or later misread as a user removal), and
+    # the pending list is cleared. Best effort.
+    if ! $addonly; then
+        _xaca1605_write_receipt "$canon" "$mp_dir" "$ok_json" "$new_removed" || true
     fi
 
     if (( rc != 0 )); then

@@ -641,6 +641,106 @@ EOF
     log_pass "uninstall removes only aiteamforge-mods state"
 }
 
+test_mods_user_uninstalled_not_readded() {
+    log_test "mods: a mod the user ran 'claude plugin uninstall' on is NOT re-added on upgrade..."
+    mods_case uninstalled
+    mods_run stub _xaca1605_sync_mods
+    jq 'del(.enabledPlugins["beta@aiteamforge-mods"])' "$SETTINGS" > "$T/s.tmp" && mv "$T/s.tmp" "$SETTINGS"
+    : > "$LOG"
+    mods_run stub _xaca1605_sync_mods
+    mods_run stub _xaca1605_sync_mods
+    [[ "$(mods_plugin beta@$MP)" == absent ]] || { mods_fail "beta re-added: $(mods_plugin beta@$MP)"; return 1; }
+    if grep -q 'install beta' "$LOG"; then mods_fail "install ran for a user-removed mod"; return 1; fi
+    [[ "$(jq -c '.targets | to_entries[0].value.removed' "$RECEIPT")" == '["beta@aiteamforge-mods"]' ]] \
+        || { mods_fail "receipt does not keep beta as user-removed"; return 1; }
+    [[ "$(jq -c '.targets | to_entries[0].value.enabled | sort' "$RECEIPT")" == '["alpha@aiteamforge-mods","gamma@aiteamforge-mods"]' ]] \
+        || { mods_fail "beta still recorded as enabled"; return 1; }
+    # The user reinstalls it by hand: the key returns, the removal marker drops.
+    jq '.enabledPlugins["beta@aiteamforge-mods"]=true' "$SETTINGS" > "$T/s.tmp" && mv "$T/s.tmp" "$SETTINGS"
+    mods_run stub _xaca1605_sync_mods
+    [[ "$(jq -c '.targets | to_entries[0].value.removed // []' "$RECEIPT")" == '[]' ]] \
+        || { mods_fail "removal marker not cleared after the user reinstalled"; return 1; }
+    log_pass "user uninstall sticks across upgrades; reinstall clears it"
+}
+
+test_mods_old_format_receipt_still_works() {
+    log_test "mods: a pre-'removed' receipt (no removed/pending fields) still works..."
+    mods_case oldreceipt
+    mods_run stub _xaca1605_sync_mods
+    # Strip to the original schema, then remove nothing: plain no-op.
+    jq '.targets |= with_entries(.value |= del(.removed, .pending))' "$RECEIPT" > "$T/r.tmp" && mv "$T/r.tmp" "$RECEIPT"
+    : > "$LOG"
+    mods_run stub _xaca1605_sync_mods
+    [[ "$RC" == 0 ]] || { mods_fail "old-format no-op rc $RC"; return 1; }
+    if grep -q '^install \|^uninstall ' "$LOG"; then mods_fail "old-format receipt caused churn"; return 1; fi
+    # Old-format receipt + a mod dropped from the marketplace is still retired.
+    mods_market alpha beta
+    mods_run stub _xaca1605_sync_mods
+    [[ "$(mods_plugin gamma@$MP)" == absent ]] || { mods_fail "retire broken with old-format receipt"; return 1; }
+    # Old-format receipt + key absent for a recorded id = user removal, honoured.
+    jq 'del(.enabledPlugins["alpha@aiteamforge-mods"])' "$SETTINGS" > "$T/s.tmp" && mv "$T/s.tmp" "$SETTINGS"
+    mods_run stub _xaca1605_sync_mods
+    [[ "$(mods_plugin alpha@$MP)" == absent ]] || { mods_fail "alpha re-added from old-format receipt"; return 1; }
+    log_pass "old-format receipt: no-op, retire and removal detection all work"
+}
+
+test_mods_failed_install_then_success_not_user_removed() {
+    log_test "mods: a failed install is not mistaken for a user removal; a later success adds it..."
+    mods_case failthenok
+    MODS_EXTRA_ENV=(STUB_FAIL_INSTALL=beta@aiteamforge-mods)
+    mods_run stub _xaca1605_sync_mods
+    MODS_EXTRA_ENV=()
+    [[ "$RC" == 1 ]] || { mods_fail "expected rc 1 on failed install, got $RC"; return 1; }
+    [[ "$(mods_plugin beta@$MP)" == absent ]] || { mods_fail "beta unexpectedly present"; return 1; }
+    [[ "$(jq -c '.targets | to_entries[0].value.removed // []' "$RECEIPT")" == '[]' ]] \
+        || { mods_fail "failed install recorded as user-removed"; return 1; }
+    mods_run stub _xaca1605_sync_mods
+    [[ "$(mods_plugin beta@$MP)" == true ]] || { mods_fail "beta not added once install works"; return 1; }
+    # Crash shape: receipt lists beta + pending but its install never ran.
+    mods_case crashed
+    mods_run stub _xaca1605_sync_mods
+    jq 'del(.enabledPlugins["beta@aiteamforge-mods"])' "$SETTINGS" > "$T/s.tmp" && mv "$T/s.tmp" "$SETTINGS"
+    jq '.targets |= with_entries(.value.pending=["beta@aiteamforge-mods"])' "$RECEIPT" > "$T/r.tmp" && mv "$T/r.tmp" "$RECEIPT"
+    mods_run stub _xaca1605_sync_mods
+    [[ "$(mods_plugin beta@$MP)" == true ]] || { mods_fail "pending id read as user-removed"; return 1; }
+    log_pass "failed/interrupted install is retried, never read as user-removed"
+}
+
+test_mods_nonshipped_registration_left_alone() {
+    log_test "mods: a registration at a non-shipped path is warned about and left alone..."
+    mods_case foreignreg
+    mkdir -p "$T/mine/.claude-plugin"; cp "$T/mods/.claude-plugin/marketplace.json" "$T/mine/.claude-plugin/"
+    jq -n --arg p "$T/mine" '{extraKnownMarketplaces:{"aiteamforge-mods":{source:{source:"directory",path:$p}}}}' > "$SETTINGS"
+    mods_run stub _xaca1605_sync_mods
+    [[ "$RC" == 1 ]] || { mods_fail "expected rc 1 (skipped), got $RC"; return 1; }
+    [[ "$(jq -r --arg m "$MP" '.extraKnownMarketplaces[$m].source.path' "$SETTINGS")" == "$T/mine" ]] \
+        || { mods_fail "registration was repointed"; return 1; }
+    grep -q 'WARNING.*AITEAMFORGE_MODS_REPOINT=1' <<< "$ERR" || { mods_fail "no warning naming the override"; return 1; }
+    if grep -q '^marketplace-add\|^install ' "$LOG"; then mods_fail "CLI ran despite the foreign registration"; return 1; fi
+    # A shipped-looking older spelling is still repointed without any override.
+    mods_case oldcellar
+    mkdir -p "$T/Cellar/libexec/share"
+    cp -R "$T/mods" "$T/Cellar/libexec/share/claude-mods"
+    jq -n --arg p "$T/Cellar/libexec/share/claude-mods" '{extraKnownMarketplaces:{"aiteamforge-mods":{source:{source:"directory",path:$p}}}}' > "$SETTINGS"
+    mods_run stub _xaca1605_sync_mods
+    [[ "$(jq -r --arg m "$MP" '.extraKnownMarketplaces[$m].source.path' "$SETTINGS")" == "$T/mods" ]] \
+        || { mods_fail "older shipped spelling was not repointed"; return 1; }
+    log_pass "foreign registration untouched + warned; shipped spelling still repointed"
+}
+
+test_mods_repoint_override() {
+    log_test "mods: AITEAMFORGE_MODS_REPOINT=1 repoints a non-shipped registration..."
+    mods_case repoint
+    jq -n '{extraKnownMarketplaces:{"aiteamforge-mods":{source:{source:"directory",path:"/somewhere/else"}}}}' > "$SETTINGS"
+    MODS_EXTRA_ENV=(AITEAMFORGE_MODS_REPOINT=1)
+    mods_run stub _xaca1605_sync_mods
+    MODS_EXTRA_ENV=()
+    [[ "$RC" == 2 ]] || { mods_fail "expected rc 2, got $RC"; return 1; }
+    [[ "$(jq -r --arg m "$MP" '.extraKnownMarketplaces[$m].source.path' "$SETTINGS")" == "$T/mods" ]] \
+        || { mods_fail "override did not repoint"; return 1; }
+    log_pass "override repoints"
+}
+
 test_mods_real_cli_smoke() {
     log_test "mods: real claude CLI against a folder marketplace (sandboxed config dir)..."
     if [[ -z "$REAL_CLAUDE" ]]; then log_info "claude not installed, skipping real-CLI smoke"; return 0; fi
@@ -698,6 +798,11 @@ main() {
     test_mods_dry_run_writes_nothing || failed=$((failed + 1))
     test_mods_interim_duplicate_warning || failed=$((failed + 1))
     test_mods_uninstall_removes_ours_only || failed=$((failed + 1))
+    test_mods_user_uninstalled_not_readded || failed=$((failed + 1))
+    test_mods_old_format_receipt_still_works || failed=$((failed + 1))
+    test_mods_failed_install_then_success_not_user_removed || failed=$((failed + 1))
+    test_mods_nonshipped_registration_left_alone || failed=$((failed + 1))
+    test_mods_repoint_override || failed=$((failed + 1))
     test_mods_real_cli_smoke || failed=$((failed + 1))
 
     echo ""
