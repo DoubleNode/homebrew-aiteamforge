@@ -565,10 +565,14 @@ _xaca1669_tmux_conf_receipt_path() {
 }
 
 # Every shipped tmux.conf render except the current template, one sha256 per
-# line. Only one has ever shipped (git blob 2fec0ca5, the single-line tab bar).
+# line, oldest first:
+#   f83149da... git blob 2fec0ca5, the single-line tab bar (pre-XACA-1669)
+#   542a8601... the XACA-1669 two-line tab bar with fixed 22-col labels
+#               (v0.21.9 .. v0.21.16), outgoing when XACA-1678 made widths adaptive
 _xaca1669_tmux_conf_historical_sha256() {
     cat <<'HIST'
 f83149da485c2edf2aeefbd261e7d6d5378edb5b399df27d0b2266b42b92d924
+542a8601ba49cc3715925111f3d02fc9b32a58072ba244ba0e300938df372d78
 HIST
 }
 

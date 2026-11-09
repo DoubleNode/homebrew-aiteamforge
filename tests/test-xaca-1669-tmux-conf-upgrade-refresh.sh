@@ -25,6 +25,7 @@
 #   C4b stale receipt but live == CURRENT render -> rc 0, receipt re-synced, no
 #       sidecar (adoption; never strand the user on "customized")
 #   C5  pre-receipt box on the historical shipped blob -> rc 2, receipt written
+#   C5b pre-receipt box on the second historical render (b72a0b96, XACA-1678) -> rc 2
 #       (historical bytes are the committed fixture tests/fixtures/xaca-1669/
 #       tmux.conf.2fec0ca5, sha256-pinned to the installer's constant; NO git
 #       history dependency -- CI checkouts are shallow, and the publisher will
@@ -74,6 +75,12 @@ UPGRADE_SH="${XACA1669_UPGRADE_SH:-$TAP_ROOT/libexec/commands/aiteamforge-upgrad
 # share/: the point is that the suite needs neither.
 HIST_SHA256="f83149da485c2edf2aeefbd261e7d6d5378edb5b399df27d0b2266b42b92d924"
 HIST_FIXTURE="$SCRIPT_DIR/fixtures/xaca-1669/tmux.conf.2fec0ca5"
+# XACA-1678: the second shipped render, the XACA-1669 two-line tab bar with fixed
+# 22-col labels (tap blob b72a0b96, shipped v0.21.9 .. v0.21.16). Committed
+# byte-exact the same way; the installer must embed its sha256 too, or every
+# receipt-less box sitting on it is stranded as "customized" by XACA-1678.
+HIST2_SHA256="542a8601ba49cc3715925111f3d02fc9b32a58072ba244ba0e300938df372d78"
+HIST2_FIXTURE="$SCRIPT_DIR/fixtures/xaca-1669/tmux.conf.b72a0b96"
 
 for _need in "$INSTALLER" "$UPGRADE_SH"; do
     if [ ! -f "$_need" ]; then
@@ -93,6 +100,15 @@ if [ "$_fx_sha" != "$HIST_SHA256" ]; then
 fi
 if ! grep -q "^${HIST_SHA256}\$" "$INSTALLER"; then
     echo "FATAL: installer does not embed the historical sha256 ${HIST_SHA256} (constant drifted from the fixture)" >&2
+    exit 1
+fi
+if [ ! -f "$HIST2_FIXTURE" ]; then
+    echo "FATAL: historical tmux.conf fixture missing: $HIST2_FIXTURE" >&2
+    exit 1
+fi
+_fx2_sha="$(shasum -a 256 "$HIST2_FIXTURE" | awk '{print $1}')"
+if [ "$_fx2_sha" != "$HIST2_SHA256" ]; then
+    echo "FATAL: fixture sha256 ($_fx2_sha) != expected historical sha256 ($HIST2_SHA256) -- fixture corrupted or edited; refusing to fall back" >&2
     exit 1
 fi
 
@@ -433,6 +449,25 @@ refresh
 check_rc "pre-receipt == current template" 0 "$RC"
 check "receipt bootstrapped from current-template match" same_bytes "$RECEIPT" "$LIVE"
 check "no backup, no sidecar" test -z "$(backup_files)$( [ -e "$LIVE.new" ] && echo x)"
+end_case
+
+# ═══════════════════════════════════════════════════════════════════════════
+# C5b — pre-receipt box on the SECOND historical render (b72a0b96) -> rc 2 (XACA-1678)
+# ═══════════════════════════════════════════════════════════════════════════
+begin_case "C5b: pre-receipt box on the XACA-1669 two-line render (b72a0b96) -> rc 2, receipt written"
+new_sandbox
+cp "$HIST2_FIXTURE" "$OLD_BYTES"
+check "second historical fixture sha256 == installer constant" test "$(sha256_of "$OLD_BYTES")" = "$HIST2_SHA256"
+check "installer embeds the second historical sha256" grep -q "^${HIST2_SHA256}\$" "$INSTALLER"
+cp "$OLD_BYTES" "$LIVE"
+cp "$OLD_BYTES" "$S/pre.bytes"
+check "precondition: no receipt" test ! -e "$RECEIPT"
+refresh
+check_rc "refresh" 2 "$RC"
+check "live == new template" same_bytes "$LIVE" "$TMPL"
+check "receipt written == new live" same_bytes "$RECEIPT" "$LIVE"
+check "backup holds the second historical bytes" same_bytes "$(backup_files | head -1)" "$S/pre.bytes"
+check "no sidecar" test ! -e "$LIVE.new"
 end_case
 
 # ═══════════════════════════════════════════════════════════════════════════
