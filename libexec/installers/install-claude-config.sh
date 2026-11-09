@@ -2247,6 +2247,360 @@ _xaca1753_refresh_settings_hooks() {
 
 
 #------------------------------------------------------------------------------
+# XACA-1605: fleet mods marketplace (aiteamforge-mods)
+#------------------------------------------------------------------------------
+# The mods live in the tap at share/claude-mods (a folder marketplace). This
+# section registers that folder as the user-scope marketplace `aiteamforge-mods`
+# and enables every plugin its .claude-plugin/marketplace.json lists, through
+# the `claude plugin` CLI (measured offline-safe in a sandbox: marketplace add /
+# install / uninstall / marketplace remove only touch CLAUDE_CONFIG_DIR).
+#
+# Rules (design record D1-D3, kanban/plans/XACA-1605):
+#   * Marketplace path is the brew OPT spelling,
+#       $(brew --prefix)/opt/aiteamforge/libexec/share/claude-mods
+#     NEVER a Cellar or `pwd -P` path: the Cellar dir dies at `brew cleanup`.
+#     (Test seam: XACA1605_MODS_DIR overrides the whole path.)
+#   * A listed mod is installed ONLY when its enabledPlugins key is ABSENT. A
+#     present key -- true, or a user `claude plugin disable` false -- is left
+#     alone. (`claude plugin install` on a disabled key would flip it to true.)
+#   * Retirement is by receipt, never by merge: an id is uninstalled only if it
+#     is recorded in the receipt, is no longer listed by the shipped marketplace,
+#     and its live value is still true. A user false stays. Plugins from any other
+#     marketplace are never touched.
+#   * Receipt: ${AITEAMFORGE_DIR}/.xaca1605-mods.receipt, v1:
+#       {"ticket":"XACA-1605","version":1,"targets":{"<canonical settings path>":
+#         {"marketplace":{"name":..,"path":..},"enabled":["<mod>@aiteamforge-mods"],"at":..}}}
+#     Written BEFORE any settings change (XACA-1227 ordering). If the receipt
+#     exists but is unreadable the run is ADD-ONLY: nothing is retired, the
+#     receipt is never overwritten. A failed receipt write aborts before any
+#     settings change.
+#   * Fail-soft everywhere: `claude`, jq, brew or the shipped marketplace being
+#     absent is a clear skip (rc 1, never an installer failure). The marketplace
+#     dir being absent is expected between a tap-main installer release and the
+#     publisher mirroring share/claude-mods.
+#   * An empty/malformed marketplace.json is rejected (rc 1): an empty "desired"
+#     list must never be read as "retire everything".
+#
+# _xaca1605_sync_mods [--dry-run]: prints ONE summary line on stdout (warnings go
+# to stderr). rc: 0 no-op / nothing to do, 2 changed, 3 untouched (unreadable
+# settings), 1 skipped or failed (non-fatal to the caller).
+_XACA1605_MP_NAME="aiteamforge-mods"
+
+_xaca1605_receipt_path() {
+    printf '%s' "${AITEAMFORGE_DIR}/.xaca1605-mods.receipt"
+}
+
+# The directory registered as the marketplace (opt spelling). rc 1 if unknowable.
+_xaca1605_mods_dir() {
+    if [[ -n "${XACA1605_MODS_DIR:-}" ]]; then
+        printf '%s' "$XACA1605_MODS_DIR"
+        return 0
+    fi
+    local prefix=""
+    command -v brew >/dev/null 2>&1 || return 1
+    prefix="$(brew --prefix 2>/dev/null)" || return 1
+    [[ -n "$prefix" ]] || return 1
+    printf '%s/opt/aiteamforge/libexec/share/claude-mods' "$prefix"
+}
+
+# Prints one of: none | ok | bad
+_xaca1605_receipt_state() {
+    local receipt
+    receipt="$(_xaca1605_receipt_path)"
+    if [[ ! -e "$receipt" && ! -L "$receipt" ]]; then
+        echo none
+    elif [[ -f "$receipt" ]] && jq -e 'type == "object" and .version == 1
+            and ((.targets // null) | type) == "object"
+            and ([.targets[] | (.enabled // null) | type == "array"] | all)' \
+            "$receipt" >/dev/null 2>&1; then
+        echo ok
+    else
+        echo bad
+    fi
+}
+
+# $1 canonical settings path. Prints the recorded enabled ids as a JSON array
+# ("[]" when none/not recorded). rc 3 if the receipt is unreadable.
+_xaca1605_receipt_enabled() {
+    local canon="$1" state
+    state="$(_xaca1605_receipt_state)"
+    case "$state" in
+        none) echo '[]'; return 0 ;;
+        ok) jq -c --arg t "$canon" '(.targets[$t].enabled // [])' "$(_xaca1605_receipt_path)" 2>/dev/null || return 3 ;;
+        *) return 3 ;;
+    esac
+}
+
+# $1 canon, $2 marketplace path, $3 JSON array of enabled ids. Merges into the
+# receipt set (temp + jq -e validation + atomic mv); rc 1 on any failure, and
+# never touches an unreadable receipt.
+_xaca1605_write_receipt() {
+    local canon="$1" mp_path="$2" enabled="$3" receipt tmp state existing
+    receipt="$(_xaca1605_receipt_path)"
+    state="$(_xaca1605_receipt_state)"
+    case "$state" in
+        none) existing='{"targets":{}}' ;;
+        ok) existing="$(jq -c . "$receipt" 2>/dev/null)" || return 1 ;;
+        *) return 1 ;;
+    esac
+    mkdir -p "$(dirname "$receipt")" 2>/dev/null || return 1
+    tmp="$(mktemp "${receipt}.XXXXXX" 2>/dev/null)" || return 1
+    if ! jq -n -c --argjson ex "$existing" --arg k "$canon" --arg n "$_XACA1605_MP_NAME" \
+            --arg p "$mp_path" --argjson e "$enabled" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{ticket:"XACA-1605",version:1,
+              targets:((($ex.targets) // {}) + {($k):{marketplace:{name:$n,path:$p},enabled:$e,at:$at}})}' \
+            > "$tmp" 2>/dev/null \
+        || ! jq -e --arg k "$canon" '.version == 1 and (.targets | has($k))' "$tmp" >/dev/null 2>&1 \
+        || ! mv -f "$tmp" "$receipt" 2>/dev/null; then
+        rm -f "$tmp"
+        return 1
+    fi
+    return 0
+}
+
+# Run the claude CLI against CLAUDE_CONFIG_DIR only; output discarded.
+_xaca1605_claude() {
+    CLAUDE_CONFIG_DIR="$CLAUDE_CONFIG_DIR" claude plugin "$@" >/dev/null 2>&1
+}
+
+# Warn (stderr) while the interim CLAUDE_CODE_PLUGIN_DIRS / ~/.claude/mods copy
+# still loads a mod the marketplace now provides: both load at once, so each
+# status band is drawn twice until XACA-1605-015 removes the interim line.
+# $1 = newline-separated desired mod names.
+_xaca1605_warn_interim_dirs() {
+    local names="$1" n hit="" entry
+    local mods_home="${HOME}/.claude/mods"
+    local dirs_file="${mods_home}/plugin-dirs.zsh"
+    while IFS= read -r n; do
+        [[ -n "$n" ]] || continue
+        case ":${CLAUDE_CODE_PLUGIN_DIRS:-}:" in
+            *":${mods_home}/${n}:"*|*":${mods_home}/${n}/"*) hit="${hit} ${n}" ;;
+        esac
+        if [[ -f "$dirs_file" ]] && grep -q -F "/.claude/mods/${n}" "$dirs_file" 2>/dev/null; then
+            case " ${hit} " in *" ${n} "*) : ;; *) hit="${hit} ${n}" ;; esac
+        fi
+    done <<< "$names"
+    if [[ -n "$hit" ]]; then
+        echo "claude-mods: WARNING duplicate load: CLAUDE_CODE_PLUGIN_DIRS / ${dirs_file} still lists${hit} from ~/.claude/mods, and the ${_XACA1605_MP_NAME} marketplace now provides them. Both load until the interim line is removed (XACA-1605-015)." >&2
+    fi
+    return 0
+}
+
+_xaca1605_sync_mods() {
+    local dry=false
+    [[ "${1:-}" == "--dry-run" ]] && dry=true
+
+    local label="claude-mods"
+    $dry && label="claude-mods: dry-run"
+
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "claude-mods: skipped (jq not found)"; return 1
+    fi
+    local mp_dir=""
+    if ! mp_dir="$(_xaca1605_mods_dir)"; then
+        echo "claude-mods: skipped (cannot determine the brew prefix; brew not found)"; return 1
+    fi
+    local manifest="${mp_dir}/.claude-plugin/marketplace.json"
+    if [[ ! -d "$mp_dir" ]]; then
+        echo "claude-mods: skipped (marketplace not shipped in this release: ${mp_dir} absent; nothing changed)"; return 0
+    fi
+    if [[ ! -f "$manifest" ]]; then
+        echo "claude-mods: skipped (${manifest} missing; nothing changed)"; return 1
+    fi
+    if ! jq -e --arg n "$_XACA1605_MP_NAME" '.name == $n
+            and ((.plugins // null) | type) == "array" and (.plugins | length) > 0
+            and ([.plugins[] | (.name // "") | test("^[A-Za-z0-9][A-Za-z0-9._-]*$")] | all)' \
+            "$manifest" >/dev/null 2>&1; then
+        echo "claude-mods: skipped (${manifest} is not a valid ${_XACA1605_MP_NAME} marketplace; nothing changed)"; return 1
+    fi
+    if ! command -v claude >/dev/null 2>&1; then
+        echo "claude-mods: skipped (claude CLI not found; install Claude Code, then re-run aiteamforge upgrade)"; return 1
+    fi
+
+    local desired_names desired_json
+    desired_names="$(jq -r '.plugins[].name' "$manifest" 2>/dev/null)" || { echo "claude-mods: skipped (could not read ${manifest})"; return 1; }
+    desired_json="$(jq -c '[.plugins[].name]' "$manifest" 2>/dev/null)" || { echo "claude-mods: skipped (could not read ${manifest})"; return 1; }
+
+    local target="${CLAUDE_CONFIG_DIR}/settings.json" canon="" live='{}'
+    mkdir -p "$CLAUDE_CONFIG_DIR" 2>/dev/null || { echo "claude-mods: skipped (cannot create ${CLAUDE_CONFIG_DIR})"; return 1; }
+    canon="$(_xaca1227_canon_target "$target")" || { echo "claude-mods: skipped (cannot resolve ${target})"; return 1; }
+    if [[ -f "$target" ]]; then
+        live="$(jq -c '(.enabledPlugins // {})' "$target" 2>/dev/null)" || live=""
+        if [[ -z "$live" ]] || ! printf '%s' "$live" | jq -e 'type == "object"' >/dev/null 2>&1; then
+            echo "claude-mods: untouched (${target} is not valid settings JSON)"; return 3
+        fi
+    fi
+
+    local rstate prior="[]" addonly=false rc=0
+    rstate="$(_xaca1605_receipt_state)"
+    if [[ "$rstate" == bad ]]; then
+        addonly=true
+        echo "claude-mods: WARNING receipt $(_xaca1605_receipt_path) is unreadable; add-only run (nothing retired, receipt left alone)" >&2
+    else
+        prior="$(_xaca1605_receipt_enabled "$canon")" || { addonly=true; prior="[]"; }
+    fi
+
+    # Plan: add = desired ids with an absent key; retire = recorded, no longer
+    # desired, still true; keep = recorded AND still desired (survives in the receipt).
+    local plan add_ids retire_ids new_enabled
+    plan="$(jq -n -c --argjson d "$desired_json" --argjson p "$prior" --argjson e "$live" \
+        --arg s "@${_XACA1605_MP_NAME}" '
+        ($d | map(. + $s)) as $want
+        | ($p | map(select(type == "string" and endswith($s)))) as $rec
+        | ($want | map(. as $i | select(($e | has($i)) | not))) as $add
+        | ($rec | map(select(. as $i | ($want | index($i)) == null))) as $gone
+        | { add: $add,
+            retire: ($gone | map(. as $i | select($e[$i] == true))),
+            enabled: ((($rec - $gone) + $add) | unique) }' 2>/dev/null)" \
+        || { echo "claude-mods: skipped (could not compute the change plan)"; return 1; }
+    add_ids="$(printf '%s' "$plan" | jq -r '.add[]')"
+    retire_ids="$(printf '%s' "$plan" | jq -r '.retire[]')"
+    new_enabled="$(printf '%s' "$plan" | jq -c '.enabled')"
+    $addonly && retire_ids=""
+
+    local n_add=0 n_ret=0
+    [[ -n "$add_ids" ]] && n_add="$(printf '%s\n' "$add_ids" | grep -c .)"
+    [[ -n "$retire_ids" ]] && n_ret="$(printf '%s\n' "$retire_ids" | grep -c .)"
+
+    _xaca1605_warn_interim_dirs "$desired_names"
+
+    if $dry; then
+        echo "${label} (would register ${_XACA1605_MP_NAME} at ${mp_dir}; add=${n_add} retire=${n_ret}; existing keys, including user-disabled ones, left as they are)"
+        return 0
+    fi
+
+    # Marketplace registration: idempotent, repoints a changed path (e.g. an
+    # older Cellar spelling), keeps already-installed plugins.
+    if ! _xaca1605_claude marketplace add "$mp_dir" --scope user; then
+        echo "claude-mods: skipped (claude plugin marketplace add ${mp_dir} failed; nothing else changed)"; return 1
+    fi
+
+    if (( n_add == 0 && n_ret == 0 )); then
+        # Nothing to enable or retire; still make sure the receipt exists so a
+        # later retirement can work (add-only/bad receipts are never written).
+        if ! $addonly && [[ "$rstate" == none ]]; then
+            _xaca1605_write_receipt "$canon" "$mp_dir" "$new_enabled" || true
+        fi
+        echo "claude-mods: added=0 retired=0 (no-op; marketplace ${_XACA1605_MP_NAME} at ${mp_dir})"
+        return 0
+    fi
+
+    # Receipt BEFORE settings (XACA-1227 ordering). A failed write aborts before
+    # any plugin is touched; an unreadable receipt is never written (add-only).
+    if ! $addonly; then
+        if ! _xaca1605_write_receipt "$canon" "$mp_dir" "$new_enabled"; then
+            echo "claude-mods: skipped (could not record receipt $(_xaca1605_receipt_path); no plugin changed)"; return 1
+        fi
+    fi
+
+    local id added=0 retired=0 failed="" ok_json="$new_enabled"
+    while IFS= read -r id; do
+        [[ -n "$id" ]] || continue
+        if _xaca1605_claude install "$id" --scope user; then
+            added=$((added + 1))
+        else
+            failed="${failed} ${id}"
+            ok_json="$(printf '%s' "$ok_json" | jq -c --arg i "$id" 'map(select(. != $i))')"
+            rc=1
+        fi
+    done <<< "$add_ids"
+    while IFS= read -r id; do
+        [[ -n "$id" ]] || continue
+        if _xaca1605_claude uninstall "$id" --scope user; then
+            retired=$((retired + 1))
+        else
+            failed="${failed} ${id}"
+            rc=1
+        fi
+    done <<< "$retire_ids"
+
+    # A failed install must not stay recorded as ours (it could then be retired
+    # from under a later user choice). Best effort.
+    if [[ -n "$failed" && "$ok_json" != "$new_enabled" ]] && ! $addonly; then
+        _xaca1605_write_receipt "$canon" "$mp_dir" "$ok_json" || true
+    fi
+
+    if (( rc != 0 )); then
+        echo "claude-mods: added=${added} retired=${retired} FAILED:${failed} (non-fatal; re-run aiteamforge upgrade to retry)"
+        return 1
+    fi
+    echo "claude-mods: added=${added} retired=${retired} (marketplace ${_XACA1605_MP_NAME} at ${mp_dir})"
+    return 2
+}
+
+# Installer entry (called after install_settings_json). Never fails the install.
+install_claude_mods() {
+    log_info "Installing fleet mods marketplace (${_XACA1605_MP_NAME})..."
+    local out="" rc=0
+    out="$(_xaca1605_sync_mods)" || rc=$?
+    case "$rc" in
+        0|2) log_success "$out" ;;
+        *)   log_warning "$out" ;;
+    esac
+    return 0
+}
+
+# Uninstall: remove the recorded mods and the marketplace (only when it still
+# points at the shipped opt path), then the receipt entry. Prints one line.
+# rc 0 done/nothing to do, 1 skipped.
+_xaca1605_remove_mods() {
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "claude-mods: not removed (jq not found)"; return 1
+    fi
+    if ! command -v claude >/dev/null 2>&1; then
+        echo "claude-mods: not removed (claude CLI not found); remove by hand: claude plugin marketplace remove ${_XACA1605_MP_NAME}"; return 1
+    fi
+    local target="${CLAUDE_CONFIG_DIR}/settings.json" canon="" cur_path="" ids="" id
+    [[ -f "$target" ]] || { echo "claude-mods: nothing to remove (no ${target})"; return 0; }
+    canon="$(_xaca1227_canon_target "$target")" || { echo "claude-mods: not removed (cannot resolve ${target})"; return 1; }
+
+    # Recorded ids first (cleans the plugin cache). Only values still true; a
+    # user false is theirs and goes with the marketplace entry below anyway.
+    if [[ "$(_xaca1605_receipt_state)" == ok ]]; then
+        ids="$(jq -r --arg t "$canon" --slurpfile s "$target" \
+            '(.targets[$t].enabled // [])[] as $i | select(($s[0].enabledPlugins // {})[$i] == true) | $i' \
+            "$(_xaca1605_receipt_path)" 2>/dev/null)" || ids=""
+        while IFS= read -r id; do
+            [[ -n "$id" ]] || continue
+            case "$id" in *"@${_XACA1605_MP_NAME}") _xaca1605_claude uninstall "$id" --scope user || true ;; esac
+        done <<< "$ids"
+    fi
+
+    cur_path="$(jq -r --arg n "$_XACA1605_MP_NAME" '.extraKnownMarketplaces[$n].source.path // empty' "$target" 2>/dev/null)" || cur_path=""
+    local removed_mp=false
+    case "$cur_path" in
+        */libexec/share/claude-mods)
+            if _xaca1605_claude marketplace remove "$_XACA1605_MP_NAME"; then removed_mp=true; fi ;;
+        "") : ;;
+        *) echo "claude-mods: marketplace ${_XACA1605_MP_NAME} points at ${cur_path} (not the shipped path); left in place" >&2 ;;
+    esac
+
+    # Drop this target from the receipt (delete the file when empty). An
+    # unreadable receipt is never touched.
+    if [[ "$(_xaca1605_receipt_state)" == ok ]]; then
+        local receipt tmp
+        receipt="$(_xaca1605_receipt_path)"
+        tmp="$(mktemp "${receipt}.XXXXXX" 2>/dev/null)" || tmp=""
+        if [[ -n "$tmp" ]] && jq -c --arg t "$canon" 'del(.targets[$t])' "$receipt" > "$tmp" 2>/dev/null \
+                && jq -e '.version == 1 and (.targets | type) == "object"' "$tmp" >/dev/null 2>&1; then
+            if [[ "$(jq '.targets | length' "$tmp")" == "0" ]]; then
+                rm -f "$tmp" "$receipt"
+            else
+                mv -f "$tmp" "$receipt"
+            fi
+        else
+            [[ -n "$tmp" ]] && rm -f "$tmp"
+        fi
+    fi
+    if $removed_mp; then
+        echo "claude-mods: removed marketplace ${_XACA1605_MP_NAME} and recorded mods"
+    else
+        echo "claude-mods: recorded mods removed; marketplace entry not removed (absent or not the shipped path)"
+    fi
+    return 0
+}
+
+#------------------------------------------------------------------------------
 # Main Installation Function
 #------------------------------------------------------------------------------
 
@@ -2288,6 +2642,10 @@ install_claude_config() {
     # Install settings.json (do this last so it can reference installed components)
     echo ""
     install_settings_json
+
+    # XACA-1605: register the fleet mods marketplace + enable its mods. Fail-soft.
+    echo ""
+    install_claude_mods
 
     # Deploy personas to every team repo present on this machine (XACA-0285).
     # Must run after ~/dev-team/ clone is in place so agents-master/ and

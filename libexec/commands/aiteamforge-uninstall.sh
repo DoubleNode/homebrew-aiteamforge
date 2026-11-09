@@ -46,6 +46,7 @@ What Gets Removed:
   • Running services (LCARS, Fleet Monitor)
   • Installed files in ~/.aiteamforge/ (or custom location)
   • Claude Code config additions (backups restored)
+  • Fleet mods marketplace (aiteamforge-mods) and its recorded mods
   • Shell aliases and helpers
 
 What Can Be Preserved (with --keep-data):
@@ -434,6 +435,35 @@ restore_claude_config() {
   fi
 }
 
+# XACA-1605: remove the fleet mods marketplace (aiteamforge-mods) and the mods recorded in the
+# receipt from the user's Claude Code settings. Runs BEFORE remove_files() because the receipt lives in
+# ${WORKING_DIR}. Single source of truth: _xaca1605_remove_mods() in install-claude-config.sh. Plugins
+# from other marketplaces are never touched. Never fatal to the uninstall.
+remove_claude_mods() {
+  print_section "Removing Claude Code fleet mods"
+
+  local installer="${LIBEXEC_DIR}/installers/install-claude-config.sh"
+  if [ ! -f "$installer" ]; then
+    print_info "install-claude-config.sh not found; skipping fleet mods removal"
+    return 0
+  fi
+
+  local result="" rc=0
+  result="$(
+      AITEAMFORGE_DIR="${WORKING_DIR}"
+      export AITEAMFORGE_DIR
+      # shellcheck source=/dev/null
+      source "$installer" >/dev/null 2>&1
+      _xaca1605_remove_mods
+    )" && rc=0 || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    print_success "${result:-claude-mods: nothing to remove}"
+  else
+    print_warning "${result:-claude-mods: not removed (non-fatal)}"
+  fi
+  return 0
+}
+
 # XACA-1599-006: remove the Claude Code L1 managed policy. It is a root-owned file OUTSIDE
 # ${WORKING_DIR}, so the wholesale removal in remove_files() would never touch it and it would outlive
 # the uninstall, blocking plugins on a machine that no longer runs aiteamforge. Runs BEFORE
@@ -476,6 +506,7 @@ stop_services
 remove_launchagents
 remove_zshrc_integration
 restore_claude_config
+remove_claude_mods
 remove_managed_policy
 remove_files
 

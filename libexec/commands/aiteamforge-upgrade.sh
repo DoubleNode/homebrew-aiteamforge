@@ -6790,6 +6790,43 @@ update_claude_settings() {
   return 0
 }
 
+# XACA-1605: register the fleet mods marketplace (aiteamforge-mods) and enable the
+# mods it lists, on already-installed boxes (the install path only reaches fresh
+# installs). Single source of truth for the rules (opt path, add-only-when-key-
+# absent, receipt-guarded retirement, user false preserved) is
+# _xaca1605_sync_mods() in install-claude-config.sh. Same subshell/fail-soft
+# pattern as update_claude_settings. Also warns while the interim
+# CLAUDE_CODE_PLUGIN_DIRS copy of a mod is still loaded (double load).
+update_claude_mods() {
+  print_section "Updating Claude Code fleet mods (aiteamforge-mods)"
+
+  local installer="${LIBEXEC_DIR}/installers/install-claude-config.sh"
+  if [ ! -f "$installer" ]; then
+    print_warning "install-claude-config.sh not found ($installer) — skipping fleet mods refresh"
+    return 0
+  fi
+
+  local _xaca1605_flag=""
+  [ "$DRY_RUN" = true ] && _xaca1605_flag="--dry-run"
+
+  local _xaca1605_result="" _xaca1605_rc=0
+  _xaca1605_result="$(
+      AITEAMFORGE_DIR="${WORKING_DIR}"
+      TEMPLATE_DIR="${FRAMEWORK_DIR}/share/templates"
+      export AITEAMFORGE_DIR TEMPLATE_DIR
+      # shellcheck source=/dev/null
+      source "$installer" >/dev/null 2>&1
+      _xaca1605_sync_mods ${_xaca1605_flag}
+    )" && _xaca1605_rc=0 || _xaca1605_rc=$?
+
+  case "$_xaca1605_rc" in
+    0|2) print_success "${_xaca1605_result:-claude-mods: added=0 retired=0 (no-op)}" ;;
+    *)   print_warning "${_xaca1605_result:-claude-mods: skipped (non-fatal; upgrade continues)}" ;;
+  esac
+
+  return 0
+}
+
 # XACA-1740: the Claude config dir, using the same precedence as
 # install-claude-config.sh (XACA-0773) and update_claude_hooks' assert block:
 # a caller/test CLAUDE_CONFIG_DIR wins, then CLAUDE_SANDBOX=1 staging, then
@@ -7425,6 +7462,7 @@ update_claude_hooks
 update_global_claude_md
 update_tmux_conf
 update_claude_settings
+update_claude_mods
 update_skills
 update_launchagents
 # XACA-0763-005: tear down the retired com.aiteamforge.lcars-runatload agent
