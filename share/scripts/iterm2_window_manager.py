@@ -19,9 +19,61 @@ Note: Requires the 'iterm2' Python package. The dep is provisioned in the
 
 import argparse
 import asyncio
+import collections
 import os
+import re
 import subprocess
 import sys
+
+# XACA-1673: team window geometry defaults, overridable via environment.
+# Precedence for resize-pane / reset-panels: CLI flag > env var > default.
+DEFAULT_MAIN_COLS = 195
+DEFAULT_PANEL_COLS = 30
+DEFAULT_ROWS = 60
+GEOMETRY_MIN = 10
+GEOMETRY_MAX = 1000  # inclusive bounds
+ENV_MAIN_COLS = "ITERM2_TEAM_MAIN_COLS"
+ENV_PANEL_COLS = "ITERM2_TEAM_PANEL_COLS"
+ENV_ROWS = "ITERM2_TEAM_ROWS"
+
+WindowGeometry = collections.namedtuple("WindowGeometry", ["main_cols", "panel_cols", "rows"])
+
+_DIGITS_RE = re.compile(r"^[0-9]+$", re.ASCII)
+
+
+def _resolve_dim(env_name, default, environ=None):
+    """Return the int value of env var `env_name`, or `default`.
+
+    Unset/blank silently yields the default. A non-integer or out-of-range
+    value (outside GEOMETRY_MIN..GEOMETRY_MAX) warns once on stderr and yields
+    the default. Never raises.
+    """
+    if environ is None:
+        environ = os.environ
+    raw = environ.get(env_name)
+    if raw is None or not str(raw).strip():
+        return default
+    text = str(raw).strip()
+    if _DIGITS_RE.match(text):
+        value = int(text)
+        if GEOMETRY_MIN <= value <= GEOMETRY_MAX:
+            return value
+    print(
+        f"Warning: ignoring {env_name}={raw!r} (need an integer "
+        f"{GEOMETRY_MIN}-{GEOMETRY_MAX}); using default {default}",
+        file=sys.stderr,
+    )
+    return default
+
+
+def resolve_window_geometry(environ=None):
+    """Resolve the team window geometry from the environment (call-time)."""
+    return WindowGeometry(
+        main_cols=_resolve_dim(ENV_MAIN_COLS, DEFAULT_MAIN_COLS, environ),
+        panel_cols=_resolve_dim(ENV_PANEL_COLS, DEFAULT_PANEL_COLS, environ),
+        rows=_resolve_dim(ENV_ROWS, DEFAULT_ROWS, environ),
+    )
+
 
 # XACA-0652: Use shared venv bootstrap instead of an inline probe (k501 drift fix).
 # Path resolution must cover two layouts:
@@ -502,9 +554,11 @@ async def split_agent_panel(connection, window_title, tab_name, command):
     )
 
     if agent_session:
-        # Resize: make the agent panel narrow (30 cols) and terminal wide
-        agent_session.preferred_size = iterm2.util.Size(30, 50)
-        session.preferred_size = iterm2.util.Size(170, 50)
+        # Resize: make the agent panel narrow (default 30 cols) and terminal wide
+        # (default 195 cols), at the configured row height (XACA-1673).
+        g = resolve_window_geometry()
+        agent_session.preferred_size = iterm2.util.Size(g.panel_cols, g.rows)
+        session.preferred_size = iterm2.util.Size(g.main_cols, g.rows)
         await target_tab.async_update_layout()
 
         # Run the display command in the agent panel pane.
@@ -548,12 +602,18 @@ def extract_session_uuid(env_id):
     return env_id
 
 
-async def resize_pane_by_env(connection, target_cols=30, min_rows=50):
+async def resize_pane_by_env(connection, target_cols=None, min_rows=None):
     """Resize the current pane (identified by ITERM_SESSION_ID env var) to a fixed column width.
 
     Called by agent-panel-display.sh when pane width drifts from target.
+    target_cols/min_rows default (None) to the env/default geometry (XACA-1673).
     """
     import os
+    g = resolve_window_geometry()
+    if target_cols is None:
+        target_cols = g.panel_cols
+    if min_rows is None:
+        min_rows = g.rows
     app = await iterm2.async_get_app(connection)
     env_session_id = os.environ.get("ITERM_SESSION_ID", "")
     if not env_session_id:
@@ -594,9 +654,9 @@ async def resize_pane_by_env(connection, target_cols=30, min_rows=50):
                     # Capture window frame BEFORE update_layout, restore AFTER.
                     # async_update_layout uses preferred_sizes as the layout target;
                     # because main pane's preferred_size is frozen at split-time
-                    # (170 cols) and never tracks user-driven window growth,
+                    # (DEFAULT_MAIN_COLS = 195) and never tracks user-driven window growth,
                     # the layout pass pulls the window down toward the preferred
-                    # sum (~200 cols) — shrinking the window monotonically each
+                    # sum (~225 cols = DEFAULT_MAIN_COLS + DEFAULT_PANEL_COLS) — shrinking the window monotonically each
                     # tick where this branch fires. Restoring the pixel frame
                     # cancels that pull without disturbing pane ratios.
                     saved_frame = await window.async_get_frame()
@@ -611,14 +671,20 @@ async def resize_pane_by_env(connection, target_cols=30, min_rows=50):
 
 
 
-async def reset_all_agent_panels(connection, target_cols=30, min_rows=50):
+async def reset_all_agent_panels(connection, target_cols=None, min_rows=None):
     """Reset ALL agent panel panes across all windows to the target width.
 
     Iterates through every tab in every window. For tabs with exactly 2 panes,
     sets the narrower pane (the agent panel) to target_cols and the wider pane
     to the remainder. Processes one tab at a time to avoid cascading.
+    target_cols/min_rows default (None) to the env/default geometry (XACA-1673).
     """
     import asyncio
+    g = resolve_window_geometry()
+    if target_cols is None:
+        target_cols = g.panel_cols
+    if min_rows is None:
+        min_rows = g.rows
     app = await iterm2.async_get_app(connection)
     fixed = 0
     skipped = 0
@@ -656,7 +722,7 @@ async def reset_all_agent_panels(connection, target_cols=30, min_rows=50):
             agent.preferred_size = iterm2.util.Size(target_cols, target_h)
             # See window-frame capture/restore note in resize_pane_by_env:
             # the layout pass otherwise pulls the window toward the sum of
-            # preferred_sizes (agent_target + main_frozen ≈ 200 cols),
+            # preferred_sizes (agent_target + main_frozen ≈ 225 cols),
             # shrinking the window each cycle.
             saved_frame = await window.async_get_frame()
             await tab.async_update_layout()
@@ -856,8 +922,8 @@ async def main_async(args):
         await split_agent_panel(connection, args.window_title, args.tab_name, args.command)
 
     elif args.action == "resize-pane":
-        target = int(args.target_cols) if args.target_cols else 30
-        min_rows = int(args.min_rows) if args.min_rows else 50
+        target = int(args.target_cols) if args.target_cols else None
+        min_rows = int(args.min_rows) if args.min_rows else None
         await resize_pane_by_env(connection, target, min_rows)
 
     elif args.action == "set-font":
@@ -869,8 +935,8 @@ async def main_async(args):
         await set_default_profile_font(connection, font_name)
 
     elif args.action == "reset-panels":
-        target = int(args.target_cols) if args.target_cols else 30
-        min_rows = int(args.min_rows) if args.min_rows else 50
+        target = int(args.target_cols) if args.target_cols else None
+        min_rows = int(args.min_rows) if args.min_rows else None
         await reset_all_agent_panels(connection, target, min_rows)
 
     elif args.action == "list-windows":
@@ -887,15 +953,28 @@ async def main_async(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="iTerm2 Window Manager")
+    parser = argparse.ArgumentParser(
+        description="iTerm2 Window Manager",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Team window geometry (XACA-1673):\n"
+            f"  {ENV_MAIN_COLS:<24} main pane width at split   (default {DEFAULT_MAIN_COLS})\n"
+            f"  {ENV_PANEL_COLS:<24} agent panel width          (default {DEFAULT_PANEL_COLS})\n"
+            f"  {ENV_ROWS:<24} window rows                (default {DEFAULT_ROWS})\n"
+            f"  Integers {GEOMETRY_MIN}-{GEOMETRY_MAX}; an invalid value warns and uses the default.\n"
+            "  Main width applies when a window is split; existing windows keep theirs.\n"
+            "  Panels narrower than ~24 cols wrap the usage bar and labels.\n"
+            "  Precedence for resize-pane/reset-panels: --target-cols/--min-rows > env > default."
+        ),
+    )
     parser.add_argument("--window-title", "-t", help="Window title to find or set")
     parser.add_argument("--window-id", "-i", help="Window ID (for set-title action)")
     parser.add_argument("--profile", "-p", help="iTerm2 profile to use")
     parser.add_argument("--tab-name", "-n", help="Name for the new tab")
     parser.add_argument("--command", "-c", help="Command to execute in the tab")
     parser.add_argument("--url", "-u", help="(deprecated) URL for agent panel")
-    parser.add_argument("--target-cols", help="Target column width for resize-pane action (default: 30)")
-    parser.add_argument("--min-rows", help="Minimum row height; only grows pane if shorter (default: 50)")
+    parser.add_argument("--target-cols", help=f"Target column width for resize-pane action (default: {DEFAULT_PANEL_COLS}, override with ${ENV_PANEL_COLS})")
+    parser.add_argument("--min-rows", help=f"Minimum row height; only grows pane if shorter (default: {DEFAULT_ROWS}, override with ${ENV_ROWS})")
     parser.add_argument("--font", "-f", help="Font spec for set-font action (e.g. 'FiraCodeNFM-Light 8')")
     parser.add_argument(
         "--action", "-a",

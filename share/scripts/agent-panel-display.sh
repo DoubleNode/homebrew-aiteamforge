@@ -228,6 +228,31 @@ WHITE="\033[38;5;255m"
 CYAN="\033[38;5;81m"
 YELLOW="\033[38;5;226m"
 
+# XACA-1673: resolve the agent-panel width from ITERM2_TEAM_PANEL_COLS using
+# the SAME rule as iterm2_window_manager.py's _resolve_dim (ASCII digits after
+# trimming surrounding whitespace, 10..1000 inclusive, else default 30). Without
+# this the width-drift check below would keep resizing a non-default split back
+# to 30 cols while every new split re-applies the override. Invalid values fall
+# back silently here (stdout is the panel); the Python side emits the warning.
+# Portable bash/zsh on purpose: the test harness extracts it under bash.
+resolve_panel_target_cols() {
+    local raw="${ITERM2_TEAM_PANEL_COLS:-}"
+    raw="${raw#"${raw%%[![:space:]]*}"}"
+    raw="${raw%"${raw##*[![:space:]]}"}"
+    case "$raw" in
+        ''|*[!0123456789]*) echo 30; return 0 ;;
+    esac
+    raw="${raw#"${raw%%[!0]*}"}"   # strip leading zeros (Python int() accepts them)
+    if [[ -z "$raw" || ${#raw} -gt 4 ]]; then
+        echo 30; return 0
+    fi
+    if (( 10#$raw >= 10 && 10#$raw <= 1000 )); then
+        echo "$(( 10#$raw ))"
+    else
+        echo 30
+    fi
+}
+
 # Word-wrap text at word boundaries to fit within pane width.
 # Usage: word_wrap "long text here" [max_width]
 # Outputs wrapped lines, one per echo. Caller applies color codes per line.
@@ -1925,7 +1950,7 @@ BOARD_FILE=$(get_board_file)
 LAST_BOARD_MTIME=""
 [[ -n "$BOARD_FILE" && -f "$BOARD_FILE" ]] && LAST_BOARD_MTIME=$(stat -f %m "$BOARD_FILE" 2>/dev/null)
 LAST_SUBAGENT_MTIME=""
-TARGET_COLS=30
+TARGET_COLS=$(resolve_panel_target_cols)
 # Stagger the first width check by session-unique offset (0-30s)
 # so panels don't all fire at once after a bulk restart.
 LAST_WIDTH_CHECK=$(( $(date +%s) + (STAGGER_HASH % 30) ))

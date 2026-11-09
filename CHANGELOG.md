@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1673: Configurable iTerm2 team window size — default 195+30 cols × 60 rows (XACA-1673)
+- Tap files updated in this publish: `docs/TROUBLESHOOTING.md`,`share/scripts/agent-panel-display.sh` `share/scripts/iterm2_window_manager.py`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1703: Close-out completes the current build's CR when the GAMMA gate holds (XACA-1703)
 - Tap files updated in this publish: `share/kanban-hooks/approval_providers.py`,`share/kanban-hooks/release_gate.py` `share/kanban-hooks/release_resume.py`,`share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1685: kb-sync-plugins session-dir link boundary; deliver:false removes owned skill links (XACA-1685)

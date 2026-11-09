@@ -448,6 +448,29 @@ If you use cockpit connect (XACA-0607) to SSH into a remote machine and run agen
 
 ---
 
+### Team Window Is the Wrong Size (or Reverts After Connect)
+
+**Symptoms:**
+- Each team startup/connect resets the window to the same size, undoing a manual resize
+- The agent panel is too narrow/wide, or snaps back to 30 columns a few seconds after you drag it
+
+**Cause:** the agent-panel split sets the window geometry: main pane 195 columns, agent panel 30 columns, 60 rows by default. The agent panel also re-checks its own width every 30 seconds and resizes itself if it drifts more than 5 columns from its target.
+
+**Solution:** set the size you want in your shell profile (for example `~/.zshrc`), then start or connect the team again:
+
+```bash
+export ITERM2_TEAM_MAIN_COLS=195   # main pane width at split
+export ITERM2_TEAM_PANEL_COLS=30   # agent panel width (also the panel's drift target)
+export ITERM2_TEAM_ROWS=60         # window rows
+```
+
+- Values must be whole numbers from 10 to 1000. An invalid value prints a warning and uses the default.
+- The main width only applies when a window is split; existing windows keep their current size until the next startup/connect.
+- Keep the panel at about **24 columns or more**. Below that the usage bar and labels wrap.
+- `python3 ~/aiteamforge/iterm2_window_manager.py --help` lists the variables and their defaults (use your install directory if it is not `~/aiteamforge`).
+
+---
+
 ### PATH Issues
 
 **Symptoms:**
