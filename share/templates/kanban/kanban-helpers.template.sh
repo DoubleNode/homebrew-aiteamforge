@@ -2073,7 +2073,7 @@ _kb_co_cr_preflight() {
             *)
                 [[ "${_KB_CO_DRY_ACTIVE-}" == 1 && "${_KB_CO_DRY_COMPLETE-} " == *" $cid "* ]] && continue   # XACA-1703 --dry-run ONLY: kb-cr complete is planned for it
                 (( bad )) || echo "Error: close-out refused (nothing was tagged, merged or deleted): linked CR(s) the crClose step cannot handle:" >&2
-                echo "  - CR $cid is '${cst:-<none>}': close-out closes only cr-completed, cr-rejected or already-closed CRs; take it to cr-completed, or 'kb-cr close $cid --reason \"<why>\"' if it is abandoned, then re-run" >&2
+                echo "  - CR $cid is '${cst:-<none>}': close-out closes only cr-completed, cr-rejected or already-closed CRs; take it to cr-completed, or 'kb-cr close $cid --force-close --reason \"<why>\"' if it is abandoned (a release-linked CR's close is refused without --force-close until close-out runs), then re-run" >&2
                 bad=1 ;;
         esac
     done <<EOF_PRE
@@ -2383,7 +2383,7 @@ EOF_UNB
                 echo "  - CR ${line#missing } is listed on the release but is not on the board; unlink it (or restore it), then re-run: kb-release close-out $release_id" >&2
             else
                 line="${line#other }"; cid="${line%% *}"; cst="${line#* }"
-                echo "  - CR $cid is '$cst': close-out closes only cr-completed, cr-rejected or already-closed CRs; take it to cr-completed, or 'kb-cr close $cid --reason \"<why>\"' if it is abandoned, then re-run: kb-release close-out $release_id" >&2
+                echo "  - CR $cid is '$cst': close-out closes only cr-completed, cr-rejected or already-closed CRs; take it to cr-completed, or 'kb-cr close $cid --force-close --reason \"<why>\"' if it is abandoned (a release-linked CR's close is refused without --force-close until close-out runs), then re-run: kb-release close-out $release_id" >&2
             fi
         done <<EOF_OTH
 $other_list

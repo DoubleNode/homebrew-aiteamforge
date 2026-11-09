@@ -756,7 +756,8 @@ class CrStage:
                 raise CrStageError("CR %s took the emergency path; the CR stage does not apply" % self.cr_id, RC_REFUSED)
             if cr.get("crState") not in REUSABLE_STATES:  # XACA-1349-007: legacy implementing/deployed-dev, junk, absent
                 raise CrStageError("CR %s is in state %r, which the CR stage does not drive (it handles %s). Resolve or "
-                                   "close it (kb-cr close <CR> --reason ...) so a CR in a stage-flow state remains"
+                                   "close it (kb-cr close <CR> --force-close --reason ...; a release-linked CR's close is refused "
+                                   "without --force-close until close-out runs) so a CR in a stage-flow state remains"
                                    % (self.cr_id, cr.get("crState"), ", ".join(REUSABLE_STATES)), RC_REFUSED)
             detail.append("reusing %s (%s)" % (self.cr_id, cr.get("crState")))
         # stageSha.CR (the SHA the CR describes; the CR exit gate reads this field)

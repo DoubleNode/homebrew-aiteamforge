@@ -970,7 +970,7 @@ _kb_cr_v2_guard() {
     if [[ "$from" == "cr-held" && "$to" != "cr-closed" && "$to" != "cr-held" && "$to" != "cr-rejected" ]]; then
         local _hf
         _hf=$(_kb_jq_read "$board_file" ".crs[$cr_idx].held_from // \"\"" -r 2>/dev/null)
-        echo "kb-cr $verb: CR '$cr_id' is on hold${_hf:+ (held from $_hf)}; a v2 CR leaves cr-held only through 'kb-cr resume' (back to the state it was held from) or close." >&2
+        echo "kb-cr $verb: CR '$cr_id' is on hold${_hf:+ (held from $_hf)}; a v2 CR leaves cr-held only through 'kb-cr resume' (back to the state it was held from) or close (a release-linked CR needs: kb-cr close $cr_id --force-close --reason \"<why>\")." >&2
         return 1
     fi
     if [[ "$to" == "deployed-prod" ]]; then

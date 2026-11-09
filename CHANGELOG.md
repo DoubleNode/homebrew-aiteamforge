@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1684: CR remedy hints name --force-close where a bare kb-cr close is refused (XACA-1684)
+- Tap files updated in this publish: `share/kanban-hooks/approval_providers.py`,`share/kanban-hooks/release_cr_stage.py` `share/kanban-hooks/release_gamma_failure.py`,`share/kanban-hooks/release_resume.py` `share/scripts/cr-confluence-poller.py`,`share/scripts/kb-cr.sh` `share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1678: Two-line tmux tab bar adapts label width to narrow clients (XACA-1678)
 - XACA-1598: Adopt LSP + playwright fleet plugins, vendor 4 Superpowers skills (XACA-1598)
 - XACA-1682: GAMMA exit binds an open cr-completed CR to the current build (XACA-1682)

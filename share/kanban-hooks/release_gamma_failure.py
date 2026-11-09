@@ -518,7 +518,8 @@ class GammaFailure:
             return "skipped", "%s is already held by a GAMMA failure" % cr["id"]
         if state == "cr-held":
             raise CrStageError("CR %s is on hold for another reason; it is not the GAMMA-failure hold. Resolve it "
-                               "(kb-cr resume / close) and re-run" % cr["id"], rcs.RC_REFUSED)
+                               "(`kb-cr resume %s`, or `kb-cr close %s --force-close --reason \"<why>\"`: a release-linked CR's "
+                               "close is refused without --force-close until close-out runs) and re-run" % (cr["id"], cr["id"], cr["id"]), rcs.RC_REFUSED)
         if state not in ("deployed-prod", "emergency-deployed", "cr-approved", "cr-submitted"):
             raise CrStageError("CR %s is in state %r; kb-cr hold applies from deployed-prod (the normal GAMMA case), "
                                "emergency-deployed (spec 13.5 step 4), cr-approved or cr-submitted" % (cr["id"], state),

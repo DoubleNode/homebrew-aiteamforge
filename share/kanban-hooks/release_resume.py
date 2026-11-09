@@ -300,7 +300,8 @@ def _cr_row(release, plan, done, promote_offer, cr, branch_head, flow_config, cr
                     "Run: kb-release cr-stage %s (reuses or creates the CR, drafts it, stops for the lead's approval)." % rid)
     if state == "cr-held":
         return done("cr-held", "hold", "CR %s is held: the GAMMA gate stays closed." % cr["id"],
-                    "Resume with kb-cr resume (returns to exactly held_from), or close it (spec 13.2).")
+                    "Resume with kb-cr resume <CR> (returns to exactly held_from), or close it with kb-cr close <CR> --force-close "
+                    "--reason \"<why>\" (a release-linked CR's close is refused without --force-close until close-out runs; spec 13.2).")
     if state == "cr-drafted" and not cr.get("draftApproved"):
         return done("cr-draft-not-approved", "present-draft", "CR %s: draft is not approved." % cr["id"],
                     "Re-present the draft for the lead's approval (kb-release cr-stage %s stops at the approval step); "

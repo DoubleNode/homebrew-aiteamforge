@@ -719,7 +719,8 @@ def close_out_cr_preflight(board, release):
             if st in CLOSE_OUT_CR_CLOSABLE:
                 continue
             out.append("CR %s is '%s': close-out closes only cr-completed, cr-rejected or already-closed CRs; take it to "
-                       "cr-completed, or `kb-cr close %s --reason \"<why>\"` if it is abandoned, then re-run"
+                       "cr-completed, or `kb-cr close %s --force-close --reason \"<why>\"` if it is abandoned "
+                       "(a release-linked CR's close is refused without --force-close until close-out runs), then re-run"
                        % (c.get("id"), st if isinstance(st, str) else "<none>", c.get("id")))
         return out
     except Exception as e:  # noqa: BLE001

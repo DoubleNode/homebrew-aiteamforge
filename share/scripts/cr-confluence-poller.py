@@ -564,7 +564,9 @@ def _refuse_if_claimed(team: str, cr_id: str, url: str) -> bool:
         log(
             f"[{team}][{cr_id}] REFUSED transition: cr_proper_url {url!r} is already held by {named}. "
             f"Nothing written. If {first} does not own this ticket, release it with "
-            f"`kb-cr close {first}` (closed/rejected holders do not block); otherwise this CR's page links "
+            f"`kb-cr close {first} --force-close --reason \"<why>\"` (closed/rejected holders do not block; "
+            f"--force-close because a release-linked CR's close is refused without it until close-out runs"
+            f"); otherwise this CR's page links "
             f"the wrong ticket. To submit {cr_id} by hand: `kb-cr submit {cr_id}`."
         )
         return True
