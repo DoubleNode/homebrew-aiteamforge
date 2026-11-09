@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+
+## [0.21.18] - 2026-11-09
 - XACA-1605: Ship the AITeamForge Claude Code mods fleet-wide via the aiteamforge-mods marketplace (XACA-1605)
 - XACA-1763: CI pool gates on sustained load; stall alerts page once and announce recovery (XACA-1763)
 - XACA-1711: Backfill releaseHistory from archived releases' trails (XACA-1711, 2/2)
@@ -8180,7 +8182,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.17...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.18...HEAD
+[0.21.18]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.17...v0.21.18
 [0.21.17]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.16...v0.21.17
 [0.21.16]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.15...v0.21.16
 [0.21.15]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.14...v0.21.15
