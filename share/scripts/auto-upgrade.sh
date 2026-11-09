@@ -20,6 +20,10 @@
 #   $AITEAMFORGE_DIR/version-pin — single line, e.g. "v0.12.3" or "0.12.3"
 #   Empty / missing = no pin (upgrade freely).
 #   Unparseable = warn + treat as no pin.
+#   The pin governs only this unattended job (and cellar-watch, which never runs
+#   brew). An explicit `aiteamforge upgrade` by a person — interactive or
+#   --non-interactive — upgrades past it, like a hand-run `brew upgrade`, and
+#   prints a warning saying so (XACA-1781).
 #
 # Notification opt-out:
 #   Set AITEAMFORGE_AUTO_UPGRADE_QUIET=1 in environment or in
@@ -374,7 +378,15 @@ main() {
     _ATF_REFRESH_FAILED=0
     if command -v aiteamforge &>/dev/null; then
         log "Refreshing working-dir copy: aiteamforge upgrade --non-interactive"
-        if ! log_cmd_output aiteamforge upgrade --non-interactive; then
+        # XACA-1781: tell `aiteamforge upgrade` that THIS script already ran
+        # `brew upgrade aiteamforge` (Step 7 above, whatever its exit). Without the
+        # marker, --non-interactive runs brew upgrade itself (a human or remote
+        # invocation has no caller that did). Per-command env, not an export, so the
+        # marker never leaks to any other child (a VAR=1 prefix on a shell function
+        # reaches its children and needs no `env` binary on a stripped PATH).
+        # The other marked caller is scripts/cellar-watch-trigger.sh (refresh-only);
+        # tests/test-xaca-1781-noninteractive-callers.sh pins every call site.
+        if ! AITEAMFORGE_BREW_UPGRADE_DONE=1 log_cmd_output aiteamforge upgrade --non-interactive; then
             _ATF_REFRESH_FAILED=1
             log "WARNING: 'aiteamforge upgrade --non-interactive' failed — brew upgrade succeeded but working-dir copy may be stale"
             notify "Upgrade partial — see $LOG_FILE (brew succeeded, working-dir refresh failed)"

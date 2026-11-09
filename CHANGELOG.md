@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1781: --non-interactive upgrade runs brew unless the caller did, and names the real failure reason (XACA-1781)
+- Tap files updated in this publish: `share/scripts/auto-upgrade.sh`,`share/scripts/cellar-watch-trigger.sh`. Run `brew upgrade aiteamforge` to receive them.
 
 ## [0.21.18] - 2026-11-09
 - XACA-1605: Ship the AITeamForge Claude Code mods fleet-wide via the aiteamforge-mods marketplace (XACA-1605)

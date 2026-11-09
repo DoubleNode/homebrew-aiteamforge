@@ -44,8 +44,13 @@ main() {
   fi
 
   # Run the working-dir refresh
+  # XACA-1781: this watcher is a REFRESH-only caller — Homebrew already changed the
+  # Cellar (that is what fired us), so `aiteamforge upgrade` must not run
+  # `brew upgrade` itself. Without AITEAMFORGE_BREW_UPGRADE_DONE=1 it would, which
+  # could upgrade past the version-pin hold (honoured only by auto-upgrade.sh) and
+  # race auto-upgrade's own brew run for Homebrew's lock. Per-command, not exported.
   log "Running: aiteamforge upgrade --non-interactive"
-  if aiteamforge upgrade --non-interactive >> "$LOG_FILE" 2>&1; then
+  if AITEAMFORGE_BREW_UPGRADE_DONE=1 aiteamforge upgrade --non-interactive >> "$LOG_FILE" 2>&1; then
     log "SUCCESS: working-dir refresh complete"
   else
     rc=$?
