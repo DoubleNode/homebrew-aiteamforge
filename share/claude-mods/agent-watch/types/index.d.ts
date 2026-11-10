@@ -21,6 +21,9 @@ export type AgentRec = {
   skills: string[]
   startedAt: number
   endedAt: number | null
+  // The effort its first request carried (a level name, or a number as text); null until seen, or when the
+  // model takes none. Recorded once, on the agent's first turn.step.
+  effort: string | null
   // The main turn it belongs to; the band shows the current one only.
   turnSeq: number
 }
@@ -32,12 +35,29 @@ export type Moment = {
   status: AgentStatus | null
 }
 
+// Session counters of what the dispatch lint saw (XACA-1639): kept in every mode so warn-mode data can
+// decide whether deny becomes the default.
+export type LintCounts = {
+  missingModel: number
+  opusLow: number
+  max: number
+}
+
+// What this chat touched (XACA-1639-016): paths deduped, newest last, bounded; MCP calls per server.
+export type Used = {
+  read: string[]
+  written: string[]
+  mcp: Record<string, number>
+}
+
 export type Log = {
   turnSeq: number
   sessionStartedAt: number
   agents: AgentRec[]
   turnSkills: string[]
   timeline: Moment[]
+  lint: LintCounts
+  used: Used
 }
 
 declare module 'claude-code' {

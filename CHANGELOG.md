@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1639: Dispatch lint and live effort/cache visibility in agent-watch and usage-gauge (XACA-1639)
+- Tap files updated in this publish: `share/claude-mods/agent-watch/README.md`,`share/claude-mods/agent-watch/hooks/layout.ts` `share/claude-mods/agent-watch/hooks/register.tsx`,`share/claude-mods/agent-watch/hooks/rubric.ts` `share/claude-mods/agent-watch/tests/agent-watch.test.tsx`,`share/claude-mods/agent-watch/tests/layout.test.ts` `share/claude-mods/agent-watch/tests/rubric.test.ts`,`share/claude-mods/agent-watch/types/index.d.ts` (+6 more). Run `brew upgrade aiteamforge` to receive them.
 - XACA-1704: Show why the CI pool refuses a machine — per-host eligibility, per-job refusals, REFUSING card (XACA-1704)
 - Tap files updated in this publish: `fleet-monitor/server/lib/ci-dispatch-audit.js`,`fleet-monitor/server/lib/ci-dispatch-placement.js` `fleet-monitor/server/lib/ci-dispatcher.js`,`fleet-monitor/server/lib/ci-pool-routes.js` `fleet-monitor/server/package.json`,`fleet-monitor/server/public/lcars/lcars-dashboard.html` `fleet-monitor/server/public/shared/css/lcars-ci-pool.css`,`fleet-monitor/server/public/shared/css/lcars-ci-queue.css` (+15 more). Run `brew upgrade aiteamforge` to receive them.
 

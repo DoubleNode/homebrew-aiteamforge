@@ -180,3 +180,38 @@ export function since(at: number, start: number): string {
 
   return m > 0 ? `+${m}m${String(s % 60).padStart(2, '0')}s` : `+${s}s`
 }
+
+// "12s", "1m05s", "1h02m": how long an agent has run, or ran. No clock zone, no rounding up.
+export function elapsed(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000))
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  if (h > 0) return `${h}h${String(m).padStart(2, '0')}m`
+  if (m > 0) return `${m}m${String(s % 60).padStart(2, '0')}s`
+
+  return `${s}s`
+}
+
+/** A path kept to its last `max` characters (the file name is what matters), with a leading ellipsis. */
+export function tailPath(path: string, max = 60): string {
+  const chars = [...path]
+
+  return chars.length <= max ? path : `…${chars.slice(chars.length - max + 1).join('')}`
+}
+
+// Paths the "This chat used" lists leave out: the engine's tool-result spill files and scratch space.
+export function isNoisePath(path: string): boolean {
+  return /(^|\/)tool-results\//.test(path) || /^(\/private)?\/tmp(\/|$)/.test(path)
+}
+
+export const KEEP_PATHS = 50
+
+/** The list with `path` as its newest entry (a second touch moves it, never doubles it), kept to KEEP_PATHS. */
+export function touchPath(list: readonly string[], path: string): string[] {
+  return [...list.filter(p => p !== path), path].slice(-KEEP_PATHS)
+}
+
+/** The server of an `mcp__<server>__<tool>` name, or null for any other tool. */
+export function mcpServer(tool: string): string | null {
+  return /^mcp__(.+?)__./.exec(tool)?.[1] ?? null
+}

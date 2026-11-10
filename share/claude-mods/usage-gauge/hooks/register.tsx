@@ -1,12 +1,13 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, SessionCost, SessionRateLimit } from 'claude-code'
 
-import type { Gauge, Window } from '../types'
-import { createSwitch } from './switches'
+import type { CacheClock, Gauge, Window } from '../types'
+import { createSwitch, readSwitchFile, setSwitch, stateFrom } from './switches'
 import type { SwitchIo } from './switches'
 import {
   AMBER,
   CHIP,
+  GREEN,
   bar,
   color,
   hasPacePair,
@@ -17,6 +18,18 @@ import {
   span,
   usd,
 } from './layout'
+import {
+  GUARD_MIN_TOKENS,
+  cacheText,
+  cacheView,
+  coldCost,
+  effortLabel,
+  isRestorable,
+  menuEffort,
+  parseCacheTtl,
+  tokens,
+  ttlName,
+} from './cache'
 
 const PANE = 'usage-gauge'
 const TICK_MS = 60_000
@@ -34,14 +47,25 @@ const EMPTY: Gauge = {
   toasted: {},
   utcOffsetMin: 0,
   tick: 0,
+  effortSent: null,
+  effortMenu: null,
+  effortBase: null,
+  cache: null,
 }
 
 // Change the tag when Gauge's fields change: it declines what an older
 // version stored, which outlives a reload.
-const gauge = atom({ plugin: 'usage-gauge', key: 'gauge' } as const, EMPTY, { shape: 'gauge-1' })
+const gauge = atom({ plugin: 'usage-gauge', key: 'gauge' } as const, EMPTY, { shape: 'gauge-2' })
 const warn = atom({ plugin: 'usage-gauge', key: 'warn' } as const, DEFAULT_WARN)
 // On/off and shown/hidden live in the shared switch file (hooks/switches.ts), read by every chat.
 const sw = createSwitch('usage-gauge')
+// The cold-send guard (018) has its own key in the same file. Missing means OFF: it is read when a prompt
+// arrives, so there is no poll for it.
+const GUARD_KEY = 'usage-gauge:cold-guard'
+// The cache line has its own on/off, default on (key `usage-gauge:cache`), so hiding it keeps the plan line.
+const swCache = createSwitch('usage-gauge:cache')
+const TAIL_BYTES = 400_000
+const COUNTDOWN_MS = 1000
 
 // BEGIN switch-io (identical in every mod; tests/test-claude-mods-switches-sync.sh keeps it so)
 const switchIo = ($: EngineInterface): SwitchIo => ({
@@ -58,8 +82,13 @@ const switchIo = ($: EngineInterface): SwitchIo => ({
 const HELP = [
   '/usage-gauge              open the Usage pane',
   '/usage-gauge on|off       turn the gauge on or off in every chat (remembered)',
-  '/usage-gauge hide|show    hide the line and status text but keep measuring, or show them again',
-  '/usage-gauge warn 75 90   toast when a window crosses these percents (remembered)',
+  '/usage-gauge hide|show    hide the line and status text but keep measuring,',
+  '                          or show them again',
+  '/usage-gauge warn 75 90   toast at these window percents (remembered)',
+  '/usage-gauge cache        the cache line above the prompt: cache on|off',
+  '                          (default on, remembered)',
+  '/usage-gauge cold-guard   hold a person-sent prompt once when the cache is cold:',
+  '                          cold-guard on|off (default off)',
   '/usage-gauge status       the figures as text',
 ].join('\n')
 
@@ -129,9 +158,67 @@ async function showStatus($: EngineInterface): Promise<void> {
   $.ui.status(sw.shown && statusText.length > 0 ? statusText.join(' · ') : undefined)
 }
 
+const projectSlug = (cwd: string): string => cwd.replace(/[^A-Za-z0-9]/g, '-')
+
+// The tail of this chat's transcript, or null when it cannot be found or read whole enough to trust
+// (a consumer layout with no transcript access lands here, and the clock then draws nothing).
+async function transcriptTail($: EngineInterface): Promise<string | null> {
+  try {
+    const id = await $.session.id()
+    const cwd = await $.session.cwd()
+    const home = (await switchIo($).home()) ?? ''
+    const fromEnv = await $.env.get('CLAUDE_CONFIG_DIR').catch(() => undefined)
+    const base = fromEnv !== undefined && fromEnv !== '' ? fromEnv : home === '' ? '' : `${home}/.claude`
+    if (base === '' || id === '') return null
+    const direct = `${base}/projects/${projectSlug(cwd)}/${id}.jsonl`
+    let path: string | null = (await $.fs.exists(direct)) ? direct : null
+    if (path === null) {
+      for (const d of await $.fs.list(`${base}/projects`)) {
+        const candidate = `${base}/projects/${d.name}/${id}.jsonl`
+        if (d.kind === 'dir' && (await $.fs.exists(candidate))) {
+          path = candidate
+          break
+        }
+      }
+    }
+    if (path === null) return null
+    const ran = await $.process.run(['tail', '-c', String(TAIL_BYTES), path], { timeoutMs: 5000 })
+
+    return ran.exitCode === 0 && !ran.isStdoutTruncated ? ran.stdout : null
+  } catch {
+    return null
+  }
+}
+
+// The cache clock as of a reply that just ended; null when the transcript says nothing usable.
+async function readCache($: EngineInterface, at: number): Promise<CacheClock | null> {
+  const tail = await transcriptTail($)
+  const ttl = tail === null ? null : parseCacheTtl(tail)
+  if (ttl === null) return null
+  const usage = await $.session.usage().catch(() => null)
+  const used = usage?.context.tokens
+
+  return { ...ttl, lastEnd: at, contextTokens: typeof used === 'number' ? used : null }
+}
+
+async function guardOn($: EngineInterface): Promise<boolean> {
+  const io = switchIo($)
+  const json = await readSwitchFile(io, sw.home || ((await io.home()) ?? ''))
+
+  return json !== null && !stateFrom(json, GUARD_KEY, true).off
+}
+
 export const register: Register = on => {
   // The cost when this main turn began, for "(+$x)".
   let costAtTurnStart: number | null = null
+  // A main turn is running (the clock hides while it is).
+  let working = false
+  // When the warm cache goes cold, for the one-second countdown tick; 0 when there is none to count.
+  let warmUntil = 0
+  // The session has a screen and a person (headless runs are never held).
+  let interactive = false
+  // The reply end a cold-send hold was issued for: the resend of that prompt proceeds.
+  let heldFor: number | null = null
 
   on('session.start', async ($, e, next) => {
     await $.command.register({
@@ -139,6 +226,7 @@ export const register: Register = on => {
       description: 'Plan usage: pane, or on | off | warn <a> <b> | status',
       argumentHint: '[on|off|warn <a> <b>|status]',
     })
+    await swCache.start(switchIo($))
     await sw.start(switchIo($), async () => {
       if (!sw.off) {
         const usage = await $.session.usage().catch(() => null)
@@ -151,7 +239,18 @@ export const register: Register = on => {
       await update($, warn, () => storedWarn as number[])
     }
     const offset = await utcOffset($)
-    await update($, gauge, g => ({ ...g, utcOffsetMin: offset }))
+    interactive = e.isInteractive && e.surface !== null
+    working = false
+    warmUntil = 0
+    heldFor = null
+    await update($, gauge, g => ({
+      ...g,
+      utcOffsetMin: offset,
+      effortSent: null,
+      effortMenu: null,
+      effortBase: null,
+      cache: null,
+    }))
 
     const usage = await $.session.usage().catch(() => null)
     if (usage !== null) await measure($, usage, await $.clock.now())
@@ -161,6 +260,16 @@ export const register: Register = on => {
       if (sw.off) return
       void (async () => {
         const at = await $.clock.now()
+        await update($, gauge, g => ({ ...g, tick: at }))
+      })()
+    })
+
+    // The cache countdown moves every second, but only while one is on screen: idle and warm.
+    $.clock.every(COUNTDOWN_MS, () => {
+      if (!sw.shown || working || warmUntil === 0) return
+      void (async () => {
+        const at = await $.clock.now()
+        if (at > warmUntil + COUNTDOWN_MS) return
         await update($, gauge, g => ({ ...g, tick: at }))
       })()
     })
@@ -175,6 +284,7 @@ export const register: Register = on => {
   })
 
   on('turn.start', async ($, e, next) => {
+    if (e.agentId === undefined) working = true
     if (e.agentId === undefined && !sw.off) costAtTurnStart = (await read($, gauge)).costUsd
 
     return next(e)
@@ -197,9 +307,58 @@ export const register: Register = on => {
         await update($, gauge, g => ({ ...g, costUsd: now }))
       }
       costAtTurnStart = null
+      // The reply ended: the cache clock restarts from now, with the lifetime the transcript shows. A turn
+      // with no usage (interrupted before an answer, an API error) did not touch the cache.
+      if (e.usage !== undefined) {
+        const cache = await readCache($, at)
+        warmUntil = cache === null ? 0 : cache.lastEnd + cache.ttlMs
+        await update($, gauge, g => ({ ...g, cache }))
+      }
     }
+    if (e.agentId === undefined) working = false
 
     return next(e)
+  })
+
+  // The effort the main chat's request actually carries, read on its way out. Observation only.
+  on('turn.step', async function* ($, e, next) {
+    if (e.agentId === undefined && !sw.off) {
+      const sent = e.effort === undefined ? null : String(e.effort)
+      const rows = await $.config.list().catch(() => [])
+      const menu = menuEffort(rows)
+      await update($, gauge, g => ({ ...g, effortSent: sent, effortMenu: menu, effortBase: g.effortBase ?? sent }))
+    }
+
+    return yield* next(e)
+  })
+
+  // The footer's mode labels (right of the prompt): add `Effort <level>` when it differs from the menu.
+  on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {
+    if (!sw.shown) return next(e)
+    const g = await read($, gauge)
+    const label = effortLabel(g.effortSent, g.effortMenu, g.effortBase)
+    if (label === null) return next(e)
+
+    return next({ ...e, props: { ...e.props, modes: [...e.props.modes, label] } })
+  })
+
+  // Cold-send guard: a prompt a person sent into a cold cache of a big context is held once.
+  on('prompt.submit', async ($, e, next) => {
+    if (sw.off || !interactive || e.isMeta === true || e.command !== undefined || e.turnId !== undefined) return next(e)
+    if (!isRestorable(e)) return next(e)
+    const { cache } = await read($, gauge)
+    if (cache === null || cache.contextTokens === null || cache.contextTokens < GUARD_MIN_TOKENS) return next(e)
+    if (cacheView(cache, await $.clock.now())?.state !== 'cold') return next(e)
+    if (heldFor === cache.lastEnd || !(await guardOn($))) return next(e)
+
+    // Put the text back first and only hold when the box confirms it has it; otherwise let the prompt go.
+    const filled = await $.prompt.fill({ text: e.text }).catch(() => ({ isFilled: false }))
+    if (!filled.isFilled) return next(e)
+    heldFor = cache.lastEnd
+
+    return {
+      drop: `Held once: the prompt cache is cold (${ttlName(cache.ttlMs)} TTL). Sending now re-writes ${coldCost(cache) ?? 'the whole context'}. Send again to proceed, or /usage-gauge cold-guard off.`,
+    }
   })
 
   on('command.run', { command: 'usage-gauge' }, async ($, e) => {
@@ -228,6 +387,33 @@ export const register: Register = on => {
 
       return { text: `Usage gauge warns at ${sorted.join('% and ')}%.` }
     }
+    if (word === 'cache') {
+      const arg = rest[0] ?? 'status'
+      if (arg === 'on' || arg === 'off') {
+        if (!(await swCache.set(switchIo($), { off: arg === 'off' }))) {
+          return { text: 'Cache line: could not save the switch (switches.json is unreadable).' }
+        }
+        const at = await $.clock.now()
+        await update($, gauge, g => ({ ...g, tick: at }))
+
+        return { text: `Cache line ${arg}.` }
+      }
+
+      return { text: `Cache line is ${swCache.off ? 'off' : 'on'}. Turn it ${swCache.off ? 'on' : 'off'} with /usage-gauge cache ${swCache.off ? 'on' : 'off'}.` }
+    }
+    if (word === 'cold-guard') {
+      const arg = rest[0] ?? 'status'
+      if (arg === 'on' || arg === 'off') {
+        const io = switchIo($)
+        const saved = await setSwitch(io, sw.home || ((await io.home()) ?? ''), GUARD_KEY, { off: arg === 'off' }, true)
+
+        return { text: saved ? `Cold-send guard ${arg}.` : 'Cold-send guard: could not save the switch (switches.json is unreadable).' }
+      }
+
+      return {
+        text: `Cold-send guard is ${(await guardOn($)) ? 'on' : 'off'} (holds a person-sent prompt once, when the cache is cold and the context is ${tokens(GUARD_MIN_TOKENS)}+ tokens).`,
+      }
+    }
     if (word === 'status') {
       const g = await read($, gauge)
       const at = await $.clock.now()
@@ -238,6 +424,10 @@ export const register: Register = on => {
       })
       if (g.windows.length === 0) lines.push('No plan windows reported (API billing, or no response yet).')
       if (g.costUsd !== null) lines.push(`Session: ${usd(g.costUsd)} on API pricing`)
+      const cache = cacheText(g.cache, at, g.utcOffsetMin)
+      if (cache !== null) lines.push(cache.text)
+      const effort = effortLabel(g.effortSent, g.effortMenu, g.effortBase)
+      if (effort !== null) lines.push(`${effort} (the last request; the menu holds ${g.effortMenu ?? 'an unreadable value'})`)
 
       return { text: lines.join('\n') }
     }
@@ -252,7 +442,10 @@ export const register: Register = on => {
     const g = await read($, gauge)
     const now = await $.clock.now()
     const hasWindows = g.windows.length > 0
-    if (!hasWindows && g.costUsd === null && g.contextPercent === null) return below
+    // The cache line shows only while idle: a running turn is using the cache, not letting it cool.
+    const cache = e.props.isWorking || swCache.off ? null : cacheText(g.cache, now, g.utcOffsetMin)
+    const hasPlan = hasWindows || g.costUsd !== null || g.contextPercent !== null
+    if (!hasPlan && cache === null) return below
 
     const { Box, Text } = $.ui.resolve(e)
     const five = g.windows.find(w => w.kind === 'five_hour')
@@ -260,30 +453,37 @@ export const register: Register = on => {
 
     return (
       <Box flexDirection="column">
-        <Text wrap="truncate-end">
-          <Text color={CHIP.color} backgroundColor={CHIP.bg} weight="bold">
-            {CHIP.text}
-          </Text>
-          {g.windows.map((w, i) => {
-            const when = resetLabel(w.resetsAt, now, g.utcOffsetMin)
-
-            return (
-              <Text>
-                {i > 0 && <Text dimColor> │</Text>} {short(w.kind)} <Text color={color(w.percentUsed)}>{bar(w.percentUsed, 6)}</Text>{' '}
-                <Text color={color(w.percentUsed)}>{Math.round(w.percentUsed)}%</Text>
-                {when !== null && <Text dimColor> ↻{when}</Text>}
-              </Text>
-            )
-          })}
-          {!hasWindows && g.contextPercent !== null && <Text> context {g.contextPercent}%</Text>}
-          {g.costUsd !== null && (
-            <Text>
-              <Text dimColor> │</Text> session {usd(g.costUsd)}
-              {g.lastTurnUsd !== null && <Text dimColor> (+{usd(g.lastTurnUsd)})</Text>}
+        {hasPlan && (
+          <Text wrap="truncate-end">
+            <Text color={CHIP.color} backgroundColor={CHIP.bg} weight="bold">
+              {CHIP.text}
             </Text>
-          )}
-          {outIn !== null && <Text color={AMBER}> ⚠ at this pace: out in ~{span(outIn)}</Text>}
-        </Text>
+            {g.windows.map((w, i) => {
+              const when = resetLabel(w.resetsAt, now, g.utcOffsetMin)
+
+              return (
+                <Text>
+                  {i > 0 && <Text dimColor> │</Text>} {short(w.kind)} <Text color={color(w.percentUsed)}>{bar(w.percentUsed, 6)}</Text>{' '}
+                  <Text color={color(w.percentUsed)}>{Math.round(w.percentUsed)}%</Text>
+                  {when !== null && <Text dimColor> ↻{when}</Text>}
+                </Text>
+              )
+            })}
+            {!hasWindows && g.contextPercent !== null && <Text> context {g.contextPercent}%</Text>}
+            {g.costUsd !== null && (
+              <Text>
+                <Text dimColor> │</Text> session {usd(g.costUsd)}
+                {g.lastTurnUsd !== null && <Text dimColor> (+{usd(g.lastTurnUsd)})</Text>}
+              </Text>
+            )}
+            {outIn !== null && <Text color={AMBER}> ⚠ at this pace: out in ~{span(outIn)}</Text>}
+          </Text>
+        )}
+        {cache !== null && (
+          <Text wrap="truncate-end" color={cache.level === 'ok' ? GREEN : AMBER}>
+            {cache.text}
+          </Text>
+        )}
         {below}
       </Box>
     )
@@ -326,6 +526,7 @@ export const register: Register = on => {
         </Text>
         {g.contextPercent !== null && <Text>Context: {g.contextPercent}%</Text>}
         {g.costUsd !== null && <Text>Session: {usd(g.costUsd)} on API pricing</Text>}
+        {cacheText(g.cache, now, g.utcOffsetMin) !== null && <Text>Cache: {cacheText(g.cache, now, g.utcOffsetMin)?.text}</Text>}
         <Text> </Text>
         <Text weight="bold">Last {KEEP_TURNS} turns</Text>
         {g.turns.length === 0 && <Text dimColor>None yet.</Text>}

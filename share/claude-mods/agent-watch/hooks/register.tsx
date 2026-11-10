@@ -2,20 +2,26 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, ModelUsage, Register } from 'claude-code'
 
 import type { AgentRec, AgentStatus, Log, Moment } from '../types'
-import { createSwitch } from './switches'
+import { createSwitch, homeOf, readSwitchFile, writeSwitchFile } from './switches'
 import type { SwitchIo } from './switches'
+import { classifyDispatch } from './rubric'
 import {
   MAIN,
   SKILL_COLOR,
   STATUS,
   compact,
   cut,
+  elapsed,
+  isNoisePath,
   label,
   layoutBand,
+  mcpServer,
   modelColor,
   shortModel,
   since,
   sumTokens,
+  tailPath,
+  touchPath,
 } from './layout'
 
 const PANE = 'agent-watch'
@@ -32,12 +38,14 @@ const EMPTY: Log = {
   agents: [],
   turnSkills: [],
   timeline: [],
+  lint: { missingModel: 0, opusLow: 0, max: 0 },
+  used: { read: [], written: [], mcp: {} },
 }
 
 // Change the tag when Log's fields change: it declines what an older
 // version stored, which outlives a reload.
 const log = atom({ plugin: 'agent-watch', key: 'log' } as const, EMPTY, {
-  shape: 'log-1',
+  shape: 'log-2',
 })
 // On/off and shown/hidden live in the shared switch file (hooks/switches.ts), read by every chat.
 const sw = createSwitch('agent-watch')
@@ -54,14 +62,77 @@ const switchIo = ($: EngineInterface): SwitchIo => ({
 })
 // END switch-io
 
+// The dispatch lint's mode lives in the shared switch file beside the on/off keys, as a string:
+//   "agent-watch:lint": "deny" | "off"      key absent (or anything else): warn
+// The switch helpers only know booleans, so this reads and writes the one key through their file helpers,
+// which keep every other key. It is read at each spawn, so another chat's change is picked up at once.
+const LINT_KEY = 'agent-watch:lint'
+type LintMode = 'warn' | 'deny' | 'off'
+const LINT_MODES: readonly string[] = ['warn', 'deny', 'off']
+const TICK_MS = 1000
+
+async function readLintMode(io: SwitchIo): Promise<LintMode> {
+  try {
+    const json = await readSwitchFile(io, await homeOf(io))
+    const v = json?.[LINT_KEY]
+
+    return v === 'deny' || v === 'off' ? v : 'warn'
+  } catch {
+    return 'warn'
+  }
+}
+
+async function writeLintMode(io: SwitchIo, mode: LintMode): Promise<boolean> {
+  try {
+    const home = await homeOf(io)
+    const json = await readSwitchFile(io, home)
+    if (json === null) return false
+    if (mode === 'warn') delete json[LINT_KEY]
+    else json[LINT_KEY] = mode
+    await writeSwitchFile(io, home, json)
+
+    return true
+  } catch {
+    return false
+  }
+}
+
 const HELP = [
   '/agent-watch         open the Agents pane',
   '/agent-watch on      turn agent watch on in every chat (remembered)',
   '/agent-watch off     turn it off: no tracking, no band (remembered)',
-  '/agent-watch hide    hide the band but keep tracking; /agent-watch show brings it back',
-  '/agent-watch clear   forget the agents seen so far',
+  '/agent-watch hide    hide the band but keep tracking; show brings it back',
+  '/agent-watch clear   forget the agents seen and what this chat used',
+  '                     (the lint counters stay)',
+  '/agent-watch status  the dispatch lint mode and its session counters',
+  '/agent-watch lint    show or set the dispatch lint: warn|deny|off|reset',
+  '                     warn is the default; deny refuses a general-purpose,',
+  '                     Explore or Plan spawn with no model; reset zeroes',
+  '                     the counters',
   '/agent-watch help    this text',
 ].join('\n')
+
+function countsText(c: Log['lint']): string {
+  return `Session: ${c.missingModel} missing-model, ${c.opusLow} opus+low, ${c.max} max-effort.`
+}
+
+// The file a Read/Edit/Write/NotebookEdit call names, or null for any other tool or a path we leave out.
+function pathOf(e: { tool: string; [k: string]: unknown }): string | null {
+  const isTool = e.tool === 'Read' || e.tool === 'Edit' || e.tool === 'Write' || e.tool === 'NotebookEdit'
+  if (!isTool) return null
+  const raw = e.tool === 'NotebookEdit' ? (e.notebook_path ?? e.file_path) : e.file_path
+
+  return typeof raw === 'string' && raw !== '' && !isNoisePath(raw) ? raw : null
+}
+
+function usedBy(u: Log['used'], tool: string, path: string | null, server: string | null): Log['used'] {
+  if (path !== null) {
+    return tool === 'Read' ? { ...u, read: touchPath(u.read, path) } : { ...u, written: touchPath(u.written, path) }
+  }
+  if (server !== null) return { ...u, mcp: { ...u.mcp, [server]: (u.mcp[server] ?? 0) + 1 } }
+
+  return u
+}
 
 function newAgent(fields: Partial<AgentRec> & { id: string }, l: Log, at: number): AgentRec {
   return {
@@ -76,6 +147,7 @@ function newAgent(fields: Partial<AgentRec> & { id: string }, l: Log, at: number
     skills: [],
     startedAt: at,
     endedAt: null,
+    effort: null,
     turnSeq: l.turnSeq,
     ...fields,
   }
@@ -156,6 +228,8 @@ async function ensureAgent($: EngineInterface, id: string, at: number): Promise<
 export const register: Register = on => {
   // Module variables: lost on a reload, and nothing drawn depends on them.
   const stepsSeen = new Set<string>()
+  // An agent's first request is judged once; a reload forgets, and its next first step is judged again.
+  const effortChecked = new Set<string>()
   const skillCalls = new Map<string, number>()
   let spawnsInFlight = 0
   let preloads: string[] = []
@@ -163,14 +237,23 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'agent-watch',
-      description: 'Agents pane and band: on | off | clear | help',
-      argumentHint: '[on|off|clear|help]',
+      description: 'Agents pane and band: on | off | clear | status | lint | help',
+      argumentHint: '[on|off|clear|status|lint [warn|deny|off|reset]|help]',
     })
     await sw.start(switchIo($), () => {
       $.ui.invalidate('ui.render')
     })
     const at = await $.clock.now()
     await update($, log, l => (l.sessionStartedAt === 0 ? { ...l, sessionStartedAt: at } : l))
+    // The pane's elapsed time ticks while somebody is running; nothing is drawn or invalidated otherwise.
+    $.clock.every(TICK_MS, () => {
+      if (sw.off) return
+      void read($, log)
+        .then(l => {
+          if (l.agents.some(a => a.status === 'running')) $.ui.invalidate('ui.render')
+        })
+        .catch(() => undefined)
+    })
 
     return next(e)
   })
@@ -194,6 +277,7 @@ export const register: Register = on => {
       const at = await $.clock.now()
       await update($, log, l => ({
         ...EMPTY,
+        lint: l.lint, // the warn-mode evidence outlives a clear; /agent-watch lint reset zeroes it
         turnSeq: l.turnSeq,
         sessionStartedAt: at,
       }))
@@ -202,6 +286,31 @@ export const register: Register = on => {
     }
     if (arg === 'help') {
       return { text: HELP }
+    }
+    if (arg === 'status') {
+      const l = await read($, log)
+
+      return { text: `Dispatch lint ${await readLintMode(switchIo($))}. ${countsText(l.lint)}` }
+    }
+    if (arg === 'lint' || arg.startsWith('lint ')) {
+      const want = arg.slice(4).trim()
+      if (want === '') return { text: `Dispatch lint is ${await readLintMode(switchIo($))}. Set it with /agent-watch lint warn|deny|off (reset zeroes the counters).` }
+      if (want === 'reset') {
+        await update($, log, l => ({ ...l, lint: { missingModel: 0, opusLow: 0, max: 0 } }))
+
+        return { text: 'Dispatch lint counters reset.' }
+      }
+      if (!LINT_MODES.includes(want)) return { text: `Unknown lint mode "${want}". Use warn, deny or off.` }
+      if (!(await writeLintMode(switchIo($), want as LintMode))) {
+        return { text: 'Agent watch: could not save the lint mode (switches.json is unreadable).' }
+      }
+
+      return {
+        text:
+          want === 'deny'
+            ? 'Dispatch lint deny: a general-purpose, Explore or Plan spawn with no model is refused. Effort findings stay warnings.'
+            : `Dispatch lint ${want}.`,
+      }
     }
 
     return { text: `Unknown option "${arg}".\n${HELP}` }
@@ -243,12 +352,32 @@ export const register: Register = on => {
   })
 
   on('turn.step', async function* ($, e, next) {
+    // The effort half of the dispatch lint runs on its own setting (agent-watch:lint), not the band's switch:
+    // an off or hidden band does not stop it. Effort cannot be seen at agent.spawn, so each subagent's FIRST
+    // request is judged here, once. Warnings only.
+    const first = e.agentId !== undefined && e.index === 0 && !effortChecked.has(e.agentId)
+    if (first && e.agentId !== undefined) {
+      effortChecked.add(e.agentId)
+      const mode = await readLintMode(switchIo($))
+      const found = mode === 'off' ? undefined : classifyDispatch({ model: e.model, effort: e.effort })
+      if (found !== undefined && (found.kind === 'opus-low' || found.kind === 'max-outside-escalation')) {
+        const key = found.kind === 'opus-low' ? 'opusLow' : 'max'
+        await update($, log, l => ({ ...l, lint: { ...l.lint, [key]: l.lint[key] + 1 } }))
+        $.ui.log(`agent-watch: ${found.message}`)
+      }
+    }
     if (sw.off) return yield* next(e)
     const id = e.agentId ?? MAIN
     const at = await $.clock.now()
     stepsSeen.add(e.turnId)
     if (e.agentId !== undefined) await ensureAgent($, e.agentId, at)
     await update($, log, l => withAgent(l, id, at, a => addModel(a, e.model)))
+
+    if (first && e.agentId !== undefined) {
+      const agentId = e.agentId
+      const effort = e.effort === undefined ? null : String(e.effort)
+      await update($, log, l => withAgent(l, agentId, at, a => ({ ...a, effort })))
+    }
 
     const result = yield* next(e)
     const usage = result.usage
@@ -279,10 +408,14 @@ export const register: Register = on => {
         ? (e as { skill: string }).skill
         : null
 
+    const path = pathOf(e)
+    const server = mcpServer(e.tool)
     await update($, log, l => {
       const counted = withAgent(l, id, at, a => ({ ...a, calls: a.calls + 1 }))
+      const used = usedBy(counted.used, e.tool, path, server)
+      const withUsed = used === counted.used ? counted : { ...counted, used }
 
-      return skill === null ? counted : addSkill(counted, id, skill, at)
+      return skill === null ? withUsed : addSkill(withUsed, id, skill, at)
     })
     if (skill !== null) skillCalls.set(skill, at)
 
@@ -309,7 +442,40 @@ export const register: Register = on => {
   })
 
   on('agent.spawn', async ($, e, next) => {
-    if (sw.off) return next(e)
+    // The model half of the dispatch lint, on its own setting (agent-watch:lint): an off or hidden band does not
+    // disable it, a user-selected deny still refuses. A fork is exempt (classifyDispatch); a named persona is not in
+    // the rubric's no-tier list. Also exempt, since inheriting the parent is not what happens there: a workflow
+    // script's agent() and a resumed agent (both named on the spawn event), and any spawn while the session forces
+    // one subagent model (CLAUDE_CODE_SUBAGENT_MODEL). The counter moves in warn and deny alike; only deny refuses.
+    const mode = await readLintMode(switchIo($))
+    let found = mode === 'off' ? undefined : classifyDispatch({ subagentType: e.subagentType, model: e.model, fork: e.fork })
+    if (found?.kind === 'missing-model') {
+      const forced = (await $.env.get('CLAUDE_CODE_SUBAGENT_MODEL').catch(() => undefined)) ?? ''
+      if (e.workflow !== undefined || e.resume !== undefined || forced.trim() !== '') found = undefined
+    }
+    const lintMessage = found?.kind === 'missing-model' ? `agent-watch: ${found.message}` : undefined
+    if (lintMessage !== undefined) {
+      await update($, log, l => ({ ...l, lint: { ...l.lint, missingModel: l.lint.missingModel + 1 } }))
+      if (mode === 'deny') return { deny: lintMessage }
+    }
+    const announce = () => {
+      if (lintMessage === undefined) return
+      // The notice sits under the open Agent call and goes when the call resolves, or is dropped when none is
+      // open; the dim transcript line is always written too, so a finding is never silently lost.
+      try {
+        $.ui.notice(e.tool_use_id, lintMessage)
+      } catch {
+        // the log line below still carries it
+      }
+      $.ui.log(lintMessage)
+    }
+    if (sw.off) {
+      const passed = await next(e)
+      if (passed.deny === undefined) announce()
+
+      return passed
+    }
+
     spawnsInFlight += 1
     let ran
     try {
@@ -319,6 +485,7 @@ export const register: Register = on => {
     }
     const agentId = ran.agentId
     if (ran.deny !== undefined || agentId === undefined) return ran
+    announce()
 
     const at = await $.clock.now()
     const skills = preloads
@@ -454,6 +621,25 @@ export const register: Register = on => {
     }
 
     const room = Math.max(4, Math.min(12, (e.viewport?.rows ?? 24) - 8))
+    const now = await $.clock.now()
+    const mode = await readLintMode(switchIo($))
+    const readFiles = l.used.read
+    const wroteFiles = l.used.written
+    const servers = Object.entries(l.used.mcp)
+    const hasUsed = readFiles.length > 0 || wroteFiles.length > 0 || servers.length > 0
+    const SHOWN = 6
+    const fileRows = (title: string, list: string[]) =>
+      list.length === 0 ? null : (
+        <Box flexDirection="column">
+          <Text>
+            <Text dimColor>{title}</Text> <Text dimColor>({list.length})</Text>
+          </Text>
+          {list.slice(-SHOWN).reverse().map(p => (
+            <Text wrap="truncate-end">  {tailPath(p)}</Text>
+          ))}
+          {list.length > SHOWN && <Text dimColor>  +{list.length - SHOWN} more</Text>}
+        </Box>
+      )
 
     return (
       <Box flexDirection="column">
@@ -473,6 +659,7 @@ export const register: Register = on => {
               </Text>
               <Text dimColor wrap="truncate-end">
                 {pad}  {models} · {agent.calls} calls · {compact(t.input + t.cacheRead + t.cacheWrite)} in / {compact(t.output)} out
+                {agent.effort === null ? '' : ` · effort ${agent.effort}`} · {elapsed((agent.endedAt ?? now) - agent.startedAt)}
               </Text>
               {agent.skills.length > 0 && (
                 <Text wrap="truncate-end">
@@ -493,6 +680,20 @@ export const register: Register = on => {
             </Text>
           </Text>
         ))}
+        <Text> </Text>
+        <Text weight="bold">Dispatch lint</Text>
+        <Text dimColor>
+          mode {mode} · missing-model {l.lint.missingModel} · opus+low {l.lint.opusLow} · max-effort {l.lint.max}
+        </Text>
+        {hasUsed && <Text> </Text>}
+        {hasUsed && <Text weight="bold">This chat used</Text>}
+        {fileRows('files read', readFiles)}
+        {fileRows('files written', wroteFiles)}
+        {servers.length > 0 && (
+          <Text wrap="truncate-end">
+            <Text dimColor>MCP calls</Text> {servers.map(([name, n]) => `${name} ${n}`).join(' · ')}
+          </Text>
+        )}
         {e.surface === 'terminal' && l.timeline.length > 0 && <Text> </Text>}
         {e.surface === 'terminal' && l.timeline.length > 0 && <Text weight="bold">Timeline</Text>}
         {e.surface === 'terminal' &&
