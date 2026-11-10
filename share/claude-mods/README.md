@@ -37,4 +37,4 @@ The engine's hook checker also refuses to let the engine handle `$` itself be pa
 
 ## Dev-only mods
 
-`DEV-ONLY` lists mods that live here but never ship: they are not in `.claude-plugin/marketplace.json` and `sync-tap.sh` will not mirror them (it refuses to run if one leaks). `cache-clock` is third-party with no licence. `scripts/check-claude-mods.sh` still validates and tests them. See `docs/claude-plugins-fleet.md` section 16.
+`DEV-ONLY` lists mods that live here but never ship: they are not in `.claude-plugin/marketplace.json` and `sync-tap.sh` will not mirror them (it refuses to run if one leaks). None are listed today: `cache-clock` (third-party, no licence), the last one, was retired by XACA-1639-017. `scripts/check-claude-mods.sh` still validates and tests them. See `docs/claude-plugins-fleet.md` section 16.

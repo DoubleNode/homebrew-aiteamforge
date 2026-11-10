@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1639: Retire the dev-host-only cache-clock mod (XACA-1639-017)
+- Tap files updated in this publish: `share/claude-mods/README.md`. Run `brew upgrade aiteamforge` to receive them.
 
 ## [0.21.20] - 2026-11-10
 - XACA-1639: Dispatch lint and live effort/cache visibility in agent-watch and usage-gauge (XACA-1639)
