@@ -171,9 +171,85 @@
     function setExpanded(id, on) { expandState.set(String(id), on === true); }
     var CHEV_CLOSED = '\u25B8', CHEV_OPEN = '\u25BE';   // same glyphs as lcars-division-collapse.js
 
+    // ---- XACA-1704-004: REFUSING state (admin says accepting, the pool gate says no) ------------------
+    // m.state === 'enabled' only means "admin enabled and not paused". m.eligibility (server, job-independent)
+    // says whether the pool would actually place a job here. Missing eligibility (older server) => no change.
+    var REASON_TEXT = {
+        'no-report': 'no health report', 'stale-poll': 'poll is stale', 'swap-high': 'swap use too high',
+        'mem-pressure': 'memory pressure', 'swap-growing': 'swap growing too fast', 'mem-free-low': 'free memory too low',
+        'load-high': 'load too high', 'load-malformed': 'load report malformed', 'not-enabled': 'not enabled', 'paused': 'paused'
+    };
+    function isRefusing(m) {
+        return !!m && m.state === 'enabled' && !!m.eligibility && typeof m.eligibility === 'object' &&
+            m.eligibility.eligible === false;
+    }
+    function fmtBytes(b) {
+        if (!isNum(b)) return null;
+        return b >= 1073741824 ? (b / 1073741824).toFixed(1) + ' GiB' : (b / 1048576).toFixed(0) + ' MiB';
+    }
+    function fmtMs(v) {
+        if (!isNum(v)) return null;
+        return v >= 60000 ? (v / 60000).toFixed(1) + ' min' : (v / 1000).toFixed(1) + ' s';
+    }
+    function fmtLoad(v) { return isNum(v) ? v.toFixed(2) + '/CPU' : null; }
+    function fmtOne(reason, v) {
+        var out = null;
+        if (reason === 'swap-high') out = fmtBytes(v);
+        else if (reason === 'swap-growing') { out = fmtBytes(v); if (out) out += '/h'; }
+        else if (reason === 'mem-free-low') out = isNum(v) ? num2(v) + '%' : null;
+        else if (reason === 'stale-poll') out = fmtMs(v);
+        else if (reason === 'load-high') out = fmtLoad(v);
+        return out === null ? String(v === null || v === undefined ? DASH : v) : out;
+    }
+    // "5.2 GiB vs limit 2.0 GiB" (no label); the label and code are added by reasonLine().
+    function measuredVsLimit(c) {
+        var reason = c && c.reason, mv = c ? c.measured : null, meas;
+        if (reason === 'load-high' && mv && typeof mv === 'object') {
+            meas = '1m ' + fmtOne('load-high', mv.load1PerCpu) +
+                (isNum(mv.load5PerCpu) ? ', 5m ' + fmtOne('load-high', mv.load5PerCpu) : '');
+        } else meas = fmtOne(reason, mv);
+        return meas + ' vs limit ' + fmtOne(reason, c ? c.limit : null);
+    }
+    // ONE line per reason (XACA-1704-016): "swap use too high: 5.2 GiB vs limit 2.0 GiB (swap-high)". A reason without
+    // a check is "text (code)"; an unknown reason shows the raw code only. Plain text; the caller escapes it.
+    function reasonLine(reason, check) {
+        var known = Object.prototype.hasOwnProperty.call(REASON_TEXT, reason);
+        var label = known ? REASON_TEXT[reason] : String(reason);
+        return label + (check ? ': ' + measuredVsLimit(check) : '') + (known ? ' (' + reason + ')' : '');
+    }
+    function refusalHtml(m) {
+        var e = m.eligibility, h = '<div class="cicd-pool-refusal" data-cicd-pool-refusal role="note">' +
+            '<p class="cicd-pool-refusal-head">Not accepting jobs: pool gate refuses this machine</p>';
+        var reasons = Array.isArray(e.reasons) ? e.reasons : [];
+        var checks = Array.isArray(e.checks) ? e.checks.filter(function(c) { return c && typeof c === 'object'; }) : [];
+        var used = [];
+        var items = '';
+        function li(reason, check) {
+            return '<li data-cicd-pool-refusal-reason="' + esc(reason) + '"' +
+                (check ? ' data-cicd-pool-refusal-check="' + esc(check.reason) + '"' : '') + '>' + esc(reasonLine(reason, check)) + '</li>';
+        }
+        reasons.forEach(function(r) {
+            var c = null;
+            checks.forEach(function(k, i) { if (!c && used.indexOf(i) === -1 && k.reason === r) { c = k; used.push(i); } });
+            items += li(r, c);
+        });
+        // A check whose reason is not in reasons[] still shows (never drop evidence).
+        checks.forEach(function(k, i) {
+            if (used.indexOf(i) === -1) items += li(k.reason, k);
+        });
+        if (items) h += '<ul class="cicd-pool-refusal-reasons" data-cicd-pool-refusal-reasons>' + items + '</ul>';
+        var os = e.os;
+        if (os && os.macOS && os.Linux && (os.macOS.eligible !== os.Linux.eligible)) {
+            h += '<p class="cicd-pool-refusal-os" data-cicd-pool-refusal-os>macOS ' + (os.macOS.eligible ? 'ok' : 'refusing') +
+                ' · Linux ' + (os.Linux.eligible ? 'ok' : 'refusing') + '</p>';
+        }
+        return h + '</div>';
+    }
+
     function cardHtml(id, m, serverTime, expanded, assignments) {
         var state = STATES[m.state] ? m.state : 'unknown';
-        var st = STATES[state], key = safeId(id);
+        var st = STATES[state], key = safeId(id), refusing = isRefusing(m);
+        if (refusing) st = { label: 'REFUSING', glyph: '⊘' };
         var detailsId = 'cicd-pool-details-' + key;
         var h = '<div class="cicd-pool-header">' +
             '<h4 class="cicd-pool-name" id="cicd-pool-name-' + esc(key) + '">' +
@@ -183,6 +259,7 @@
             '<span class="cicd-pool-name-text">' + esc(id) + '</span>' +
             '<span class="cicd-pool-badge" data-cicd-pool-state="' + esc(state) + '">' +
             '<span aria-hidden="true" class="cicd-pool-glyph">' + st.glyph + '</span> ' + esc(st.label) + '</span></button></h4>';
+        if (refusing) h += refusalHtml(m);
         if (m.stateReason) h += '<p class="cicd-pool-reason" data-cicd-pool-reason>' + esc(m.stateReason) + '</p>';
         if (m.paused === true || m.pauseReason) {
             h += '<p class="cicd-pool-pause" data-cicd-pool-pause>Paused' +
@@ -329,6 +406,8 @@
                 patchAge(card, html);   // only the relative poll time moved: no rebuild, focus untouched
             }
             card.setAttribute('data-cicd-pool-state', STATES[m.state] ? m.state : 'unknown');
+            if (isRefusing(m)) card.setAttribute('data-cicd-pool-refusing', 'true');
+            else card.removeAttribute('data-cicd-pool-refusing');
             if (list.children[pos] !== card) list.insertBefore(card, list.children[pos] || null);
             pos++;
         });
@@ -592,7 +671,7 @@
         }
     }
 
-    root.LCARSCIPool = { render: render, teardown: teardown, isExpanded: isExpanded };
+    root.LCARSCIPool = { render: render, teardown: teardown, isExpanded: isExpanded, REASON_TEXT: REASON_TEXT };
 
 })(typeof window !== 'undefined' ? window : this);
 

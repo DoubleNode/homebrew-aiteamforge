@@ -651,6 +651,42 @@ function createDispatcher(deps) {
         } catch (_) { /* audit must never break placement */ }
     }
 
+    /**
+     * XACA-1704-003/-014: {host: reasons[]} for the machines that REFUSED a job in one evaluateMachines() pass.
+     * Eligible machines never appear. Bounded and sanitized (host ids and reason codes only, short strings): it is
+     * served on the operator API and written to the audit log.
+     */
+    const REFUSAL_MAX_HOSTS = 16, REFUSAL_MAX_REASONS = 12, REFUSAL_MAX_STR = 40;
+    function refusalsOf(evals) {
+        const out = {};
+        let n = 0;
+        for (const e of Array.isArray(evals) ? evals : []) {
+            if (!e || e.eligible || !Array.isArray(e.reasons)) continue;
+            if (n >= REFUSAL_MAX_HOSTS) break;
+            const host = capStr(clean(e.id), REFUSAL_MAX_STR);
+            if (!host || Object.prototype.hasOwnProperty.call(out, host)) continue;
+            out[host] = e.reasons.slice(0, REFUSAL_MAX_REASONS).map((r) => capStr(clean(r), REFUSAL_MAX_STR)).filter((r) => r !== null);
+            n++;
+        }
+        return out;
+    }
+
+    /** XACA-1704-014: refusals as ONE scalar for the audit log (it is scalar-only, 512-char values):
+     *  "host:r1,r2|host2:r1". Whole hosts only; hosts that do not fit become a trailing "+N more". */
+    const AUDIT_REFUSALS_MAX = 480;
+    function refusalsAuditText(refusals) {
+        const parts = Object.entries(refusals || {}).map(([h, rs]) => `${h}:${rs.join(',')}`);
+        let out = '';
+        let used = 0;
+        for (const p of parts) {
+            if ((out ? out.length + 1 : 0) + p.length > AUDIT_REFUSALS_MAX) break;
+            out += (out ? '|' : '') + p;
+            used++;
+        }
+        if (used < parts.length) out += `${out ? '|' : ''}+${parts.length - used} more`;
+        return out;
+    }
+
     function reasonsText(evals) {
         if (!evals.length) return 'no machines registered';
         return evals.map((e) => `${e.id}: ${e.reasons.join(',') || 'eligible'}`).join('; ');
@@ -772,10 +808,11 @@ function createDispatcher(deps) {
             recordPlacement(t.rec, machines, base, decRes, pcfg, isCovered, t.viaHostLabel === true);
             if (isCovered) {
                 noCapObserved.add(`class:${plc.jobClass(t.rec.name, cfg.jobClasses)}`);
-                t.noCapSince = null; demand.push(t.rec);
+                t.noCapSince = null; t.refusals = null; demand.push(t.rec);
                 continue;
             }
             const evals = plc.evaluateMachines(machines, adjusted, t.rec, pcfg);
+            t.refusals = refusalsOf(evals);   // XACA-1704-003: cleared below when the job turns out placeable/excluded
             auditBindingRefusals(t.rec, evals);
             const via = t.viaHostLabel === true;
             // A job accepted ONLY through its static host label whose pinned host is not explicitly live
@@ -786,7 +823,7 @@ function createDispatcher(deps) {
                 // makes its class unobservable. A job that was always pinned to a non-live host never
                 // contributed to an incident, so it must not turn another job's observed recovery into a silent close.
                 if (t.noCapSince !== null) noCapUnobserved.add(`class:${plc.jobClass(t.rec.name, cfg.jobClasses)}`);
-                t.noCapSince = null;
+                t.noCapSince = null; t.refusals = null;
                 continue;
             }
             noCapObserved.add(`class:${plc.jobClass(t.rec.name, cfg.jobClasses)}`);
@@ -794,7 +831,7 @@ function createDispatcher(deps) {
             // ranks first must not strand a job a live host could take. The decision RECORD above still
             // uses the all-host ranking (that is the shadow comparison).
             const top = evals.find((e) => e.eligible && machineMode(machines[e.id], via) === 'live');
-            if (top) { t.noCapSince = null; demand.push(t.rec); needing.push(t.rec); continue; }
+            if (top) { t.noCapSince = null; t.refusals = null; demand.push(t.rec); needing.push(t.rec); continue; }
             if (t.noCapSince === null) t.noCapSince = nowMs;
             if (globalShadow) continue;   // shadow raises no operational alerts: the persistent runners still serve the job
             const waited = nowMs - t.noCapSince;
@@ -810,7 +847,7 @@ function createDispatcher(deps) {
                     ref: `class:${cls}`,
                 });
                 if (res.raised) {
-                    writeAudit('alert', { repo: `${t.rec.owner}/${t.rec.repo}`, jobId: t.rec.jobId, runAttempt: t.rec.runAttempt, jobName: t.rec.name, jobClass: cls, waitedMs: waited, reason: 'ci-no-capacity' });
+                    writeAudit('alert', { repo: `${t.rec.owner}/${t.rec.repo}`, jobId: t.rec.jobId, runAttempt: t.rec.runAttempt, jobName: t.rec.name, jobClass: cls, waitedMs: waited, reason: 'ci-no-capacity', refusals: refusalsAuditText(t.refusals) });
                 }
             }
         }
@@ -1071,6 +1108,9 @@ function createDispatcher(deps) {
             machine: machineFor(t.rec),
             // XACA-1479-007 (additive): dispatch priority, always one of critical|high|normal (missing/unknown -> normal).
             priority: ['critical', 'high'][priorityRank(t.rec)] || 'normal',
+            // XACA-1704-003 (additive): {host: reasons[]} from this job's last evaluateMachines() pass, refused
+            // hosts only, bounded. {} when covered, placeable, excluded, or not yet evaluated.
+            refusals: t.refusals && typeof t.refusals === 'object' ? t.refusals : {},
         }));
     }
 

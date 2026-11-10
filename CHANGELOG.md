@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1704: Show why the CI pool refuses a machine — per-host eligibility, per-job refusals, REFUSING card (XACA-1704)
+- Tap files updated in this publish: `fleet-monitor/server/lib/ci-dispatch-audit.js`,`fleet-monitor/server/lib/ci-dispatch-placement.js` `fleet-monitor/server/lib/ci-dispatcher.js`,`fleet-monitor/server/lib/ci-pool-routes.js` `fleet-monitor/server/package.json`,`fleet-monitor/server/public/lcars/lcars-dashboard.html` `fleet-monitor/server/public/shared/css/lcars-ci-pool.css`,`fleet-monitor/server/public/shared/css/lcars-ci-queue.css` (+15 more). Run `brew upgrade aiteamforge` to receive them.
 
 ## [0.21.19] - 2026-11-09
 - XACA-1781: --non-interactive upgrade runs brew unless the caller did, and names the real failure reason (XACA-1781)

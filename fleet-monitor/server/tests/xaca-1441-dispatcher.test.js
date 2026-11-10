@@ -447,7 +447,7 @@ describe('queue()/status() views', () => {
         assert.equal(q[0].jobClass, 'long');
         assert.equal(q[0].repo, REPO);
         assert.ok(q[0].waitingMs >= 29000);
-        assert.deepEqual(Object.keys(q[0]).sort(), ['branch', 'jobClass', 'jobId', 'key', 'labels', 'machine', 'name', 'noCapacityMs', 'noEligibleMachine', 'priority', 'repo', 'runnerName', 'status', 'url', 'waitingMs', 'workflow']);
+        assert.deepEqual(Object.keys(q[0]).sort(), ['branch', 'jobClass', 'jobId', 'key', 'labels', 'machine', 'name', 'noCapacityMs', 'noEligibleMachine', 'priority', 'refusals', 'repo', 'runnerName', 'status', 'url', 'waitingMs', 'workflow']);
     });
 });
 

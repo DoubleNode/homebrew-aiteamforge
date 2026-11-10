@@ -69,7 +69,22 @@
       ],
       "state": "enabled",
       "stateReason": "accepting",
-      "capability": "enabled"
+      "capability": "enabled",
+      "eligibility": {
+        "eligible": true,
+        "reasons": [],
+        "checks": [],
+        "os": {
+          "macOS": {
+            "eligible": true,
+            "reasons": []
+          },
+          "Linux": {
+            "eligible": true,
+            "reasons": []
+          }
+        }
+      }
     },
     "m1mini": {
       "enabled": true,
@@ -117,7 +132,28 @@
       ],
       "state": "draining",
       "stateReason": "busy-slots",
-      "capability": "unknown"
+      "capability": "unknown",
+      "eligibility": {
+        "eligible": false,
+        "reasons": [
+          "paused"
+        ],
+        "checks": [],
+        "os": {
+          "macOS": {
+            "eligible": false,
+            "reasons": [
+              "paused"
+            ]
+          },
+          "Linux": {
+            "eligible": false,
+            "reasons": [
+              "paused"
+            ]
+          }
+        }
+      }
     },
     "m1pro": {
       "enabled": true,
@@ -159,7 +195,28 @@
       ],
       "state": "paused",
       "stateReason": "marker-confirms",
-      "capability": "dormant"
+      "capability": "dormant",
+      "eligibility": {
+        "eligible": false,
+        "reasons": [
+          "paused"
+        ],
+        "checks": [],
+        "os": {
+          "macOS": {
+            "eligible": false,
+            "reasons": [
+              "paused"
+            ]
+          },
+          "Linux": {
+            "eligible": false,
+            "reasons": [
+              "paused"
+            ]
+          }
+        }
+      }
     },
     "m3pro": {
       "enabled": true,
@@ -201,7 +258,22 @@
       ],
       "state": "resuming",
       "stateReason": "marker-resuming",
-      "capability": "unknown"
+      "capability": "unknown",
+      "eligibility": {
+        "eligible": true,
+        "reasons": [],
+        "checks": [],
+        "os": {
+          "macOS": {
+            "eligible": true,
+            "reasons": []
+          },
+          "Linux": {
+            "eligible": true,
+            "reasons": []
+          }
+        }
+      }
     },
     "m2mini": {
       "enabled": false,
@@ -224,7 +296,31 @@
       "slots": null,
       "state": "disabled",
       "stateReason": "not-enabled",
-      "capability": "unknown"
+      "capability": "unknown",
+      "eligibility": {
+        "eligible": false,
+        "reasons": [
+          "not-enabled",
+          "no-report"
+        ],
+        "checks": [],
+        "os": {
+          "macOS": {
+            "eligible": false,
+            "reasons": [
+              "not-enabled",
+              "no-report"
+            ]
+          },
+          "Linux": {
+            "eligible": false,
+            "reasons": [
+              "not-enabled",
+              "no-report"
+            ]
+          }
+        }
+      }
     },
     "m5mini": {
       "enabled": true,
@@ -247,7 +343,28 @@
       "slots": null,
       "state": "unknown",
       "stateReason": "no-report",
-      "capability": "unknown"
+      "capability": "unknown",
+      "eligibility": {
+        "eligible": false,
+        "reasons": [
+          "no-report"
+        ],
+        "checks": [],
+        "os": {
+          "macOS": {
+            "eligible": false,
+            "reasons": [
+              "no-report"
+            ]
+          },
+          "Linux": {
+            "eligible": false,
+            "reasons": [
+              "no-report"
+            ]
+          }
+        }
+      }
     }
   },
   "assignments": [],
@@ -274,7 +391,23 @@
       "status": "queued",
       "runnerName": null,
       "machine": null,
-      "priority": "normal"
+      "priority": "normal",
+      "refusals": {
+        "m1mini": [
+          "paused",
+          "no-idle-slot"
+        ],
+        "m1pro": [
+          "paused"
+        ],
+        "m2mini": [
+          "not-enabled",
+          "no-report"
+        ],
+        "m5mini": [
+          "no-report"
+        ]
+      }
     },
     {
       "key": "DoubleNode/dev-team#2#1",
@@ -297,7 +430,23 @@
       "status": "queued",
       "runnerName": null,
       "machine": null,
-      "priority": "normal"
+      "priority": "normal",
+      "refusals": {
+        "m1mini": [
+          "paused",
+          "no-idle-slot"
+        ],
+        "m1pro": [
+          "paused"
+        ],
+        "m2mini": [
+          "not-enabled",
+          "no-report"
+        ],
+        "m5mini": [
+          "no-report"
+        ]
+      }
     },
     {
       "key": "DoubleNode/dev-team#3#1",
@@ -320,7 +469,23 @@
       "status": "queued",
       "runnerName": null,
       "machine": null,
-      "priority": "normal"
+      "priority": "normal",
+      "refusals": {
+        "m1mini": [
+          "paused",
+          "no-idle-slot"
+        ],
+        "m1pro": [
+          "paused"
+        ],
+        "m2mini": [
+          "not-enabled",
+          "no-report"
+        ],
+        "m5mini": [
+          "no-report"
+        ]
+      }
     }
   ],
   "running": [],

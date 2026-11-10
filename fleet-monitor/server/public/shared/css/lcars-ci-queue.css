@@ -63,3 +63,7 @@
 @media (prefers-reduced-motion: reduce) {
     .ciq, .ciq * { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 }
+
+/* XACA-1704-005: which hosts refused the queued jobs and why. Own full-width line, wraps on narrow screens. */
+.ciq-banner-refusals { flex: 1 1 100%; color: var(--lcars-tan); font-size: 0.9em; overflow-wrap: anywhere; }
+.ciq-banner-refusals[hidden] { display: none; }

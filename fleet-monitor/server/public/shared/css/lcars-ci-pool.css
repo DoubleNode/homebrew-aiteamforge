@@ -71,3 +71,16 @@
 .cicd-pool-details { margin-top: 4px; }
 .cicd-pool-details[hidden] { display: none; }
 @media (prefers-reduced-motion: reduce) { .cicd-pool, .cicd-pool * { animation: none !important; transition: none !important; } }
+
+/* XACA-1704-004: REFUSING = admin-enabled but the pool gate refuses the machine. Text badge + glyph + dashed
+   alert-red border, never colour alone. */
+.cicd-pool-card[data-cicd-pool-refusing="true"] { border-color: var(--lcars-alert-red); border-style: dashed; }
+.cicd-pool-card[data-cicd-pool-refusing="true"] .cicd-pool-badge { color: var(--lcars-alert-red); font-weight: 700; }
+.cicd-pool-refusal { margin: 6px 0 0; padding: 6px 8px; border-left: 4px solid var(--lcars-alert-red);
+    background: var(--lcars-darker); font-size: 0.8rem; min-width: 0; overflow-wrap: anywhere; }
+.cicd-pool-refusal p { margin: 0 0 4px; }
+.cicd-pool-refusal-head { color: var(--lcars-alert-red); letter-spacing: 0.04em; }
+.cicd-pool-refusal ul { margin: 0 0 4px; padding: 0 0 0 16px; }
+.cicd-pool-refusal-checks { color: var(--lcars-tan); }
+.cicd-pool-refusal code { color: var(--lcars-tan); font-size: 0.75rem; }
+.cicd-pool-refusal-os { color: var(--lcars-tan); }

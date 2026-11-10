@@ -567,7 +567,7 @@ describe('GET /api/ci-pool redaction', () => {
         assert.equal(r.body.machines.m1mini.lastPollAt, null);
         assert.equal(r.body.dispatcherEnabled, true);
         assert.equal(r.body.assignments.length, 2);
-        assert.deepEqual(Object.keys(r.body.machines.m4mini).sort(), ['agentVersion', 'capability', 'capacity', 'enabled', 'hasKey', 'hasTelemetryKey', 'lastPollAt', 'mode', 'pauseDrift', 'pauseMarker', 'pauseReason', 'pausedAt', 'pausedBy', 'paused', 'prefers', 'repos', 'bindingState', 'slots', 'state', 'stateReason', 'thresholds'].sort());   // state/stateReason/capability: XACA-1444-001 (additive)
+        assert.deepEqual(Object.keys(r.body.machines.m4mini).sort(), ['agentVersion', 'capability', 'capacity', 'eligibility', 'enabled', 'hasKey', 'hasTelemetryKey', 'lastPollAt', 'mode', 'pauseDrift', 'pauseMarker', 'pauseReason', 'pausedAt', 'pausedBy', 'paused', 'prefers', 'repos', 'bindingState', 'slots', 'state', 'stateReason', 'thresholds'].sort());   // state/stateReason/capability: XACA-1444-001 (additive)
     });
 });
 

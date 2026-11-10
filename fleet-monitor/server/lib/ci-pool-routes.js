@@ -393,6 +393,17 @@ function registerCiPoolRoutes(app, deps) {
     });
 
     // --------------------------------------------------------- operator view
+    /** XACA-1704-002: {eligible, reasons, checks[], os:{macOS,Linux}} for one machine. Numbers and reason codes only. */
+    function eligibilityOf(id, m, r, cfg, nowMs) {
+        const rec = Object.assign({ id }, m);
+        const gcfg = { now: nowMs, thresholds: cfg.thresholds };
+        const g = plc.hostGate(r, rec, gcfg);
+        return {
+            eligible: g.eligible, reasons: g.reasons, checks: g.checks,
+            os: { macOS: plc.hostGateForOs(r, rec, gcfg, 'macOS'), Linux: plc.hostGateForOs(r, rec, gcfg, 'Linux') },
+        };
+    }
+
     app.get('/api/ci-pool', (req, res) => {
         try {
             const cfg = store.getConfig();
@@ -425,6 +436,10 @@ function registerCiPoolRoutes(app, deps) {
                     state: derived.state,
                     stateReason: derived.reason,
                     capability: derive.deriveCapability(r),
+                    // XACA-1704-002 (additive): WHY the dispatcher would refuse this host, from the same
+                    // hostGate() and the same effective-threshold merge (pool config < per-host override) as placement.
+                    // `state`/`stateReason` above are ADMIN state; this is ELIGIBILITY.
+                    eligibility: eligibilityOf(id, m, r, cfg, nowForView),
                 };
             }
             const out = {

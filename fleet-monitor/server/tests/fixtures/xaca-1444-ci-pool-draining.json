@@ -69,7 +69,28 @@
       ],
       "state": "draining",
       "stateReason": "busy-slots",
-      "capability": "unknown"
+      "capability": "unknown",
+      "eligibility": {
+        "eligible": false,
+        "reasons": [
+          "paused"
+        ],
+        "checks": [],
+        "os": {
+          "macOS": {
+            "eligible": false,
+            "reasons": [
+              "paused"
+            ]
+          },
+          "Linux": {
+            "eligible": false,
+            "reasons": [
+              "paused"
+            ]
+          }
+        }
+      }
     },
     "m1mini": {
       "enabled": true,
@@ -117,7 +138,22 @@
       ],
       "state": "enabled",
       "stateReason": "accepting",
-      "capability": "unknown"
+      "capability": "unknown",
+      "eligibility": {
+        "eligible": true,
+        "reasons": [],
+        "checks": [],
+        "os": {
+          "macOS": {
+            "eligible": true,
+            "reasons": []
+          },
+          "Linux": {
+            "eligible": true,
+            "reasons": []
+          }
+        }
+      }
     }
   },
   "assignments": [],
@@ -144,7 +180,15 @@
       "status": "queued",
       "runnerName": null,
       "machine": null,
-      "priority": "normal"
+      "priority": "normal",
+      "refusals": {
+        "m1mini": [
+          "no-idle-slot"
+        ],
+        "m4mini": [
+          "paused"
+        ]
+      }
     },
     {
       "key": "DoubleNode/dev-team#2#1",
@@ -167,7 +211,15 @@
       "status": "queued",
       "runnerName": null,
       "machine": null,
-      "priority": "normal"
+      "priority": "normal",
+      "refusals": {
+        "m1mini": [
+          "no-idle-slot"
+        ],
+        "m4mini": [
+          "paused"
+        ]
+      }
     }
   ],
   "running": [],

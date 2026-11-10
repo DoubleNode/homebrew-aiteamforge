@@ -127,7 +127,130 @@ function hostLabelOf(machine) {
 }
 
 /**
+ * XACA-1704-001: the JOB-INDEPENDENT half of D4 eligibility, in stages so isEligible() can interleave the
+ * job-dependent checks at exactly the positions the original single function emitted them (reason ORDER is
+ * part of the contract: the dispatcher's audit/alert text and the tests read it).
+ *
+ *   admin     not-enabled | paused
+ *   noReport  no-report (when set, freshness/headroom are empty: nothing to measure)
+ *   freshness no-clock | no-last-poll | stale-poll | poll-in-future
+ *   headroom  swap / pressure / swap-growth / mem-free / load
+ *
+ * `checks` (failing gates only) carries {reason, measured, limit} using the EFFECTIVE limit, for the operator
+ * view. Numbers only; reasons that mean "field missing/malformed" have no measurable value and no check.
+ */
+function hostGateStages(report, machine, cfg) {
+    const st = { admin: [], noReport: [], freshness: [], headroom: [], checks: [] };
+    const o = cfg || {};
+    const th = effectiveThresholds(o.thresholds, machine);
+    const chk = (reason, measured, limit) => st.checks.push({ reason, measured, limit });
+
+    if (machine.enabled !== true) st.admin.push('not-enabled');
+    if (machine.paused !== false) st.admin.push('paused');   // anything but an explicit false pauses (fail closed)
+
+    if (!report || typeof report !== 'object' || !report.capacity || typeof report.capacity !== 'object') {
+        st.noReport.push('no-report');
+        return st;
+    }
+    const c = report.capacity;
+
+    // Freshness
+    const polled = toMs(report.receivedAt);
+    if (!isNum(o.now)) st.freshness.push('no-clock');
+    else if (polled === null) st.freshness.push('no-last-poll');
+    else if (o.now - polled > th.pollStaleMs) { st.freshness.push('stale-poll'); chk('stale-poll', o.now - polled, th.pollStaleMs); }
+    else if (polled - o.now > th.pollStaleMs) { st.freshness.push('poll-in-future'); chk('poll-in-future', polled - o.now, th.pollStaleMs); }
+
+    const h = st.headroom;
+    // Swap (XACA-1708-003). macOS swap-used is a sticky high-water mark, so an ABSOLUTE gate trips forever on
+    // a long-running host regardless of real pressure (m1mini 2026-10-31: 3.6 GiB swap, 55% free, 7.6h queued).
+    // Agents that report memPressureLevel are gated on pressure + swap GROWTH instead; absolute swapUsedBytes
+    // is informational for them. swapUsedBytes stays a REQUIRED report field (routes enforce it), so its absence
+    // is still 'swap-missing' for everyone: a report without it is a broken agent, fail closed.
+    if (!isNum(c.swapUsedBytes)) h.push('swap-missing');
+    if (c.memPressureLevel === undefined) {
+        // LEGACY agent (no memPressureLevel field at all): the original absolute gate, unchanged, so an old
+        // agent is never less gated than before this change.
+        if (isNum(c.swapUsedBytes) && !(c.swapUsedBytes < th.swapUsedBytes)) { h.push('swap-high'); chk('swap-high', c.swapUsedBytes, th.swapUsedBytes); }
+    } else {
+        // Present-but-unusable (null, string, NaN, < 1) must not read as "normal": fail closed.
+        if (!isNum(c.memPressureLevel) || c.memPressureLevel < 1) h.push('mem-pressure-malformed');
+        else if (c.memPressureLevel >= th.memPressureLevel) { h.push('mem-pressure'); chk('mem-pressure', c.memPressureLevel, th.memPressureLevel); }
+
+        // Swap growth: both fields are absent until the agent's window is half-filled (=> no verdict, not a
+        // refusal). One without the other, or a bad value, is malformed => refuse.
+        const g = c.swapGrowthBytes, w = c.swapGrowthWindowSec;
+        if (g !== undefined || w !== undefined) {
+            if (!isNum(g) || !isNum(w) || w <= 0) h.push('swap-growth-malformed');
+            else if ((g * 3600) / w > th.swapGrowthBytesPerHour) {
+                // measured is normalised to bytes PER HOUR (the unit of the limit and of the gate's own comparison),
+                // not the raw window growth (XACA-1704-017).
+                h.push('swap-growing'); chk('swap-growing', (g * 3600) / w, th.swapGrowthBytesPerHour);
+            }
+        }
+    }
+
+    if (!isNum(c.memFreePct)) h.push('mem-free-missing');
+    else if (c.memFreePct < th.memFreePct) { h.push('mem-free-low'); chk('mem-free-low', c.memFreePct, th.memFreePct); }
+
+    if (!isNum(c.load1) || !isNum(c.ncpu) || c.ncpu <= 0) h.push('load-missing');
+    else if (c.load5 === undefined) {
+        // LEGACY agent (no load5 field at all): the original load1-only gate, unchanged, so an old agent is
+        // never less gated than before XACA-1763.
+        if (!(c.load1 / c.ncpu < th.loadPerCpu)) { h.push('load-high'); chk('load-high', { load1PerCpu: c.load1 / c.ncpu, load5PerCpu: null }, th.loadPerCpu); }
+    } else if (!isNum(c.load5) || c.load5 < 0) {
+        // Present-but-unusable (null, string, NaN, negative) must not read as "calm": fail closed.
+        h.push('load-malformed');
+    } else if (c.load1 / c.ncpu >= th.loadPerCpu && c.load5 / c.ncpu >= th.loadPerCpu) {
+        // Sustained load (XACA-1763): refuse only when BOTH the 1- and 5-minute averages are over the line.
+        // A load1 spike with a calm load5 (co-tenant Claude sessions on m4mini) is transient, not saturation.
+        h.push('load-high');
+        chk('load-high', { load1PerCpu: c.load1 / c.ncpu, load5PerCpu: c.load5 / c.ncpu }, th.loadPerCpu);
+    }
+    return st;
+}
+
+/**
+ * XACA-1704-001: job-independent host gate (admin state, report freshness, headroom). Never throws.
+ *
+ * @param report   {receivedAt, capacity, slots} or null
+ * @param machine  pool record (+ optional id): enabled, paused, thresholds (per-host overrides)
+ * @param cfg      {now (epoch ms), thresholds (pool config thresholds)}
+ * @returns {{eligible: boolean, reasons: string[], checks: {reason: string, measured: *, limit: number}[]}}
+ */
+function hostGate(report, machine, cfg) {
+    if (!machine || typeof machine !== 'object') return { eligible: false, reasons: ['no-machine-record'], checks: [] };
+    const st = hostGateStages(report, machine, cfg);
+    const reasons = [...st.admin, ...st.noReport, ...st.freshness, ...st.headroom];
+    return { eligible: reasons.length === 0, reasons, checks: st.checks };
+}
+
+/**
+ * XACA-1704-002: hostGate() plus the checks that depend only on the slot's OS (not on a particular job):
+ * macOS also needs memReclaimable headroom, Linux also needs a running VM. For the operator view's
+ * per-OS breakdown; isEligible() applies the same rules inline at their original reason positions.
+ *
+ * @param os 'macOS' | 'Linux'
+ * @returns {{eligible: boolean, reasons: string[]}}
+ */
+function hostGateForOs(report, machine, cfg, os) {
+    const g = hostGate(report, machine, cfg);
+    const reasons = g.reasons.slice();
+    const c = report && typeof report === 'object' && report.capacity && typeof report.capacity === 'object' ? report.capacity : null;
+    if (c && machine && typeof machine === 'object') {
+        const th = effectiveThresholds((cfg || {}).thresholds, machine);
+        if (os === 'macOS') {
+            if (!isNum(c.memReclaimableBytes)) reasons.push('mem-reclaimable-missing');
+            else if (c.memReclaimableBytes < th.memReclaimableBytes) reasons.push('mem-reclaimable-low');
+        } else if (os === 'Linux' && c.vmState !== 'running') reasons.push('vm-not-running');
+    }
+    return { eligible: reasons.length === 0, reasons };
+}
+
+/**
  * D4 eligibility. Never throws; every missing/invalid input yields a reason.
+ * Job-independent rules live in hostGateStages(); this adds the job-dependent ones (repo binding, job OS,
+ * labels, idle slot, macOS mem-reclaimable, Linux VM) at their original positions in the reason order.
  *
  * @param machine  pool record (+ optional id/hostLabel): enabled, paused, thresholds
  * @param report   {receivedAt, capacity, slots}
@@ -142,8 +265,8 @@ function isEligible(machine, report, job, opts) {
     const th = effectiveThresholds(o.thresholds, machine);
 
     if (!machine || typeof machine !== 'object') return { eligible: false, reasons: ['no-machine-record'] };
-    if (machine.enabled !== true) reasons.push('not-enabled');
-    if (machine.paused !== false) reasons.push('paused');   // anything but an explicit false pauses (fail closed)
+    const gate = hostGateStages(report, machine, o);
+    reasons.push(...gate.admin);
 
     // XACA-1459 repo binding. Reasons: binding-malformed | repo-not-bound | repo-reserved.
     const binding = bindingOf(machine);
@@ -167,18 +290,13 @@ function isEligible(machine, report, job, opts) {
         if (extra.length && (host === null || extra.some((l) => l !== host))) reasons.push('label-mismatch');
     }
 
-    if (!report || typeof report !== 'object' || !report.capacity || typeof report.capacity !== 'object') {
-        reasons.push('no-report');
+    if (gate.noReport.length) {
+        reasons.push(...gate.noReport);
         return { eligible: false, reasons };
     }
     const c = report.capacity;
 
-    // Freshness
-    const polled = toMs(report.receivedAt);
-    if (!isNum(o.now)) reasons.push('no-clock');
-    else if (polled === null) reasons.push('no-last-poll');
-    else if (o.now - polled > th.pollStaleMs) reasons.push('stale-poll');
-    else if (polled - o.now > th.pollStaleMs) reasons.push('poll-in-future');
+    reasons.push(...gate.freshness);
 
     // Idle slot for the job's OS
     if (os !== null) {
@@ -187,51 +305,13 @@ function isEligible(machine, report, job, opts) {
         else if (!slots.some((s) => s && s.os === os && s.state === 'idle')) reasons.push('no-idle-slot');
     }
 
-    // Headroom. memReclaimable gates macOS jobs only (the Linux VM's memory is already allocated).
+    // memReclaimable gates macOS jobs only (the Linux VM's memory is already allocated).
     if (os === 'macOS') {
         if (!isNum(c.memReclaimableBytes)) reasons.push('mem-reclaimable-missing');
         else if (c.memReclaimableBytes < th.memReclaimableBytes) reasons.push('mem-reclaimable-low');
     }
-    // Swap (XACA-1708-003). macOS swap-used is a sticky high-water mark, so an ABSOLUTE gate trips forever on
-    // a long-running host regardless of real pressure (m1mini 2026-10-31: 3.6 GiB swap, 55% free, 7.6h queued).
-    // Agents that report memPressureLevel are gated on pressure + swap GROWTH instead; absolute swapUsedBytes
-    // is informational for them. swapUsedBytes stays a REQUIRED report field (routes enforce it), so its absence
-    // is still 'swap-missing' for everyone: a report without it is a broken agent, fail closed.
-    if (!isNum(c.swapUsedBytes)) reasons.push('swap-missing');
-    if (c.memPressureLevel === undefined) {
-        // LEGACY agent (no memPressureLevel field at all): the original absolute gate, unchanged, so an old
-        // agent is never less gated than before this change.
-        if (isNum(c.swapUsedBytes) && !(c.swapUsedBytes < th.swapUsedBytes)) reasons.push('swap-high');
-    } else {
-        // Present-but-unusable (null, string, NaN, < 1) must not read as "normal": fail closed.
-        if (!isNum(c.memPressureLevel) || c.memPressureLevel < 1) reasons.push('mem-pressure-malformed');
-        else if (c.memPressureLevel >= th.memPressureLevel) reasons.push('mem-pressure');
 
-        // Swap growth: both fields are absent until the agent's window is half-filled (=> no verdict, not a
-        // refusal). One without the other, or a bad value, is malformed => refuse.
-        const g = c.swapGrowthBytes, w = c.swapGrowthWindowSec;
-        if (g !== undefined || w !== undefined) {
-            if (!isNum(g) || !isNum(w) || w <= 0) reasons.push('swap-growth-malformed');
-            else if ((g * 3600) / w > th.swapGrowthBytesPerHour) reasons.push('swap-growing');
-        }
-    }
-
-    if (!isNum(c.memFreePct)) reasons.push('mem-free-missing');
-    else if (c.memFreePct < th.memFreePct) reasons.push('mem-free-low');
-
-    if (!isNum(c.load1) || !isNum(c.ncpu) || c.ncpu <= 0) reasons.push('load-missing');
-    else if (c.load5 === undefined) {
-        // LEGACY agent (no load5 field at all): the original load1-only gate, unchanged, so an old agent is
-        // never less gated than before XACA-1763.
-        if (!(c.load1 / c.ncpu < th.loadPerCpu)) reasons.push('load-high');
-    } else if (!isNum(c.load5) || c.load5 < 0) {
-        // Present-but-unusable (null, string, NaN, negative) must not read as "calm": fail closed.
-        reasons.push('load-malformed');
-    } else if (c.load1 / c.ncpu >= th.loadPerCpu && c.load5 / c.ncpu >= th.loadPerCpu) {
-        // Sustained load (XACA-1763): refuse only when BOTH the 1- and 5-minute averages are over the line.
-        // A load1 spike with a calm load5 (co-tenant Claude sessions on m4mini) is transient, not saturation.
-        reasons.push('load-high');
-    }
+    reasons.push(...gate.headroom);
 
     if (os === 'Linux' && c.vmState !== 'running') reasons.push('vm-not-running');
 
@@ -331,5 +411,5 @@ module.exports = {
     DEFAULT_POOL_LABEL,
     repoSlug, bindingOf, boundRepoSet, BINDING_REASONS,
     normalizeLabels, labelSetKey, jobOs, jobClass, effectiveThresholds, hostLabelOf,
-    isEligible, evaluateMachines, rankCandidates, computeSupply, mintLabels,
+    hostGate, hostGateForOs, isEligible, evaluateMachines, rankCandidates, computeSupply, mintLabels,
 };

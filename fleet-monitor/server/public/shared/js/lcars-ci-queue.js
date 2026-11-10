@@ -158,6 +158,41 @@
         return Math.max(0, (ref - t) / 1000);
     }
 
+    // XACA-1704-005: aggregate per-host refusals over queue items (server: refusals = {host: reasons[]}, refused
+    // hosts only). Deduped per host and per reason; absent/malformed => [] (today's banner text).
+    var REFUSAL_HOST_MAX = 4, REFUSAL_REASON_MAX = 4;
+    function aggregateRefusals(queue) {
+        var byHost = Object.create(null), order = [];
+        queue.forEach(function(q) {
+            var r = q && q.refusals;
+            if (!r || typeof r !== 'object' || Array.isArray(r)) return;
+            Object.keys(r).forEach(function(host) {
+                if (!Array.isArray(r[host])) return;
+                if (!byHost[host]) { byHost[host] = []; order.push(host); }
+                r[host].forEach(function(x) {
+                    if (isStr(x) && byHost[host].indexOf(x) === -1) byHost[host].push(x);
+                });
+            });
+        });
+        return order.filter(function(h) { return byHost[h].length > 0; }).map(function(h) { return { host: h, reasons: byHost[h] }; });
+    }
+    // Plain-English reason text is shared with the pool card (lcars-ci-pool.js, loaded first on the dashboard):
+    // one table, so the banner and the card cannot drift. Unknown reason, or pool.js absent => the raw code.
+    function reasonLabel(code) {
+        var pool = root.LCARSCIPool, t = pool && pool.REASON_TEXT;
+        if (t && typeof t === 'object' && Object.prototype.hasOwnProperty.call(t, code) && isStr(t[code])) return t[code] + ' (' + code + ')';
+        return code;
+    }
+    function refusalText(list) {
+        var shown = list.slice(0, REFUSAL_HOST_MAX).map(function(e) {
+            var rs = e.reasons.slice(0, REFUSAL_REASON_MAX).map(reasonLabel).join(', ');
+            if (e.reasons.length > REFUSAL_REASON_MAX) rs += ', +' + (e.reasons.length - REFUSAL_REASON_MAX) + ' more';
+            return e.host + ' (' + rs + ')';
+        });
+        var more = list.length - REFUSAL_HOST_MAX;
+        return 'Refused: ' + shown.join('; ') + (more > 0 ? '; +' + more + ' more' : '');
+    }
+
     function bannerModel(body, queue) {
         var nc = body.noCapacity && typeof body.noCapacity === 'object' ? body.noCapacity : {};
         var groups = Array.isArray(body.queueAge) ? body.queueAge.filter(function(g) { return g && typeof g === 'object'; }) : [];
@@ -177,7 +212,7 @@
         over.forEach(function(g) {
             if (isNum(g.oldestWaitSec) && (oldest === null || g.oldestWaitSec > oldest.sec)) oldest = { sec: g.oldestWaitSec, labels: g.labels };
         });
-        return { kind: kind, since: nc.since, queued: isNum(nc.queuedCount) ? nc.queuedCount : null, oldest: oldest };
+        return { kind: kind, refusals: noMachine ? aggregateRefusals(queue) : [], since: nc.since, queued: isNum(nc.queuedCount) ? nc.queuedCount : null, oldest: oldest };
     }
 
     // ---------------------------------------------------------------- DOM
@@ -200,6 +235,11 @@
         detail.setAttribute('aria-live', 'off');
         banner.appendChild(head);
         banner.appendChild(detail);
+        var refusals = el(doc, 'span', 'ciq-banner-refusals');
+        refusals.setAttribute('data-ciq-refusals', '');
+        refusals.setAttribute('aria-live', 'off');
+        refusals.hidden = true;
+        banner.appendChild(refusals);
 
         var age = el(doc, 'div', 'ciq-age');
         age.setAttribute('data-ciq-age', '');
@@ -258,6 +298,12 @@
             if (model.oldest && humanSec(model.oldest.sec)) parts.push('oldest ' + humanSec(model.oldest.sec) + (isStr(model.oldest.labels) ? ' on ' + model.oldest.labels : ''));
         }
         setText(detail, parts.join(' · '));
+        var rf = banner.querySelector('[data-ciq-refusals]');
+        if (rf) {
+            var list = model.kind !== 'none' && model.refusals ? model.refusals : [];
+            setText(rf, list.length ? refusalText(list) : '');
+            rf.hidden = list.length === 0;
+        }
     }
 
     function renderAge(doc, rootEl, body) {

@@ -46,7 +46,7 @@ const EVENT_FIELDS = {
   'reject':     BASE_FIELDS.concat(['runId', 'jobName', 'runEvent']),
   'expire':     BASE_FIELDS,
   'deregister': BASE_FIELDS.concat(['ok', 'httpStatus']),
-  'alert':      BASE_FIELDS.concat(['jobClass', 'waitedMs']),
+  'alert':      BASE_FIELDS.concat(['jobClass', 'waitedMs', 'refusals']),   // XACA-1704-014: refusals = compact "host:reason,reason|host:..." for ci-no-capacity
   'pause':      BASE_FIELDS.concat(['paused', 'by', 'action', 'outcome', 'confirmed']),   // XACA-1444: action/outcome/confirmed
   'enable':     BASE_FIELDS.concat(['enabled', 'by', 'action', 'outcome', 'confirmed']),  // XACA-1444: enabled flips
   'key-mint':   BASE_FIELDS.concat(['keyKind', 'by']),   // XACA-1422: never the credential itself
