@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+
+## [0.21.20] - 2026-11-10
 - XACA-1639: Dispatch lint and live effort/cache visibility in agent-watch and usage-gauge (XACA-1639)
 - Tap files updated in this publish: `share/claude-mods/agent-watch/README.md`,`share/claude-mods/agent-watch/hooks/layout.ts` `share/claude-mods/agent-watch/hooks/register.tsx`,`share/claude-mods/agent-watch/hooks/rubric.ts` `share/claude-mods/agent-watch/tests/agent-watch.test.tsx`,`share/claude-mods/agent-watch/tests/layout.test.ts` `share/claude-mods/agent-watch/tests/rubric.test.ts`,`share/claude-mods/agent-watch/types/index.d.ts` (+6 more). Run `brew upgrade aiteamforge` to receive them.
 - XACA-1704: Show why the CI pool refuses a machine — per-host eligibility, per-job refusals, REFUSING card (XACA-1704)
@@ -8190,7 +8192,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.19...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.20...HEAD
+[0.21.20]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.19...v0.21.20
 [0.21.19]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.18...v0.21.19
 [0.21.18]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.17...v0.21.18
 [0.21.17]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.16...v0.21.17
