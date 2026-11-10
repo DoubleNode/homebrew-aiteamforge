@@ -174,11 +174,24 @@
     // ---- XACA-1704-004: REFUSING state (admin says accepting, the pool gate says no) ------------------
     // m.state === 'enabled' only means "admin enabled and not paused". m.eligibility (server, job-independent)
     // says whether the pool would actually place a job here. Missing eligibility (older server) => no change.
-    var REASON_TEXT = {
+    // Frozen: exported by reference as LCARSCIPool.REASON_TEXT and read by lcars-ci-queue.js (XACA-1789).
+    // Covers every reason code ci-dispatch-placement.js can emit; a text equal to its code (hyphens as spaces) renders without a suffix.
+    var REASON_TEXT = Object.freeze({
         'no-report': 'no health report', 'stale-poll': 'poll is stale', 'swap-high': 'swap use too high',
-        'mem-pressure': 'memory pressure', 'swap-growing': 'swap growing too fast', 'mem-free-low': 'free memory too low',
-        'load-high': 'load too high', 'load-malformed': 'load report malformed', 'not-enabled': 'not enabled', 'paused': 'paused'
-    };
+        'mem-pressure': 'memory pressure high', 'swap-growing': 'swap growing too fast', 'mem-free-low': 'free memory too low',
+        'load-high': 'load too high', 'load-malformed': 'load report malformed', 'not-enabled': 'not enabled', 'paused': 'paused',
+        'binding-malformed': 'repo binding malformed', 'job-os-unknown': 'job OS unknown',
+        'label-mismatch': 'job pinned to another host',
+        'load-missing': 'load not reported', 'mem-free-missing': 'free memory not reported',
+        'mem-pressure-malformed': 'memory pressure report malformed', 'mem-reclaimable-low': 'reclaimable memory too low',
+        'mem-reclaimable-missing': 'reclaimable memory not reported', 'no-clock': 'no clock to judge poll age',
+        'no-idle-slot': 'no idle slot', 'no-last-poll': 'poll time missing', 'no-machine-record': 'no machine record',
+        'no-slots': 'no slots reported', 'poll-in-future': 'poll time is in the future',
+        'repo-not-bound': 'repo not bound to this host', 'repo-reserved': 'repo reserved for another host',
+        'swap-growth-malformed': 'swap growth report malformed', 'swap-missing': 'swap not reported',
+        'vm-not-running': 'VM not running'
+    });
+
     function isRefusing(m) {
         return !!m && m.state === 'enabled' && !!m.eligibility && typeof m.eligibility === 'object' &&
             m.eligibility.eligible === false;
@@ -212,10 +225,16 @@
     }
     // ONE line per reason (XACA-1704-016): "swap use too high: 5.2 GiB vs limit 2.0 GiB (swap-high)". A reason without
     // a check is "text (code)"; an unknown reason shows the raw code only. Plain text; the caller escapes it.
+    // XACA-1789-012: a text that just restates its code (case-insensitive, hyphens as spaces) needs no "(code)" suffix.
+    // Shared with lcars-ci-queue.js via LCARSCIPool.textIsCode.
+    function textIsCode(text, code) {
+        var t = String(text).toLowerCase(), c = String(code).toLowerCase();
+        return t === c || t === c.replace(/-/g, ' ');
+    }
     function reasonLine(reason, check) {
         var known = Object.prototype.hasOwnProperty.call(REASON_TEXT, reason);
         var label = known ? REASON_TEXT[reason] : String(reason);
-        return label + (check ? ': ' + measuredVsLimit(check) : '') + (known ? ' (' + reason + ')' : '');
+        return label + (check ? ': ' + measuredVsLimit(check) : '') + (known && !textIsCode(label, reason) ? ' (' + reason + ')' : '');
     }
     function refusalHtml(m) {
         var e = m.eligibility, h = '<div class="cicd-pool-refusal" data-cicd-pool-refusal role="note">' +
@@ -671,7 +690,7 @@
         }
     }
 
-    root.LCARSCIPool = { render: render, teardown: teardown, isExpanded: isExpanded, REASON_TEXT: REASON_TEXT };
+    root.LCARSCIPool = { render: render, teardown: teardown, isExpanded: isExpanded, REASON_TEXT: REASON_TEXT, textIsCode: textIsCode };
 
 })(typeof window !== 'undefined' ? window : this);
 

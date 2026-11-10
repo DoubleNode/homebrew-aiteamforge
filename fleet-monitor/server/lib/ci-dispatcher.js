@@ -657,33 +657,19 @@ function createDispatcher(deps) {
      * served on the operator API and written to the audit log.
      */
     const REFUSAL_MAX_HOSTS = 16, REFUSAL_MAX_REASONS = 12, REFUSAL_MAX_STR = 40;
+    // Host ids may be up to 128 chars (MACHINE_ID_RE in lib/ci-pool-store.js); a 40-cap collided shared prefixes.
+    const REFUSAL_MAX_HOST_STR = 128;
     function refusalsOf(evals) {
         const out = {};
         let n = 0;
         for (const e of Array.isArray(evals) ? evals : []) {
             if (!e || e.eligible || !Array.isArray(e.reasons)) continue;
             if (n >= REFUSAL_MAX_HOSTS) break;
-            const host = capStr(clean(e.id), REFUSAL_MAX_STR);
+            const host = capStr(clean(e.id), REFUSAL_MAX_HOST_STR);
             if (!host || Object.prototype.hasOwnProperty.call(out, host)) continue;
             out[host] = e.reasons.slice(0, REFUSAL_MAX_REASONS).map((r) => capStr(clean(r), REFUSAL_MAX_STR)).filter((r) => r !== null);
             n++;
         }
-        return out;
-    }
-
-    /** XACA-1704-014: refusals as ONE scalar for the audit log (it is scalar-only, 512-char values):
-     *  "host:r1,r2|host2:r1". Whole hosts only; hosts that do not fit become a trailing "+N more". */
-    const AUDIT_REFUSALS_MAX = 480;
-    function refusalsAuditText(refusals) {
-        const parts = Object.entries(refusals || {}).map(([h, rs]) => `${h}:${rs.join(',')}`);
-        let out = '';
-        let used = 0;
-        for (const p of parts) {
-            if ((out ? out.length + 1 : 0) + p.length > AUDIT_REFUSALS_MAX) break;
-            out += (out ? '|' : '') + p;
-            used++;
-        }
-        if (used < parts.length) out += `${out ? '|' : ''}+${parts.length - used} more`;
         return out;
     }
 
@@ -1245,7 +1231,51 @@ function wireCiPool(app, opts) {
     };
 }
 
+/** XACA-1704-014: refusals as ONE scalar for the audit log (it is scalar-only, 512-char values):
+ *  "host:r1,r2|host2:r1". Whole hosts only; hosts that do not fit become a trailing "+N more".
+ *  XACA-1789-016: when the FIRST host alone exceeds the budget it is kept with whole reasons truncated
+ *  ("host:r1,r2,+10 more") instead of being dropped, so the audit row always names a refusing host. */
+const AUDIT_REFUSALS_MAX = 480;
+function truncatedHostPart(h, rs, reserve) {
+    const budget = AUDIT_REFUSALS_MAX - reserve;   // room for a trailing "|+N more" host marker
+    let part = `${h}:`;
+    let kept = 0;
+    for (const r of rs) {
+        const next = `${part}${kept ? ',' : ''}${r}`;
+        // Reserve room for the ",+N more" marker that will follow (worst case, N = remaining incl. this one).
+        if (next.length + `,+${rs.length - kept} more`.length > budget) break;
+        part = next;
+        kept++;
+    }
+    const rest = rs.length - kept;
+    if (rest > 0) part += `${kept ? ',' : ''}+${rest} more`;
+    return part.length > budget ? part.slice(0, budget) : part;
+}
+function refusalsAuditText(refusals) {
+    const entries = Object.entries(refusals || {});
+    const parts = entries.map(([h, rs]) => `${h}:${rs.join(',')}`);
+    let out = '';
+    let used = 0;
+    for (const p of parts) {
+        // Accept a host only if it fits WITH the "|+N more" marker for the hosts after it, so the marker is never cut
+        // (XACA-1789 review round 2: a trailing slice used to truncate it and the row read as a complete list).
+        const after = parts.length - used - 1;
+        const reserve = after > 0 ? `|+${after} more`.length : 0;
+        if ((out ? out.length + 1 : 0) + p.length + reserve > AUDIT_REFUSALS_MAX) {
+            if (!out) {
+                out = truncatedHostPart(entries[used][0], entries[used][1], reserve);
+                used++;
+            }
+            break;
+        }
+        out += (out ? '|' : '') + p;
+        used++;
+    }
+    if (used < parts.length) out += `${out ? '|' : ''}+${parts.length - used} more`;
+    return out;
+}
+
 module.exports = {
-    createDispatcher, wireCiPool, hasCredentials, dormantReason, globalMode, priorityRank, surgePlan,
+    refusalsAuditText, createDispatcher, wireCiPool, hasCredentials, dormantReason, globalMode, priorityRank, surgePlan,
     NO_CAPACITY_AFTER_MS, INCIDENT_CLEAR_MS, FALLBACK_DELAY_MS, MAX_MINTS_PER_JOB, MAX_TRACKED_MS, MAX_CONFIG_REJECTED, reportAccountsFor,
 };

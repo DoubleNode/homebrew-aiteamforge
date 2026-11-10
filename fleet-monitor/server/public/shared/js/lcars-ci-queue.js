@@ -180,14 +180,18 @@
     // one table, so the banner and the card cannot drift. Unknown reason, or pool.js absent => the raw code.
     function reasonLabel(code) {
         var pool = root.LCARSCIPool, t = pool && pool.REASON_TEXT;
-        if (t && typeof t === 'object' && Object.prototype.hasOwnProperty.call(t, code) && isStr(t[code])) return t[code] + ' (' + code + ')';
+        if (t && typeof t === 'object' && Object.prototype.hasOwnProperty.call(t, code) && isStr(t[code])) {
+            // One rule for card and banner: pool.js owns textIsCode (XACA-1789-017).
+            var same = typeof pool.textIsCode === 'function' ? pool.textIsCode(t[code], code) : t[code] === code;
+            return same ? t[code] : t[code] + ' (' + code + ')';
+        }
         return code;
     }
     function refusalText(list) {
         var shown = list.slice(0, REFUSAL_HOST_MAX).map(function(e) {
             var rs = e.reasons.slice(0, REFUSAL_REASON_MAX).map(reasonLabel).join(', ');
             if (e.reasons.length > REFUSAL_REASON_MAX) rs += ', +' + (e.reasons.length - REFUSAL_REASON_MAX) + ' more';
-            return e.host + ' (' + rs + ')';
+            return e.host + ': ' + rs;
         });
         var more = list.length - REFUSAL_HOST_MAX;
         return 'Refused: ' + shown.join('; ') + (more > 0 ? '; +' + more + ' more' : '');

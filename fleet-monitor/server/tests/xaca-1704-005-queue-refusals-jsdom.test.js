@@ -46,8 +46,8 @@ test('names each refused host and its reasons, deduped across jobs', () => {
     ]));
     const r = refusals(el);
     assert.equal(r.hidden, false);
-    // XACA-1704-015: plain text first, code in parentheses; reasons the card has no text for stay as the raw code.
-    assert.equal(txt(r), 'Refused: m1mini (swap use too high (swap-high), no-idle-slot); m4mini (label-mismatch, swap use too high (swap-high))');
+    // XACA-1704-015 / XACA-1789: plain text first, code in parentheses (omitted when the text IS the code, e.g. paused); unknown codes stay raw.
+    assert.equal(txt(r), 'Refused: m1mini: swap use too high (swap-high), no idle slot; m4mini: job pinned to another host (label-mismatch), swap use too high (swap-high)');
     assert.equal(r.getAttribute('aria-live'), 'off');
     // The headline is untouched and the existing detail line still carries the counts.
     assert.match(txt(el.querySelector('[data-ciq-headline]')), /no CI machine can take them/);
@@ -59,14 +59,14 @@ test('bounded display: first 4 hosts then "+K more"; reasons capped too', () => 
     ['a', 'b', 'c', 'd', 'e', 'f'].forEach((h) => { many[h] = ['r1']; });
     many.a = ['r1', 'r2', 'r3', 'r4', 'r5', 'r6'];
     const t = txt(refusals(render(body([job(1, { refusals: many })]))));
-    assert.match(t, /^Refused: a \(r1, r2, r3, r4, \+2 more\); b \(r1\); c \(r1\); d \(r1\); \+2 more$/);
+    assert.match(t, /^Refused: a: r1, r2, r3, r4, \+2 more; b: r1; c: r1; d: r1; \+2 more$/);
     // Bound also holds with known (longer) labels.
     const known = {};
     ['a', 'b', 'c', 'd', 'e'].forEach((h) => { known[h] = ['swap-high', 'paused', 'load-high', 'no-report', 'stale-poll']; });
     const tk = txt(refusals(render(body([job(1, { refusals: known })]))));
-    assert.match(tk, /^Refused: a \(swap use too high \(swap-high\), paused \(paused\), load too high \(load-high\), no health report \(no-report\), \+1 more\);/);
-    assert.ok(tk.endsWith('; +1 more') && !tk.includes('e ('));
-    assert.ok(!t.includes('e (') && !t.includes('f ('));
+    assert.match(tk, /^Refused: a: swap use too high \(swap-high\), paused, load too high \(load-high\), no health report \(no-report\), \+1 more;/);
+    assert.ok(tk.endsWith('; +1 more') && !tk.includes('e:'));
+    assert.ok(!t.includes('e:') && !t.includes('f:'));
 });
 
 test('no refusals (absent, empty, malformed) => today\'s text, element hidden', () => {
@@ -100,7 +100,7 @@ test('XSS: hostile host and reason strings are inert text', () => {
 
 test('XACA-1704-015: without pool.js the banner falls back to raw codes; the table is shared, not duplicated', () => {
     const el = render(body([job(1, { refusals: { m1mini: ['swap-high'] } })]), { pool: false });
-    assert.equal(txt(refusals(el)), 'Refused: m1mini (swap-high)');
+    assert.equal(txt(refusals(el)), 'Refused: m1mini: swap-high');
     assert.ok(!/swap use too high/.test(fs.readFileSync(QUEUE_JS, 'utf8')), 'queue.js must not carry its own copy of the reason text');
 });
 
