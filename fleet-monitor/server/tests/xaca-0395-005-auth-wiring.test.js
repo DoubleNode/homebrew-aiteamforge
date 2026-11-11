@@ -282,7 +282,7 @@ describe('engines-routes.js — requireApiKey actually mounted (not just importe
 // Section 3: server.js — real child process, real HTTP, real mount.
 // ---------------------------------------------------------------------------
 
-describe('server.js — requireApiKey actually mounted on all 14 mutating routes (live server)', () => {
+describe('server.js — requireApiKey actually mounted on all 16 mutating routes (live server)', () => {
     const STARTUP_TIMEOUT_MS = 20000;
     const POLL_INTERVAL_MS = 200;
     const SERVER_DIR = path.join(__dirname, '..');
@@ -343,7 +343,7 @@ describe('server.js — requireApiKey actually mounted on all 14 mutating routes
         });
     });
 
-    // The 14 mutating routes from server.js, re-derived at suite-write time
+    // The 16 mutating routes from server.js, re-derived at suite-write time
     // (contract §0 grounding rule — do not trust this list without re-running
     // the grep in the file-header comment above).
     const MUTATING_ROUTES = [
@@ -361,6 +361,9 @@ describe('server.js — requireApiKey actually mounted on all 14 mutating routes
         { method: 'DELETE', path: '/api/credentials/anthropic' },
         { method: 'DELETE', path: '/api/dashboards/dummy-id' },
         { method: 'DELETE', path: '/api/epics/academy/dummy-epic' },
+        // XACA-1766-002: retire a stale machine slug (admin tier; any gate still 401s without credentials).
+        { method: 'DELETE', path: '/api/registered-teams/academy/machines/dummy-slug' },
+        { method: 'DELETE', path: '/api/registered-teams/machines/dummy-slug' },
     ];
 
     test('MUTATING_ROUTES mirrors the mutating routes actually declared in server.js (source-derived)', () => {
@@ -371,7 +374,7 @@ describe('server.js — requireApiKey actually mounted on all 14 mutating routes
         // human skimming test output.
         assert.equal(MUTATING_ROUTES.filter((r) => r.method === 'POST').length, 7);
         assert.equal(MUTATING_ROUTES.filter((r) => r.method === 'PUT').length, 4);
-        assert.equal(MUTATING_ROUTES.filter((r) => r.method === 'DELETE').length, 3);
+        assert.equal(MUTATING_ROUTES.filter((r) => r.method === 'DELETE').length, 5);
     });
 
     for (const { method, path: routePath } of MUTATING_ROUTES) {

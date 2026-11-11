@@ -65,6 +65,17 @@ const PAIRS = [
         name: 'enrichTeamMachineEntry',
         re: /function enrichTeamMachineEntry\(entry\)\s*\{/,
     },
+    // XACA-1766-002: the two retire handlers (E1 per-team, E2 machine-wide). Their bodies are thin
+    // wiring around lib/registered-teams-retire.js, so any drift here means a changed argument,
+    // scope or error mapping in only one copy.
+    {
+        name: 'DELETE /api/registered-teams/:team/machines/:slug',
+        re: /app\.delete\(\s*['"]\/api\/registered-teams\/:team\/machines\/:slug['"][^\n]*=>\s*\{/,
+    },
+    {
+        name: 'DELETE /api/registered-teams/machines/:slug',
+        re: /app\.delete\(\s*['"]\/api\/registered-teams\/machines\/:slug['"][^\n]*=>\s*\{/,
+    },
 ];
 
 test('mirror-drift guard: extraction produces non-empty bodies on both sides', () => {
@@ -180,4 +191,25 @@ test('XACA-1089-015: the real guarded blocks still normalize non-empty and still
         normalizeBody(extractBlock(serverSrc, PAIRS[0].re)).includes("'http://localhost:3000'"),
         'the http:// string literal inside the guarded block must survive normalizeBody'
     );
+});
+
+test('XACA-1766-002: a divergent E1/E2 mirror is detected (scope, slug source, status mapping)', () => {
+    // In-memory mutation of the MIRROR side only: the guard's own comparison must flip for each retire pair.
+    const retirePairs = PAIRS.filter((p) => p.name.startsWith('DELETE '));
+    assert.equal(retirePairs.length, 2);
+    for (const { name, re } of retirePairs) {
+        const serverBody = normalizeBody(extractBlock(serverSrc, re));
+        const mirrorBody = normalizeBody(extractBlock(mirrorSrc, re));
+        assert.equal(mirrorBody, serverBody, `${name}: precondition, mirror matches server`);
+        for (const [from, to] of [
+            ["scope: '", "scope: 'x"],
+            ['req.params.slug', 'req.params.team'],
+            ['result.status', '200'],
+            ['saveRegisteredTeams,', ''],
+        ]) {
+            const mutated = mirrorBody.replace(from, to);
+            assert.notEqual(mutated, mirrorBody, `${name}: mutation '${from}' did not apply, guard test is vacuous`);
+            assert.notEqual(mutated, serverBody, `${name}: mutation '${from}' was not detected`);
+        }
+    }
 });

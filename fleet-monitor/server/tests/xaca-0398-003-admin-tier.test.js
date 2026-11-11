@@ -22,7 +22,7 @@
  *   3. Cookie login + CSRF — login/logout/session routes, each CSRF layer
  *      rejecting on its own, header auth unaffected, cookie refused on the
  *      fleet tier, rate limit, no echo of the token.
- *   4. Route inventory (static, source-derived) — the 42 admin routes are on
+ *   4. Route inventory (static, source-derived) — the 44 admin routes are on
  *      requireAdminKey, the 10 fleet routes stay on the fleet gate, the 3 notify
  *      team routes are on the per-team key gate, and every
  *      mutating route anywhere is gated or deliberately allowlisted.
@@ -621,7 +621,7 @@ describe('cookie on an admin route — each CSRF layer rejects on its own', () =
 // 4. Route inventory (static, source-derived)
 // ===========================================================================
 
-// The 42 admin-tier routes (19 from the design's §1 tier classification + 2 XACA-1441 + 2 XACA-1465 fallback-switches GET/PUT + 4 XACA-1422 mint/revoke + 3 XACA-1392 accessories + 7 XACA-1400 notify + 2 XACA-1488 notify team-key mint/revoke + 1 XACA-1405 notify test + 2 XACA-1407 notify fleet-routes GET/PUT). This is
+// The 44 admin-tier routes (2 XACA-1766 retire + 19 from the design's §1 tier classification + 2 XACA-1441 + 2 XACA-1465 fallback-switches GET/PUT + 4 XACA-1422 mint/revoke + 3 XACA-1392 accessories + 7 XACA-1400 notify + 2 XACA-1488 notify team-key mint/revoke + 1 XACA-1405 notify test + 2 XACA-1407 notify fleet-routes GET/PUT). This is
 // the EXPECTED list — deliberately not derived from source, so a route moved
 // back to requireApiKey disappears from the source-derived admin set and the
 // equality assertion below fails.
@@ -636,6 +636,9 @@ const ADMIN_ROUTES = [
     { method: 'POST',   path: '/api/epics/:team',                                file: 'server.js' },
     { method: 'PUT',    path: '/api/epics/:team/:epicId',                        file: 'server.js' },
     { method: 'DELETE', path: '/api/epics/:team/:epicId',                        file: 'server.js' },
+    // XACA-1766-002: retire a stale machine slug from registered-teams (E1 per team, E2 machine-wide).
+    { method: 'DELETE', path: '/api/registered-teams/:team/machines/:slug',      file: 'server.js' },
+    { method: 'DELETE', path: '/api/registered-teams/machines/:slug',            file: 'server.js' },
     { method: 'POST',   path: '/api/engines/:engineSlug/accounts',               file: 'lib/engines-routes.js' },
     { method: 'PUT',    path: '/api/engines/:engineSlug/accounts/:accountSlug',  file: 'lib/engines-routes.js' },
     { method: 'DELETE', path: '/api/engines/:engineSlug/accounts/:accountSlug',  file: 'lib/engines-routes.js' },
@@ -732,12 +735,12 @@ describe('route inventory — every admin route is on the admin gate (static)', 
     const regs = deriveRegistrations();
     const key = (r) => `${r.method} ${r.path}`;
 
-    test('exactly 42 expected admin routes, no duplicates', () => {
-        assert.equal(ADMIN_ROUTES.length, 42);
-        assert.equal(new Set(ADMIN_ROUTES.map(key)).size, 42);
+    test('exactly 44 expected admin routes, no duplicates', () => {
+        assert.equal(ADMIN_ROUTES.length, 44);
+        assert.equal(new Set(ADMIN_ROUTES.map(key)).size, 44);
     });
 
-    test('the source-derived requireAdminKey set equals the 42 expected admin routes exactly', () => {
+    test('the source-derived requireAdminKey set equals the 44 expected admin routes exactly', () => {
         const derived = regs.filter((r) => r.gate === 'requireAdminKey').map((r) => `${r.file} ${key(r)}`).sort();
         const expected = ADMIN_ROUTES.map((r) => `${r.file} ${key(r)}`).sort();
         assert.deepEqual(derived, expected);
@@ -772,10 +775,10 @@ describe('route inventory — every admin route is on the admin gate (static)', 
         assert.ok(!/checkAdminKey|requireAdminKey/.test(src));
     });
 
-    test('tier totals: 42 admin + 10 fleet + 2 ci-host + 1 ci-telemetry + 3 notify-team-key = 58 guarded', () => {
+    test('tier totals: 44 admin + 10 fleet + 2 ci-host + 1 ci-telemetry + 3 notify-team-key = 60 guarded', () => {
         const admin = regs.filter((r) => r.gate === 'requireAdminKey').length;
         const fleet = regs.filter((r) => r.gate === 'requireApiKey').length + FLEET_GUARD_ROUTES.length;
-        assert.equal(admin, 42);
+        assert.equal(admin, 44);
         assert.equal(fleet, 10);
         assert.equal(regs.filter((r) => NOTIFY_TEAM_KEY_GATES.includes(r.gate)).length, 4);
         assert.equal(regs.filter((r) => r.gate === 'ciHostKey').length, 2);
@@ -967,6 +970,8 @@ describe('server.js (live) — both tokens set, FLEET_REQUIRE_AUTH=1', () => {
         'POST /api/epics/:team': '/api/epics/xaca-0398-003-nonexistent-team',
         'PUT /api/epics/:team/:epicId': '/api/epics/xaca-0398-003-nonexistent-team/EPIC-0000',
         'DELETE /api/epics/:team/:epicId': '/api/epics/xaca-0398-003-nonexistent-team/EPIC-0000',
+        'DELETE /api/registered-teams/:team/machines/:slug': '/api/registered-teams/xaca-0398-003-nonexistent-team/machines/xaca-0398-003-nonexistent',
+        'DELETE /api/registered-teams/machines/:slug': '/api/registered-teams/machines/xaca-0398-003-nonexistent',
     };
 
     before(async () => {
@@ -984,8 +989,8 @@ describe('server.js (live) — both tokens set, FLEET_REQUIRE_AUTH=1', () => {
 
     after(async () => { await stopServer(child); });
 
-    test('10 server.js admin routes enumerated, each with a live path', () => {
-        assert.equal(serverRoutes.length, 10);
+    test('12 server.js admin routes enumerated, each with a live path', () => {
+        assert.equal(serverRoutes.length, 12);
         for (const r of serverRoutes) assert.ok(LIVE_PATHS[`${r.method} ${r.path}`], `no live path for ${r.method} ${r.path}`);
     });
 

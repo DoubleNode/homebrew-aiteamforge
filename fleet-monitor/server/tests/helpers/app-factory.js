@@ -28,6 +28,10 @@ const os = require('os');
 // vault registry for these tests MUST set that env var BEFORE requiring this
 // file (same pattern as vault-store.test.js / vault-routes.test.js).
 const vaultStore = require('../../lib/vault-store');
+// XACA-1766-002: the retire handlers mirror server.js's thin wiring; the decisions live in this lib
+// (shared, so tests exercise the shipping logic) and the ADMIN-tier gate is the real middleware.
+const { retireMachineSlug, createRetireAudit, writeTeamsFileAtomic } = require('../../lib/registered-teams-retire');
+const { requireAdminKey } = require('../../lib/auth-middleware');
 
 // ============================================================================
 // PURE HELPER FUNCTIONS (mirrored from server.js — must stay in sync)
@@ -403,6 +407,9 @@ function normalizeSystemBlock(system) {
  * @param {Map}    opts.pushedBoards    - Pre-populated board state (optional)
  * @param {Map}    opts.pushedKnowledge - Pre-populated knowledge state (optional)
  * @param {string} opts.tmpDir          - Temp dir for dashboard config files (optional)
+ * @param {string} opts.teamsFile       - XACA-1766-002: when set, the mirror's saveRegisteredTeams() really writes this file (like server.js); else it is an in-memory no-op returning true
+ * @param {Function} opts.saveRegisteredTeams - XACA-1766-002: override returning true/false (persist-failure seam)
+ * @param {Function} opts.appendRetireAudit   - XACA-1766-002: override that may throw (audit-failure seam); default appends under tmpDir
  * @returns {{ app, state, tmpDir }} - Express app + mutable state references + temp dir path
  */
 function createApp(opts = {}) {
@@ -921,6 +928,62 @@ function createApp(opts = {}) {
                 terminal_count: terminalCount,
                 machines: teamData.machines
             });
+        } catch (error) {
+            res.status(500).json({ error: 'Internal server error' });
+        }
+    });
+
+    // XACA-1766-002: test doubles for server.js's saveRegisteredTeams() / appendRetireAudit. The
+    // handlers below call them by these exact names so their bodies stay byte-identical to
+    // server.js's (drift guard). The default save writes opts.teamsFile the way server.js does,
+    // so a test can re-read the file from disk; with no teamsFile it is an in-memory no-op.
+    const teamsFile = opts.teamsFile || null;
+    const retireAuditFile = path.join(tmpDir, 'registered-teams-retire-audit.jsonl');
+    function saveRegisteredTeams() {
+        if (typeof opts.saveRegisteredTeams === 'function') return opts.saveRegisteredTeams();
+        if (!teamsFile) return true;
+        try {
+            writeTeamsFileAtomic(teamsFile, Object.fromEntries(registeredTeams));
+            return true;
+        } catch (error) {
+            return false;
+        }
+    }
+    const appendRetireAuditDefault = createRetireAudit(retireAuditFile);
+    function appendRetireAudit(entry) {
+        if (typeof opts.appendRetireAudit === 'function') return opts.appendRetireAudit(entry);
+        return appendRetireAuditDefault(entry);
+    }
+
+    // DELETE /api/registered-teams/:team/machines/:slug  (E1) and
+    // DELETE /api/registered-teams/machines/:slug        (E2)
+    // XACA-1766-002: mirrors server.js's real handlers -- MUST stay in sync (drift-guarded).
+    app.delete('/api/registered-teams/:team/machines/:slug', requireAdminKey, (req, res) => {
+        try {
+            const result = retireMachineSlug({
+                scope: 'team',
+                team: req.params.team,
+                slug: req.params.slug,
+                registeredTeams,
+                saveRegisteredTeams,
+                appendRetireAudit
+            });
+            res.status(result.status).json(result.body);
+        } catch (error) {
+            res.status(500).json({ error: 'Internal server error' });
+        }
+    });
+
+    app.delete('/api/registered-teams/machines/:slug', requireAdminKey, (req, res) => {
+        try {
+            const result = retireMachineSlug({
+                scope: 'machine',
+                slug: req.params.slug,
+                registeredTeams,
+                saveRegisteredTeams,
+                appendRetireAudit
+            });
+            res.status(result.status).json(result.body);
         } catch (error) {
             res.status(500).json({ error: 'Internal server error' });
         }
@@ -1513,6 +1576,9 @@ function createApp(opts = {}) {
         app,
         state: { machines, registeredTeams, pushedBoards, pushedKnowledge, activityLog, latestTapVersionState },
         tmpDir,
+        // XACA-1766-002: where the mirror's retire audit lands (default) and its persisted teams file (if opts.teamsFile).
+        retireAuditFile,
+        teamsFile,
         // XACA-1002: exposed so a test can call the idle-bucket materializer
         // directly against a hand-built or fixture-derived `divisions` object
         // (this instance's own `registeredTeams` Map is what it reads --

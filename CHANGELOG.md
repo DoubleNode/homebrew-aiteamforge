@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1766: Retire stale machine slugs from fleet-monitor registered teams (XACA-1766)
+- Tap files updated in this publish: `fleet-monitor/server/lib/registered-teams-retire.js`,`fleet-monitor/server/package.json` `fleet-monitor/server/server.js`,`fleet-monitor/server/tests/helpers/app-factory.js` `fleet-monitor/server/tests/xaca-0395-005-auth-wiring.test.js`,`fleet-monitor/server/tests/xaca-0398-003-admin-tier.test.js` `fleet-monitor/server/tests/xaca-1089-005-server-mirror-drift-guard.test.js`,`fleet-monitor/server/tests/xaca-1766-retire-machine-slug.test.js`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1640: effort-floor mod, hold low-effort high-stakes actions and re-run at High (XACA-1640)
 - Tap files updated in this publish: `share/claude-mods/.claude-plugin/marketplace.json`,`share/claude-mods/README.md` `share/claude-mods/effort-floor/.claude-plugin/plugin.json`,`share/claude-mods/effort-floor/README.md` `share/claude-mods/effort-floor/hooks/floor.ts`,`share/claude-mods/effort-floor/hooks/hooks.json` `share/claude-mods/effort-floor/hooks/register.tsx`,`share/claude-mods/effort-floor/hooks/signals.ts` (+7 more). Run `brew upgrade aiteamforge` to receive them.
 - XACA-1788: Stack CI queue rows into labelled cards at narrow widths (XACA-1788)

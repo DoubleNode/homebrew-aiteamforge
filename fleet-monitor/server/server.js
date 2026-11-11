@@ -32,6 +32,7 @@ const { registerEnginesRoutes } = require('./lib/engines-routes');
 
 // XACA-0537-004: Secret Vault store helpers + crypto
 const vaultStore = require('./lib/vault-store');
+const { retireMachineSlug, createRetireAudit, writeTeamsFileAtomic } = require('./lib/registered-teams-retire');
 const { ensureReady: vaultEnsureReady } = require('./lib/vault-crypto');
 
 // XACA-0537-012: Secret Vault API routes, extracted into a mountable module so
@@ -87,7 +88,11 @@ const WARNING_THRESHOLD_MS = 120 * 1000; // 120 seconds (2 minutes) - early warn
 const machineNotices = createMachineNoticeTracker({ emit: emitFleetNotice, offlineThresholdMs: OFFLINE_THRESHOLD_MS });
 const accessoryNotices = createAccessoryNoticeTracker({ emit: emitFleetNotice });
 const DATA_FILE = path.join(__dirname, 'data', 'machines.json');
-const TEAMS_FILE = path.join(__dirname, 'data', 'registered-teams.json');
+// XACA-1766-002: FLEET_TEAMS_FILE is an ADDITIVE test seam (same precedent as FLEET_VAULT_FILE);
+// unset keeps the production path. The retire audit log always sits beside this file.
+const TEAMS_FILE = process.env.FLEET_TEAMS_FILE || path.join(__dirname, 'data', 'registered-teams.json');
+const RETIRE_AUDIT_FILE = path.join(path.dirname(TEAMS_FILE), 'registered-teams-retire-audit.jsonl');
+const appendRetireAudit = createRetireAudit(RETIRE_AUDIT_FILE);
 const BOARDS_FILE = path.join(__dirname, 'data', 'pushed-boards.json');
 const KNOWLEDGE_FILE = path.join(__dirname, 'data', 'pushed-knowledge.json');
 const SAVE_INTERVAL_MS = 30 * 1000; // Save every 30 seconds
@@ -332,19 +337,18 @@ function loadRegisteredTeams() {
 }
 
 /**
- * Save registered teams to file
+ * Save registered teams to file.
+ * XACA-1766-002: returns true on success, false on a caught error (additive; the
+ * pre-existing callers ignore it, only the retire handlers check it).
+ * XACA-1766-012: temp + rename, so a failed write never truncates the existing file.
  */
 function saveRegisteredTeams() {
     try {
-        const dataDir = path.dirname(TEAMS_FILE);
-        if (!fs.existsSync(dataDir)) {
-            fs.mkdirSync(dataDir, { recursive: true });
-        }
-
-        const data = Object.fromEntries(registeredTeams);
-        fs.writeFileSync(TEAMS_FILE, JSON.stringify(data, null, 2));
+        writeTeamsFileAtomic(TEAMS_FILE, Object.fromEntries(registeredTeams));
+        return true;
     } catch (error) {
         console.error('Error saving registered teams:', error.message);
+        return false;
     }
 }
 
@@ -2400,6 +2404,51 @@ app.post('/api/team-register', requireApiKey, (req, res) => {
         });
     } catch (error) {
         console.error('Error processing team registration:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+/**
+ * DELETE /api/registered-teams/:team/machines/:slug      (E1: one team)
+ * DELETE /api/registered-teams/machines/:slug            (E2: every team, decommission)
+ *
+ * XACA-1766-002 (contract kanban/plans/XACA-1766/retire-contract.md C1-C5). ADMIN tier: team-register
+ * is fleet-tier and only ever ADDS slugs, so a stale slug (a renamed or returned machine) had no
+ * removal path short of hand-editing the data file on the volume. Plain delete, no tombstone:
+ * a retired slug returns if its machine runs team-register again, so unload the machine's
+ * reporters first. Decisions (validation, audit-before-mutate, checked persistence with
+ * rollback) live in lib/registered-teams-retire.js; this file only wires them to the state.
+ * The two paths differ in segment count so they cannot shadow each other.
+ */
+app.delete('/api/registered-teams/:team/machines/:slug', requireAdminKey, (req, res) => {
+    try {
+        const result = retireMachineSlug({
+            scope: 'team',
+            team: req.params.team,
+            slug: req.params.slug,
+            registeredTeams,
+            saveRegisteredTeams,
+            appendRetireAudit
+        });
+        res.status(result.status).json(result.body);
+    } catch (error) {
+        console.error('Error retiring machine slug:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+app.delete('/api/registered-teams/machines/:slug', requireAdminKey, (req, res) => {
+    try {
+        const result = retireMachineSlug({
+            scope: 'machine',
+            slug: req.params.slug,
+            registeredTeams,
+            saveRegisteredTeams,
+            appendRetireAudit
+        });
+        res.status(result.status).json(result.body);
+    } catch (error) {
+        console.error('Error retiring machine slug:', error);
         res.status(500).json({ error: 'Internal server error' });
     }
 });
