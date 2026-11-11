@@ -111,7 +111,7 @@
     <link rel="stylesheet" href="../shared/css/lcars-ci-pool.css?v=20261109b">
     <link rel="stylesheet" href="../shared/css/lcars-ci-queue.css?v=20261110a">
     <!-- NOTIFICATIONS section styles (XACA-1405), shared with lcars2 -->
-    <link rel="stylesheet" href="../shared/css/lcars-notify-connections.css?v=20261010a">
+    <link rel="stylesheet" href="../shared/css/lcars-notify-connections.css?v=20261110c">
     <!-- Chart.js: CDN with local fallback for offline/CDN-unavailable environments -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
     <script>window.Chart || document.write('<script src="js/vendor/chart.umd.min.js"><\/script>')</script>
@@ -905,6 +905,7 @@
                         <div id="notify-content">
                             <div class="empty-state"><div class="empty-state-text">LOADING CONNECTIONS...</div></div>
                         </div>
+                        <div id="notify-fleet-routes" class="notify-fleet-routes"></div>
                         <div id="notify-live" class="notify-sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
                     </section>
                 </div><!-- End NOTIFICATIONS section -->
@@ -977,7 +978,7 @@
     <!-- ACCESSORIES section (XACA-1393-004) — fed by lcars-dashboard-app.js via window.LCARSAccessories.render() -->
     <script src="js/lcars-accessories.js?v=20261009a"></script>
     <!-- NOTIFICATIONS section (XACA-1405) — self-polling while its section is active; admin-key gated -->
-    <script src="js/lcars-notify-connections.js?v=20261010c"></script>
+    <script src="js/lcars-notify-connections.js?v=20261110c"></script>
     <!-- LCARS Sound Engine (XACA-0533) — button tap audio feedback with persistent mute -->
     <script src="js/lcars-sound.js?v=1.3"></script>
 </body>

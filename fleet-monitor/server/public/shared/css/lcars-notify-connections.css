@@ -146,3 +146,44 @@
     font-size: 14px;
     letter-spacing: 1px;
 }
+
+/* XACA-1527-004: FLEET ROUTES matrix. Scrolls inside .notify-fr-wrap, never the page. */
+.notify-fleet-routes { margin-top: 24px; max-width: 100%; }
+.notify-fr-title { font-family: 'Antonio', sans-serif; letter-spacing: 2px; color: var(--lcars-peach, #ffcc99); margin: 0 0 6px; }
+.notify-fr-wrap { max-width: 100%; }
+.notify-fr-table th[scope="row"] { text-align: left; white-space: nowrap; border-bottom: 1px solid var(--lcars-surface, #252540); }
+.notify-fr-table th[scope="col"] { text-align: center; }
+.notify-fr-table td { text-align: center; vertical-align: middle; }
+.notify-fr-cell { display: inline-block; padding: 6px; cursor: pointer; }
+.notify-fr-cell input { width: 20px; height: 20px; accent-color: var(--lcars-amber, #ff9900); }
+.notify-fr-cell input:focus-visible { outline: 2px solid var(--lcars-amber, #ff9900); outline-offset: 2px; }
+.notify-fr-warn { color: var(--lcars-amber, #ff9900); font-size: 13px; }
+.notify-fr-actions { display: flex; align-items: center; gap: 14px; margin-top: 12px; flex-wrap: wrap; }
+.notify-fr-actions .btn-lcars:disabled,
+.notify-fr-actions .btn-lcars[aria-disabled="true"] { opacity: 0.5; cursor: not-allowed; }
+.notify-fr-dirty { font-size: 13px; color: var(--lcars-amber, #ff9900); }
+.notify-fr-msg { font-size: 13px; overflow-wrap: anywhere; }
+.notify-fleet-routes .empty-state-text { font-family: 'Antonio', sans-serif; letter-spacing: 2px; color: var(--lcars-tan, #cc9966); padding: 8px 0; }
+/* The matrix must stay a real table at narrow widths (the generic .notify-table rule stacks rows
+   and hides thead, which would leave unlabelled checkboxes). It scrolls inside .notify-fr-wrap. */
+@media (max-width: 720px) {
+    .notify-fr-table thead { position: static; width: auto; height: auto; overflow: visible; clip: auto; }
+    .notify-fr-table tr { display: table-row; margin: 0; border-left: 0; }
+    .notify-fr-table th, .notify-fr-table td { display: table-cell; padding: 10px; }
+    .notify-fr-table td { border-bottom: 1px solid var(--lcars-surface, #252540); }
+    .notify-fr-table { min-width: max-content; }
+    /* XACA-1527-015: keep the notice-type column visible while scrolling to later connections. */
+    .notify-fr-table th[scope="row"],
+    .notify-fr-table thead th:first-child { position: sticky; left: 0; z-index: 2; background: var(--lcars-dark, #1a1a2e); }
+    .notify-fr-table thead th:first-child { z-index: 3; }
+    /* XACA-1527-016: tighter gutter so more of the next column peeks out. */
+    .notify-fr-table th, .notify-fr-table td { padding: 10px 8px; }
+}
+/* XACA-1527-016: CSS-only scroll cue: shadow appears on whichever edge has more content. */
+.notify-fr-wrap {
+    background:
+        linear-gradient(to right, var(--lcars-dark, #1a1a2e) 30%, rgba(26, 26, 46, 0)) 0 0 / 40px 100% no-repeat local,
+        linear-gradient(to left, var(--lcars-dark, #1a1a2e) 30%, rgba(26, 26, 46, 0)) 100% 0 / 40px 100% no-repeat local,
+        linear-gradient(to right, rgba(0, 0, 0, 0.55), rgba(0, 0, 0, 0)) 0 0 / 14px 100% no-repeat scroll,
+        linear-gradient(to left, rgba(255, 153, 0, 0.45), rgba(255, 153, 0, 0)) 100% 0 / 14px 100% no-repeat scroll;
+}

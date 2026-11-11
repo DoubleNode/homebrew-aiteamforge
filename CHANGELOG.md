@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1527: Fleet Routes editor on Notification Connections + 413 on /api/notify (XACA-1527)
+- Tap files updated in this publish: `fleet-monitor/server/lib/notify-routes.js`,`fleet-monitor/server/package.json` `fleet-monitor/server/public/lcars/js/lcars-notify-connections.js`,`fleet-monitor/server/public/lcars/lcars-dashboard.html` `fleet-monitor/server/public/lcars2/lcars-all.html`,`fleet-monitor/server/public/lcars2/lcars-index.html` `fleet-monitor/server/public/shared/css/lcars-notify-connections.css`,`fleet-monitor/server/tests/xaca-1527-001-payload-too-large.test.js` (+1 more). Run `brew upgrade aiteamforge` to receive them.
 - XACA-1766: Retire stale machine slugs from fleet-monitor registered teams (XACA-1766)
 - Tap files updated in this publish: `fleet-monitor/server/lib/registered-teams-retire.js`,`fleet-monitor/server/package.json` `fleet-monitor/server/server.js`,`fleet-monitor/server/tests/helpers/app-factory.js` `fleet-monitor/server/tests/xaca-0395-005-auth-wiring.test.js`,`fleet-monitor/server/tests/xaca-0398-003-admin-tier.test.js` `fleet-monitor/server/tests/xaca-1089-005-server-mirror-drift-guard.test.js`,`fleet-monitor/server/tests/xaca-1766-retire-machine-slug.test.js`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1640: effort-floor mod, hold low-effort high-stakes actions and re-run at High (XACA-1640)

@@ -382,6 +382,7 @@
                     _conns.map(function(x) { return rowHtml(x, last); }).join('') + '</tbody></table></div>';
             }
             restoreFocus(c, focused);
+            if (!_busy) renderFleetRoutes();
         } catch (e) {
             if (typeof console !== 'undefined' && console.warn) console.warn('[NOTIFY] render failed:', e && e.message);
         }
@@ -444,6 +445,7 @@
             // would reappear, a fresh test receipt would be missing): drop it and read again.
             if (_stale) { _stale = false; return refresh(); }
             if (!_busy) render();
+            return loadFleetRoutes();
         });
         return _inflight;
     }
@@ -1027,6 +1029,242 @@
     }
 
     // =========================================================================
+    // XACA-1527-004: FLEET ROUTES (notice type x connection matrix)
+    // Fleet-originated notices (machine-offline, accessory-on-battery, ...) belong to no team,
+    // so their routing is one admin-tier set: GET/PUT /api/notify/fleet-routes. PUT replaces the
+    // whole set, so we always send the full draft. This screen has no fleet-vs-team split of
+    // connections (connections are hub-wide), so every connection is a column.
+    // UNKNOWN IDS: a saved route can name a connection that was deleted since. We KEEP it, shown
+    // as an extra "(deleted)" column, checked, with a notice, so the operator sees it and can
+    // untick it. It is never silently dropped; the server rejects a PUT that still contains it,
+    // and that message is shown, so nothing stale is saved by accident.
+    // =========================================================================
+
+    var FR_LOAD_FAIL = 'Could not load fleet routes. Check the server and try again.';
+    var _fr = { state: 'idle', types: [], draft: {}, base: '', updatedAt: null, saving: false, msg: null, gen: 0 };
+    var _frLastHtml = null;   // last HTML written to the container; an identical render is skipped (keeps focus/scroll)
+
+    function frWhen(iso) {
+        var d = new Date(iso);
+        return isNaN(d.getTime()) ? iso : d.toLocaleString();
+    }
+
+    function frSerialize(draft) {
+        var out = {};
+        Object.keys(draft).sort().forEach(function(t) {
+            var ids = draft[t].slice().sort();
+            if (ids.length) out[t] = ids;
+        });
+        return out;
+    }
+    function frKey(draft) { return JSON.stringify(frSerialize(draft)); }
+    function frDirty() { return _fr.state === 'ready' && frKey(_fr.draft) !== _fr.base; }
+
+    function frAdopt(data) {
+        var routes = isObj(data.routes) ? data.routes : {};
+        var draft = {};
+        Object.keys(routes).forEach(function(t) {
+            if (Array.isArray(routes[t])) draft[t] = routes[t].filter(function(x) { return typeof x === 'string'; });
+        });
+        _fr.draft = draft;
+        _fr.base = frKey(draft);
+        _fr.updatedAt = typeof data.updatedAt === 'string' ? data.updatedAt : null;
+    }
+
+    // Only called once the connections view is 'ready' (i.e. the admin key was accepted), so a
+    // locked screen never sends a fleet-routes request. Skipped while editing/saving so the
+    // poll never clobbers an unsaved draft.
+    function loadFleetRoutes() {
+        if (_view !== 'ready' || _fr.saving || frDirty()) { renderFleetRoutes(); return Promise.resolve(); }
+        if (_fr.state === 'idle') { _fr.state = 'loading'; renderFleetRoutes(); }
+        // XACA-1527-013: generation stamp. A save bumps _fr.gen when it starts and again when it
+        // completes, so a GET that began before either can never land afterwards and revert the set.
+        var gen = _fr.gen;
+        return call('GET', '/fleet-routes').then(function(res) {
+            if (gen !== _fr.gen) return;   // stale read: a save started/finished since this GET began
+            if (res.ok && isObj(res.data) && Array.isArray(res.data.noticeTypes)) {
+                if (_fr.saving || frDirty()) return;
+                _fr.types = res.data.noticeTypes.filter(function(x) { return typeof x === 'string'; });
+                frAdopt(res.data);
+                _fr.state = 'ready';
+            } else if (_fr.state !== 'ready') {
+                _fr.state = 'error';
+            }
+        }, function() { if (gen === _fr.gen && _fr.state !== 'ready') _fr.state = 'error'; }).then(renderFleetRoutes);
+    }
+
+    function frColumns() {
+        var cols = _conns.map(function(c) { return { id: c.id, label: c.label || c.id, missing: false }; });
+        var known = {};
+        cols.forEach(function(c) { known[c.id] = true; });
+        Object.keys(_fr.draft).forEach(function(t) {
+            _fr.draft[t].forEach(function(id) {
+                if (!known[id]) { known[id] = true; cols.push({ id: id, label: id, missing: true }); }
+            });
+        });
+        return cols;
+    }
+
+    // A saved route can name a notice type the server no longer offers. Keep it as a "(retired)"
+    // row so it can be unticked (a type with nothing ticked is omitted from the PUT).
+    function frRetiredTypes() {
+        return Object.keys(_fr.draft).filter(function(t) { return _fr.types.indexOf(t) === -1 && _fr.draft[t].length; }).sort();
+    }
+
+    function frHtml() {
+        // Locked: the main panel already offers UNLOCK, so this section renders nothing.
+        if (_view !== 'ready') return '';
+        var head = '<h3 class="notify-fr-title">FLEET ROUTES</h3><p class="notify-muted">Where notices that Fleet Monitor raises itself (machine offline, accessory on battery, ...) are sent. Tick a connection to route a notice type to it.</p>';
+        if (_fr.state === 'idle' || _fr.state === 'loading') return head + '<div class="empty-state-text">LOADING FLEET ROUTES...</div>';
+        if (_fr.state === 'error') {
+            return head + '<div class="notify-disabled" role="alert"><div class="empty-state-text">FLEET ROUTES UNAVAILABLE</div><p>' + esc(FR_LOAD_FAIL) + '</p>' +
+                '<button type="button" class="btn-lcars btn-lcars-secondary" data-act="fr-retry" aria-label="Retry loading fleet routes">RETRY</button></div>';
+        }
+        var cols = frColumns();
+        if (!cols.length) return head + '<div class="empty-state-text">NO CONNECTIONS TO ROUTE TO</div><p class="notify-muted">Add a notification connection above first; fleet notices need somewhere to go.</p>';
+        var html = head;
+        if (!Object.keys(frSerialize(_fr.draft)).length) html += '<p class="notify-muted" data-fr="empty">No fleet routes yet. Until you save some, fleet notices go nowhere. Tick the boxes below and press SAVE.</p>';
+        var gone = cols.filter(function(c) { return c.missing; });
+        if (gone.length) html += '<p class="notify-fr-warn" role="status">Routes still point at deleted connection(s): ' + gone.map(function(c) { return '<code>' + esc(c.id) + '</code>'; }).join(', ') + '. Untick them, then save.</p>';
+        var retired = frRetiredTypes();
+        if (retired.length) html += '<p class="notify-fr-warn" role="status">Routes still use notice type(s) the server no longer offers: ' + retired.map(function(t) { return '<code>' + esc(t) + '</code>'; }).join(', ') + '. Untick them, then save.</p>';
+        html += '<div class="notify-table-wrap notify-fr-wrap" role="region" aria-label="Fleet routes matrix" tabindex="0"><table class="notify-table notify-fr-table"><thead><tr><th scope="col">Notice type</th>' +
+            cols.map(function(c) { return '<th scope="col">' + esc(c.label) + (c.missing ? ' (deleted)' : '') + '</th>'; }).join('') + '</tr></thead><tbody>';
+        _fr.types.concat(retired).forEach(function(t) {
+            html += '<tr><th scope="row"><code>' + esc(t) + '</code>' + (_fr.types.indexOf(t) === -1 ? ' (retired)' : '') + '</th>' + cols.map(function(c) {
+                var on = (_fr.draft[t] || []).indexOf(c.id) !== -1;
+                return '<td><label class="notify-fr-cell"><input type="checkbox" data-fr-type="' + esc(t) + '" data-fr-conn="' + esc(c.id) + '"' + (on ? ' checked' : '') + '>' +
+                    '<span class="notify-sr-only">Route ' + esc(t) + ' to ' + esc(c.label) + '</span></label></td>';
+            }).join('') + '</tr>';
+        });
+        html += '</tbody></table></div><div class="notify-fr-actions"><button type="button" class="btn-lcars btn-lcars-primary" data-act="fr-save" aria-label="Save fleet routes"></button>' +
+            '<button type="button" class="btn-lcars btn-lcars-secondary" data-act="fr-discard" aria-label="Discard unsaved fleet route changes">DISCARD</button>' +
+            '<span id="notify-fr-dirty" class="notify-fr-dirty"></span>' +
+            '<span id="notify-fr-msg" class="notify-fr-msg"></span></div>';
+        return html;
+    }
+
+    function frUpdateControls() {
+        var save = document.querySelector('#notify-fleet-routes [data-act="fr-save"]');
+        if (save) {
+            // aria-disabled (not disabled) so keyboard focus can stay on SAVE while saving / once clean.
+            save.setAttribute('aria-disabled', (_fr.saving || !frDirty()) ? 'true' : 'false');
+            save.textContent = _fr.saving ? 'SAVING...' : 'SAVE ROUTES';
+        }
+        var disc = document.querySelector('#notify-fleet-routes [data-act="fr-discard"]');
+        if (disc) disc.setAttribute('aria-disabled', (_fr.saving || !frDirty()) ? 'true' : 'false');
+        var dirty = $('notify-fr-dirty');
+        if (dirty) {
+            var isDirty = frDirty();
+            dirty.className = 'notify-fr-dirty' + (isDirty ? ' notify-fr-dirty-on' : '');
+            dirty.textContent = isDirty ? 'Unsaved changes' : '';
+        }
+        var m = $('notify-fr-msg');
+        if (m) {
+            m.className = 'notify-fr-msg' + (_fr.msg ? (_fr.msg.ok ? ' notify-result-ok' : ' notify-result-fail') : '');
+            m.textContent = _fr.msg ? _fr.msg.text : '';   // textContent only: server text is never markup
+        }
+    }
+
+    function renderFleetRoutes() {
+        try {
+            var el = $('notify-fleet-routes');
+            if (!el) return;
+            var html = frHtml();
+            el.hidden = html === '';
+            if (html === _frLastHtml) { frUpdateControls(); return; }   // nothing changed: keep focus, scroll and live region
+            var a = document.activeElement;
+            var focus = null;
+            if (a && el.contains(a) && a.getAttribute) {
+                if (a.getAttribute('data-fr-type') !== null) focus = { type: a.getAttribute('data-fr-type'), conn: a.getAttribute('data-fr-conn') };
+                else if (a.getAttribute('data-act')) focus = { act: a.getAttribute('data-act') };
+            }
+            var oldWrap = el.querySelector('.notify-fr-wrap');
+            var scrollLeft = oldWrap ? oldWrap.scrollLeft : 0;
+            el.innerHTML = html;
+            _frLastHtml = html;
+            frUpdateControls();
+            var wrap = el.querySelector('.notify-fr-wrap');
+            if (wrap && scrollLeft) wrap.scrollLeft = scrollLeft;
+            if (focus) {
+                var again = null;
+                if (focus.act) again = el.querySelector('[data-act="' + focus.act + '"]');
+                else {
+                    var boxes = el.querySelectorAll('input[data-fr-type]');
+                    for (var i = 0; i < boxes.length; i++) {
+                        if (boxes[i].getAttribute('data-fr-type') === focus.type && boxes[i].getAttribute('data-fr-conn') === focus.conn) { again = boxes[i]; break; }
+                    }
+                }
+                if (again) again.focus();
+            }
+        } catch (e) {
+            if (typeof console !== 'undefined' && console.warn) console.warn('[NOTIFY] fleet routes render failed:', e && e.message);
+        }
+    }
+
+    function frSave() {
+        if (_fr.saving || !frDirty()) return Promise.resolve();
+        _fr.saving = true;
+        _fr.gen++;
+        _fr.msg = null;
+        renderFleetRoutes();
+        return call('PUT', '/fleet-routes', { routes: frSerialize(_fr.draft) }).then(function(res) {
+            if (res.ok && isObj(res.data)) {
+                frAdopt(res.data);
+                _fr.msg = { ok: true, text: 'Saved' + (_fr.updatedAt ? ' at ' + frWhen(_fr.updatedAt) : '') + '.' };
+            } else if (res.status === 401) {
+                _fr.msg = { ok: false, text: 'SAVE FAILED: Locked — unlock admin actions and try again.' };
+            } else {
+                _fr.msg = { ok: false, text: 'SAVE FAILED: ' + errText(res) };
+            }
+        }, function() {
+            _fr.msg = { ok: false, text: 'SAVE FAILED: could not reach the server.' };
+        }).then(function() {
+            _fr.saving = false;
+            _fr.gen++;
+            renderFleetRoutes();
+            if (_fr.msg) announce(_fr.msg.text);   // persistent #notify-live region; textContent only
+        });
+    }
+
+    // XACA-1527-014: abandon the draft and go back to the last loaded/saved set (no request sent).
+    function frDiscard() {
+        if (_fr.saving || !frDirty()) return;
+        var base = {};
+        try { base = JSON.parse(_fr.base); } catch (e) { base = {}; }
+        var draft = {};
+        Object.keys(base).forEach(function(t) { if (Array.isArray(base[t])) draft[t] = base[t].slice(); });
+        _fr.draft = draft;
+        _fr.msg = null;
+        _frLastHtml = null;   // live checkboxes were mutated by the user: force a real rebuild, not the identical-HTML skip
+        renderFleetRoutes();
+        announce('Discarded unsaved changes.');
+    }
+
+    function onFrChange(e) {
+        var t = e.target;
+        if (!t || !t.getAttribute || t.getAttribute('data-fr-type') === null) return;
+        if (_fr.saving) { t.checked = !t.checked; return; }   // draft is frozen while the PUT is in flight
+        var type = t.getAttribute('data-fr-type');
+        var id = t.getAttribute('data-fr-conn');
+        var ids = (_fr.draft[type] || []).filter(function(x) { return x !== id; });
+        if (t.checked) ids.push(id);
+        _fr.draft[type] = ids;
+        _fr.msg = null;
+        frUpdateControls();
+    }
+
+    function onFrClick(e) {
+        var t = e.target && e.target.closest ? e.target.closest('button[data-act]') : null;
+        if (!t || t.disabled || t.getAttribute('aria-disabled') === 'true') return;
+        var act = t.getAttribute('data-act');
+        if (act === 'unlock') unlock();
+        else if (act === 'fr-retry') { _fr.state = 'idle'; loadFleetRoutes(); }
+        else if (act === 'fr-save') frSave();
+        else if (act === 'fr-discard') frDiscard();
+    }
+
+    // =========================================================================
     // WIRING
     // =========================================================================
 
@@ -1042,6 +1280,8 @@
         var c = $('notify-content');
         var t = $('notify-toolbar');
         if (c) c.addEventListener('click', onClick);
+        var fr = $('notify-fleet-routes');
+        if (fr) { fr.addEventListener('click', onFrClick); fr.addEventListener('change', onFrChange); }
         if (t) t.addEventListener('click', onClick);
         var fp = $('notify-form-panel');
         if (fp) {

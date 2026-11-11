@@ -36,7 +36,7 @@
     <!-- LCARS Fleet Theme (Red/Blue Color Scheme) -->
     <link rel="stylesheet" href="css/lcars-fleet-theme.css?v=20261009a">
     <!-- NOTIFICATIONS section styles (XACA-1405), shared with lcars/ -->
-    <link rel="stylesheet" href="../shared/css/lcars-notify-connections.css?v=20261010a">
+    <link rel="stylesheet" href="../shared/css/lcars-notify-connections.css?v=20261110c">
     <!-- XACA-0989: collapsible divisions + compact session chips (shared) -->
     <link rel="stylesheet" href="../shared/css/lcars-division-collapse.css?v=20260827a">
 </head>
@@ -589,6 +589,7 @@
                         <div id="notify-content">
                             <div class="empty-state"><div class="empty-state-text">LOADING CONNECTIONS...</div></div>
                         </div>
+                        <div id="notify-fleet-routes" class="notify-fleet-routes"></div>
                         <div id="notify-live" class="notify-sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
                     </section>
                 </div><!-- End NOTIFICATIONS section -->
@@ -631,7 +632,7 @@
     <script src="js/lcars-machine-health.js?v=20260904a"></script>
     <script src="js/lcars-all-config.js?v=20260906a"></script>
     <!-- NOTIFICATIONS section (XACA-1405): shared with lcars/; needs fleet-api-auth.js + the lcars:sectionChange event above -->
-    <script src="../lcars/js/lcars-notify-connections.js?v=20261010c"></script>
+    <script src="../lcars/js/lcars-notify-connections.js?v=20261110c"></script>
     <script src="js/lcars-fleet-dashboard-app.js?v=20261009a"></script>
 </body>
 </html>

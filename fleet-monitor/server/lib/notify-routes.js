@@ -382,8 +382,13 @@ function registerNotifyRoutes(app, { store, registry, isRegisteredTeam, dispatch
     // SyntaxError message embeds a snippet of the body (a secret prefix). Express's default
     // handler would send and log that text, so errors on /api/notify paths end here instead:
     // fixed bodies, and at most the error TYPE is logged. Other routes are untouched.
+    // XACA-1527-001: body-parser's entity.too.large (413) is mapped to a fixed 413 body, not 500.
     app.use('/api/notify', (err, req, res, next) => {
         if (res.headersSent) return next(err);
+        if (err && err.type === 'entity.too.large') {
+            console.error('[NOTIFY] request error:', 'entity.too.large');
+            return res.status(413).json({ error: 'payload_too_large', message: 'request body too large' });
+        }
         const parseFailure = err && (err.type === 'entity.parse.failed' || err instanceof SyntaxError);
         console.error('[NOTIFY] request error:', parseFailure ? 'entity.parse.failed' : ((err && err.name) || 'Error'));
         if (parseFailure) {
