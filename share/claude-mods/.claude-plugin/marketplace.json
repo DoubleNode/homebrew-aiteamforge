@@ -11,6 +11,7 @@
     { "name": "ticket-lamp", "source": "./ticket-lamp", "description": "This session's kanban ticket: status, subitems, release, epic." },
     { "name": "replay-theater", "source": "./replay-theater", "description": "Replay a session's tool calls." },
     { "name": "blast-radius", "source": "./blast-radius", "description": "Holds risky Bash commands and shows what they would change. Ships off." },
+    { "name": "effort-floor", "source": "./effort-floor", "description": "Offers to hold a merge, tap release or other ungated high-stakes action taken at low effort, and re-run it at High." },
     { "name": "mods-switchboard", "source": "./mods-switchboard", "description": "/mods: list every mod, turn each on or off, hide or show it, open its pane." }
   ]
 }

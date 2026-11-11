@@ -1,0 +1,9 @@
+{
+  "name": "effort-floor",
+  "version": "0.1.0",
+  "description": "Before a merge, tap release, gitlink stage, publisher arming or ROUND_LIMIT action taken at Low or Medium effort, offers once to hold it and re-run it at High from your next message. Raise-only, never automatic.",
+  "author": {
+    "name": "AITeamForge"
+  },
+  "types": "./types/index.d.ts"
+}

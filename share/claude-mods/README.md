@@ -25,7 +25,7 @@ Hard enable and disable stay with `enabledPlugins` in `settings.json`. The switc
 
 Off has two strengths. `claude plugin disable <mod>@aiteamforge-mods` and `/mods off <mod>` are soft: the mod stays installed and `aiteamforge upgrade` leaves it off. `claude plugin uninstall <mod>@aiteamforge-mods` is a permanent opt-out: upgrades will not re-add that mod until you run `claude plugin install <mod>@aiteamforge-mods` yourself. If `aiteamforge-mods` is registered at a path of your own, upgrades warn and leave it; set `AITEAMFORGE_MODS_REPOINT=1` for one run to repoint it. See `docs/claude-plugins-fleet.md` section 16.
 
-### One reader, nine copies
+### One reader, ten copies
 
 A marketplace install copies each mod on its own, so a mod cannot import a sibling's file. `hooks/switches.ts`, `tests/switch-fixture.ts`, `tests/switches.test.ts` and the small `switch-io` block in each mod's hooks file are therefore byte-identical copies. `tests/test-claude-mods-switches-sync.sh` fails when one drifts. To change the reader, edit one copy and copy it over the rest.
 
