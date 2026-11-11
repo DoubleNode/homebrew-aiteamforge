@@ -42,6 +42,9 @@
     'use strict';
 
     var DASH = '—';
+    // XACA-1788: single source for the column headers. Each row cell gets data-label from the same array
+    // (the stacked narrow layout shows it via CSS ::before), so labels cannot drift from the <th> text.
+    var HEADERS = ['Repo', 'Workflow / job', 'Branch', 'Status', 'Waiting / running for', 'Machine'];
     var TERMINAL = { completed: 1, failed: 1, expired: 1, cancelled: 1, lost: 1 };
 
     function isNum(v) { return typeof v === 'number' && isFinite(v); }
@@ -258,18 +261,26 @@
         scroll.setAttribute('tabindex', '0');
         scroll.setAttribute('role', 'region');
         scroll.setAttribute('aria-label', 'Queued and running CI jobs');
+        // XACA-1788: explicit ARIA table roles. The narrow layout sets display:block on table/tr/td, and some
+        // browsers (Safari/VoiceOver) then drop the native table semantics; the roles keep them.
         var table = el(doc, 'table', 'ciq-table');
+        table.setAttribute('role', 'table');
         table.appendChild(el(doc, 'caption', 'ciq-caption', 'Queued and running CI jobs and the machine that took each. Queued jobs are listed in dispatch order: critical, then high, then oldest first.'));
         var thead = el(doc, 'thead');
+        thead.setAttribute('role', 'rowgroup');
         var tr = el(doc, 'tr');
-        ['Repo', 'Workflow / job', 'Branch', 'Status', 'Waiting / running for', 'Machine'].forEach(function(t) {
+        tr.setAttribute('role', 'row');
+        HEADERS.forEach(function(t) {
             var th = el(doc, 'th', null, t);
             th.setAttribute('scope', 'col');
+            th.setAttribute('role', 'columnheader');
             tr.appendChild(th);
         });
         thead.appendChild(tr);
         table.appendChild(thead);
-        table.appendChild(el(doc, 'tbody'));
+        var tbody = el(doc, 'tbody');
+        tbody.setAttribute('role', 'rowgroup');
+        table.appendChild(tbody);
         scroll.appendChild(table);
 
         rootEl.appendChild(banner);
@@ -348,7 +359,13 @@
         for (var i = 0; i < rows.length; i++) if (rows[i].getAttribute('data-ciq-job') === id) return rows[i];
         var tr = el(doc, 'tr', 'ciq-row');
         tr.setAttribute('data-ciq-job', id);
-        for (var c = 0; c < 6; c++) tr.appendChild(el(doc, 'td'));
+        tr.setAttribute('role', 'row');
+        for (var c = 0; c < HEADERS.length; c++) {
+            var td = el(doc, 'td');
+            td.setAttribute('role', 'cell');
+            td.setAttribute('data-label', HEADERS[c]);
+            tr.appendChild(td);
+        }
         return tr;
     }
 

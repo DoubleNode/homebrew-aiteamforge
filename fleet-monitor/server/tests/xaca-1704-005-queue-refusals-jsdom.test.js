@@ -107,6 +107,8 @@ test('XACA-1704-015: without pool.js the banner falls back to raw codes; the tab
 test('dashboard cache-busters were bumped for the changed assets', () => {
     const html = fs.readFileSync(DASHBOARD_HTML, 'utf8');
     ['lcars-ci-pool.css', 'lcars-ci-queue.css', 'lcars-ci-pool.js', 'lcars-ci-queue.js'].forEach((f) => {
-        assert.match(html, new RegExp(f.replace('.', '\\.') + '\\?v=20261109b'), f);
+        // XACA-1788 bumped only the queue assets (to 20261110a); the pool assets keep the 1704-005 value.
+        const v = /queue/.test(f) ? '20261110a' : '20261109b';
+        assert.match(html, new RegExp(f.replace('.', '\\.') + '\\?v=' + v), f);
     });
 });

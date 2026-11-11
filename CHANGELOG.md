@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1788: Stack CI queue rows into labelled cards at narrow widths (XACA-1788)
+- Tap files updated in this publish: `fleet-monitor/server/package.json`,`fleet-monitor/server/public/lcars/lcars-dashboard.html` `fleet-monitor/server/public/shared/css/lcars-ci-queue.css`,`fleet-monitor/server/public/shared/js/lcars-ci-queue.js` `fleet-monitor/server/tests/xaca-1704-005-queue-refusals-jsdom.test.js`,`fleet-monitor/server/tests/xaca-1788-queue-narrow-jsdom.test.js`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1789: Plain-English text for every CI pool refusal reason (XACA-1789)
 - Tap files updated in this publish: `fleet-monitor/server/lib/ci-dispatcher.js`,`fleet-monitor/server/package.json` `fleet-monitor/server/public/shared/js/lcars-ci-pool.js`,`fleet-monitor/server/public/shared/js/lcars-ci-queue.js` `fleet-monitor/server/tests/xaca-1704-003-queue-refusals.test.js`,`fleet-monitor/server/tests/xaca-1704-005-queue-refusals-jsdom.test.js` `fleet-monitor/server/tests/xaca-1704-014-audit-refusals.test.js`,`fleet-monitor/server/tests/xaca-1789-reason-text.test.js`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1639: Retire the dev-host-only cache-clock mod (XACA-1639-017)
