@@ -1408,7 +1408,7 @@ If manifests get out of sync (e.g., items show `releaseAssignment` but manifest 
 python3 ~/dev-team/scripts/sync-release-manifests.py
 
 # Sync specific team
-python3 ~/dev-team/scripts/sync-release-manifests.py --team firebase
+python3 ~/dev-team/scripts/sync-release-manifests.py --team spacedock
 
 # Dry run (show what would change)
 python3 ~/dev-team/scripts/sync-release-manifests.py --dry-run
@@ -1451,8 +1451,8 @@ The LCARS UI Releases tab provides:
 # Sync manifests from board data
 python3 ~/dev-team/scripts/sync-release-manifests.py --team <team>
 
-# Example for Firebase
-python3 ~/dev-team/scripts/sync-release-manifests.py --team firebase
+# Example for Academy
+python3 ~/dev-team/scripts/sync-release-manifests.py --team academy
 ```
 
 ### Cross-Team Assignment Errors

@@ -20,7 +20,9 @@ Usage: python3 sync_release_manifests.py [--dry-run]
 
 import json
 import os
+import stat
 import sys
+import tempfile
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -149,10 +151,38 @@ def sync_manifest(manifest_path, items_by_id, dry_run=False):
         manifest['items'] = items
         manifest['updatedAt'] = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 
-        with open(manifest_path, 'w') as f:
-            json.dump(manifest, f, indent=2)
+        _atomic_write_json(manifest_path, manifest)
 
     return len(items), updated_count
+
+
+def _atomic_write_json(path, doc):
+    """Temp file in the SAME directory + fsync + os.replace (XACA-1799).
+
+    Mirrors lcars-ui/server.py's manifest write: a reader (or an interrupted
+    run) sees the old file or the new one, never a truncated one. The temp
+    file is removed on any failure. No cross-process lock: LCARS guards
+    manifests with an in-process RLock, so a file lock here would not
+    coordinate with it -- atomic replace is the guarantee both sides share.
+    """
+    try:
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+    except OSError:
+        mode = 0o644
+    fd, tmp = tempfile.mkstemp(prefix='.manifest.json.', suffix='.tmp', dir=str(Path(path).parent))
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            json.dump(doc, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 def main():
     import sys
