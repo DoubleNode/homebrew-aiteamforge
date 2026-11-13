@@ -60,33 +60,25 @@ def _build_team_kanban_dirs() -> dict:
             return _dirs
         except Exception:
             pass
-    # Fallback: hardcoded subset (main teams used by this script)
+    # Fallback: hardcoded subset (main teams used by this script).
+    # Main Event teams (ios/android/firebase/command) are intentionally absent:
+    # Main Event content does not belong in fleet code (XACA-1799).
     return {
         "academy": Path.home() / "dev-team" / "kanban",
-        "ios": Path("/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban"),
-        "android": Path("/Users/Shared/Development/Main Event/MainEventApp-Android/kanban"),
-        "firebase": Path("/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban"),
-        "command": Path("/Users/Shared/Development/Main Event/dev-team/kanban"),
+        "spacedock": Path.home() / ".aiteamforge" / "spacedock" / "kanban",
         "dns": Path("/Users/Shared/Development/DNSFramework/kanban"),
     }
 
 TEAM_KANBAN_DIRS = _build_team_kanban_dirs()
 
-# Team configurations
-TEAMS = {
-    'ios': {
-        'board': TEAM_KANBAN_DIRS["ios"] / "ios-board.json",
-        'releases': Path("/Users/Shared/Development/Main Event/MainEventApp-iOS/DEV/dev-team/kanban/releases"),
-    },
-    'android': {
-        'board': TEAM_KANBAN_DIRS["android"] / "android-board.json",
-        'releases': Path("/Users/Shared/Development/Main Event/MainEventApp-Android/develop/dev-team/kanban/releases"),
-    },
-    'firebase': {
-        'board': TEAM_KANBAN_DIRS["firebase"] / "firebase-board.json",
-        'releases': Path("/Users/Shared/Development/Main Event/MainEventApp-Functions/develop/dev-team/kanban/releases"),
-    },
-}
+# Team configurations. Built only from teams actually present in the registry
+# so a host lacking one cannot KeyError at import (XACA-1799).
+TEAMS = {}
+if "spacedock" in TEAM_KANBAN_DIRS:
+    TEAMS["spacedock"] = {
+        'board': TEAM_KANBAN_DIRS["spacedock"] / "spacedock-board.json",
+        'releases': TEAM_KANBAN_DIRS["spacedock"] / "releases",
+    }
 
 def load_board(board_path):
     """Load kanban board and index items by ID"""
@@ -172,6 +164,14 @@ def main():
     total_items = 0
     total_updated = 0
 
+    # A host without spacedock has nothing to sync -- a no-op, not a failure
+    # (test_xaca1193_007 pins exit 0 here). Say so loudly instead of printing
+    # an empty summary that reads like a successful sync.
+    if not TEAMS:
+        print("NOTICE: no syncable teams found (spacedock is not in this host's "
+              "team registry); nothing to sync.", file=sys.stderr)
+        return 0
+
     for team_name, config in TEAMS.items():
         print(f"\n{'='*60}")
         print(f"Team: {team_name.upper()}")
@@ -220,4 +220,4 @@ def main():
         print(f"\nRun without --dry-run to apply changes")
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main() or 0)

@@ -6,6 +6,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1799: Pin test AITEAMFORGE_DIR to the checkout; spacedock TEAMS in sync_release_manifests (XACA-1799)
+- XACA-1794: Pin the skins claim reset on the /clear reload path (XACA-1794)
+- XACA-1651: Vendor the skins mod with fleet team/persona skins (XACA-1651)
+- Tap files updated in this publish: `share/lcars-ui/sync_release_manifests.py`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1527: Fleet Routes editor on Notification Connections + 413 on /api/notify (XACA-1527)
 - Tap files updated in this publish: `fleet-monitor/server/lib/notify-routes.js`,`fleet-monitor/server/package.json` `fleet-monitor/server/public/lcars/js/lcars-notify-connections.js`,`fleet-monitor/server/public/lcars/lcars-dashboard.html` `fleet-monitor/server/public/lcars2/lcars-all.html`,`fleet-monitor/server/public/lcars2/lcars-index.html` `fleet-monitor/server/public/shared/css/lcars-notify-connections.css`,`fleet-monitor/server/tests/xaca-1527-001-payload-too-large.test.js` (+1 more). Run `brew upgrade aiteamforge` to receive them.
 - XACA-1766: Retire stale machine slugs from fleet-monitor registered teams (XACA-1766)
