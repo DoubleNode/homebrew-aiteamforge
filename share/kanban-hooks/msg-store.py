@@ -71,6 +71,8 @@ MAIL_DIR = os.path.join(os.path.expanduser("~"), ".aiteamforge", "mail")
 
 # Terminal/team tokens are used to build filenames; keep them filesystem-safe.
 _SAFE_RE = re.compile(r"[^A-Za-z0-9._-]")
+# --after accepts an ISO timestamp (this) or a message-id prefix (anything else).
+_ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T")
 
 
 def _ensure_mail_dir():
@@ -158,7 +160,13 @@ def _tmux_sockets():
     team-named socket files directly in /tmp (the fleet's per-team sockets)."""
     sockets = set()
     uid = os.getuid()
-    std_dir = f"/tmp/tmux-{uid}"
+    # Honour TMUX_TMPDIR exactly as tmux itself does (and as kanban-helpers.sh does
+    # for its own socket dir). Unset in production, so the scan base stays /tmp. A
+    # sandboxed caller (tests) then never probes the host's real sockets: every
+    # unresponsive one costs `tmux list-sessions` its full 3 s timeout, per send
+    # (XACA-1545: send-heavy suites blew the 120 s CI budget on shared runners).
+    base = os.environ.get("TMUX_TMPDIR") or "/tmp"
+    std_dir = os.path.join(base, f"tmux-{uid}")
     if os.path.isdir(std_dir):
         for p in glob.glob(os.path.join(std_dir, "*")):
             try:
@@ -166,8 +174,8 @@ def _tmux_sockets():
                     sockets.add(p)
             except OSError:
                 continue
-    # Team-named sockets live directly under /tmp (e.g. /tmp/academy).
-    for p in glob.glob("/tmp/*"):
+    # Team-named sockets live directly under the base (e.g. /tmp/academy).
+    for p in glob.glob(os.path.join(base, "*")):
         try:
             st = os.stat(p)
             if stat.S_ISSOCK(st.st_mode) and st.st_uid == uid:
@@ -470,6 +478,73 @@ def cmd_read(args):
             print(banner)
 
 
+def cmd_thread_reply(args):
+    """Return the first reply on a thread addressed to the caller (XACA-1545).
+
+    The synchronous half of kb-ask: the worker polls this with the thread id it
+    generated. Only records whose thread_id matches are candidates, so unrelated
+    mail is never matched, never returned and never marked read. The match is
+    marked read under the same lock that finds it (atomic find+mark), and nothing
+    else in the inbox is touched.
+
+    Filters (all optional):
+      --exclude-from <team:terminal>  skip records sent by that identity, so the
+                                      asker never "answers" its own question.
+      --after <ISO|msg-id>            only records strictly newer than an ISO
+                                      timestamp, or positioned after the record
+                                      whose id starts with the given prefix.
+
+    Read records are still candidates: the Stop-hook inbox surfacing may have
+    marked the reply read before the poll saw it, and a read reply is still THE
+    reply. Thread ids are unique per ask, so re-matching is harmless.
+
+    Exit 0 + reply printed (body, or the full record with --json) on a match.
+    Exit 1 + {"ok": false, "error": "no reply"} when there is none yet.
+    """
+    path = inbox_path(args.team, args.terminal)
+    matched = {"rec": None}
+    after_iso = None
+    after_id = None
+    if args.after:
+        if _ISO_RE.match(args.after):
+            after_iso = args.after
+        else:
+            after_id = args.after
+
+    def updater(records):
+        seen_after = after_id is None
+        for r in records:
+            if not seen_after:
+                if (r.get("id") or "").startswith(after_id):
+                    seen_after = True
+                continue
+            if r.get("thread_id") != args.thread:
+                continue
+            frm = f"{r.get('from_team','')}:{r.get('from_terminal','')}"
+            if args.exclude_from and frm == args.exclude_from:
+                continue
+            if after_iso and not (r.get("created_at") or "") > after_iso:
+                continue
+            if not r.get("read_at"):
+                r["read_at"] = _now_iso()
+            matched["rec"] = dict(r)
+            break
+        return records
+
+    # Polling must not create inbox/lock files for an identity with no mail.
+    if not os.path.exists(path):
+        print(json.dumps({"ok": False, "error": "no reply"}))
+        sys.exit(1)
+    locked_update(path, updater)
+    if matched["rec"] is None:
+        print(json.dumps({"ok": False, "error": "no reply"}))
+        sys.exit(1)
+    if args.json:
+        print(json.dumps(matched["rec"]))
+    else:
+        print(matched["rec"].get("body", ""))
+
+
 def cmd_who(args):
     """List live <team>:<terminal> sessions on this machine."""
     sessions = sorted(live_sessions())
@@ -529,6 +604,15 @@ def build_parser():
     s.add_argument("--id", required=True)
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_read)
+
+    s = sub.add_parser("thread-reply", help="first reply on a thread (marks only that reply read)")
+    s.add_argument("--team", required=True)
+    s.add_argument("--terminal", required=True)
+    s.add_argument("--thread", required=True)
+    s.add_argument("--exclude-from", dest="exclude_from", default=None, help="<team>:<terminal> to skip")
+    s.add_argument("--after", default=None, help="ISO timestamp or message-id prefix")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_thread_reply)
 
     s = sub.add_parser("who", help="list live team:terminal sessions on this machine")
     s.add_argument("--json", action="store_true")

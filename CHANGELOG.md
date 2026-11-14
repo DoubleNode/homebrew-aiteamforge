@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1545: kb-ask / kb-answer blocking worker-to-coordinator questions (XACA-1545)
+- Tap files updated in this publish: `share/kanban-hooks/msg-store.py`,`share/scripts/agent-panel-display.sh` `share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1544: kb-dispatch guarded dispatcher + kb-run --orchestrated worker mode (XACA-1544)
 - Tap files updated in this publish: `share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1542: kb-terminals registry + orchestrator persona routing (XACA-1542)

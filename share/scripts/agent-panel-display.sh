@@ -1881,6 +1881,7 @@ render_panel() {
                     planning)   status_icon="${BLUE}●${RESET}" ;;
                     pr_review)  status_icon="${ORANGE}●${RESET}" ;;
                     paused)     status_icon="${RED}●${RESET}" ;;
+                    awaiting-answer) status_icon="${YELLOW}◆${RESET}" ;;
                     *)          status_icon="${GRAY}●${RESET}" ;;
                 esac
                 # First line gets the status icon, remaining lines indent to match
