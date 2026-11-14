@@ -167,6 +167,10 @@ def _tmux_sockets():
     # (XACA-1545: send-heavy suites blew the 120 s CI budget on shared runners).
     base = os.environ.get("TMUX_TMPDIR") or "/tmp"
     std_dir = os.path.join(base, f"tmux-{uid}")
+    # Team-named sockets are opened with an explicit `tmux -S /tmp/<team>` (e.g.
+    # fleet-reporter.sh), which tmux does NOT relocate under TMUX_TMPDIR, so their
+    # base stays /tmp. A sandbox overrides it separately (XACA-1545-015).
+    team_dir = os.environ.get("KB_MSG_TEAM_SOCKET_DIR") or "/tmp"
     if os.path.isdir(std_dir):
         for p in glob.glob(os.path.join(std_dir, "*")):
             try:
@@ -174,8 +178,8 @@ def _tmux_sockets():
                     sockets.add(p)
             except OSError:
                 continue
-    # Team-named sockets live directly under the base (e.g. /tmp/academy).
-    for p in glob.glob(os.path.join(base, "*")):
+    # Team-named sockets live directly under team_dir (e.g. /tmp/academy).
+    for p in glob.glob(os.path.join(team_dir, "*")):
         try:
             st = os.stat(p)
             if stat.S_ISSOCK(st.st_mode) and st.st_uid == uid:
@@ -494,6 +498,10 @@ def cmd_thread_reply(args):
                                       timestamp, or positioned after the record
                                       whose id starts with the given prefix.
 
+    --consume                       exactly-once: skip replies already consumed and
+                                      mark the match consumed_at in the same locked
+                                      write (kb-ask always passes it).
+
     Read records are still candidates: the Stop-hook inbox surfacing may have
     marked the reply read before the poll saw it, and a read reply is still THE
     reply. Thread ids are unique per ask, so re-matching is harmless.
@@ -511,7 +519,7 @@ def cmd_thread_reply(args):
         else:
             after_id = args.after
 
-    def updater(records):
+    def find(records):
         seen_after = after_id is None
         for r in records:
             if not seen_after:
@@ -525,14 +533,27 @@ def cmd_thread_reply(args):
                 continue
             if after_iso and not (r.get("created_at") or "") > after_iso:
                 continue
+            if args.consume and r.get("consumed_at"):
+                continue
+            return r
+        return None
+
+    def updater(records):
+        r = find(records)
+        if r is not None:
             if not r.get("read_at"):
                 r["read_at"] = _now_iso()
+            if args.consume:
+                # Exactly-once: kb-ask can never be handed the same answer twice, even
+                # if its own board write afterwards fails (XACA-1545-020).
+                r["consumed_at"] = _now_iso()
             matched["rec"] = dict(r)
-            break
         return records
 
-    # Polling must not create inbox/lock files for an identity with no mail.
-    if not os.path.exists(path):
+    # Polling must not create inbox/lock files for an identity with no mail, nor
+    # rewrite the inbox on every idle poll (a rewrite also drops unparseable lines):
+    # a read-only scan first, and the lock + atomic find-and-mark only on a hit.
+    if not os.path.exists(path) or find(_read_jsonl(path)) is None:
         print(json.dumps({"ok": False, "error": "no reply"}))
         sys.exit(1)
     locked_update(path, updater)
@@ -611,6 +632,8 @@ def build_parser():
     s.add_argument("--thread", required=True)
     s.add_argument("--exclude-from", dest="exclude_from", default=None, help="<team>:<terminal> to skip")
     s.add_argument("--after", default=None, help="ISO timestamp or message-id prefix")
+    s.add_argument("--consume", action="store_true",
+                   help="skip replies already consumed; mark the match consumed (exactly-once delivery)")
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_thread_reply)
 

@@ -34153,9 +34153,10 @@ PY
 #
 # Board shapes (the contract XACA-1544 / 1546 / 1548 build against):
 #
-#   item.orchestration.coordinator   WRITTEN BY XACA-1544 (`kb-run --orchestrated`);
-#                                    nothing writes it yet. Shape: a kb-msg address
-#                                    STRING "team:terminal", e.g. "academy:chancellor".
+#   item.orchestration.coordinator   WRITTEN BY XACA-1544 (_kb_set_item_orchestration,
+#                                    via kb-dispatch / `kb-run --orchestrated`), which
+#                                    validates it with _kb_orch_addr_valid. Shape: a kb-msg
+#                                    address STRING "team:terminal", e.g. "academy:chancellor".
 #                                    An object {"address": "team:terminal"} is also
 #                                    accepted. A bare team (broadcast) or "team:*" is
 #                                    REFUSED: a question needs exactly one answerer.
@@ -34168,6 +34169,12 @@ PY
 #         "askedAt":     "<ISO-8601 UTC>",
 #         "askedBy":     "<team:terminal of the worker>",
 #         "coordinator": "<team:terminal it was sent to>" }
+#
+#   item.lastQuestion                TOMBSTONE written by kb-answer: the answered
+#                                    pendingQuestion + {"answeredAt"}. Lets a parked worker
+#                                    collect the answer with `kb-ask --wait`; removed when
+#                                    kb-ask receives it. NOT an open question: kb-ask list
+#                                    and any QUESTION_PENDING monitor must ignore it.
 #
 #   activeWindows[<window>].status   "awaiting-answer" while kb-ask is blocked.
 #
@@ -34210,15 +34217,25 @@ _kb_ask_resolve() {
     printf '%s\t%s\t%s\t%s\t%s\n' "$team" "$terminal" "$window_id" "$board_file" "$item"
 }
 
-# _kb_ask_clear_pending <board_file> <item_id> <thread_id>
+# _kb_ask_clear_pending <board_file> <item_id> <thread_id> [answered|consumed]
 # Clears item.pendingQuestion ONLY if it is still this thread (never a newer question).
+#   (default)  withdraw: delete it outright (send failed, --clear: no answer exists).
+#   answered   kb-answer: move it to the tombstone item.lastQuestion (+answeredAt) so a
+#              worker that parked (rc 3/130) can still collect the answer with
+#              `kb-ask --wait` (XACA-1545 PR #1335 review). kb-ask list ignores it.
+#   consumed   kb-ask received the answer: delete pendingQuestion AND the tombstone.
 _kb_ask_clear_pending() {
-    local board_file="${1-}" item="${2-}" tid="${3-}" ts
+    local board_file="${1-}" item="${2-}" tid="${3-}" mode="${4-withdraw}" ts
     ts=$(_kb_get_timestamp)
     _kb_jq_update "$board_file" '
-        (.backlog[] | select(.id == $id and ((.pendingQuestion.threadId // "") == $tid))) |= del(.pendingQuestion)
+        (.backlog[] | select(.id == $id)) |= (
+            if (.pendingQuestion.threadId // "") == $tid then
+                (if $mode == "answered" then .lastQuestion = (.pendingQuestion + {answeredAt: $ts}) else . end)
+                | del(.pendingQuestion)
+            else . end
+            | if $mode == "consumed" and ((.lastQuestion.threadId // "") == $tid) then del(.lastQuestion) else . end)
         | .lastUpdated = $ts' \
-        --arg id "$item" --arg tid "$tid" --arg ts "$ts"
+        --arg id "$item" --arg tid "$tid" --arg ts "$ts" --arg mode "$mode"
 }
 
 # kb-ask "<question>" [--options a|b|c] [--timeout SECS] [--interval SECS]   (worker)
@@ -34231,6 +34248,7 @@ kb-ask() {
     fi
 
     local question="" opt_set="" timeout="${KB_ASK_TIMEOUT:-1800}" interval="${KB_ASK_INTERVAL:-5}"
+    local wait_mode=0 replace_mode=0 from_tomb=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -h|--help)
@@ -34238,8 +34256,19 @@ kb-ask() {
 kb-ask — block on a question to the release coordinator (XACA-1545)
 
 Usage:
-  kb-ask "<question>" [--options a|b|c] [--timeout SECS] [--interval SECS]
+  kb-ask "<question>" [--options a|b|c] [--timeout SECS] [--interval SECS] [--replace]
+  kb-ask --wait [--timeout SECS] [--interval SECS]    (resume waiting on YOUR pending question)
   kb-ask list [--release REL-ID | --all] [--json]     (coordinator: open questions)
+
+One question per item at a time. While one is pending, a new kb-ask is refused
+(rc 11): after a timeout (rc 3) or an interrupt (rc 130), resume with --wait,
+which sends nothing and returns an answer that arrived in the meantime - also
+when kb-answer has already cleared the question (it keeps an item.lastQuestion
+tombstone until kb-ask collects the answer). --wait skips the coordinator
+liveness check and never re-sends: if the coordinator restarted with an empty
+inbox, the question stays pending until --replace. --replace
+asks a new question instead and posts a SUPERSEDED note on the old thread, so a
+reply to the old message is not mistaken for an answer to the new one.
 
 The answer is printed on stdout and the command exits 0. Everything else goes
 to stderr. Defaults: --timeout 1800 (env KB_ASK_TIMEOUT), --interval 5 (env
@@ -34257,6 +34286,9 @@ Exit codes:
      pending on the board, the         without a tmux pane); the reply would land in a
      worker should park                mailbox nobody reads
   7  cannot resolve team/board/item 8  board write or kb-msg send failed (nothing left pending)
+  9  --wait: nothing of yours to    11 a question is already pending on this item (use --wait
+     resume (kb-answer's rc 9 is       or --replace), or --wait on a question another session asked
+     "nothing to answer")
   130 interrupted (SIGINT/SIGTERM): like 3 - window status restored, question stays pending
 
 Claude Code workers: the Bash tool kills a foreground command after at most
@@ -34267,13 +34299,21 @@ USAGE
             --options)  opt_set="${2-}"; shift 2 2>/dev/null || shift ;;
             --timeout)  timeout="${2-}"; shift 2 2>/dev/null || shift ;;
             --interval) interval="${2-}"; shift 2 2>/dev/null || shift ;;
+            --wait)     wait_mode=1; shift ;;
+            --replace)  replace_mode=1; shift ;;
             --) shift; question="$*"; break ;;
             -*) echo "kb-ask: unknown option '$1' (try: kb-ask --help)" >&2; return 1 ;;
             *)  if [[ -z "$question" ]]; then question="$1"; else question="$question $1"; fi; shift ;;
         esac
     done
-    if [[ -z "${question//[[:space:]]/}" ]]; then
-        echo "Usage: kb-ask \"<question>\" [--options a|b|c] [--timeout SECS] [--interval SECS]" >&2
+    if (( wait_mode )); then
+        if [[ -n "${question//[[:space:]]/}" || -n "$opt_set" || $replace_mode -eq 1 ]]; then
+            echo "kb-ask: --wait takes no question, --options or --replace (it resumes the pending one)." >&2
+            return 1
+        fi
+    elif [[ -z "${question//[[:space:]]/}" ]]; then
+        echo "Usage: kb-ask \"<question>\" [--options a|b|c] [--timeout SECS] [--interval SECS] [--replace]" >&2
+        echo "       kb-ask --wait [--timeout SECS] [--interval SECS]" >&2
         return 1
     fi
     if ! [[ "$timeout" =~ ^[0-9]+$ ]]; then
@@ -34323,40 +34363,90 @@ USAGE
     fi
     self_addr="${self_team}:${self_terminal}"
 
-    # Refusal 3: coordinator must be live — same data as `kb-msg who`.
     local store; store=$(_kb_msg_store)
-    if ! grep -qxF "$coordinator" <<<"$(python3 "$store" who 2>/dev/null)"; then
+
+    # One question per item (XACA-1545-011): a second kb-ask would silently overwrite
+    # pendingQuestion, and a kb-answer <ITEM-ID> typed from the OLD message would then
+    # answer the NEW question. Refuse unless the caller resumes (--wait) or explicitly
+    # supersedes (--replace).
+    local pend old_tid old_by old_coord old_q old_opts
+    pend=$(_kb_jq_read "$board_file" '
+        (.backlog[] | select(.id == $id) | .pendingQuestion) // {}
+        | [(.threadId // ""), (.askedBy // ""), (.coordinator // ""), (.question // "" | gsub("\n"; " ")),
+           ((.options // []) | join("|"))] | @tsv' --arg id "$item" -r 2>/dev/null | head -1)
+    IFS=$'\t' read -r old_tid old_by old_coord old_q old_opts <<<"$pend"
+
+    local tid asked_at prev_status ts_now
+    if (( wait_mode )) && [[ -z "$old_tid" ]]; then
+        # Nothing pending: the usual reason is that kb-answer already answered it while
+        # this worker was parked, moving it to the lastQuestion tombstone. Resume THAT
+        # thread when this session asked it; the answer is waiting in our inbox.
+        pend=$(_kb_jq_read "$board_file" '
+            (.backlog[] | select(.id == $id) | .lastQuestion) // {}
+            | [(.threadId // ""), (.askedBy // ""), (.coordinator // ""), (.question // "" | gsub("\n"; " ")),
+               ((.options // []) | join("|"))] | @tsv' --arg id "$item" -r 2>/dev/null | head -1)
+        IFS=$'\t' read -r old_tid old_by old_coord old_q old_opts <<<"$pend"
+        if [[ -z "$old_tid" || "$old_by" != "$self_addr" ]]; then
+            echo "kb-ask --wait: no pending (or answered-but-uncollected) question of yours on $item." >&2
+            return 9
+        fi
+        from_tomb=1
+    fi
+    if (( wait_mode )); then
+        if [[ "$old_by" != "$self_addr" ]]; then
+            echo "kb-ask --wait: the pending question on $item was asked by '${old_by:-?}', not this session ($self_addr)." >&2
+            return 11
+        fi
+        tid="$old_tid"; question="$old_q"; opt_set="$old_opts"
+        [[ "$old_coord" == *:* ]] && coordinator="$old_coord"
+    elif [[ -n "$old_tid" && $replace_mode -eq 0 ]]; then
+        echo "kb-ask: a question is already pending on $item (thread ${old_tid:0:8}, asked by ${old_by:-?}): \"${old_q:0:120}\"" >&2
+        echo "  Resume waiting for it with: kb-ask --wait    or supersede it with: kb-ask --replace \"<question>\"" >&2
+        return 11
+    fi
+
+    # Refusal 3: coordinator must be live — same data as `kb-msg who`. Not for --wait:
+    # the answer may already be in our inbox even if the coordinator has since gone.
+    if (( ! wait_mode )) && ! grep -qxF "$coordinator" <<<"$(python3 "$store" who 2>/dev/null)"; then
         echo "kb-ask: coordinator '$coordinator' is not live (not in 'kb-msg who'). Not asking; nothing was sent or recorded." >&2
         return 5
     fi
 
-    local tid asked_at prev_status ts_now
-    tid=$(uuidgen 2>/dev/null | tr -d '-' | tr '[:upper:]' '[:lower:]')
-    [[ "$tid" =~ ^[0-9a-f]{32}$ ]] || tid=$(python3 -c 'import uuid;print(uuid.uuid4().hex)' 2>/dev/null)
-    if ! [[ "$tid" =~ ^[0-9a-f]{32}$ ]]; then
-        echo "kb-ask: could not generate a thread id." >&2; return 8
-    fi
     asked_at=$(_kb_get_timestamp)
     prev_status=$(_kb_jq_read "$board_file" '(.activeWindows[]? | select(.id == $id) | .status) // ""' --arg id "$window_id" -r 2>/dev/null | head -1)
     [[ -z "$prev_status" || "$prev_status" == "awaiting-answer" ]] && prev_status="coding"
 
-    # Board write FIRST, send second: if the coordinator answers instantly, kb-answer
-    # must find the pendingQuestion to clear (the other order leaves a stale one).
-    _kb_jq_update "$board_file" '
-        (.backlog[] | select(.id == $id)) |= (.pendingQuestion = {
-            threadId: $tid, question: $q,
-            options: (if $opts == "" then [] else ($opts | split("|")) end),
-            askedAt: $ts, askedBy: $by, coordinator: $coord })
-        | .lastUpdated = $ts' \
-        --arg id "$item" --arg tid "$tid" --arg q "$question" --arg opts "$opt_set" \
-        --arg ts "$asked_at" --arg by "$self_addr" --arg coord "$coordinator" || {
-        echo "kb-ask: board write failed; question not sent." >&2
-        return 8
-    }
-    # Delivery, not presence: read it back before trusting the write.
-    if [[ "$(_kb_jq_read "$board_file" '(.backlog[] | select(.id == $id) | .pendingQuestion.threadId) // ""' --arg id "$item" -r 2>/dev/null | head -1)" != "$tid" ]]; then
-        echo "kb-ask: pendingQuestion did not land on $item (item missing from board?). Question not sent." >&2
-        return 8
+    if (( ! wait_mode )); then
+        tid=$(uuidgen 2>/dev/null | tr -d '-' | tr '[:upper:]' '[:lower:]')
+        [[ "$tid" =~ ^[0-9a-f]{32}$ ]] || tid=$(python3 -c 'import uuid;print(uuid.uuid4().hex)' 2>/dev/null)
+        if ! [[ "$tid" =~ ^[0-9a-f]{32}$ ]]; then
+            echo "kb-ask: could not generate a thread id." >&2; return 8
+        fi
+        # Board write FIRST, send second: if the coordinator answers instantly, kb-answer
+        # must find the pendingQuestion to clear (the other order leaves a stale one).
+        # A new question retires THIS asker's uncollected lastQuestion tombstone: the
+        # worker has moved on, and a later --wait must never fall back to that OLDER
+        # question's answer (PR #1335 test gate). Scoped to askedBy == us: another
+        # session's tombstone is not ours to drop (XACA-1545-021).
+        _kb_jq_update "$board_file" '
+            (.backlog[] | select(.id == $id)) |= (
+                (if (.lastQuestion.askedBy // "") == $by then del(.lastQuestion) else . end)
+                | .pendingQuestion = {
+                threadId: $tid, question: $q,
+                options: (if $opts == "" then [] else ($opts | split("|")) end),
+                askedAt: $ts, askedBy: $by, coordinator: $coord }
+                + (if $old == "" then {} else {supersedes: $old} end))
+            | .lastUpdated = $ts' \
+            --arg id "$item" --arg tid "$tid" --arg q "$question" --arg opts "$opt_set" \
+            --arg ts "$asked_at" --arg by "$self_addr" --arg coord "$coordinator" --arg old "$old_tid" || {
+            echo "kb-ask: board write failed; question not sent." >&2
+            return 8
+        }
+        # Delivery, not presence: read it back before trusting the write.
+        if [[ "$(_kb_jq_read "$board_file" '(.backlog[] | select(.id == $id) | .pendingQuestion.threadId) // ""' --arg id "$item" -r 2>/dev/null | head -1)" != "$tid" ]]; then
+            echo "kb-ask: pendingQuestion did not land on $item (item missing from board?). Question not sent." >&2
+            return 8
+        fi
     fi
 
     # Window goes awaiting-answer BEFORE the send so no observer can see an answerable
@@ -34371,25 +34461,37 @@ USAGE
     trap 'kb_ask_intr=1' INT TERM
     kb-status awaiting-answer >/dev/null 2>&1
 
-    local body="[kb-ask $item thread=${tid:0:8}] $question"
-    [[ -n "$opt_set" ]] && body="$body"$'\n'"Options: ${opt_set//|/ | }"
-    body="$body"$'\n'"Answer with: kb-answer ${tid:0:8} \"<answer>\"  (or: kb-answer $item \"<answer>\")"
-    if ! _kb_msg_send --thread "$tid" "$coordinator" "$body" >/dev/null; then
-        echo "kb-ask: kb-msg send to '$coordinator' failed; withdrawing the pending question." >&2
-        _kb_ask_clear_pending "$board_file" "$item" "$tid" >/dev/null 2>&1
-        kb-status "$prev_status" >/dev/null 2>&1 || kb-status coding >/dev/null 2>&1
-        return 8
+    if (( ! wait_mode )); then
+        local body="[kb-ask $item thread=${tid:0:8}] $question"
+        [[ -n "$opt_set" ]] && body="$body"$'\n'"Options: ${opt_set//|/ | }"
+        body="$body"$'\n'"Answer with: kb-answer ${tid:0:8} \"<answer>\"  (or: kb-answer $item \"<answer>\")"
+        if ! _kb_msg_send --thread "$tid" "$coordinator" "$body" >/dev/null; then
+            echo "kb-ask: kb-msg send to '$coordinator' failed; withdrawing the pending question." >&2
+            _kb_ask_clear_pending "$board_file" "$item" "$tid" >/dev/null 2>&1
+            kb-status "$prev_status" >/dev/null 2>&1 || kb-status coding >/dev/null 2>&1
+            return 8
+        fi
+        _kb_log_activity "question_asked" "$item" "item" "pendingQuestion" "" "${question:0:200}" "thread=$tid to=$coordinator"
+        if [[ -n "$old_tid" ]]; then
+            # --replace: tell whoever holds the old message that it no longer counts.
+            # Best effort - the new question is already live, so a failed note is a warning.
+            [[ "$old_coord" == *:* ]] || old_coord="$coordinator"
+            _kb_msg_send --thread "$old_tid" "$old_coord" \
+                "[kb-ask $item thread=${old_tid:0:8}] SUPERSEDED by thread ${tid:0:8}. Do not answer this one; answer: kb-answer ${tid:0:8} \"<answer>\"" >/dev/null \
+                || echo "kb-ask: WARNING could not post the SUPERSEDED note on old thread ${old_tid:0:8}." >&2
+            _kb_log_activity "question_superseded" "$item" "item" "pendingQuestion" "$old_tid" "$tid" "replaced by kb-ask --replace"
+        fi
+        echo "kb-ask: asked $coordinator (thread ${tid:0:8}); waiting up to ${timeout}s for the answer..." >&2
+    else
+        echo "kb-ask: resuming the wait on thread ${tid:0:8} ($item); up to ${timeout}s..." >&2
     fi
-
-    _kb_log_activity "question_asked" "$item" "item" "pendingQuestion" "" "${question:0:200}" "thread=$tid to=$coordinator"
-    echo "kb-ask: asked $coordinator (thread ${tid:0:8}); waiting up to ${timeout}s for the answer..." >&2
 
     # Poll THIS thread only. Normally: reply addressed to us, not sent by us. When the
     # coordinator shares our address (another window of the same terminal), our own
     # question lands in OUR inbox and the answer is sent FROM our address, so a sender
     # filter would drop the answer. Match by position instead: only records after the
     # question's own message id count.
-    local deadline got got_rc
+    local deadline got got_rc now_s
     local -a poll_filter
     poll_filter=(--exclude-from "$self_addr")
     if [[ "$coordinator" == "$self_addr" ]]; then
@@ -34411,8 +34513,11 @@ USAGE
             echo "kb-ask: interrupted; the question stays pending on $item (thread ${tid:0:8})." >&2
             return 130
         fi
+        # --consume: exactly-once. The matched reply is marked consumed in the same
+        # locked write that returns it, so no later poll (e.g. --wait on a tombstone
+        # whose retire write failed) can be handed it again (XACA-1545-020).
         got=$(python3 "$store" thread-reply --team "$self_team" --terminal "$self_terminal" \
-                --thread "$tid" "${poll_filter[@]}" 2>/dev/null)
+                --thread "$tid" --consume "${poll_filter[@]}" 2>/dev/null)
         got_rc=$?
         if [[ $got_rc -eq 0 ]]; then
             break
@@ -34423,19 +34528,27 @@ USAGE
             kb-status "$prev_status" >/dev/null 2>&1 || kb-status coding >/dev/null 2>&1
             return 8
         fi
-        if (( $(date +%s) >= deadline )); then
+        now_s=$(date +%s)
+        if (( now_s >= deadline )); then
             # TIMEOUT: the worker parks. pendingQuestion stays set so the monitor keeps
             # raising QUESTION_PENDING; the window is no longer blocked inside kb-ask, so
             # its status goes back to what it was rather than a stale "awaiting-answer".
             kb-status "$prev_status" >/dev/null 2>&1 || kb-status coding >/dev/null 2>&1
-            echo "kb-ask: timed out after ${timeout}s with no answer on thread ${tid:0:8}. The question stays pending on $item; park this work." >&2
+            if (( from_tomb )); then
+                echo "kb-ask: timed out after ${timeout}s: thread ${tid:0:8} was answered (kb-answer) but no uncollected reply is in this inbox (already collected?). Nothing is pending on $item." >&2
+            else
+                echo "kb-ask: timed out after ${timeout}s with no answer on thread ${tid:0:8}. The question stays pending on $item; park this work." >&2
+            fi
             return 3
         fi
-        sleep "$interval"
+        # Never sleep past the deadline (XACA-1545-012: a 2 s timeout with a 10 s
+        # interval used to take 11 s). The loop re-polls once at the deadline.
+        sleep $(( deadline - now_s < interval ? deadline - now_s : interval ))
     done
 
-    # Answered. Idempotent with kb-answer's own clear (it clears first, usually).
-    _kb_ask_clear_pending "$board_file" "$item" "$tid" >/dev/null 2>&1
+    # Answered. Idempotent with kb-answer's own clear (it clears first, usually); also
+    # retires the lastQuestion tombstone now that the answer has been collected.
+    _kb_ask_clear_pending "$board_file" "$item" "$tid" consumed >/dev/null 2>&1
     kb-status "$prev_status" >/dev/null 2>&1 || kb-status coding >/dev/null 2>&1
     if [[ -n "$opt_set" ]]; then
         local in_set
@@ -34472,14 +34585,15 @@ _kb_ask_list() {
     fi
     local now_ts; now_ts=$(_kb_get_timestamp)
     local filter='
-        def ago: if . < 60 then "\(floor)s" elif . < 3600 then "\(./60|floor)m"
+        def ago: if . == null then "?" elif . < 60 then "\(floor)s" elif . < 3600 then "\(./60|floor)m"
                  elif . < 86400 then "\(./3600|floor)h" else "\(./86400|floor)d" end;
         [ .backlog[] | select(.pendingQuestion != null)
           | select($rel == "" or ((.releaseAssignment.releaseId // "") == $rel))
           | { item: .id, release: (.releaseAssignment.releaseId // null),
               threadId: .pendingQuestion.threadId, thread: (.pendingQuestion.threadId[0:8]),
               askedAt: .pendingQuestion.askedAt,
-              ageSeconds: (($now | fromdateiso8601) - (.pendingQuestion.askedAt | fromdateiso8601)),
+              # A missing/malformed askedAt (hand-edited board) must not hide every other row.
+              ageSeconds: (try (($now | fromdateiso8601) - (.pendingQuestion.askedAt | fromdateiso8601)) catch null),
               askedBy: .pendingQuestion.askedBy, question: .pendingQuestion.question,
               options: (.pendingQuestion.options // []) } ]
         | map(. + { age: (.ageSeconds | ago) })'
@@ -34508,21 +34622,38 @@ _kb_ask_list() {
 # item's activity history. Refuses: no answer text, no matching question (rc 9), an
 # ambiguous prefix (rc 10, candidates listed). A thread prefix needs >= 4 characters.
 kb-answer() {
+    local clear_only=0
+    if [[ "${1-}" == "--clear" ]]; then
+        clear_only=1
+        shift
+    fi
     local target="${1-}" answer=""
     shift 2>/dev/null || true
     answer="$*"
     if [[ "$target" == "-h" || "$target" == "--help" ]]; then
         echo "Usage: kb-answer <thread-id-prefix|ITEM-ID> \"<answer>\"   (see: kb-ask list)"
+        echo "       kb-answer --clear <thread-id-prefix|ITEM-ID>      (clear only; sends NOTHING)"
         return 0
     fi
-    if [[ -z "$target" || -z "${answer//[[:space:]]/}" ]]; then
+    local need_usage=0
+    [[ -z "$target" ]] && need_usage=1
+    (( ! clear_only )) && [[ -z "${answer//[[:space:]]/}" ]] && need_usage=1
+    if (( need_usage )); then
         echo "Usage: kb-answer <thread-id-prefix|ITEM-ID> \"<answer>\"   (see: kb-ask list)" >&2
+        echo "       kb-answer --clear <thread-id-prefix|ITEM-ID>" >&2
+        return 1
+    fi
+    if (( clear_only )) && [[ -n "${answer//[[:space:]]/}" ]]; then
+        echo "kb-answer --clear takes no answer text (it sends nothing)." >&2
         return 1
     fi
     _kb_ensure_jq || return 7
 
-    local match_by="thread" ctx team board_file item_team
-    if [[ "$(printf '%s' "$target" | tr '[:lower:]' '[:upper:]')" =~ ^X[A-Z]{2,4}-[0-9]+$ ]]; then
+    local match_by="thread" ctx team board_file item_team up_target
+    up_target=$(printf '%s' "$target" | tr '[:lower:]' '[:upper:]')
+    # A subitem ID (XACA-1545-003) maps to its parent, as in kb-ask (XACA-1545-012).
+    [[ "$up_target" =~ ^(X[A-Z]{2,4}-[0-9]+)-[0-9]+$ ]] && target="${match[1]}" && up_target="${match[1]}"
+    if [[ "$up_target" =~ ^X[A-Z]{2,4}-[0-9]+$ ]]; then
         match_by="item"
     elif [[ ${#target} -lt 4 || ! "$target" =~ ^[0-9a-fA-F]+$ ]]; then
         echo "kb-answer: '$target' is neither an ITEM-ID nor a thread id prefix (>= 4 hex characters)." >&2
@@ -34551,7 +34682,7 @@ kb-answer() {
           | select(if $by == "item" then .id == $t
                    else ((.pendingQuestion.threadId // "") | startswith($t)) end)
           | {item: .id, tid: .pendingQuestion.threadId, asker: .pendingQuestion.askedBy,
-             question: .pendingQuestion.question} ]' \
+             coord: (.pendingQuestion.coordinator // ""), question: .pendingQuestion.question} ]' \
         --arg by "$match_by" --arg t "$target" -c 2>/dev/null) || { echo "kb-answer: board read failed." >&2; return 7; }
     count=$(printf '%s' "$matches" | jq 'length' 2>/dev/null)
     if [[ "$count" == "0" || -z "$count" ]]; then
@@ -34564,14 +34695,37 @@ kb-answer() {
         return 10
     fi
 
-    local m_item m_tid m_asker m_q
+    local m_item m_tid m_asker m_q m_coord
     m_item=$(printf '%s' "$matches" | jq -r '.[0].item')
     m_tid=$(printf '%s' "$matches" | jq -r '.[0].tid')
     m_asker=$(printf '%s' "$matches" | jq -r '.[0].asker')
+    m_coord=$(printf '%s' "$matches" | jq -r '.[0].coord')
     m_q=$(printf '%s' "$matches" | jq -r '.[0].question')
+
+    if (( clear_only )); then
+        # Clear-only path (XACA-1545-013): after a reply that was SENT but whose clear
+        # failed, re-running kb-answer would send the answer a second time.
+        _kb_ask_clear_pending "$board_file" "$m_item" "$m_tid" || {
+            echo "kb-answer --clear: clearing pendingQuestion on $m_item failed." >&2
+            return 8
+        }
+        _kb_log_activity "question_cleared" "$m_item" "item" "pendingQuestion" "${m_q:0:300}" "" "thread=$m_tid cleared-without-reply"
+        echo "Cleared the pending question on $m_item (thread ${m_tid:0:8}); nothing was sent."
+        return 0
+    fi
+
     if [[ -z "$m_asker" || "$m_asker" == "null" || "$m_asker" != *:* ]]; then
         echo "kb-answer: pending question on $m_item has no usable askedBy address; cannot reply." >&2
         return 8
+    fi
+
+    # Answering someone else's question (XACA-1545-014): warn, don't refuse - a human
+    # stepping in for a stuck coordinator is legitimate, but it should never be silent.
+    local me me_addr
+    me=$(_kb_msg_self 2>/dev/null)
+    me_addr="${me%% *}:${me##* }"
+    if [[ "$m_coord" == *:* && "$me_addr" != "$m_coord" ]]; then
+        echo "kb-answer: WARNING this question was sent to coordinator '$m_coord', but you are '$me_addr'; answering anyway." >&2
     fi
 
     # Reply on the SAME thread first; only clear the board once delivery succeeded.
@@ -34579,8 +34733,9 @@ kb-answer() {
         echo "kb-answer: reply to $m_asker failed; the question stays pending on $m_item." >&2
         return 8
     fi
-    _kb_ask_clear_pending "$board_file" "$m_item" "$m_tid" || {
-        echo "kb-answer: reply SENT, but clearing pendingQuestion on $m_item failed; clear it by re-running kb-answer." >&2
+    _kb_ask_clear_pending "$board_file" "$m_item" "$m_tid" answered || {
+        echo "kb-answer: reply SENT, but clearing pendingQuestion on $m_item failed." >&2
+        echo "  Do NOT re-run kb-answer (it would send the reply again). Clear it with: kb-answer --clear $m_item" >&2
         return 8
     }
     _kb_log_activity "question_answered" "$m_item" "item" "qa" "${m_q:0:300}" "${answer:0:300}" "thread=$m_tid asker=$m_asker"
@@ -34588,6 +34743,7 @@ kb-answer() {
     #   answer=$answer, askedBy=$m_asker) goes HERE (release_orchestrator.ledger_append, once the
     #   writer exists). kb-ask's "question" ledger event goes next to its _kb_log_activity call.
     echo "Answered $m_item (thread ${m_tid:0:8}) -> $m_asker. Pending question cleared."
+    echo "  Q: ${m_q:0:160}"
     return 0
 }
 
