@@ -14500,6 +14500,10 @@ _kb_build_planning_gate_section() {
 #                   subitem delegation; emits the release resume plan + release rules instead. Empty/absent =
 #                   the item prompt, BYTE-IDENTICAL to before (tests/test-xaca-1350-001-launch-prompt-parity.sh)
 #   launch_extra    (optional 10th) the resume-plan text for release mode (raw; escaped here like every user field)
+#                   launch_mode "orchestrated" (XACA-1544-002): a `kb-run <ID> --orchestrated <RUN>` worker. The
+#                   normal item prompt (subitems, delegation) plus the worker-rules block, and an autonomous tail
+#                   instead of "wait for approval". launch_extra = the RUN-ID; launch_extra2 (11th) = the
+#                   coordinator's team:terminal kb-msg address.
 #
 # Output: published in the GLOBAL $_KB_LAUNCH_PROMPT (NOT stdout). The result is meant for
 # `echo -e "$_KB_LAUNCH_PROMPT" | cc`, so it contains literal \n sequences.
@@ -14517,6 +14521,7 @@ _kb_build_launch_prompt() {
     local team="${8-}"
     local launch_mode="${9-}"
     local launch_extra="${10-}"
+    local launch_extra2="${11-}"
     _KB_LAUNCH_PROMPT=""
 
     # XACA-1128: this prompt is emitted via `echo -e`, which expands backslash
@@ -14644,6 +14649,15 @@ _kb_build_launch_prompt() {
         prompt+="**DO NOT skip tracking steps.** They update the kanban board so progress is visible in the Fleet Monitor.\n"
         prompt+="**DO NOT directly edit the board JSON files.** Always use the commands above.\n"
         prompt+="**DO NOT close the terminal without running kb-done.** This clears the task from the workflow board.\n"
+    fi
+
+    # XACA-1544-002: orchestrated worker. Nobody watches this window, so the "wait for approval" tail below would
+    # stall the run forever; this branch replaces it. Returns before the tail, so the non-orchestrated prompt stays
+    # byte-identical (tests/test-xaca-1350-001-launch-prompt-parity.sh).
+    if [[ "$launch_mode" == "orchestrated" ]]; then
+        prompt+="$(_kb_orchestrated_worker_rules "$_kb_prompt_item_id" "${launch_extra//\\/\\\\}" "${launch_extra2//\\/\\\\}")"
+        _KB_LAUNCH_PROMPT="$prompt"
+        return 0
     fi
 
     # XACA-0801: this tail asserted "delegate each subitem" unconditionally, even when
@@ -15097,26 +15111,45 @@ kb-run() {
     _kb_ensure_jq || return 1
 
     # XACA-1284-003: accept --yes/-y in either position; first non-flag arg is the selector.
-    local selector="" _kb_yes=0 _kb_arg
-    for _kb_arg in "$@"; do
-        case "$_kb_arg" in
-            --yes|-y) _kb_yes=1 ;;
-            *) [[ -z "$selector" ]] && selector="$_kb_arg" ;;
+    # XACA-1544-001: --orchestrated <RUN-ID> / --coordinator <team:terminal> take a value, so this is a
+    # shifting loop. A flag with a missing value is a usage error, never silently ignored.
+    local selector="" _kb_yes=0 _kb_orch_run="" _kb_orch_coord="" _kb_orch_flag=0
+    while (( $# > 0 )); do
+        case "$1" in
+            --yes|-y) _kb_yes=1; shift ;;
+            --orchestrated|--coordinator)
+                if (( $# < 2 )) || [[ -z "${2-}" || "${2-}" == -* ]]; then
+                    echo "Error: kb-run $1 needs a value" >&2
+                    return 1
+                fi
+                if [[ "$1" == "--orchestrated" ]]; then _kb_orch_run="$2"; _kb_orch_flag=1; else _kb_orch_coord="$2"; fi
+                shift 2 ;;
+            *) [[ -z "$selector" ]] && selector="$1"; shift ;;
         esac
     done
+    if [[ -n "$_kb_orch_coord" && "$_kb_orch_flag" != "1" ]]; then
+        echo "Error: kb-run --coordinator is only valid with --orchestrated <RUN-ID>" >&2
+        return 1
+    fi
 
     # XACA-1350-002 (spec 5.1): any ^REL- selector is a RELEASE session. Dispatched BEFORE the usage block, team
     # resolution and _kb_resolve_selector: a release id is never an item selector and must not reach that path.
     # Item selectors fall through untouched.
     if [[ "$selector" == REL-* ]]; then
+        if [[ "$_kb_orch_flag" == "1" ]]; then
+            echo "Error: --orchestrated applies to an item, not a release session ($selector)" >&2
+            return 1
+        fi
         _kb_release_run "$selector" "$_kb_yes"
         return $?
     fi
 
     if [[ -z "$selector" ]]; then
-        echo "Usage: kb-run <id> [--yes]"
+        echo "Usage: kb-run <id> [--yes] [--orchestrated <RUN-ID> [--coordinator <team:terminal>]]"
         echo "       kb-run <REL-ID> [--yes]   release session: attach/create the release worktree, resume from the record (XACA-1350)"
         echo "  --yes, -y   skip the confirmation prompt (required without a tty; or set KB_ASSUME_YES=1)"
+        echo "  --orchestrated <RUN-ID>   worker mode for a release-orchestrator run (XACA-1544): stamps"
+        echo "              item.orchestration and adds the worker rules to the prompt. Normally sent by kb-dispatch."
         echo "Launches Claude Code with task details and auto-creates worktree."
         echo "Use 'kb-backlog list' to see available items"
         echo "Example: kb-run XFRE-0001"
@@ -15225,6 +15258,12 @@ kb-run() {
     _kb_require_epic "$board_file" "$index" "$item_id" || return 1
     _kb_require_release "$board_file" "$index" "$item_id" || return 1
 
+    # XACA-1544-001: orchestrated worker mode. Every refusal is checked HERE, read-only, before any worktree work.
+    # The stamp itself rides kb-run's activelyWorking write as one CAS (see "Mark item as actively being worked on").
+    if [[ "$_kb_orch_flag" == "1" ]]; then
+        _kb_orch_check "$board_file" "$item_id" "$_kb_orch_run" "$_kb_orch_coord" || return 1
+    fi
+
     # XACA-0184: If the item has a subRepo and we're in an umbrella context, cd into
     # the sub-repo before the git-context check runs. This lets users run kb-run from
     # the umbrella parent directory — the script auto-navigates to the correct sub-repo.
@@ -15300,8 +15339,14 @@ kb-run() {
 
     # Build the prompt (shared with kb-run/kb-work via _kb_build_launch_prompt; see its
     # header for the XACA-1128 echo -e backslash-escaping contract).
-    _kb_build_launch_prompt "$item_id" "$title" "$description" "$jira_id" "$github_issue" \
-        "$subitem_count" "$item_json" "$team"
+    if [[ "$_kb_orch_flag" == "1" ]]; then
+        # XACA-1544-002: orchestrated worker rules; the coordinator is the one _kb_orch_check resolved.
+        _kb_build_launch_prompt "$item_id" "$title" "$description" "$jira_id" "$github_issue" \
+            "$subitem_count" "$item_json" "$team" "orchestrated" "$_kb_orch_run" "$_KB_ORCH_COORDINATOR"
+    else
+        _kb_build_launch_prompt "$item_id" "$title" "$description" "$jira_id" "$github_issue" \
+            "$subitem_count" "$item_json" "$team"
+    fi
     local prompt="$_KB_LAUNCH_PROMPT"
 
     # Check for worktree conflicts before starting
@@ -15330,7 +15375,17 @@ kb-run() {
     local window_name="${rest#*:}"
     window_id=$(_kb_get_window_id "$terminal" "$window_name")
 
-    if ! _kb_jq_update "$board_file" \
+    if [[ "$_kb_orch_flag" == "1" ]]; then
+        # XACA-1544-001 (PR #1333 r1 B1 + r2): in orchestrated mode the stamp IS this write. cc() is checked first, then
+        # ONE locked compare-and-set writes the stamp together with kb-run's own activelyWorking/worktree fields,
+        # evaluated against the item as it was BEFORE kb-run touched it (a status-less item resolves todo only until
+        # activelyWorking/startedAt are set). A refused stamp writes nothing at all, and nothing fallible follows it.
+        if ! _kb_ensure_cc_function "kb-run"; then
+            return 1
+        fi
+        _kb_set_item_orchestration "$board_file" "$item_id" "$_kb_orch_run" "$_KB_ORCH_COORDINATOR" \
+            "$worktree" "$worktree_branch" "$window_id" || return 1
+    elif ! _kb_jq_update "$board_file" \
        '.backlog[$idx].activelyWorking = true |
         .backlog[$idx].workStartedAt = $ts |
         .backlog[$idx].startedAt //= $ts |
@@ -15439,6 +15494,641 @@ kb-run() {
         echo "✗ kb-run: cc exited $_kb_cc_rc -- the session may not have launched (see the error above); do not treat this as a completed launch." >&2
         return $_kb_cc_rc
     fi
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Release orchestrator: guarded dispatcher + orchestrated worker mode (XACA-1544)
+# Design: kanban/plans/XACA-1544/XACA-1544_guarded_dispatcher.md (EPIC-0072).
+#
+#   kb-run <ITEM> --orchestrated <RUN-ID> [--coordinator <team:terminal>]
+#       stamps item.orchestration {runId, coordinator, dispatchedAt} + status in_progress, then launches with the
+#       worker-rules prompt block (_kb_orchestrated_worker_rules).
+#   kb-dispatch <ITEM> --terminal <name> --run <RUN-ID> [--model M] [--coordinator A] [--deadline S] [--json]
+#       opens ONE new detached tmux window named <ITEM> in session <team>-<terminal>, bootstraps it exactly like
+#       that terminal's own startup script, types `kb-run <ITEM> --yes --orchestrated <RUN>`, and reports
+#       DISPATCHED only when the board shows the flip. It never types into a window it did not just create.
+#
+# Run id: RUN-<REL-ID>-<UTC yyyymmddThhmmss> (minted by XACA-1546). The release is read back out of the id.
+# Board shapes READ here (written by XACA-1546 / XACA-1548):
+#   release.orchestration.activeRunId / closedAt / coordinator ("team:terminal" or {address})
+#   release.orchestration.maxParallel (default 2) / lanes[] ({current: <item>|null})
+#   release.orchestration.workerModel|model, releaseConfig.orchestration.{workerModel|model, allowedModels}
+#   item.orchestration.model (per-item override)
+# ═════════════════════════════════════════════════════════════════════════════
+
+_KB_ORCH_DEFAULT_MODEL="claude-fable-5-2"
+# Built-in allow-list, used only when the team sets no releaseConfig.orchestration.allowedModels.
+_KB_ORCH_BUILTIN_MODELS=(claude-fable-5-2 claude-opus-5-5 claude-sonnet-5-5 claude-haiku-5-5)
+# Shells a fresh pane may report before we type into it (XACA-1380, scripts/kb-host-ready.sh SHELLS).
+_KB_ORCH_SHELLS=(zsh bash -zsh -bash)
+
+_kb_orch_run_valid() {
+    [[ "${1-}" =~ ^RUN-REL-[A-Za-z0-9]+(-[A-Za-z0-9]+)*-[0-9]{8}T[0-9]{6}$ ]]
+}
+
+# RUN-REL-2026-Q4-049-20261113T193800 -> REL-2026-Q4-049. Caller validates first.
+_kb_orch_run_release() {
+    local r="${1#RUN-}"
+    echo "${r%-*}"
+}
+
+# A kb-msg address naming exactly ONE terminal (kb-ask refuses a broadcast/team:* coordinator too).
+_kb_orch_addr_valid() {
+    [[ "${1-}" =~ ^[a-z0-9][a-z0-9-]*:[a-z0-9][a-z0-9_-]*$ ]]
+}
+
+# _kb_orch_check <board> <item_id> <run_id> [coordinator]   (XACA-1544-001; read-only)
+# Everything that can refuse an orchestrated launch, WITHOUT writing: the run id format; the run being the release's
+# active, open run (release.orchestration.activeRunId, no closedAt), also when --coordinator is passed explicitly;
+# the item belonging to that release; the item being todo; and a single-terminal coordinator (the flag, else the
+# run's own). kb-run calls this before any worktree work, so refusals cost nothing. Publishes $_KB_ORCH_COORDINATOR.
+_kb_orch_check() {
+    local board_file="${1-}" item_id="${2-}" run="${3-}" coord="${4-}"
+    _KB_ORCH_COORDINATOR=""
+    if ! _kb_orch_run_valid "$run"; then
+        echo "Error: --orchestrated: '$run' is not a run id (expected RUN-<REL-ID>-<yyyymmddThhmmss>)" >&2
+        return 1
+    fi
+    local rel info item_rel item_status run_coord
+    rel=$(_kb_orch_run_release "$run")
+    info=$(_kb_jq_read "$board_file" "${_KB_ITEM_STATUS_JQ_DEFS}"'
+        ([.backlog[]? | select(.id == $id)] | first) as $it
+        | ([.releases[]? | select(.id == $rel) | .orchestration] | first) as $o
+        | [ ($it.releaseAssignment.releaseId // ""),
+            (if $it == null then "missing" else ($it | kb_resolve_item_status) end),
+            (if ($o | type) == "object" and ($o.activeRunId // "") == $run and ($o.closedAt // null) == null
+             then ($o.coordinator // "" | if type == "object" then (.address // "") else . end
+                   | if type == "string" and . != "" then . else "-" end)
+             else "INACTIVE" end) ] | @tsv' \
+        --arg id "$item_id" --arg rel "$rel" --arg run "$run" -r 2>/dev/null) || info=""
+    IFS=$'\t' read -r item_rel item_status run_coord <<<"$info"
+    if [[ "$item_rel" != "$rel" ]]; then
+        echo "Error: --orchestrated: [$item_id] is assigned to '${item_rel:-no release}', not to run $run's release $rel" >&2
+        return 1
+    fi
+    if [[ "$run_coord" == "INACTIVE" || -z "$run_coord" ]]; then
+        echo "Error: --orchestrated: $run is not the active, open run of $rel (release.orchestration.activeRunId)" >&2
+        return 1
+    fi
+    if [[ "$item_status" != "todo" ]]; then
+        echo "Error: --orchestrated: [$item_id] is '${item_status}'; only a todo item starts an orchestrated worker" >&2
+        echo "       (to resume an existing worker, run kb-run $item_id without --orchestrated: the stamp stays on the item)" >&2
+        return 1
+    fi
+    [[ -z "$coord" && "$run_coord" != "-" ]] && coord="$run_coord"
+    if ! _kb_orch_addr_valid "$coord"; then
+        echo "Error: --orchestrated: no usable coordinator for $run ('${coord}'): pass --coordinator <team:terminal>," >&2
+        echo "       or set release.orchestration.coordinator on the active run" >&2
+        return 1
+    fi
+    _KB_ORCH_COORDINATOR="$coord"
+    return 0
+}
+
+# _kb_set_item_orchestration <board> <item_id> <run_id> [coordinator]   (XACA-1544-001)
+# The stamp. kb-run calls it as its activelyWorking write, after cc() is confirmed, so no fallible kb-run step runs
+# after it and strands an in_progress item with no worker (PR #1333 B1, r2). It re-runs _kb_orch_check, then writes as a compare-and-set INSIDE
+# one locked _kb_jq_update: only an item whose resolved status is still todo is changed (PR #1333 B2: never reopen a
+# completed/cancelled item or steal another run's item). The write carries a per-call claim nonce that is read back;
+# if a concurrent stamp won the race (or the item moved off todo meanwhile), the CAS was a no-op and this refuses.
+# On success: item.orchestration = existing object + {runId, coordinator, dispatchedAt, claim}, status in_progress,
+# startedAt //= now. rc 1 (board unchanged by this call) on any refusal.
+_kb_set_item_orchestration() {
+    local board_file="${1-}" item_id="${2-}" run="${3-}" coord="${4-}"
+    # Optional 5-7: kb-run's worktree, branch and window id. When given (kb-run always passes 7 args), kb-run's
+    # activelyWorking/worktree write happens INSIDE the same CAS, so a refusal leaves no derived-in_progress residue.
+    local with_wt=0 wt="${5-}" wtb="${6-}" wid="${7-}"
+    (( $# >= 7 )) && with_wt=1
+    _kb_orch_check "$board_file" "$item_id" "$run" "$coord" || return 1
+    coord="$_KB_ORCH_COORDINATOR"
+    local ts nonce got
+    ts=$(_kb_get_timestamp)
+    nonce="${ts}-$$-${RANDOM}${RANDOM}"
+    if ! _kb_jq_update "$board_file" "${_KB_ITEM_STATUS_JQ_DEFS}"'
+        if any(.backlog[]?; .id == $id and (kb_resolve_item_status) == "todo") then
+            .backlog |= map(
+                if .id == $id then
+                    .orchestration = ((if (.orchestration | type) == "object" then .orchestration else {} end)
+                                      + {runId: $run, coordinator: $coord, dispatchedAt: $ts, claim: $nonce})
+                    | .status = "in_progress" | .startedAt //= $ts | .updatedAt = $ts
+                    | if $withwt == "1" then .activelyWorking = true | .workStartedAt = $ts | .worktree = $wt
+                        | .worktreeBranch = $wtb | .worktreeWindowId = $wid else . end
+                else . end) |
+            .lastUpdated = $ts
+        else . end' \
+        --arg id "$item_id" --arg run "$run" --arg coord "$coord" --arg ts "$ts" --arg nonce "$nonce" \
+        --arg withwt "$with_wt" --arg wt "$wt" --arg wtb "$wtb" --arg wid "$wid"; then
+        echo "Error: --orchestrated: could not write item.orchestration for [$item_id]" >&2
+        return 1
+    fi
+    got=$(_kb_jq_read "$board_file" '[.backlog[]? | select(.id == $id) | .orchestration.claim // empty] | first // ""' \
+        --arg id "$item_id" -r 2>/dev/null)
+    if [[ "$got" != "$nonce" ]]; then
+        echo "Error: --orchestrated: [$item_id] was no longer todo when the stamp was written (a concurrent start won); not launching" >&2
+        return 1
+    fi
+    _KB_ORCH_COORDINATOR="$coord"
+    echo "✓ Orchestrated worker: run $run, coordinator $coord"
+    return 0
+}
+
+# _kb_orchestrated_worker_rules <item_id> <run_id> <coordinator>   (XACA-1544-002)
+# Prints the worker-rules block with literal \n sequences (the caller's prompt goes through `echo -e`). The caller
+# passes already backslash-escaped values (XACA-1128).
+_kb_orchestrated_worker_rules() {
+    local id="${1-}" run="${2-}" coord="${3-}" r=""
+    r+="\n\n## Orchestrated worker rules (run ${run}, coordinator ${coord})\n"
+    r+="You were dispatched by the release coordinator. Nobody is watching this window: do NOT wait for approval. Work the ticket all the way through.\n"
+    r+="- **Full normal flow.** Stay on this worktree branch. Work the subitems (\`kb-backlog sub start/done\`). Run lint and tests. Open the PR against the release branch, then \`kb-pr\`. Launch BOTH gates yourself, each in its OWN background Bash call: \`kb-run-test ${id} --yes\` and \`kb-run-review ${id} --yes\` (add \`kb-run-ux ${id} --yes\` if the diff touches UI). Then run \`kb-pr-monitor --pr <N> --item ${id}\`. On GATES_PASSED: \`kb-sweep ${id}\`, then \`kb-done\`.\n"
+    r+="- **Questions: ask, never guess.** For anything you cannot resolve with confidence, and ALWAYS for a user-owned decision (scope, product behaviour, anything destructive or outward-facing), run \`kb-ask \"<question>\" [--options a|b]\`. Run kb-ask as a BACKGROUND Bash command (run_in_background): the Bash tool kills a foreground command after 600s and kb-ask waits up to 1800s. Act on its exit code: 0 = the answer is on stdout; 3 or 130 = no answer yet, so PARK (stop and end your turn; the question stays pending for the coordinator); 4/5/6/7/8 = you cannot ask, so stop and report.\n"
+    r+="- **Milestone pings.** \`kb-msg send ${coord} \"${id}: <milestone>\"\` when the PR is opened (include the number), on each gate verdict, when merged, and when done.\n"
+    r+="- **Freeze orders.** Right before merging, run \`kb-msg inbox --all\`. If the coordinator or the lead has ordered a freeze or hold, do not merge: park and say so.\n"
+    r+="- **Escalate, do not retry.** If kb-pr-monitor ends 20 CONFLICT, 21 UX_REOPEN, 22 BLOCKED, 30 PR_CLOSED or 31 TIMEOUT, stop, \`kb-msg send ${coord}\` the VERDICT line, and park. Only 10/11/12 are retried, per the normal rules.\n"
+    r+="- **Never** run \`kb-release promote\`, change a release stage, or touch another ticket's PR.\n"
+    r+="\nStart now: build the todo list, delegate the subitems, and carry the ticket through merge and \`kb-done\`."
+    printf '%s' "$r"
+}
+
+# _kb_orch_resolve_model <board> <item> <release> [cli_model]   (XACA-1544-012)
+# Per-dispatch worker model, highest precedence first:
+#   --model > item.orchestration.model > $KB_ORCH_WORKER_MODEL > $KB_ORCH_MODEL
+#   > release.orchestration.{workerModel|model} > releaseConfig.orchestration.{workerModel|model} > claude-fable-5-2
+# The FIRST layer that is present decides; a present-but-empty or non-string value is a refusal, never a fall-through
+# (an empty or unknown id must never silently become the default). "inherit" = no override (export nothing).
+# Allowed: releaseConfig.orchestration.allowedModels (non-empty string array) else _KB_ORCH_BUILTIN_MODELS.
+# Publishes $_KB_ORCH_MODEL / $_KB_ORCH_MODEL_SOURCE; rc 1 with $_KB_ORCH_MODEL_REASON on refusal.
+_kb_orch_resolve_model() {
+    local board_file="${1-}" item="${2-}" rel="${3-}" cli="${4-}"
+    _KB_ORCH_MODEL="" _KB_ORCH_MODEL_SOURCE="" _KB_ORCH_MODEL_REASON=""
+    local layers vtype val src
+    # One read: each present layer as "<source>\t<json type>\t<string value or empty>".
+    layers=$(_kb_jq_read "$board_file" '
+        def lay($o; $src): if ($o | type) == "object" then
+              (if $o.workerModel != null then [$src + ".workerModel", $o.workerModel]
+               elif $o.model != null then [$src + ".model", $o.model] else empty end)
+            else empty end;
+        [ ((.backlog[]? | select(.id == $id) | .orchestration) as $io
+            | if ($io | type) == "object" and $io.model != null then ["item.orchestration.model", $io.model] else empty end),
+          ((.releases[]? | select(.id == $rel) | .orchestration) | lay(.; "release.orchestration")),
+          (.releaseConfig.orchestration | lay(.; "releaseConfig.orchestration")) ]
+        | .[] | [.[0], (.[1] | type), (if (.[1] | type) == "string" then .[1] else "" end)] | @tsv' \
+        --arg id "$item" --arg rel "$rel" -r 2>/dev/null) || layers=""
+    local item_layer="" rest_layers=""
+    if [[ "$layers" == item.orchestration.model$'\t'* ]]; then
+        item_layer="${layers%%$'\n'*}"
+        [[ "$layers" == *$'\n'* ]] && rest_layers="${layers#*$'\n'}"
+    else
+        rest_layers="$layers"
+    fi
+    if [[ -n "$cli" ]]; then
+        src="--model" vtype="string" val="$cli"
+    elif [[ -n "$item_layer" ]]; then
+        IFS=$'\t' read -r src vtype val <<<"$item_layer"
+    elif [[ -n "${KB_ORCH_WORKER_MODEL+x}" ]]; then
+        src="env KB_ORCH_WORKER_MODEL" vtype="string" val="$KB_ORCH_WORKER_MODEL"
+    elif [[ -n "${KB_ORCH_MODEL+x}" ]]; then
+        src="env KB_ORCH_MODEL" vtype="string" val="$KB_ORCH_MODEL"
+    elif [[ -n "$rest_layers" ]]; then
+        IFS=$'\t' read -r src vtype val <<<"${rest_layers%%$'\n'*}"
+    else
+        src="built-in default" vtype="string" val="$_KB_ORCH_DEFAULT_MODEL"
+    fi
+    if [[ "$vtype" != "string" || -z "$val" ]]; then
+        _KB_ORCH_MODEL_REASON="model from ${src} is empty or not a string (${vtype})"
+        return 1
+    fi
+    if [[ "$val" == "inherit" ]]; then
+        _KB_ORCH_MODEL="inherit" _KB_ORCH_MODEL_SOURCE="$src"
+        return 0
+    fi
+    # Typed into a shell later: a strict charset first, whatever the allow-list says.
+    if [[ ! "$val" =~ ^[a-z0-9][a-z0-9.-]*$ ]]; then
+        _KB_ORCH_MODEL_REASON="model '${val}' from ${src} is not a model id"
+        return 1
+    fi
+    local allowed
+    allowed=$(_kb_jq_read "$board_file" '
+        (.releaseConfig.orchestration.allowedModels // null) as $a
+        | if $a == null then "BUILTIN"
+          elif ($a | type) == "array" and ($a | length) > 0 and all($a[]; type == "string") then $a[]
+          else "MALFORMED" end' -r 2>/dev/null) || allowed="MALFORMED"
+    if [[ "$allowed" == "MALFORMED" || -z "$allowed" ]]; then
+        _KB_ORCH_MODEL_REASON="releaseConfig.orchestration.allowedModels is malformed (want a non-empty array of model ids)"
+        return 1
+    fi
+    local ok=0 m
+    if [[ "$allowed" == "BUILTIN" ]]; then
+        for m in "${_KB_ORCH_BUILTIN_MODELS[@]}"; do [[ "$m" == "$val" ]] && ok=1; done
+    else
+        while IFS= read -r m; do [[ "$m" == "$val" ]] && ok=1; done <<<"$allowed"
+    fi
+    if (( ! ok )); then
+        _KB_ORCH_MODEL_REASON="model '${val}' from ${src} is not in the allowed models"
+        return 1
+    fi
+    _KB_ORCH_MODEL="$val" _KB_ORCH_MODEL_SOURCE="$src"
+    return 0
+}
+
+# _kb_orch_startup_script <team> <terminal> -> path of that terminal's startup script (rc 1 if none).
+# KB_STARTUP_SCRIPTS_DIR (tests) is exclusive when set; otherwise the installed copy wins over the repo copy,
+# because the installed one is what actually built the terminal's windows.
+_kb_orch_startup_script() {
+    local team="${1-}" term="${2-}" d f="${1-}-${2-}-startup.sh"
+    if [[ -n "${KB_STARTUP_SCRIPTS_DIR-}" ]]; then
+        [[ -f "$KB_STARTUP_SCRIPTS_DIR/$f" ]] && { echo "$KB_STARTUP_SCRIPTS_DIR/$f"; return 0; }
+        return 1
+    fi
+    for d in "${AITEAMFORGE_DIR:+$AITEAMFORGE_DIR/$team/scripts}" "$HOME/dev-team/$team/scripts"; do
+        [[ -n "$d" && -f "$d/$f" ]] && { echo "$d/$f"; return 0; }
+    done
+    return 1
+}
+
+# _kb_orch_assignment <script> <VAR> -> the last top-level VAR="..." value, with $HOME / $AITEAMFORGE_DIR expanded.
+# rc 1 when absent or when anything else would need shell evaluation ($, backtick, quotes left over).
+_kb_orch_assignment() {
+    local v
+    v=$(awk -v n="$2" 'index($0, n "=") == 1 { v = substr($0, length(n) + 2) } END { print v }' "$1") || return 1
+    [[ -z "$v" ]] && return 1
+    [[ "$v" == \"*\" ]] && { v="${v#\"}"; v="${v%\"}"; }
+    v="${v//\$\{HOME\}/$HOME}"; v="${v//\$HOME/$HOME}"
+    if [[ "$v" == *'$AITEAMFORGE_DIR'* || "$v" == *'${AITEAMFORGE_DIR}'* ]]; then
+        [[ -z "${AITEAMFORGE_DIR-}" ]] && return 1
+        v="${v//\$\{AITEAMFORGE_DIR\}/$AITEAMFORGE_DIR}"; v="${v//\$AITEAMFORGE_DIR/$AITEAMFORGE_DIR}"
+    fi
+    [[ "$v" == *'$'* || "$v" == *'`'* || "$v" == *'"'* || "$v" == *"'"* || -z "$v" ]] && return 1
+    echo "$v"
+}
+
+# _kb_orch_startup_core <script> <team> <terminal>   (XACA-1544-011, bootstrap parity)
+# Accepts a setup_window() ONLY when it is the core form: after dropping comments, `sleep N`, `local ...` and the
+# side-effect-free `_X_Q=$(_xaca1229_q "$X")` quoting prep, exactly four send-keys steps remain, in this order:
+#   cd $SESSION_DIRECTORY (or "\"$SESSION_DIRECTORY\"" / $_SESSION_DIRECTORY_Q)
+#   . ~/.zshrc_${SESSION_TYPE}_${SESSION_NAME}
+#   . $KANBAN_HELPERS
+#   . <...>-banner.sh <args>          (decorative; NOT replayed; must not chain anything)
+# Anything else (the freelance/mainevent wt-project/wt-dev block, a missing step, an altered step) refuses.
+# On success publishes $_KB_ORCH_BOOT_DIR / _TYPE / _NAME / _HELPERS; on refusal rc 1 + $_KB_ORCH_BOOT_REASON.
+_kb_orch_startup_core() {
+    local script="${1-}" team="${2-}" term="${3-}"
+    _KB_ORCH_BOOT_DIR="" _KB_ORCH_BOOT_TYPE="" _KB_ORCH_BOOT_NAME="" _KB_ORCH_BOOT_HELPERS="" _KB_ORCH_BOOT_REASON=""
+    if [[ ! -f "$script" ]]; then
+        _KB_ORCH_BOOT_REASON="no startup script ${team}-${term}-startup.sh"
+        return 1
+    fi
+    if ! grep -qE '^setup_window\(\)[[:space:]]*\{' "$script"; then
+        _KB_ORCH_BOOT_REASON="$(basename "$script") defines no setup_window()"
+        return 1
+    fi
+    local body line
+    local pre='$TMUX_CMD send-keys -t $SESSION_CODE:$TERMINAL_NUMBER "' suf='" C-m'
+    # Regexes live in variables: an inline =~ pattern with escaped metacharacters parses differently per shell.
+    local re_sleep='^sleep [0-9.]+$' re_local='^local [A-Za-z_][A-Za-z0-9_ ]*$'
+    local re_q='^_[A-Z_]+_Q=[$][(]_xaca1229_q "[$][A-Z_]+"[)]$'
+    local re_banner='^[.] [^;&|]*-banner[.]sh( [^;&|]*)?$'
+    local -a payloads
+    payloads=()
+    body=$(awk '/^setup_window\(\)[[:space:]]*\{/ { f = 1; next } f && /^}/ { exit } f { print }' "$script")
+    while IFS= read -r line; do
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+        [[ -z "$line" || "$line" == \#* ]] && continue
+        [[ "$line" =~ $re_sleep ]] && continue
+        [[ "$line" =~ $re_local ]] && continue
+        [[ "$line" =~ $re_q ]] && continue
+        if [[ "$line" == "$pre"*"$suf" ]]; then
+            line="${line#"$pre"}"
+            payloads+=("${line%"$suf"}")
+            continue
+        fi
+        _KB_ORCH_BOOT_REASON="setup_window has a step beyond the core form: ${line}"
+        return 1
+    done <<<"$body"
+    if (( ${#payloads[@]} != 4 )); then
+        _KB_ORCH_BOOT_REASON="setup_window has ${#payloads[@]} send-keys steps, the core form has 4"
+        return 1
+    fi
+    local p1 p2 p3 p4
+    p1="${payloads[@]:0:1}" p2="${payloads[@]:1:1}" p3="${payloads[@]:2:1}" p4="${payloads[@]:3:1}"
+    case "$p1" in
+        'cd $SESSION_DIRECTORY'|'cd \"$SESSION_DIRECTORY\"'|'cd $_SESSION_DIRECTORY_Q') ;;
+        *) _KB_ORCH_BOOT_REASON="step 1 is not the core cd: ${p1}"; return 1 ;;
+    esac
+    if [[ "$p2" != '. ~/.zshrc_${SESSION_TYPE}_${SESSION_NAME}' ]]; then
+        _KB_ORCH_BOOT_REASON="step 2 is not the persona zshrc: ${p2}"; return 1
+    fi
+    if [[ "$p3" != '. $KANBAN_HELPERS' ]]; then
+        _KB_ORCH_BOOT_REASON="step 3 is not kanban-helpers: ${p3}"; return 1
+    fi
+    if [[ ! "$p4" =~ $re_banner || "$p4" == *'$('* || "$p4" == *'`'* ]]; then
+        _KB_ORCH_BOOT_REASON="step 4 is not a plain banner line: ${p4}"; return 1
+    fi
+    local dir stype sname helpers
+    dir=$(_kb_orch_assignment "$script" SESSION_DIRECTORY) &&
+        stype=$(_kb_orch_assignment "$script" SESSION_TYPE) &&
+        sname=$(_kb_orch_assignment "$script" SESSION_NAME) &&
+        helpers=$(_kb_orch_assignment "$script" KANBAN_HELPERS) || {
+        _KB_ORCH_BOOT_REASON="cannot read SESSION_DIRECTORY/SESSION_TYPE/SESSION_NAME/KANBAN_HELPERS as plain values"
+        return 1
+    }
+    if [[ "$stype" != "$team" || "$sname" != "$term" ]]; then
+        _KB_ORCH_BOOT_REASON="script identity ${stype}-${sname} is not ${team}-${term}"
+        return 1
+    fi
+    if [[ ! "$stype" =~ ^[A-Za-z0-9_-]+$ || ! "$sname" =~ ^[A-Za-z0-9_-]+$ ]]; then
+        _KB_ORCH_BOOT_REASON="SESSION_TYPE/SESSION_NAME contain unsupported characters"
+        return 1
+    fi
+    if [[ ! -d "$dir" ]]; then _KB_ORCH_BOOT_REASON="SESSION_DIRECTORY $dir is not a directory"; return 1; fi
+    if [[ ! -f "$helpers" ]]; then _KB_ORCH_BOOT_REASON="KANBAN_HELPERS $helpers does not exist"; return 1; fi
+    _KB_ORCH_BOOT_DIR="$dir" _KB_ORCH_BOOT_TYPE="$stype" _KB_ORCH_BOOT_NAME="$sname" _KB_ORCH_BOOT_HELPERS="$helpers"
+    return 0
+}
+
+# _kb_orch_pane_at_shell <pane_id> -> rc 0 when the pane's foreground command is a shell.
+_kb_orch_pane_at_shell() {
+    local cmd s
+    cmd=$(tmux display-message -p -t "${1-}" '#{pane_current_command}' 2>/dev/null) || return 1
+    for s in "${_KB_ORCH_SHELLS[@]}"; do [[ "$cmd" == "$s" ]] && return 0; done
+    return 1
+}
+
+# _kb_orch_type <pane_id> <text> : type text literally, then Enter. Keys only; delivery is NOT evidence.
+_kb_orch_type() {
+    tmux send-keys -t "${1-}" -l -- "${2-}" 2>/dev/null && tmux send-keys -t "${1-}" Enter 2>/dev/null
+}
+
+# _kb_open_lane_window <session> <item> <run> <coordinator> <model>   (XACA-1544-003/-011)
+# Uses the _KB_ORCH_BOOT_* values from _kb_orch_startup_core. Creates the window DETACHED (-d: never steals the
+# user's focus; -n turns automatic-rename off so the name sticks), waits for its shell, then sends the core
+# bootstrap and the kb-run line. Publishes $_KB_ORCH_PANE; rc 1 + $_KB_ORCH_OPEN_REASON on failure. A window that
+# was created is never killed, whatever happens after.
+_kb_open_lane_window() {
+    local sess="${1-}" item="${2-}" run="${3-}" coord="${4-}" model="${5-}"
+    _KB_ORCH_PANE="" _KB_ORCH_OPEN_REASON=""
+    local pane
+    pane=$(tmux new-window -d -P -F '#{pane_id}' -t "=${sess}:" -n "$item" -c "$_KB_ORCH_BOOT_DIR" 2>&1) || {
+        _KB_ORCH_OPEN_REASON="WINDOW_CREATE_FAILED: ${pane}"
+        return 1
+    }
+    _KB_ORCH_PANE="$pane"
+    local waited=0 limit="${KB_DISPATCH_SHELL_WAIT:-15}"
+    until _kb_orch_pane_at_shell "$pane"; do
+        if (( waited >= limit * 10 )); then
+            _KB_ORCH_OPEN_REASON="SHELL_NOT_READY: the new pane never reached a shell within ${limit}s"
+            return 1
+        fi
+        sleep 0.1
+        (( waited++ ))
+    done
+    local exports="export KB_WT_CLEANUP_PROMPT=0"
+    [[ "$model" != "inherit" ]] && exports+=" ANTHROPIC_MODEL=${model}"
+    local -a steps
+    steps=("cd '${_KB_ORCH_BOOT_DIR}'"
+           ". ~/.zshrc_${_KB_ORCH_BOOT_TYPE}_${_KB_ORCH_BOOT_NAME}"
+           ". '${_KB_ORCH_BOOT_HELPERS}'"
+           "$exports")
+    local s
+    for s in "${steps[@]}"; do
+        _kb_orch_type "$pane" "$s" || { _KB_ORCH_OPEN_REASON="SEND_FAILED: ${s}"; return 1; }
+    done
+    # XACA-1380-027: re-check right before the line that starts real work.
+    if ! _kb_orch_pane_at_shell "$pane"; then
+        _KB_ORCH_OPEN_REASON="SHELL_NOT_READY: the pane left its shell during bootstrap"
+        return 1
+    fi
+    _kb_orch_type "$pane" "kb-run ${item} --yes --orchestrated ${run} --coordinator ${coord}" || {
+        _KB_ORCH_OPEN_REASON="SEND_FAILED: kb-run line"
+        return 1
+    }
+    return 0
+}
+
+# _kb_dispatch_result <outcome> <reason> <detail> [observed-json]
+# Reports one kb-dispatch outcome. Reads kb-dispatch's locals (item terminal session window model run team
+# want_json) through zsh dynamic scope; only kb-dispatch calls it.
+_kb_dispatch_result() {
+    local _o="${1-}" _r="${2-}" _d="${3-}" _obs="${4:-null}" _ts
+    _ts=$(_kb_get_timestamp)
+    if (( want_json )); then
+        jq -cn --arg item "$item" --arg terminal "$terminal" --arg session "$session" --arg window "$window" \
+            --arg model "$model" --arg run "$run" --arg outcome "$_o" --arg reason "$_r" --arg detail "$_d" \
+            --argjson observed "$_obs" --arg ts "$_ts" \
+            '{item: $item, terminal: $terminal, session: (if $session == "" then null else $session end),
+              window: $window, model: (if $model == "" then null else $model end), run: $run, outcome: $outcome,
+              reason: (if $reason == "" then null else $reason end),
+              observed: (($observed // {}) + (if $detail == "" then {} else {detail: $detail} end)), ts: $ts}'
+    else
+        echo "${_o}${_r:+ ${_r}}: ${item} -> ${session:-${team}-${terminal}} (run ${run}${model:+, model ${model}})"
+        [[ -n "$_d" ]] && echo "  ${_d}"
+    fi
+    return 0
+}
+
+# A refusal: nothing has been created. Always rc 3.
+_kb_dispatch_refuse() {
+    _kb_dispatch_result REFUSED "${1-}" "${2-}"
+    return 3
+}
+
+# kb-dispatch <ITEM> --terminal <name> --run <RUN-ID> [--team T] [--model M] [--coordinator A] [--deadline S] [--json]
+# Exit: 0 DISPATCHED | 2 usage | 3 REFUSED (no window created) | 4 DISPATCH_FAILED (window left open).
+# --json prints exactly one object (the XACA-1546 ledger contract):
+#   {item, terminal, session, window, model, run, outcome, reason, observed, ts}
+kb-dispatch() {
+    local item="" terminal="" run="" team="" cli_model="" coord="" deadline="${KB_DISPATCH_DEADLINE:-90}" want_json=0
+    if [[ "${1-}" == "-h" || "${1-}" == "--help" || $# -eq 0 ]]; then
+        echo "Usage: kb-dispatch <ITEM> --terminal <name> --run <RUN-ID> [--team T] [--model M|inherit]"
+        echo "                   [--coordinator team:terminal] [--deadline SECS] [--json]"
+        echo "Opens a NEW detached tmux window <ITEM> in session <team>-<terminal>, bootstraps it like that"
+        echo "terminal's startup script and runs 'kb-run <ITEM> --yes --orchestrated <RUN-ID>' (XACA-1544)."
+        echo "Exit: 0 DISPATCHED, 2 usage, 3 REFUSED (no window created), 4 DISPATCH_FAILED (window left open)."
+        [[ $# -eq 0 ]] && return 2
+        return 0
+    fi
+    while (( $# > 0 )); do
+        case "$1" in
+            --json) want_json=1; shift ;;
+            --terminal|--run|--team|--model|--coordinator|--deadline)
+                if (( $# < 2 )) || [[ -z "${2-}" ]]; then echo "kb-dispatch: $1 needs a value" >&2; return 2; fi
+                case "$1" in
+                    --terminal) terminal="$2" ;; --run) run="$2" ;; --team) team="$2" ;;
+                    --model) cli_model="$2" ;; --coordinator) coord="$2" ;; --deadline) deadline="$2" ;;
+                esac
+                shift 2 ;;
+            -*) echo "kb-dispatch: unknown option '$1'" >&2; return 2 ;;
+            *) if [[ -n "$item" ]]; then echo "kb-dispatch: one item per dispatch" >&2; return 2; fi
+               item="$1"; shift ;;
+        esac
+    done
+    if [[ ! "$item" =~ ^[A-Z][A-Z0-9]*-[0-9]+$ ]]; then echo "kb-dispatch: '$item' is not an item id" >&2; return 2; fi
+    # No '-' in a terminal name: _kb_detect_context takes the terminal after the LAST '-' of the session name, so a
+    # hyphenated terminal could never produce the <terminal>:<ITEM> window row the confirmation waits for.
+    if [[ ! "$terminal" =~ ^[a-z0-9][a-z0-9_]*$ ]]; then echo "kb-dispatch: --terminal <name> is required ([a-z0-9_], no '-')" >&2; return 2; fi
+    if ! _kb_orch_run_valid "$run"; then echo "kb-dispatch: --run '$run' is not RUN-<REL-ID>-<yyyymmddThhmmss>" >&2; return 2; fi
+    if [[ ! "$deadline" =~ ^[1-9][0-9]*$ ]]; then echo "kb-dispatch: --deadline must be a positive integer" >&2; return 2; fi
+
+    local rel session="" window="$item" model="" reason="" detail="" observed="null" outcome
+    rel=$(_kb_orch_run_release "$run")
+    if [[ -z "$team" ]]; then
+        team=$(_kb_resolve_run_team "$item" 2>/dev/null) || team=""
+    fi
+    local board_file
+    board_file=$(_kb_terminals_board_file "$team" 2>/dev/null) || board_file=""
+
+    if [[ -z "$board_file" || ! -f "$board_file" ]]; then
+        _kb_dispatch_refuse BOARD_UNAVAILABLE "no board for team '${team}'"; return 3
+    fi
+
+    # ── release / run ────────────────────────────────────────────────────────
+    local runinfo
+    runinfo=$(_kb_jq_read "$board_file" '
+        ([.releases[]? | select(.id == $rel)] | first) as $r
+        | if $r == null then "NO_RELEASE"
+          else ($r.orchestration // {}) as $o
+          | if ($o | type) != "object" or ($o.activeRunId // "") != $run or ($o.closedAt // null) != null then "NOT_ACTIVE"
+            else [ ((if $o.maxParallel == null then 2 else $o.maxParallel end)
+                    | if type == "number" and . >= 1 and . == floor then tostring else "BAD" end),
+                   ($o.coordinator // "" | if type == "object" then (.address // "") else . end | if type == "string" then . else "" end)
+                 ] | @tsv end end' --arg rel "$rel" --arg run "$run" -r 2>/dev/null) || runinfo="NO_RELEASE"
+    case "$runinfo" in
+        NO_RELEASE) _kb_dispatch_refuse RUN_NOT_ACTIVE "release $rel is not on the ${team} board"; return 3 ;;
+        NOT_ACTIVE) _kb_dispatch_refuse RUN_NOT_ACTIVE "$run is not the active, open run of $rel (release.orchestration.activeRunId)"; return 3 ;;
+    esac
+    local max_par run_coord
+    IFS=$'\t' read -r max_par run_coord <<<"$runinfo"
+    if [[ "$max_par" == "BAD" ]]; then
+        _kb_dispatch_refuse CONFIG_INVALID "release.orchestration.maxParallel must be a positive integer"; return 3
+    fi
+    [[ -z "$coord" ]] && coord="$run_coord"
+    if ! _kb_orch_addr_valid "$coord"; then
+        _kb_dispatch_refuse NO_COORDINATOR "no team:terminal coordinator for $run ('${coord}')"; return 3
+    fi
+
+    # ── item ─────────────────────────────────────────────────────────────────
+    local iteminfo
+    iteminfo=$(_kb_jq_read "$board_file" "${_KB_ITEM_STATUS_JQ_DEFS}"'
+        ([.backlog[]? | select(.id == $id)] | first) as $it
+        | if $it == null then "MISSING" else [($it | kb_resolve_item_status), ($it.releaseAssignment.releaseId // "")] | @tsv end' \
+        --arg id "$item" -r 2>/dev/null) || iteminfo="MISSING"
+    if [[ "$iteminfo" == "MISSING" || -z "$iteminfo" ]]; then
+        _kb_dispatch_refuse ITEM_NOT_FOUND "$item is not on the ${team} board"; return 3
+    fi
+    local istatus irel
+    IFS=$'\t' read -r istatus irel <<<"$iteminfo"
+    if [[ "$istatus" != "todo" ]]; then
+        _kb_dispatch_refuse ITEM_NOT_TODO "$item is '${istatus}', only a todo item is dispatched"; return 3
+    fi
+    if [[ "$irel" != "$rel" ]]; then
+        _kb_dispatch_refuse ITEM_WRONG_RELEASE "$item is assigned to '${irel:-no release}', not $rel"; return 3
+    fi
+
+    # ── open lanes (defence in depth behind the coordinator's own cap) ───────
+    local open_lanes
+    open_lanes=$(_kb_jq_read "$board_file" "${_KB_ITEM_STATUS_JQ_DEFS}"'
+        ([.releases[]? | select(.id == $rel) | .orchestration.lanes // [] | .[]? | objects | select(.current != null)] | length) as $l
+        | ([.backlog[]? | select(((.orchestration // {}) | if type == "object" then .runId else null end) == $run)
+            | kb_resolve_item_status | select(. != "completed" and . != "cancelled" and . != "done")] | length) as $s
+        | [$l, $s] | max' --arg rel "$rel" --arg run "$run" -r 2>/dev/null) || open_lanes=""
+    if [[ ! "$open_lanes" =~ ^[0-9]+$ ]]; then
+        _kb_dispatch_refuse CONFIG_INVALID "cannot count open lanes for $run"; return 3
+    fi
+    if (( open_lanes >= max_par )); then
+        _kb_dispatch_refuse LANES_FULL "$open_lanes open lane(s), maxParallel $max_par"; return 3
+    fi
+
+    # ── terminal (kb-terminals registry, XACA-1542) ──────────────────────────
+    local tjson trow
+    tjson=$(kb-terminals status --json --team "$team" 2>/dev/null) || tjson=""
+    trow=$(jq -r --arg n "$terminal" '
+        ([.terminals[]? | select(.name == $n)] | first) as $t
+        | if $t == null then "UNKNOWN"
+          else [($t.coordinatorOnly | tostring), ($t.roles | length | tostring), $t.state, $t.session] | @tsv end' \
+        <<<"$tjson" 2>/dev/null) || trow=""
+    if [[ -z "$trow" ]]; then
+        _kb_dispatch_refuse REGISTRY_UNAVAILABLE "kb-terminals status --json failed for team ${team}"; return 3
+    fi
+    if [[ "$trow" == "UNKNOWN" ]]; then
+        _kb_dispatch_refuse TERMINAL_UNKNOWN "'${terminal}' is not in the ${team} terminal registry"; return 3
+    fi
+    local t_co t_roles t_state
+    IFS=$'\t' read -r t_co t_roles t_state session <<<"$trow"
+    if [[ "$t_co" != "false" ]]; then
+        _kb_dispatch_refuse COORDINATOR_ONLY "${terminal} is coordinatorOnly"; return 3
+    fi
+    if [[ "$t_roles" == "0" ]]; then
+        _kb_dispatch_refuse NO_ROLES "${terminal} has no roles (never dispatchable)"; return 3
+    fi
+    if [[ "$t_state" != "present" ]]; then
+        _kb_dispatch_refuse SESSION_ABSENT "tmux session ${session} does not exist; the dispatcher never starts one"; return 3
+    fi
+
+    # ── duplicate window, anywhere on the server ─────────────────────────────
+    local wins
+    if ! wins=$(tmux list-windows -a -F '#{window_name}' 2>/dev/null); then
+        _kb_dispatch_refuse DUPLICATE_WINDOW "cannot list tmux windows to rule out a duplicate"; return 3
+    fi
+    if grep -qxF -- "$item" <<<"$wins"; then
+        _kb_dispatch_refuse DUPLICATE_WINDOW "a window named ${item} already exists"; return 3
+    fi
+
+    # ── model (XACA-1544-012) ────────────────────────────────────────────────
+    if ! _kb_orch_resolve_model "$board_file" "$item" "$rel" "$cli_model"; then
+        _kb_dispatch_refuse MODEL_INVALID "$_KB_ORCH_MODEL_REASON"; return 3
+    fi
+    model="$_KB_ORCH_MODEL"
+
+    # ── bootstrap parity (XACA-1544-011) ─────────────────────────────────────
+    local script
+    script=$(_kb_orch_startup_script "$team" "$terminal") || script=""
+    if ! _kb_orch_startup_core "$script" "$team" "$terminal"; then
+        _kb_dispatch_refuse BOOTSTRAP_UNSUPPORTED "$_KB_ORCH_BOOT_REASON"; return 3
+    fi
+
+    # ── open + bootstrap (a window exists from here on; it is never killed) ──
+    if ! _kb_open_lane_window "$session" "$item" "$run" "$coord" "$model"; then
+        local why="${_KB_ORCH_OPEN_REASON%%:*}" tail=""
+        [[ -n "$_KB_ORCH_PANE" ]] && tail=$(tmux capture-pane -p -t "$_KB_ORCH_PANE" -S -20 2>/dev/null)
+        observed=$(jq -cn --arg pane "$_KB_ORCH_PANE" --arg tail "$tail" '{pane: $pane, paneTail: $tail}')
+        if [[ "$why" == "WINDOW_CREATE_FAILED" ]]; then
+            _kb_dispatch_result REFUSED "$why" "$_KB_ORCH_OPEN_REASON" "$observed"
+            return 3
+        fi
+        _kb_dispatch_result DISPATCH_FAILED "$why" "$_KB_ORCH_OPEN_REASON" "$observed"
+        return 4
+    fi
+
+    # ── confirmation (XACA-1544-004): the board flip is the evidence, not the keystrokes ──
+    # The flip is written by kb-run immediately before cc starts (the stamp is its last write). It proves the
+    # worker reached its launch, not that the session stays up: a cc that dies at once is the monitor's
+    # ITEM_CRASHED (XACA-1546), not something a dispatch-time poll can see.
+    local wid="${terminal}:${item}" state="" waited=0 interval="${KB_DISPATCH_POLL_INTERVAL:-2}"
+    local start=$SECONDS
+    while :; do
+        state=$(_kb_jq_read "$board_file" "${_KB_ITEM_STATUS_JQ_DEFS}"'
+            ([.backlog[]? | select(.id == $id)] | first) as $it
+            | ([.activeWindows[]? | select(.id == $wid)] | first) as $w
+            | {status: ($it | kb_resolve_item_status),
+               runId: (($it.orchestration // {}) | if type == "object" then .runId else null end),
+               windowRow: ($w != null), windowItem: ($w.workingOnId // null)}' \
+            --arg id "$item" --arg wid "$wid" -c 2>/dev/null) || state=""
+        if [[ -n "$state" ]] && jq -e --arg run "$run" --arg id "$item" \
+            '.status == "in_progress" and .runId == $run and .windowRow and .windowItem == $id' <<<"$state" >/dev/null 2>&1; then
+            _kb_dispatch_result DISPATCHED "" "" "$state"
+            return 0
+        fi
+        (( SECONDS - start >= deadline )) && break
+        sleep "$interval"
+    done
+    local tail
+    tail=$(tmux capture-pane -p -t "$_KB_ORCH_PANE" -S -20 2>/dev/null)
+    observed=$(jq -cn --argjson s "${state:-null}" --arg pane "$_KB_ORCH_PANE" --arg tail "$tail" \
+        '($s // {}) + {pane: $pane, paneTail: $tail}')
+    _kb_dispatch_result DISPATCH_FAILED DEADLINE \
+        "no in_progress flip + activeWindows row ${wid} within ${deadline}s; window ${session}:${item} left open for inspection" \
+        "$observed"
+    return 4
 }
 
 # Work on a task without creating a worktree - for when you're already in the right place
