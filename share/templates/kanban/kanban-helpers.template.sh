@@ -819,6 +819,279 @@ HELP
     fi
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# kb-terminals (XACA-1542): terminal registry — personas, routing roles, and
+# live tmux session state for board.terminals.
+#
+# Subcommands:
+#   kb-terminals list     [--json] [--team <t>]   registry only (no tmux)
+#   kb-terminals status   [--json] [--team <t>]   registry + live session state
+#   kb-terminals validate          [--team <t>]   validate every terminal entry
+#   kb-terminals set <name> [--roles a,b|none] [--coordinator-only|--no-coordinator-only] [--team <t>]
+#
+# Schema (board.terminals.<name>, both fields optional):
+#   roles            array, subset of code|test|docs|ui. Missing/[] = the terminal
+#                    is NEVER routed to (fail-closed opt-in; there is no separate
+#                    "dispatchable" flag).
+#   coordinatorOnly  boolean, default false. true + a non-empty roles is rejected
+#                    as contradictory.
+# The validator (_KB_TERMINALS_JQ_DEFS) rejects unknown roles, a non-array roles,
+# a non-boolean coordinatorOnly, and coordinatorOnly:true with non-empty roles.
+# It runs INSIDE the locked jq write of `kb-terminals set` (jq `error` aborts the
+# atomic write, nothing lands), and standalone via `kb-terminals validate`.
+# `set` is the supported write path for these fields: never hand-edit the board.
+#
+# Team resolution: --team, else the kanban context (_kb_detect_context), else the
+# board's own .team. KB_BOARD_FILE (scratch board override) is honored.
+#
+# JSON CONTRACT (consumed by XACA-1543 release_orchestrator.py; terminals sorted
+# by name for determinism). `list --json` emits the first five fields only:
+#   {"terminals":[{"name","developer","avatar","roles","coordinatorOnly",
+#                  "session","session_exists","lane_windows","state"}]}
+#   name             terminal key (e.g. "engineering")
+#   developer/avatar strings from the board ("" when absent)
+#   roles            array of valid roles ([] when absent or malformed)
+#   coordinatorOnly  bool; anything other than absent/null/false reads as true
+#                    (validate is stricter: an explicit null is flagged as non-boolean)
+#                    (fail-closed for hand-edited garbage)
+#   session          "<team>-<terminal>" (the tmux session name kb-run expects)
+#   session_exists   bool: `tmux has-session -t =<session>` succeeded
+#   lane_windows     int: windows in that session whose name is a backlog id whose
+#                    item carries .orchestration.runId (0 when session absent)
+#   state            "present" | "absent". Missing tmux binary, no tmux server or
+#                    no such session => "absent", exit 0. Never "present" unless
+#                    verified. There is NO idle/busy probing: dispatch opens a new
+#                    window and never reuses a pane.
+# ─────────────────────────────────────────────────────────────────────────────
+_KB_TERMINALS_JQ_DEFS='
+def kb_terminal_valid_roles: ["code","test","docs","ui"];
+def kb_terminal_errors($name):
+  . as $t
+  | if ($t|type) != "object" then ["terminal \($name): entry is not an object"]
+    else
+      [ ( if ($t|has("roles")) then
+            ( if ($t.roles|type) != "array" then "terminal \($name): roles must be an array (got \($t.roles|type))"
+              else ($t.roles[] | . as $r
+                    | select(($r|type) != "string" or ((kb_terminal_valid_roles | index($r)) == null))
+                    | "terminal \($name): unknown role \($r|tojson) (allowed: code, test, docs, ui)")
+              end )
+          else empty end ),
+        ( if ($t|has("coordinatorOnly")) and (($t.coordinatorOnly|type) != "boolean")
+          then "terminal \($name): coordinatorOnly must be a boolean (got \($t.coordinatorOnly|type))"
+          else empty end ),
+        ( if ($t.coordinatorOnly == true) and (($t.roles // []) | (type == "array" and length > 0))
+          then "terminal \($name): coordinatorOnly:true contradicts a non-empty roles array"
+          else empty end )
+      ] end;
+def kb_terminals_errors:
+  (.terminals // {}) as $ts
+  | if ($ts|type) != "object" then ["terminals must be an object"]
+    else [ $ts | to_entries[] | .key as $k | (.value | kb_terminal_errors($k))[] ] end;
+def kb_terminal_row:
+  .value as $v | {
+    name: .key,
+    developer: (if ($v|type) == "object" then ($v.developer // "") else "" end),
+    avatar: (if ($v|type) == "object" then ($v.avatar // "") else "" end),
+    roles: (if ($v|type) == "object" and (($v.roles|type) == "array")
+            then [ $v.roles[] | . as $r | select(($r|type) == "string" and ((kb_terminal_valid_roles | index($r)) != null)) ]
+            else [] end),
+    coordinatorOnly: (if ($v|type) == "object" then (($v.coordinatorOnly // false) != false) else true end)
+  };
+'
+
+# Resolve the board file honoring the KB_BOARD_FILE scratch override.
+_kb_terminals_board_file() {
+    local _tb_team="${1-}" _tb_override="${KB_BOARD_FILE:-}"
+    _tb_override="${_tb_override//[[:space:]]/}"
+    if [[ -n "$_tb_override" ]]; then
+        echo "$KB_BOARD_FILE"
+        return 0
+    fi
+    _kb_get_board_file "$_tb_team"
+}
+
+kb-terminals() {
+    local sub="${1-}"
+    [[ $# -gt 0 ]] && shift
+
+    case "$sub" in
+        list|status|validate|set) ;;
+        -h|--help|help)
+            echo "Usage: kb-terminals list|status [--json] [--team <t>]"
+            echo "       kb-terminals validate [--team <t>]"
+            echo "       kb-terminals set <name> [--roles code,test,docs,ui|none] [--coordinator-only|--no-coordinator-only] [--team <t>]"
+            return 0
+            ;;
+        *)
+            echo "Usage: kb-terminals list|status|validate|set ... (see kb-terminals --help)" >&2
+            return 2
+            ;;
+    esac
+
+    _kb_ensure_jq || return 1
+
+    local want_json=0 team="" tname="" roles_csv="" roles_given=0 co_flag="" arg
+    while [[ $# -gt 0 ]]; do
+        arg="$1"
+        case "$arg" in
+            --json) want_json=1 ;;
+            --team)
+                if [[ $# -lt 2 || -z "${2-}" ]]; then echo "kb-terminals: --team needs a value" >&2; return 2; fi
+                team="$2"; shift ;;
+            --roles)
+                if [[ $# -lt 2 ]]; then echo "kb-terminals: --roles needs a value (e.g. code,ui or none)" >&2; return 2; fi
+                roles_csv="$2"; roles_given=1; shift ;;
+            --coordinator-only) co_flag="true" ;;
+            --no-coordinator-only) co_flag="false" ;;
+            -*) echo "kb-terminals: unknown option: $arg" >&2; return 2 ;;
+            *)
+                if [[ "$sub" == "set" && -z "$tname" ]]; then tname="$arg"
+                else echo "kb-terminals: unexpected argument: $arg" >&2; return 2; fi ;;
+        esac
+        shift
+    done
+
+    # Resolve team: --team, else kanban context, else (below) the board's own .team.
+    local ctx=""
+    if [[ -z "$team" ]]; then
+        ctx=$(_kb_detect_context 2>/dev/null) || ctx=""
+        team="${ctx%%:*}"
+        [[ "$team" == "ERROR" ]] && team=""
+    fi
+    local board_file
+    board_file=$(_kb_terminals_board_file "$team") || board_file=""
+    if [[ -z "$board_file" || ! -f "$board_file" ]]; then
+        echo "kb-terminals: board file not found (team='${team}'); pass --team <t> or set KB_BOARD_FILE" >&2
+        return 1
+    fi
+    if [[ -z "$team" ]]; then
+        team=$(_kb_jq_read "$board_file" '.team // empty' -r 2>/dev/null)
+    fi
+
+    # ── validate ───────────────────────────────────────────────────────────
+    if [[ "$sub" == "validate" ]]; then
+        local verrs
+        verrs=$(_kb_jq_read "$board_file" "${_KB_TERMINALS_JQ_DEFS}"' kb_terminals_errors | .[]' -r) || {
+            echo "kb-terminals: could not read board ${board_file}" >&2; return 1; }
+        if [[ -n "$verrs" ]]; then
+            echo "$verrs" >&2
+            return 1
+        fi
+        echo "kb-terminals: all terminal entries valid"
+        return 0
+    fi
+
+    # ── set ────────────────────────────────────────────────────────────────
+    if [[ "$sub" == "set" ]]; then
+        if [[ -z "$tname" ]]; then echo "kb-terminals set: terminal name required" >&2; return 2; fi
+        if [[ $roles_given -eq 0 && -z "$co_flag" ]]; then
+            echo "kb-terminals set: nothing to set (use --roles and/or --coordinator-only)" >&2
+            return 2
+        fi
+        local roles_json="null"
+        if [[ $roles_given -eq 1 ]]; then
+            if [[ "$roles_csv" == "none" ]]; then roles_csv=""; fi
+            roles_json=$(jq -cn --arg r "$roles_csv" \
+                '$r | split(",") | map(gsub("[[:space:]]"; "")) | map(select(. != ""))
+                 | reduce .[] as $x ([]; if index($x) then . else . + [$x] end)') || return 1
+        fi
+        local co_json="null"
+        [[ -n "$co_flag" ]] && co_json="$co_flag"
+
+        local set_filter="${_KB_TERMINALS_JQ_DEFS}"'
+            (.terminals // {}) as $ts
+            | if ($ts|type) != "object" or (($ts|has($name)) | not)
+              then error("unknown terminal: \($name) (known: \($ts|keys|join(", ")))") else . end
+            | .terminals[$name] |= (
+                (if $roles != null then .roles = $roles else . end)
+                | (if $co != null then .coordinatorOnly = $co else . end) )
+            | (.terminals[$name] | kb_terminal_errors($name)) as $errs
+            | if ($errs|length) > 0 then error($errs|join("; ")) else . end
+            | .lastUpdated = $ts_now'
+        local ts_now
+        ts_now=$(_kb_get_timestamp)
+
+        # Pre-check on a read so the operator sees a clean message (jq's own
+        # "error (at file:N)" noise stripped). The write below re-runs the SAME
+        # filter under the exclusive lock, so a racing change cannot slip past.
+        local precheck
+        precheck=$(_kb_jq_read "$board_file" "$set_filter" \
+            --arg name "$tname" --argjson roles "$roles_json" --argjson co "$co_json" --arg ts_now "$ts_now" \
+            2>&1 >/dev/null)
+        if [[ $? -ne 0 ]]; then
+            echo "kb-terminals set: rejected: ${precheck#jq: error*): }" >&2
+            return 1
+        fi
+        _kb_jq_update "$board_file" "$set_filter" \
+            --arg name "$tname" --argjson roles "$roles_json" --argjson co "$co_json" --arg ts_now "$ts_now" || {
+            echo "kb-terminals set: write failed for '${tname}'" >&2
+            return 1
+        }
+        echo "kb-terminals: updated ${tname}"
+        return 0
+    fi
+
+    # ── list / status ──────────────────────────────────────────────────────
+    local rows="" tn sess exists lanes lane_ids="" wname
+    if [[ "$sub" == "status" ]]; then
+        local have_tmux=0
+        command -v tmux >/dev/null 2>&1 && have_tmux=1
+        lane_ids=$(_kb_jq_read "$board_file" \
+            '[.backlog[]? | select(((.orchestration.runId // "") | tostring) != "") | .id] | .[]' -r 2>/dev/null) || lane_ids=""
+        local names
+        names=$(_kb_jq_read "$board_file" '(.terminals // {}) | keys_unsorted | .[]' -r 2>/dev/null) || names=""
+        for tn in ${(f)names}; do
+            sess="${team}-${tn}"
+            exists="false"; lanes=0
+            if [[ $have_tmux -eq 1 && -n "$team" ]] && tmux has-session -t "=${sess}" >/dev/null 2>&1; then
+                exists="true"
+                if [[ -n "$lane_ids" ]]; then
+                    for wname in ${(f)"$(tmux list-windows -t "=${sess}" -F '#{window_name}' 2>/dev/null)"}; do
+                        if print -r -- "$lane_ids" | grep -qxF -- "$wname"; then
+                            lanes=$((lanes + 1))
+                        fi
+                    done
+                fi
+            fi
+            rows+="${tn}"$'\t'"${sess}"$'\t'"${exists}"$'\t'"${lanes}"$'\n'
+        done
+    fi
+
+    local jq_body
+    if [[ "$sub" == "status" ]]; then
+        jq_body='
+          ($rows | split("\n") | map(select(. != "") | split("\t"))
+           | map({key: .[0], value: {session: .[1], session_exists: (.[2] == "true"), lane_windows: (.[3] | tonumber)}})
+           | from_entries) as $live
+          | {terminals: ((.terminals // {}) | to_entries | sort_by(.key) | map(
+              kb_terminal_row as $r
+              | ($live[$r.name] // {session: "", session_exists: false, lane_windows: 0}) as $l
+              | $r + $l + {state: (if $l.session_exists then "present" else "absent" end)}))}'
+    else
+        jq_body='{terminals: ((.terminals // {}) | to_entries | sort_by(.key) | map(kb_terminal_row))}'
+    fi
+
+    if [[ $want_json -eq 1 ]]; then
+        _kb_jq_read "$board_file" "${_KB_TERMINALS_JQ_DEFS}${jq_body}" --arg rows "$rows" -c
+        return $?
+    fi
+
+    local table
+    if [[ "$sub" == "status" ]]; then
+        table=$(_kb_jq_read "$board_file" "${_KB_TERMINALS_JQ_DEFS}${jq_body}"' | ["NAME","DEVELOPER","AVATAR","ROLES","COORD","SESSION","STATE","LANES"], (.terminals[] | [.name, .developer, .avatar, (if (.roles|length)>0 then (.roles|join(",")) else "-" end), (if .coordinatorOnly then "yes" else "no" end), .session, .state, (.lane_windows|tostring)]) | @tsv' \
+            --arg rows "$rows" -r) || return 1
+    else
+        table=$(_kb_jq_read "$board_file" "${_KB_TERMINALS_JQ_DEFS}${jq_body}"' | ["NAME","DEVELOPER","AVATAR","ROLES","COORD"], (.terminals[] | [.name, .developer, .avatar, (if (.roles|length)>0 then (.roles|join(",")) else "-" end), (if .coordinatorOnly then "yes" else "no" end)]) | @tsv' \
+            --arg rows "$rows" -r) || return 1
+    fi
+    if command -v column >/dev/null 2>&1; then
+        print -r -- "$table" | column -t -s $'\t'
+    else
+        print -r -- "$table"
+    fi
+    return 0
+}
+
 # Get current git worktree path
 _kb_get_worktree() {
     git rev-parse --show-toplevel 2>/dev/null || echo ""
