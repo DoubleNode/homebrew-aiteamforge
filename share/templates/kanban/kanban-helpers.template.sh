@@ -34227,11 +34227,16 @@ PY
 #         "askedBy":     "<team:terminal of the worker>",
 #         "coordinator": "<team:terminal it was sent to>" }
 #
-#   item.lastQuestion                TOMBSTONE written by kb-answer: the answered
-#                                    pendingQuestion + {"answeredAt"}. Lets a parked worker
-#                                    collect the answer with `kb-ask --wait`; removed when
-#                                    kb-ask receives it. NOT an open question: kb-ask list
-#                                    and any QUESTION_PENDING monitor must ignore it.
+#   item.lastQuestion                TOMBSTONES written by kb-answer, ONE PER ASKER:
+#                                    { "<team:terminal>": <answered pendingQuestion +
+#                                    "answeredAt"> }. Lets a parked worker collect its
+#                                    answer with `kb-ask --wait`; an entry is removed when
+#                                    that asker's kb-ask receives it. Keyed per asker so two
+#                                    sessions on one item never overwrite each other's
+#                                    uncollected answer (XACA-1545-023). The single-object
+#                                    shape written by PR #1335 is read as a one-entry map.
+#                                    NOT an open question: kb-ask list and any
+#                                    QUESTION_PENDING monitor must ignore it.
 #
 #   activeWindows[<window>].status   "awaiting-answer" while kb-ask is blocked.
 #
@@ -34274,6 +34279,12 @@ _kb_ask_resolve() {
     printf '%s\t%s\t%s\t%s\t%s\n' "$team" "$terminal" "$window_id" "$board_file" "$item"
 }
 
+# jq normaliser for item.lastQuestion (XACA-1545-023): the per-asker tombstone map.
+# The single-object shape written by PR #1335 reads as a one-entry map; anything that
+# is not an object (a hand-edited board) reads as empty instead of breaking the update.
+# Shared by every lastQuestion reader/writer so the definitions cannot drift.
+_KB_LQMAP_JQ='def lqmap: if type != "object" then {} elif has("threadId") then {(.askedBy // "?"): .} else . end;'
+
 # _kb_ask_clear_pending <board_file> <item_id> <thread_id> [answered|consumed]
 # Clears item.pendingQuestion ONLY if it is still this thread (never a newer question).
 #   (default)  withdraw: delete it outright (send failed, --clear: no answer exists).
@@ -34284,13 +34295,19 @@ _kb_ask_resolve() {
 _kb_ask_clear_pending() {
     local board_file="${1-}" item="${2-}" tid="${3-}" mode="${4-withdraw}" ts
     ts=$(_kb_get_timestamp)
-    _kb_jq_update "$board_file" '
+    _kb_jq_update "$board_file" "$_KB_LQMAP_JQ"'
         (.backlog[] | select(.id == $id)) |= (
             if (.pendingQuestion.threadId // "") == $tid then
-                (if $mode == "answered" then .lastQuestion = (.pendingQuestion + {answeredAt: $ts}) else . end)
+                (if $mode == "answered"
+                 then .lastQuestion = ((.lastQuestion | lqmap)
+                        + {(.pendingQuestion.askedBy // "?"): (.pendingQuestion + {answeredAt: $ts})})
+                 else . end)
                 | del(.pendingQuestion)
             else . end
-            | if $mode == "consumed" and ((.lastQuestion.threadId // "") == $tid) then del(.lastQuestion) else . end)
+            | if $mode == "consumed" and .lastQuestion != null then
+                .lastQuestion = (.lastQuestion | lqmap | with_entries(select((.value.threadId // "") != $tid)))
+                | if .lastQuestion == {} then del(.lastQuestion) else . end
+              else . end)
         | .lastUpdated = $ts' \
         --arg id "$item" --arg tid "$tid" --arg ts "$ts" --arg mode "$mode"
 }
@@ -34434,26 +34451,28 @@ USAGE
     IFS=$'\t' read -r old_tid old_by old_coord old_q old_opts <<<"$pend"
 
     local tid asked_at prev_status ts_now
-    if (( wait_mode )) && [[ -z "$old_tid" ]]; then
-        # Nothing pending: the usual reason is that kb-answer already answered it while
-        # this worker was parked, moving it to the lastQuestion tombstone. Resume THAT
-        # thread when this session asked it; the answer is waiting in our inbox.
-        pend=$(_kb_jq_read "$board_file" '
-            (.backlog[] | select(.id == $id) | .lastQuestion) // {}
+    if (( wait_mode )) && [[ -z "$old_tid" || "$old_by" != "$self_addr" ]]; then
+        # Nothing of OURS is pending. Usually kb-answer already answered our question while
+        # we were parked, moving it to our lastQuestion[self] tombstone - and another
+        # session may have asked on this item since, so its question being pending must
+        # not hide ours (PR #1341 review, variant 5). Resume our tombstone's thread.
+        local p_by="$old_by" p_tid="$old_tid" tomb
+        tomb=$(_kb_jq_read "$board_file" "$_KB_LQMAP_JQ"'
+            ((.backlog[] | select(.id == $id) | .lastQuestion | lqmap)[$by]) // {}
             | [(.threadId // ""), (.askedBy // ""), (.coordinator // ""), (.question // "" | gsub("\n"; " ")),
-               ((.options // []) | join("|"))] | @tsv' --arg id "$item" -r 2>/dev/null | head -1)
-        IFS=$'\t' read -r old_tid old_by old_coord old_q old_opts <<<"$pend"
-        if [[ -z "$old_tid" || "$old_by" != "$self_addr" ]]; then
+               ((.options // []) | join("|"))] | @tsv' --arg id "$item" --arg by "$self_addr" -r 2>/dev/null | head -1)
+        IFS=$'\t' read -r old_tid old_by old_coord old_q old_opts <<<"$tomb"
+        if [[ -n "$old_tid" && "$old_by" == "$self_addr" ]]; then
+            from_tomb=1
+        elif [[ -n "$p_tid" ]]; then
+            echo "kb-ask --wait: the pending question on $item was asked by '${p_by:-?}', not this session ($self_addr), and you have no answered-but-uncollected question here." >&2
+            return 11
+        else
             echo "kb-ask --wait: no pending (or answered-but-uncollected) question of yours on $item." >&2
             return 9
         fi
-        from_tomb=1
     fi
     if (( wait_mode )); then
-        if [[ "$old_by" != "$self_addr" ]]; then
-            echo "kb-ask --wait: the pending question on $item was asked by '${old_by:-?}', not this session ($self_addr)." >&2
-            return 11
-        fi
         tid="$old_tid"; question="$old_q"; opt_set="$old_opts"
         [[ "$old_coord" == *:* ]] && coordinator="$old_coord"
     elif [[ -n "$old_tid" && $replace_mode -eq 0 ]]; then
@@ -34485,9 +34504,12 @@ USAGE
         # worker has moved on, and a later --wait must never fall back to that OLDER
         # question's answer (PR #1335 test gate). Scoped to askedBy == us: another
         # session's tombstone is not ours to drop (XACA-1545-021).
-        _kb_jq_update "$board_file" '
+        _kb_jq_update "$board_file" "$_KB_LQMAP_JQ"'
             (.backlog[] | select(.id == $id)) |= (
-                (if (.lastQuestion.askedBy // "") == $by then del(.lastQuestion) else . end)
+                (if .lastQuestion != null then
+                    .lastQuestion = (.lastQuestion | lqmap | del(.[$by]))
+                    | if .lastQuestion == {} then del(.lastQuestion) else . end
+                 else . end)
                 | .pendingQuestion = {
                 threadId: $tid, question: $q,
                 options: (if $opts == "" then [] else ($opts | split("|")) end),
