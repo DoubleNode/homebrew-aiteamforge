@@ -31610,7 +31610,13 @@ kb-release-reconcile-closeout() {
     rc=$?
     why=$(cat "$errf" 2>/dev/null); rm -f "$errf"
     case "$rc" in
-        3) echo "$rel_id: already reconciled (status released, PROD passed, CR current). Nothing to do."; return 0 ;;
+        3) if [[ "$why" == "already finished (archived)"* ]]; then
+               # XACA-1812-002: archived + close-out complete: say so (the CLI wrote nothing; no board write, no log).
+               echo "$rel_id: ${why#already finished (archived): }"
+           else
+               echo "$rel_id: already reconciled (status released, PROD passed, CR current). Nothing to do."
+           fi
+           return 0 ;;
         4) echo "kb-release reconcile-closeout: $rel_id is NOT eligible: ${why#not eligible: }" >&2; return 1 ;;
         0) ;;
         *) echo "kb-release reconcile-closeout: cannot evaluate $rel_id: $why" >&2; return 1 ;;

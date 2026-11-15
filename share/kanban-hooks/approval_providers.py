@@ -48,6 +48,7 @@ CLI (JSON on stdout, message on stderr + nonzero exit on error):
 import argparse
 import copy
 import json
+import os
 import re
 import sys
 from datetime import datetime, time, timedelta, timezone
@@ -1003,6 +1004,48 @@ def _refresh_cr_stage_cli(args):
     return 0
 
 
+_RELEASE_ID_FILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def _reconcile_closeout_archived(board_path, release_id, rg):
+    """XACA-1812-002: a release absent from board['releases'] may be ARCHIVED -- LCARS moves the record to
+    <kanban dir>/releases-archive/<id>.json (the dir that holds the board file; same derivation as the shell's
+    pointer-clear path in kanban-helpers.sh). Never writes anything and never prints to stdout, so the shell's
+    atomic write aborts. Exit 3 = archived and its close-out is complete (nothing to reconcile), 4 = archived but
+    close-out incomplete (unarchive first), 2 = id unsafe as a filename / archive unreadable / not a release record /
+    id mismatch / absent from both (fail closed)."""
+    pre = "approval_providers reconcile-closeout: "
+    rid = release_id if isinstance(release_id, str) else ""
+    if not _RELEASE_ID_FILE_RE.match(rid) or ".." in rid:
+        sys.stderr.write(pre + "release %r not found on the board (and the id is not a safe archive filename)\n"
+                         % release_id)
+        return 2
+    archive_file = os.path.join(os.path.dirname(os.path.abspath(board_path)), "releases-archive", rid + ".json")
+    if not os.path.exists(archive_file):
+        sys.stderr.write(pre + "release %s not found on the board (and not in releases-archive/)\n" % rid)
+        return 2
+    try:
+        with open(archive_file, encoding="utf-8") as fh:
+            arec = json.loads(fh.read())
+    except (OSError, ValueError) as e:
+        sys.stderr.write(pre + "release %s: archive file %s is unreadable or unparseable: %s\n"
+                         % (rid, archive_file, e))
+        return 2
+    if not isinstance(arec, dict):
+        sys.stderr.write(pre + "release %s: archive file %s is not a JSON object\n" % (rid, archive_file))
+        return 2
+    if arec.get("id") != rid:
+        sys.stderr.write(pre + "archive file %s holds id %r, not %s (id mismatch)\n"
+                         % (archive_file, arec.get("id"), rid))
+        return 2
+    if rg.closeout_complete(arec):
+        sys.stderr.write("already finished (archived): release %s is archived and its close-out is complete; "
+                         "nothing to reconcile\n" % rid)
+        return 3
+    sys.stderr.write("not eligible: release %s is archived; unarchive it before reconciling\n" % rid)
+    return 4
+
+
 def _reconcile_closeout_cli(args):
     """`reconcile-closeout --board B --release-id R [--dry-run]` (XACA-1726-005). The pure rule is
     release_gate.reconcile_closeout. Exit 0 = changes planned (default: the new board on stdout, for
@@ -1020,8 +1063,7 @@ def _reconcile_closeout_cli(args):
     rel = next((r for r in releases if isinstance(r, dict) and r.get("id") == args.release_id), None) \
         if isinstance(releases, list) else None
     if rel is None:
-        sys.stderr.write("approval_providers reconcile-closeout: release %s not found on the board\n" % args.release_id)
-        return 2
+        return _reconcile_closeout_archived(args.board, args.release_id, _rg)
     changes, reason = _rg.reconcile_closeout(rel, board, apply=not args.dry_run)
     if reason is not None:
         sys.stderr.write("not eligible: %s\n" % reason)

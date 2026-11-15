@@ -9708,7 +9708,20 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             # handle_assign_item_to_release) can't have its write clobbered
             # by this metadata mirror reading a stale manifest.
             with self._release_manifest_lock(release_id):
-                manifest = self._load_release_manifest(release_id)
+                # XACA-1812: _load_release_manifest(release_id) is not team-aware -- for a
+                # legacy-format id it reads (or default-creates) the manifest under LCARS_TEAM.
+                # When the caller names a team (the archive toggle serves ?team=<other>) and that
+                # team's manifest exists, mirror onto THAT file so the write cannot land in, or
+                # create a stray manifest under, the wrong team's releases dir.
+                manifest = None
+                if effective_team:
+                    _team_manifest_path = self._get_release_manifest_path(release_id, effective_team)
+                    if _team_manifest_path.exists():
+                        with open(_team_manifest_path, 'r') as _mf:
+                            manifest = json.load(_mf)
+                        manifest.setdefault('team', effective_team)
+                if manifest is None:
+                    manifest = self._load_release_manifest(release_id)
                 if manifest is None:
                     # _load_release_manifest always returns a dict (creates a default when
                     # the file is absent), so None is unexpected — guard defensively.
@@ -12272,6 +12285,26 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
     # --- PATCH Handlers ---
 
+    def _mirror_archive_status_to_manifest(self, release, team):
+        """XACA-1812: write-through the archive/unarchive status into the release manifest.
+
+        Only mirrors onto an EXISTING manifest: handle_archive_release (DELETE) removes the
+        manifest dir (XACA-0183), and resurrecting a minimal one here -- or default-creating one
+        under LCARS_TEAM for a ?team=<other> request -- would be a stray artifact, not a fix.
+        Never raises and never undoes the archive/unarchive: a failure is logged only.
+        _sync_release_metadata_to_manifest takes _release_manifest_lock, a leaf lock (no holder
+        takes the board or archive_file lock inside it), so callers must NOT hold the board
+        fcntl lock; the archive_file path lock is safe.
+        """
+        try:
+            release_id = release.get('id')
+            if not release_id or not self._get_release_manifest_path(release_id, team).exists():
+                return
+            self._sync_release_metadata_to_manifest(release, team)
+        except Exception as e:
+            print(f"[LCARS] Warning: XACA-1812: could not mirror archive status for "
+                  f"{release.get('id')} to its manifest: {e}")
+
     def handle_toggle_release_archive(self, release_id):
         """PATCH /api/releases/<id>/archive - Toggle archive/unarchive release"""
         try:
@@ -12337,6 +12370,14 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
                     # Remove from archive
                     archive_file.unlink()
+
+                    # XACA-1812: mirror the restored status ('released'/'active') into
+                    # manifest.json (XACA-0659 write-through); the toggle never did, so
+                    # manifests stayed at their pre-archive status. Placed AFTER the board
+                    # transaction (board fcntl lock released) and still inside the
+                    # archive_file lock so a concurrent toggle of the SAME release cannot
+                    # interleave and leave the manifest at a stale status.
+                    self._mirror_archive_status_to_manifest(release, effective_team)
 
                     self.send_response(200)
                     self.send_header('Content-Type', 'application/json')
@@ -12427,6 +12468,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         self._atomic_write_json(archive_file, release)
 
                         self._save_releases_config(data, team, _lock_held=True)
+
+                    # XACA-1812: mirror status 'archived' into manifest.json (see the
+                    # unarchive branch for the lock-placement rationale).
+                    self._mirror_archive_status_to_manifest(release, effective_team)
 
                     self.send_response(200)
                     self.send_header('Content-Type', 'application/json')
