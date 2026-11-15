@@ -15584,6 +15584,27 @@ _kb_orch_run_release() {
     echo "${r%-*}"
 }
 
+# _kb_orch_ledger_hook <board_file> <item> <kind> [k=v ...]   (XACA-1546-001)
+# Append one event to the item's orchestration run ledger (kanban-hooks/release_orchestrator.py ledger-hook). A silent
+# no-op unless the item carries orchestration.runId, so non-orchestrated kb-ask/kb-answer pay nothing. BEST-EFFORT by
+# contract: it ALWAYS returns 0 and only warns on stderr, so it can never change a caller's exit code.
+_kb_orch_ledger_hook() {
+    local _board="${1-}" _item="${2-}" _kind="${3-}" _hdir _py _err _rc=0 _kv
+    [[ -n "$_board" && -n "$_item" && -n "$_kind" ]] || return 0
+    shift 3
+    local -a _fargs
+    _fargs=()
+    for _kv in "$@"; do _fargs+=(--field "$_kv"); done
+    _hdir="$(_kb_board_settings_script 2>/dev/null)" && _hdir="$(dirname "$_hdir")" || _hdir=""
+    _py="$_hdir/release_orchestrator.py"
+    # No module => no orchestrated run can exist here (only release_orchestrator.start_run mints one; kanban-hooks/*.py
+    # is not mirrored to the tap), so stay SILENT: a warning would fire on every consumer kb-ask/kb-answer.
+    [[ -n "$_hdir" && -f "$_py" ]] || return 0
+    _err="$(python3 "$_py" ledger-hook --board "$_board" --item "$_item" --kind "$_kind" ${_fargs[@]+"${_fargs[@]}"} 2>&1 >/dev/null)" || _rc=$?
+    (( _rc == 0 )) || echo "kb: WARNING run-ledger append ($_kind, $_item) failed: ${_err:-rc=$_rc}" >&2
+    return 0
+}
+
 # A kb-msg address naming exactly ONE terminal (kb-ask refuses a broadcast/team:* coordinator too).
 _kb_orch_addr_valid() {
     [[ "${1-}" =~ ^[a-z0-9][a-z0-9-]*:[a-z0-9][a-z0-9_-]*$ ]]
@@ -34612,6 +34633,8 @@ USAGE
             return 8
         fi
         _kb_log_activity "question_asked" "$item" "item" "pendingQuestion" "" "${question:0:200}" "thread=$tid to=$coordinator"
+        # XACA-1546-001: run-ledger "question" event (no-op unless the item has orchestration.runId; best-effort, rc-neutral).
+        _kb_orch_ledger_hook "$board_file" "$item" question thread="$tid" question="$question" to="$coordinator"
         if [[ -n "$old_tid" ]]; then
             # --replace: tell whoever holds the old message that it no longer counts.
             # Best effort - the new question is already live, so a failed note is a warning.
@@ -34879,9 +34902,8 @@ kb-answer() {
         return 8
     }
     _kb_log_activity "question_answered" "$m_item" "item" "qa" "${m_q:0:300}" "${answer:0:300}" "thread=$m_tid asker=$m_asker"
-    # XACA-1546 HOOK: ledger_append(kind="answer", item=$m_item, thread=$m_tid, question=$m_q,
-    #   answer=$answer, askedBy=$m_asker) goes HERE (release_orchestrator.ledger_append, once the
-    #   writer exists). kb-ask's "question" ledger event goes next to its _kb_log_activity call.
+    # XACA-1546-001: run-ledger "answer" event (no-op unless the item has orchestration.runId; best-effort, rc-neutral).
+    _kb_orch_ledger_hook "$board_file" "$m_item" answer thread="$m_tid" question="$m_q" answer="$answer" askedBy="$m_asker"
     echo "Answered $m_item (thread ${m_tid:0:8}) -> $m_asker. Pending question cleared."
     echo "  Q: ${m_q:0:160}"
     return 0

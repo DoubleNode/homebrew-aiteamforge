@@ -1,8 +1,22 @@
 """
 release_orchestrator.py -- read-only release run-planner (XACA-1543, EPIC-0072 T2).
 
-Stdlib only, py3.9-safe, deterministic, READ-ONLY: it never writes a board, never calls a mutating kb-* command and
-never touches tmux. XACA-1546 adds the ledger to this same file, so the layers stay separate and individually callable:
+Stdlib only, py3.9-safe. The PLANNER layer is deterministic and READ-ONLY: it never writes a board, never calls a
+mutating kb-* command and never touches tmux. The LEDGER layer (XACA-1546-001, the section delimited "LEDGER" below) is
+the ONLY part of this module that writes, and it is the shell-out boundary for bash (CLI: ledger-append / ledger-hook):
+
+  mint_run_id / run_release / run_id_valid  RUN-<REL-ID>-<UTC yyyymmddThhmmss>, same grammar as bash _kb_orch_run_valid
+  ledger_append / ledger_read / ledger_path append-only <kanban>/orchestration/<RUN-ID>.jsonl; flock'd, fsync'd; reads FAIL
+                                            CLOSED (LedgerCorrupt on any torn/garbage line; a final newline-less line is a warning)
+  write_summary / start_run / record_state / close_run
+                                            board .releases[].orchestration summary, written ONLY via
+                                            kanban_utils.update_board_safely; double start refused
+  assign_lane / lanes_view / STATE_STAGE    the LANE summary release.orchestration.lanes[] (XACA-1546-011, ticket-lamp
+                                            XACA-1786): one entry per dispatch slot, see LANES below
+  hook_append                               kb-ask / kb-answer hook: no-op unless the item carries orchestration.runId
+
+The planner functions below never call the ledger functions and the ledger functions never call plan().
+The layers stay separate and individually callable:
 
   check_readiness(...)  -> per-item refusal reasons                           (XACA-1543-003)
   build_waves(...)      -> DAG + conflict-aware wave packing, cycle refusal   (XACA-1543-002)
@@ -54,8 +68,11 @@ DECISIONS
 from __future__ import annotations
 
 import argparse
+import datetime
+import fcntl
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -64,6 +81,7 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
 import orchestrator_routing as routing  # noqa: E402
+import orchestrator_state as ostate  # noqa: E402
 
 DEFAULT_REPO_ROOT = os.path.dirname(_HERE)   # the checkout containing this script
 DEFAULT_MAX_PARALLEL = 2
@@ -284,6 +302,549 @@ def assign_terminals(waves, items, terminals, paths_by_item=None):
     return out
 
 
+# ================================================================ LEDGER (XACA-1546-001)
+# The ONLY writing layer in this module. Everything above is the read-only planner (see the module docstring).
+#
+# Two layers, one truth (plan "Two-layer ledger"):
+#   * the RUN LEDGER   <kanban_dir>/orchestration/<RUN-ID>.jsonl : append-only event history, the source of truth for
+#                      "what happened" (dispatches, state changes, questions, stalls, verdicts).
+#   * the SUMMARY      board .releases[].orchestration            : the small, current-state projection the bash side reads
+#                      (activeRunId, startedAt, closedAt, coordinator, maxParallel, waves, items{}, lanes[]).
+# The summary is only ever written through kanban_utils.update_board_safely (flock'd read-modify-write, atomic rename).
+RUN_ID_RE = re.compile(r"RUN-REL-[A-Za-z0-9]+(-[A-Za-z0-9]+)*-[0-9]{8}T[0-9]{6}")   # == bash _kb_orch_run_valid
+ORCH_DIRNAME = "orchestration"
+
+# Stable event vocabulary. `ts`, `run` and `kind` belong to the ledger envelope and may not be passed as fields; a
+# `dispatch` event therefore carries the kb-dispatch --json object NESTED under `dispatch` (that object has its own
+# `run` and `ts`) and lifts `item` to the top level.
+KIND_RUN_START, KIND_DISPATCH, KIND_STATE = "run_start", "dispatch", "state"
+KIND_QUESTION, KIND_ANSWER, KIND_STALL = "question", "answer", "stall"
+KIND_CRASH, KIND_FAILED, KIND_DONE = "crash", "failed", "done"
+KIND_VERDICT, KIND_RUN_END = "verdict", "run_end"
+KIND_LANE = "lane"          # a lane slot changed hands: {item, lane, action: "assign" | "free"} (XACA-1546-011)
+# kind -> fields that must be present (fail closed: an event the summariser cannot attribute is refused at write time).
+LEDGER_KINDS = {
+    KIND_RUN_START: (), KIND_DISPATCH: ("item", "dispatch"), KIND_STATE: ("item", "from", "to"),
+    KIND_QUESTION: ("item",), KIND_ANSWER: ("item",), KIND_STALL: ("item",), KIND_CRASH: ("item",),
+    KIND_FAILED: ("item",), KIND_DONE: ("item",), KIND_VERDICT: (), KIND_RUN_END: (),
+    KIND_LANE: ("item", "lane", "action"),
+}
+_RESERVED_FIELDS = ("ts", "run", "kind")
+
+
+class LedgerError(Exception):
+    """Any refusal from the ledger layer (bad id, unknown kind, missing release, double start, ...)."""
+
+
+class LedgerCorrupt(LedgerError):
+    """ledger_read found a torn/garbage/foreign line. `.events` = the lines that were fine, `.errors` = one
+    {"line": N, "error": text, "text": raw} per bad line, `.warnings` as for a clean read."""
+
+    def __init__(self, path, events, errors, warnings):
+        LedgerError.__init__(self, "ledger %s is corrupt: %d bad line(s), first: line %d: %s"
+                             % (path, len(errors), errors[0]["line"], errors[0]["error"]))
+        self.path, self.events, self.errors, self.warnings = path, events, errors, warnings
+
+
+class LedgerEvents(list):
+    """The events of a clean read, in file order. `.warnings` lists non-fatal notes (a final partial line)."""
+    warnings = ()
+
+
+def run_id_valid(run_id):
+    return isinstance(run_id, str) and RUN_ID_RE.fullmatch(run_id) is not None   # fullmatch: no trailing-newline slip
+
+
+def run_release(run_id):
+    """RUN-REL-2026-Q4-049-20261113T193800 -> REL-2026-Q4-049 (inverse of mint_run_id)."""
+    if not run_id_valid(run_id):
+        raise LedgerError("not a valid run id: %r" % (run_id,))
+    return run_id[len("RUN-"):].rsplit("-", 1)[0]
+
+
+def _utc(now):
+    if now is None:
+        return datetime.datetime.now(datetime.timezone.utc)
+    if isinstance(now, (int, float)) and not isinstance(now, bool):
+        return datetime.datetime.fromtimestamp(now, datetime.timezone.utc)
+    if isinstance(now, datetime.datetime):
+        return now.astimezone(datetime.timezone.utc) if now.tzinfo else now.replace(tzinfo=datetime.timezone.utc)
+    raise LedgerError("now must be None, epoch seconds or a datetime: %r" % (now,))
+
+
+def _ts(now=None):
+    return _utc(now).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+
+def mint_run_id(release_id, now=None):
+    """RUN-<REL-ID>-<UTC yyyymmddThhmmss>. Refuses a release id that would not round-trip through run_id_valid."""
+    run_id = "RUN-%s-%s" % (release_id, _utc(now).strftime("%Y%m%dT%H%M%S"))
+    if not isinstance(release_id, str) or not run_id_valid(run_id):
+        raise LedgerError("cannot mint a run id for release %r (must be REL-<alnum>[-<alnum>...])" % (release_id,))
+    return run_id
+
+
+def ledger_path(kanban_dir, run_id):
+    """<kanban_dir>/orchestration/<RUN-ID>.jsonl. The id is validated FIRST: no separator or dot can reach the path."""
+    if not run_id_valid(run_id):
+        raise LedgerError("not a valid run id: %r" % (run_id,))
+    return os.path.join(kanban_dir, ORCH_DIRNAME, run_id + ".jsonl")
+
+
+def _encode(event):
+    try:
+        return (json.dumps(event, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n").encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise LedgerError("event is not JSON-serialisable: %s" % exc)
+
+
+def _check_event(kind, fields):
+    if kind not in LEDGER_KINDS:
+        raise LedgerError("unknown ledger kind %r (known: %s)" % (kind, ", ".join(sorted(LEDGER_KINDS))))
+    for k in _RESERVED_FIELDS:
+        if k in fields:
+            raise LedgerError("field %r is reserved by the ledger envelope" % k)
+    missing = [k for k in LEDGER_KINDS[kind] if k not in fields]
+    if missing:
+        raise LedgerError("%s event is missing required field(s): %s" % (kind, ", ".join(missing)))
+    if kind == KIND_DISPATCH and not isinstance(fields["dispatch"], dict):
+        raise LedgerError("dispatch event: `dispatch` must be the kb-dispatch --json object")
+
+
+def ledger_append(kanban_dir, run_id, kind, now=None, **fields):
+    """Append ONE event {ts, run, kind, ...fields} as one sorted-key JSON line. Returns the event dict.
+
+    Concurrency: an flock on the sidecar <ledger>.lock serialises appenders, the line goes out in a single write on an
+    O_APPEND fd, then fsync. If the file ends without a newline (a crashed writer), a newline is written first so the torn
+    fragment stays its OWN line (ledger_read will report it) instead of swallowing this record."""
+    _check_event(kind, fields)
+    path = ledger_path(kanban_dir, run_id)
+    event = dict(fields)
+    event.update({"ts": _ts(now), "run": run_id, "kind": kind})
+    data = _encode(event)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    lock_fd = os.open(path + ".lock", os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o644)
+        try:
+            size = os.fstat(fd).st_size
+            if size > 0 and os.pread(fd, 1, size - 1) != b"\n":
+                data = b"\n" + data
+            view = memoryview(data)
+            while view:
+                view = view[os.write(fd, view):]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    finally:
+        os.close(lock_fd)   # closing releases the flock
+    return event
+
+
+def ledger_read_report(kanban_dir, run_id):
+    """Parse the ledger WITHOUT raising on bad lines -> (events, errors, warnings). Diagnostics use this; consumers use
+    ledger_read. A missing ledger is a LedgerError (never an empty run). A line is bad if it is blank, not valid UTF-8,
+    not a JSON object, lacks a string `ts`, names a different `run`, or has an unknown `kind`. The ONLY tolerated oddity is
+    a final segment without a trailing newline (a write in progress): reported in warnings, never in events."""
+    path = ledger_path(kanban_dir, run_id)
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read()
+    except OSError as exc:
+        raise LedgerError("cannot read ledger %s: %s" % (path, exc))
+    parts = raw.split(b"\n")
+    tail = parts.pop()          # b"" when the file ends with a newline (or is empty)
+    events, errors, warnings = [], [], []
+    for n, line in enumerate(parts, 1):
+        try:
+            obj = json.loads(line.decode("utf-8"))
+            if not isinstance(obj, dict):
+                raise ValueError("not a JSON object")
+            if not isinstance(obj.get("ts"), str):
+                raise ValueError("missing ts")
+            if obj.get("run") != run_id:
+                raise ValueError("run is %r, expected %r" % (obj.get("run"), run_id))
+            if obj.get("kind") not in LEDGER_KINDS:
+                raise ValueError("unknown kind %r" % (obj.get("kind"),))
+        except ValueError as exc:     # JSONDecodeError and UnicodeDecodeError are both ValueErrors
+            errors.append({"line": n, "error": str(exc), "text": line.decode("utf-8", "replace")[:200]})
+            continue
+        events.append(obj)
+    if tail:
+        warnings.append("line %d: partial final line without a newline (write in progress?), ignored: %r"
+                        % (len(parts) + 1, tail.decode("utf-8", "replace")[:80]))
+    return events, errors, warnings
+
+
+def ledger_read(kanban_dir, run_id):
+    """The events in order (a list with `.warnings`). FAILS CLOSED: any bad line raises LedgerCorrupt (carrying `.events`,
+    `.errors`, `.warnings`); nothing is silently skipped. A missing ledger raises LedgerError."""
+    events, errors, warnings = ledger_read_report(kanban_dir, run_id)
+    if errors:
+        raise LedgerCorrupt(ledger_path(kanban_dir, run_id), events, errors, warnings)
+    out = LedgerEvents(events)
+    out.warnings = tuple(warnings)
+    return out
+
+
+# ---------------------------------------------------------------- summary (board .releases[].orchestration)
+def _find_release_in(board, release_id):
+    for rel in board.get("releases") or []:
+        if isinstance(rel, dict) and rel.get("id") == release_id:
+            return rel
+    raise LedgerError("release %s not found in the board" % release_id)
+
+
+def write_summary(board_file, release_id, mutate_fn):
+    """Apply mutate_fn(orchestration_dict) to board .releases[id].orchestration under update_board_safely's lock; returns
+    the resulting dict. mutate_fn mutates in place (or returns a replacement dict). A missing release, a board that cannot
+    be read/written, or anything mutate_fn raises RAISES here (update_board_safely itself only returns False, which would
+    otherwise read as success). Keys mutate_fn does not touch, `lanes` included, are preserved."""
+    import kanban_utils
+    box = {}
+
+    def _upd(board):
+        try:
+            rel = _find_release_in(board, release_id)
+            orch = rel.get("orchestration")
+            if not isinstance(orch, dict):
+                orch = {}
+            res = mutate_fn(orch)
+            if res is not None:
+                orch = res
+            rel["orchestration"] = orch
+            box["orch"] = json.loads(json.dumps(orch))
+            return board
+        except Exception as exc:  # noqa: BLE001 -- re-raised below; must not be swallowed by update_board_safely
+            box["exc"] = exc
+            return None           # None = skip the write
+
+    ok = kanban_utils.update_board_safely(board_file, _upd)
+    if "exc" in box:
+        raise box["exc"]
+    if not ok or "orch" not in box:
+        raise LedgerError("could not update the board summary for %s (%s)" % (release_id, board_file))
+    return box["orch"]
+
+
+def _plan_waves(plan_):
+    """plan() output -> (waves as list of lists of ids, {id: terminal})."""
+    waves, terminals = [], {}
+    for w in plan_.get("waves") or []:
+        row = w.get("items") if isinstance(w, dict) else w
+        ids = []
+        for it in row or []:
+            iid = it.get("id") if isinstance(it, dict) else it
+            ids.append(iid)
+            if isinstance(it, dict):
+                terminals[iid] = it.get("terminal")
+        waves.append(ids)
+    return waves, terminals
+
+
+def start_run(board_file, kanban_dir, release_id, plan_, coordinator, max_parallel, now=None):
+    """Mint a run id, append run_start, write the summary; returns the run id. REFUSES (LedgerError) when the release
+    already has an activeRunId that is not closed: no silent double run. The check, the run_start append and the summary
+    write all happen under the board lock, so two racing starts cannot both win. Failure modes: if the ledger append fails
+    nothing is written to the board; if the board write fails AFTER the append, an orphan ledger holding only run_start is
+    left behind (harmless: no summary references it)."""
+    waves, terminals = _plan_waves(plan_)
+    run_id = mint_run_id(release_id, now)
+    started = _ts(now)
+
+    def _mut(orch):
+        if orch.get("activeRunId") and not orch.get("closedAt"):
+            raise LedgerError("release %s already has an active run %s (close it first)" % (release_id, orch["activeRunId"]))
+        if os.path.exists(ledger_path(kanban_dir, run_id)):
+            raise LedgerError("ledger for %s already exists (id collision within one second)" % run_id)
+        ledger_append(kanban_dir, run_id, KIND_RUN_START, now=now, release=release_id, coordinator=coordinator,
+                      maxParallel=max_parallel, waves=waves)
+        orch.pop("closedAt", None)
+        if isinstance(plan_.get("contention"), list):
+            # XACA-1546-003: the monitor's compute_slot_free needs the plan's contention pairs. A plan without the key
+            # stores nothing, so "missing" stays distinguishable (the monitor then fails closed: every pair conflicts).
+            orch["contention"] = [dict(c) if isinstance(c, dict) else c for c in plan_["contention"]]
+        else:
+            orch.pop("contention", None)
+        orch.update({"activeRunId": run_id, "startedAt": started, "coordinator": coordinator,
+                     "maxParallel": max_parallel, "waves": waves,
+                     "lanes": _init_lanes(orch.get("lanes"), waves, max_parallel, started),
+                     "items": {iid: {"terminal": terminals.get(iid), "state": "QUEUED", "since": started}
+                               for w in waves for iid in w}})
+
+    write_summary(board_file, release_id, _mut)
+    return run_id
+
+
+# ---------------------------------------------------------------- lanes (XACA-1546-011)
+# LANES. release.orchestration.lanes[] is one entry per dispatch slot, lane numbers 1..maxParallel:
+#     {"lane": int, "current": {"id", "status", "stage", "prNumber"} | null, "queue": [item ids], "since": ISO ts}
+# RULES (the lamp lines stay stable because a lane number never moves):
+#   * start_run builds lanes 1..maxParallel, current null. `queue` = the plan's wave items flattened in plan order
+#     (wave 1 first, in-wave order) and dealt ROUND-ROBIN: the i-th item goes to lane (i % N) + 1. Deterministic, no
+#     capacity guessing. A RE-RUN keeps the existing lanes (their `current` and number) and rebuilds only the queues from the
+#     new plan; items already sitting in a lane are not queued again. maxParallel may GROW (extra empty lanes) and never
+#     shrinks below an occupied lane: an empty lane above the new max is dropped, an occupied one is kept.
+#   * assign_lane (dispatch) puts the item in the requested free lane or the LOWEST-numbered free lane, removes it from every
+#     queue, appends a `lane` ledger event. Refuses an occupied lane, no free lane, an untracked item, an item already in a
+#     lane, a lane outside 1..maxParallel.
+#   * record_state keeps `current` in sync (status = the orchestrator_state STATES name, stage = STATE_STAGE[status],
+#     prNumber), and bumps `since` on every change of `current`.
+#   * HARD CONTRACT with the bash dispatcher (kb-dispatch in kanban-helpers.sh): it counts
+#         .orchestration.lanes[] | objects | select(.current != null)
+#     as OPEN lanes and refuses LANES_FULL at >= maxParallel. So `current` MUST become null when the lane's item reaches a
+#     terminal board state: DONE (completed) or CANCELLED. Otherwise dispatch deadlocks. The lane NUMBER stays, so the next
+#     dispatch ("SLOT_FREE") reuses it. FAILED, CRASHED, STALLED and every other state KEEP the lane: a human decides, and a
+#     dead item must keep counting against the cap rather than silently free capacity.
+STATE_STAGE = {
+    "QUEUED": "queued", "DISPATCHING": "dispatching", "RUNNING": "coding", "QUESTION_PENDING": "question",
+    "IN_REVIEW": "review", "MERGED_PENDING_DONE": "merged", "DONE": "done", "FAILED": "failed",
+    "CRASHED": "crashed", "STALLED": "stalled", "CANCELLED": "cancelled", "UNKNOWN": "unknown",
+}
+LANE_FREEING_STATES = ("DONE", "CANCELLED")   # the ONLY states that null `current` (see the contract above)
+
+
+def _stage_of(status):
+    return STATE_STAGE.get(status, "unknown")
+
+
+def _lane_no(entry, index):
+    n = entry.get("lane") if isinstance(entry, dict) else None
+    return n if isinstance(n, int) and not isinstance(n, bool) and n >= 1 else index + 1
+
+
+def _lane_is_open(entry):
+    return isinstance(entry, dict) and entry.get("current") is not None
+
+
+def _init_lanes(existing, waves, max_parallel, ts):
+    """Build the lanes list for start_run (see LANES). Pure."""
+    by_no = {}
+    if isinstance(existing, list):
+        for i, e in enumerate(existing):
+            if isinstance(e, dict):
+                by_no.setdefault(_lane_no(e, i), e)
+    n = max_parallel if isinstance(max_parallel, int) and not isinstance(max_parallel, bool) and max_parallel >= 1 else 1
+    occupied = {e["current"].get("id") for e in by_no.values() if isinstance(e.get("current"), dict)}
+    lanes = []
+    for no in sorted(set(range(1, n + 1)) | {k for k, e in by_no.items() if _lane_is_open(e)}):
+        e = dict(by_no.get(no) or {})
+        e["lane"] = no
+        e.setdefault("current", None)
+        e.setdefault("since", ts)
+        e["queue"] = []
+        lanes.append(e)
+    pending = list(dict.fromkeys(iid for w in waves for iid in w if iid not in occupied))   # an id listed twice queues once
+    for i, iid in enumerate(pending):
+        lanes[i % n]["queue"].append(iid)     # lanes[:n] are exactly lanes 1..n (sorted; occupied extras sort after)
+    return lanes
+
+
+def lanes_view(summary):
+    """Pure. orchestration summary -> lanes sorted by number, fixed width 1..maxParallel (missing lanes shown empty:
+    {"lane": N, "current": None, "queue": [], "since": None}); an occupied lane above maxParallel is still shown."""
+    summary = summary if isinstance(summary, dict) else {}
+    mp = summary.get("maxParallel")
+    n = mp if isinstance(mp, int) and not isinstance(mp, bool) and mp >= 1 else 0
+    raw = summary.get("lanes")
+    by_no = {}
+    if isinstance(raw, list):
+        for i, e in enumerate(raw):
+            if isinstance(e, dict):
+                by_no.setdefault(_lane_no(e, i), e)
+    nos = sorted(set(range(1, n + 1)) | set(by_no))
+    out = []
+    for no in nos:
+        e = by_no.get(no) or {}
+        out.append({"lane": no, "current": e.get("current"), "queue": list(e.get("queue") or []),
+                    "since": e.get("since")})
+    return out
+
+
+def _find_lane(lanes, item):
+    for e in lanes:
+        cur = e.get("current") if isinstance(e, dict) else None
+        if isinstance(cur, dict) and cur.get("id") == item:
+            return e
+    return None
+
+
+def assign_lane(board_file, kanban_dir, release_id, run_id, item_id, lane=None, now=None):
+    """Dispatch: put item_id into `lane` (must be free) or the lowest-numbered free lane; remove it from every queue; append
+    a `lane` ledger event; returns the lane number. Refuses (LedgerError): not the active open run, an item the run does not
+    track, an item already in a lane, a lane outside 1..maxParallel, an occupied lane, and no free lane. All under the
+    board lock."""
+    ts = _ts(now)
+    box = {}
+
+    def _mut(orch):
+        _active_run_check(orch, release_id, run_id)
+        items = orch.get("items")
+        if not isinstance(items, dict) or not isinstance(items.get(item_id), dict):
+            raise LedgerError("item %s is not tracked by run %s" % (item_id, run_id))
+        mp = orch.get("maxParallel")
+        lanes = orch.get("lanes")
+        if not isinstance(lanes, list):
+            lanes = []
+        if not lanes:    # a summary from before lanes existed: materialise empty lanes 1..maxParallel
+            lanes = _init_lanes([], [], mp if isinstance(mp, int) else 1, orch.get("startedAt") or ts)
+        if _find_lane(lanes, item_id) is not None:
+            raise LedgerError("item %s is already in lane %s" % (item_id, _find_lane(lanes, item_id)["lane"]))
+        by_no = {_lane_no(e, i): e for i, e in enumerate(lanes) if isinstance(e, dict)}
+        if lane is not None:
+            if isinstance(lane, bool) or not isinstance(lane, int) or lane < 1 or lane > max(mp or 0, 0):
+                raise LedgerError("lane %r is outside 1..%s" % (lane, mp))
+            target = by_no.get(lane)
+            if target is None:
+                target = {"lane": lane, "current": None, "queue": [], "since": ts}
+                lanes.append(target)
+            elif _lane_is_open(target):
+                raise LedgerError("lane %d is occupied by %s" % (lane, (target["current"] or {}).get("id")))
+        else:
+            free = [no for no in sorted(by_no) if not _lane_is_open(by_no[no]) and no <= (mp or 0)]
+            if not free:
+                raise LedgerError("no free lane (maxParallel %s, all occupied)" % (mp,))
+            target = by_no[free[0]]
+        status = items[item_id].get("state") or "QUEUED"
+        target["current"] = {"id": item_id, "status": status, "stage": _stage_of(status),
+                             "prNumber": items[item_id].get("prNumber")}
+        target["since"] = ts
+        for e in lanes:
+            if isinstance(e, dict) and isinstance(e.get("queue"), list):
+                e["queue"] = [q for q in e["queue"] if q != item_id]
+        lanes.sort(key=lambda e: e.get("lane", 0) if isinstance(e, dict) else 0)
+        orch["lanes"] = lanes
+        ledger_append(kanban_dir, run_id, KIND_LANE, now=now, item=item_id, lane=target["lane"], action="assign")
+        box["lane"] = target["lane"]
+
+    write_summary(board_file, release_id, _mut)
+    return box["lane"]
+
+
+def _sync_lane(orch, kanban_dir, run_id, item, to, pr_number, has_pr, ts, now):
+    """record_state helper: mirror a state change onto the item's lane (no-op when the item holds no lane)."""
+    lanes = orch.get("lanes")
+    entry = _find_lane(lanes, item) if isinstance(lanes, list) else None
+    if entry is None:
+        return
+    if to in LANE_FREEING_STATES:
+        entry["current"] = None
+        ledger_append(kanban_dir, run_id, KIND_LANE, now=now, item=item, lane=entry.get("lane"), action="free")
+    else:
+        cur = entry["current"]
+        cur["status"], cur["stage"] = to, _stage_of(to)
+        if has_pr:
+            cur["prNumber"] = pr_number
+    entry["since"] = ts
+
+
+def _active_run_check(orch, release_id, run_id):
+    if orch.get("activeRunId") != run_id:
+        raise LedgerError("%s is not the active run of %s (active: %s)" % (run_id, release_id, orch.get("activeRunId")))
+    if orch.get("closedAt"):
+        raise LedgerError("run %s of %s is already closed" % (run_id, release_id))
+
+
+def record_state(board_file, kanban_dir, release_id, run_id, item, to, detail=None, now=None, **extra):
+    """Append a `state` event AND update summary items[item] in ONE locked call. `from` is read from the summary.
+    extra may carry terminal=... / prNumber=...: they ride on the event and are stored on items[item]. Refuses a run that
+    is not the active, open run, and an item the run does not track. Also mirrors the change onto the item's lane (see LANES:
+    DONE / CANCELLED null the lane's `current` and keep the lane number; every other state keeps the lane)."""
+    ts = _ts(now)
+    # ONE vocabulary: the summary, the lanes and the ledger all carry orchestrator_state.STATES names, so a reader
+    # (status, LCARS, ticket-lamp) never has to guess a spelling.
+    if to not in ostate.STATES:
+        raise LedgerError("state %r is not one of %s" % (to, ", ".join(ostate.STATES)))
+
+    def _mut(orch):
+        _active_run_check(orch, release_id, run_id)
+        items = orch.get("items")
+        if not isinstance(items, dict) or item not in items or not isinstance(items[item], dict):
+            raise LedgerError("item %s is not tracked by run %s" % (item, run_id))
+        prev = items[item].get("state")
+        if prev == to and all(items[item].get(k) == v for k, v in extra.items() if k in ("terminal", "prNumber")):
+            return    # already recorded (a second watcher lost the race): no RUNNING->RUNNING event, `since` untouched
+        fields = {"item": item, "from": prev, "to": to}
+        if detail is not None:
+            fields["detail"] = detail
+        fields.update(extra)
+        ledger_append(kanban_dir, run_id, KIND_STATE, now=now, **fields)
+        items[item].update({"state": to, "since": ts})
+        for k in ("terminal", "prNumber"):
+            if k in extra:
+                items[item][k] = extra[k]
+        _sync_lane(orch, kanban_dir, run_id, item, to, extra.get("prNumber"), "prNumber" in extra, ts, now)
+
+    write_summary(board_file, release_id, _mut)
+
+
+def close_run(board_file, kanban_dir, release_id, run_id, outcome="complete", detail=None, now=None):
+    """Append run_end and stamp closedAt (activeRunId stays, as the closed run's record). Refuses a run that is not the
+    active open one."""
+    ts = _ts(now)
+
+    def _mut(orch):
+        _active_run_check(orch, release_id, run_id)
+        fields = {"outcome": outcome}
+        if detail is not None:
+            fields["detail"] = detail
+        ledger_append(kanban_dir, run_id, KIND_RUN_END, now=now, **fields)
+        orch["closedAt"] = ts
+
+    write_summary(board_file, release_id, _mut)
+
+
+def item_run_id(board_file, item_id):
+    """item.orchestration.runId from the board, or None when the item has none (or does not exist). Read-only."""
+    try:
+        with open(board_file, "r", encoding="utf-8") as fh:
+            board = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    for it in board.get("backlog") or []:
+        if isinstance(it, dict) and it.get("id") == item_id:
+            orch = it.get("orchestration")
+            rid = orch.get("runId") if isinstance(orch, dict) else None
+            return rid if isinstance(rid, str) and rid else None
+    return None
+
+
+def _parse_fields(pairs, json_pairs):
+    fields = {}
+    for p in pairs or []:
+        k, sep, v = p.partition("=")
+        if not sep or not k:
+            raise LedgerError("--field expects k=v, got %r" % p)
+        fields[k] = v
+    for p in json_pairs or []:
+        k, sep, v = p.partition("=")
+        if not sep or not k:
+            raise LedgerError("--json-field expects k=JSON, got %r" % p)
+        try:
+            fields[k] = json.loads(v)
+        except ValueError as exc:
+            raise LedgerError("--json-field %s is not valid JSON: %s" % (k, exc))
+    return fields
+
+
+def hook_append(board_file, item_id, kind, kanban_dir=None, **fields):
+    """The bash hook entry point. NO-OP (returns None) when the item carries no orchestration.runId. Otherwise appends
+    `kind` for that run, with item=<item_id> added; returns the event. Refuses (LedgerError) a malformed runId or a run
+    with no ledger yet (start_run creates it; a hook must never conjure a ledger for a made-up run)."""
+    run_id = item_run_id(board_file, item_id)
+    if run_id is None:
+        return None
+    kdir = kanban_dir or os.path.dirname(os.path.abspath(board_file))
+    if not run_id_valid(run_id):
+        raise LedgerError("item %s carries an invalid orchestration.runId %r" % (item_id, run_id))
+    if not os.path.isfile(ledger_path(kdir, run_id)):
+        raise LedgerError("no ledger for run %s (item %s); not creating one from a hook" % (run_id, item_id))
+    fields.setdefault("item", item_id)
+    return ledger_append(kdir, run_id, kind, **fields)
+# ================================================================ end LEDGER (XACA-1546-001)
+
+
 # ---------------------------------------------------------------- entry point (the only I/O)
 def _load_board(kanban_dir, release_id):
     import release_resume
@@ -471,10 +1032,35 @@ def main(argv=None):
     pp.add_argument("--terminals-json")
     pp.add_argument("--max-parallel", type=int)
     pp.add_argument("--json", action="store_true")
+    la = sub.add_parser("ledger-append", help="append one event to a run ledger (XACA-1546-001)")
+    la.add_argument("--kanban-dir", required=True)
+    la.add_argument("--run", required=True)
+    la.add_argument("--kind", required=True)
+    la.add_argument("--field", action="append", default=[], metavar="k=v")
+    la.add_argument("--json-field", action="append", default=[], metavar="k=JSON")
+    lh = sub.add_parser("ledger-hook", help="like ledger-append but keyed by an item: silent no-op unless the item "
+                        "carries orchestration.runId (the kb-ask / kb-answer hook, XACA-1546-001)")
+    lh.add_argument("--board", required=True)
+    lh.add_argument("--item", required=True)
+    lh.add_argument("--kind", required=True)
+    lh.add_argument("--kanban-dir", help="default: the directory holding --board")
+    lh.add_argument("--field", action="append", default=[], metavar="k=v")
+    lh.add_argument("--json-field", action="append", default=[], metavar="k=JSON")
     try:
         args = ap.parse_args(argv)
     except SystemExit as exc:
         return 0 if exc.code in (0, None) else 2
+    if args.cmd in ("ledger-append", "ledger-hook"):
+        try:
+            fields = _parse_fields(args.field, args.json_field)
+            if args.cmd == "ledger-append":
+                ledger_append(os.path.abspath(args.kanban_dir), args.run, args.kind, **fields)
+            else:
+                hook_append(args.board, args.item, args.kind, kanban_dir=args.kanban_dir, **fields)
+        except (LedgerError, OSError) as exc:
+            print("Error: %s" % exc, file=sys.stderr)
+            return 1
+        return 0
     if args.cmd != "plan":
         ap.print_usage(sys.stderr)
         return 2
