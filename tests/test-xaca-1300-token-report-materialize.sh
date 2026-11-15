@@ -24,6 +24,8 @@
 #   4. It is registered in the mandatory-materialise set.
 #   5. It is listed explicitly in update_runtime_helpers' sweep loop (the glob
 #      cannot reach an extensionless name).
+#   6-7. (XACA-1808) Its import dependency token_scan.py is mandatory and is
+#      materialised flat into scripts/ when absent.
 #
 # All filesystem activity is sandboxed to TEST_TMP_DIR.
 # NEVER touches real $HOME / ~/.aiteamforge — installer-test safety rule.
@@ -159,6 +161,36 @@ _loop_line="$(_extract_fn update_runtime_helpers | grep -E '^[[:space:]]*for src
 assert_contains "$_loop_line" '"$scripts_source"/kb-token-report' \
     "The *.sh/*.py globs cannot match an extensionless name; list it in the for-src loop" \
     && test_pass
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TEST 6 (XACA-1808): kb-token-report's import dependency token_scan.py is
+# mandatory too. kb-token-report imports it from its own directory and exits 2
+# without it, so materialising the script alone would break every upgraded box.
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "Mandatory set registers token_scan.py (kb-token-report's import)"
+assert_contains $'\n'"$(_xaca0673_mandatory_materialize_basenames)"$'\n' $'\n'"token_scan.py"$'\n' \
+    "token_scan.py must be in _xaca0673_mandatory_materialize_basenames" \
+    && test_pass
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TEST 7 (XACA-1808): an ABSENT token_scan.py is materialised by the *.py sweep.
+# Uses a sandbox framework dir so the test does not depend on the publisher
+# having mirrored share/scripts/token_scan.py yet.
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "update_runtime_helpers materialises an ABSENT token_scan.py"
+FW="$SANDBOX/fw"
+mkdir -p "$FW/share/scripts"
+printf '# token_scan stub\n' > "$FW/share/scripts/token_scan.py"
+TS_WORKING="$SANDBOX/ts-working"
+mkdir -p "$TS_WORKING/scripts"
+printf '#!/bin/bash\n# pre-existing sibling\n' > "$TS_WORKING/scripts/kanban-helpers.sh"
+FRAMEWORK_DIR="$FW" WORKING_DIR="$TS_WORKING" FORCE=false DRY_RUN=false \
+    update_runtime_helpers >/dev/null 2>&1
+if [ -f "$TS_WORKING/scripts/token_scan.py" ] && cmp -s "$FW/share/scripts/token_scan.py" "$TS_WORKING/scripts/token_scan.py"; then
+    test_pass
+else
+    test_fail "token_scan.py must be materialised flat into scripts/ (not lib/) even though its target was absent"
+fi
 
 if [ "$_STANDALONE" = true ]; then
     echo ""

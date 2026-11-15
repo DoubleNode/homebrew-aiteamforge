@@ -3434,6 +3434,7 @@ cr-schema-validator.py
 kb-compaction-premise-check.sh
 kb-compaction-quality-watch.sh
 kb-token-report
+token_scan.py
 session-account-map-headless.sh
 session-account-map-record.sh
 session-account-map.py
