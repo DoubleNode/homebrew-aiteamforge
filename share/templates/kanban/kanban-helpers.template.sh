@@ -6209,13 +6209,42 @@ _kb_branch_protected() {
     esac
 }
 
+# _kb_gh_plan_gated_403 <stdout_text> <stderr_text>  (XACA-1796)
+# True (0) ONLY when the gh api stdout body is a JSON object with status 403 (string or int) and a
+# message starting "Upgrade to GitHub Pro" - GitHub's answer for rulesets / branch protection on a
+# private repo in a Free org, where neither can exist. Everything else (empty, unparseable, other
+# status, other message, non-object) is 1. <stderr_text> is accepted for diagnostics only: it is
+# free text and must never make this true on its own. Any python failure is 1 (fail closed).
+_kb_gh_plan_gated_403() {
+    local _pg_out="${1-}"
+    printf '%s' "$_pg_out" | python3 -I -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    if not isinstance(d, dict):
+        sys.exit(1)
+    st = d.get("status")
+    m = d.get("message")
+    ok = (st == "403" or (isinstance(st, int) and not isinstance(st, bool) and st == 403))
+    ok = ok and isinstance(m, str) and m.startswith("Upgrade to GitHub Pro")
+    sys.exit(0 if ok else 1)
+except Exception:
+    sys.exit(1)
+' 2>/dev/null
+}
+
 # _kb_required_checks_status <pr> <repo> [<base>] [<sha>]  (XACA-1569-002/-013/-014/-016)
 # Compare the base branch's REQUIRED status checks against the PR head's check results.
 # Required set = the UNION of (a) every required_status_checks rule of the branch RULESET
 # (`rules/branches/<base>`) and (b) CLASSIC protection (`protection/required_status_checks`):
 # GitHub enforces both. A ruleset that cannot be read refuses (rc 2); classic 404 / "Branch not
 # protected" / "Required status checks not enabled" contributes nothing, any other classic error
-# refuses (rc 2). Each required entry is (context, app-id-or-any): ruleset `integration_id` and
+# refuses (rc 2). EXCEPTION (XACA-1796): a private repo in a GitHub Free org answers BOTH reads
+# with HTTP 403 {"message":"Upgrade to GitHub Pro or make this repository public ...","status":"403"};
+# rulesets / protection cannot exist on that plan, so exactly that body (checked on gh's STDOUT
+# JSON by _kb_gh_plan_gated_403, never on stderr text) means "this read contributes no required
+# checks" (one-line note on stderr). Any other 403 / error still refuses.
+# Each required entry is (context, app-id-or-any): ruleset `integration_id` and
 # classic `checks[].app_id` pin the app (null / -1 / absent = any source); classic `contexts[]`
 # carry no app. Pairs are de-duplicated.
 # Results are read for <sha> (kb-merge passes the head it pins with --match-head-commit; omitted =
@@ -6244,8 +6273,21 @@ _kb_required_checks_status() {
         base=$(gh pr view "$pr" --repo "$repo" --json baseRefName --jq '.baseRefName' 2>/dev/null) || base=""
         [[ -n "$base" ]] || { echo "  required-checks guard: could not read PR #$pr base branch" >&2; return 2; }
     fi
-    rules_json=$(gh api "repos/$repo/rules/branches/$base" 2>/dev/null) \
-        || { echo "  required-checks guard: could not read branch rules for $repo@$base" >&2; return 2; }
+    local _rk_err_file _rk_err
+    _rk_err_file=$(mktemp "${TMPDIR:-/tmp}/kb-rc-err.XXXXXX" 2>/dev/null) || _rk_err_file=""
+    if rules_json=$(gh api "repos/$repo/rules/branches/$base" 2>"${_rk_err_file:-/dev/null}"); then
+        :
+    else
+        _rk_err=""; [[ -n "$_rk_err_file" ]] && _rk_err=$(cat "$_rk_err_file" 2>/dev/null)
+        if _kb_gh_plan_gated_403 "$rules_json" "$_rk_err"; then
+            rules_json='[]'
+            echo "  required-checks guard: $repo@$base rulesets unavailable on this GitHub plan (HTTP 403 plan-gated) - no ruleset checks required" >&2
+        else
+            [[ -n "$_rk_err_file" ]] && unlink "$_rk_err_file" 2>/dev/null
+            echo "  required-checks guard: could not read branch rules for $repo@$base" >&2
+            return 2
+        fi
+    fi
     # Lines of `<context><TAB><integration_id or empty>`. Exit 3 = unparseable.
     ruleset_req=$(printf '%s' "$rules_json" | python3 -I -c '
 import json, sys
@@ -6262,10 +6304,11 @@ try:
                     print("%s\t%s" % (n, i if isinstance(i, int) and i > 0 else ""))
 except Exception:
     sys.exit(3)
-') || { echo "  required-checks guard: unreadable branch rules answer for $repo@$base" >&2; return 2; }
+') || { [[ -n "$_rk_err_file" ]] && unlink "$_rk_err_file" 2>/dev/null
+          echo "  required-checks guard: unreadable branch rules answer for $repo@$base" >&2; return 2; }
     # Classic protection is ALWAYS read (GitHub enforces ruleset + classic together).
     classic_req=""
-    if cls_out=$(gh api "repos/$repo/branches/$base/protection/required_status_checks" 2>&1); then
+    if cls_out=$(gh api "repos/$repo/branches/$base/protection/required_status_checks" 2>"${_rk_err_file:-/dev/null}"); then
         classic_req=$(printf '%s' "$cls_out" | python3 -I -c '
 import json, sys
 try:
@@ -6282,11 +6325,19 @@ try:
             print("%s\t%s" % (n, a if isinstance(a, int) and a > 0 else ""))
 except Exception:
     sys.exit(3)
-') || { echo "  required-checks guard: unreadable classic protection answer for $repo@$base" >&2; return 2; }
-    elif ! printf '%s' "$cls_out" | grep -qiE 'HTTP 404|Not Found|not protected|Required status checks not enabled'; then
-        echo "  required-checks guard: could not read classic protection for $repo@$base" >&2
-        return 2
+') || { [[ -n "$_rk_err_file" ]] && unlink "$_rk_err_file" 2>/dev/null
+          echo "  required-checks guard: unreadable classic protection answer for $repo@$base" >&2; return 2; }
+    else
+        _rk_err=""; [[ -n "$_rk_err_file" ]] && _rk_err=$(cat "$_rk_err_file" 2>/dev/null)
+        if _kb_gh_plan_gated_403 "$cls_out" "$_rk_err"; then
+            echo "  required-checks guard: $repo@$base classic protection unavailable on this GitHub plan (HTTP 403 plan-gated) - no classic checks required" >&2
+        elif ! printf '%s\n%s' "$cls_out" "$_rk_err" | grep -qiE 'HTTP 404|Not Found|not protected|Required status checks not enabled'; then
+            [[ -n "$_rk_err_file" ]] && unlink "$_rk_err_file" 2>/dev/null
+            echo "  required-checks guard: could not read classic protection for $repo@$base" >&2
+            return 2
+        fi
     fi
+    [[ -n "$_rk_err_file" ]] && unlink "$_rk_err_file" 2>/dev/null
     required=$(printf '%s\n%s\n' "$ruleset_req" "$classic_req" | sed '/^$/d' | LC_ALL=C sort -u)
     [[ -n "$required" ]] || return 0
     if [[ -z "$sha" ]]; then
