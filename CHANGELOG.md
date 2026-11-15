@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1543: kb-release plan-run read-only release run-planner (XACA-1543)
+- Tap files updated in this publish: `share/kanban-hooks/orchestrator_contention.py`,`share/kanban-hooks/orchestrator_routing.py` `share/kanban-hooks/release_orchestrator.py`,`share/lcars-ui/tests/test_xaca0729_release_planned_default.py` `share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1812: Archived releases mirror status to manifest; reconcile-closeout handles archived releases (XACA-1812)
 - Tap files updated in this publish: `share/kanban-hooks/approval_providers.py`,`share/lcars-ui/server.py` `share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1796: kb-merge required-checks guard accepts GitHub Free plan-gated 403 (XACA-1796)

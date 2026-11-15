@@ -31110,6 +31110,61 @@ kb-release-resume() {
     python3 "$(dirname "$_KB_RS_CLI")/release_resume.py" "${args[@]}"
 }
 
+# XACA-1543-005: the read-only run-planner (EPIC-0072 T2): dependency DAG + file-contention prediction -> execution waves
+# with a terminal/persona per item and refusals (unestimated, unplanned, blocked outside the release). Changes nothing;
+# all logic is kanban-hooks/release_orchestrator.py (contention: kanban-hooks/orchestrator_contention.py).
+# Usage: kb-release plan-run <REL-ID> [--repo-dir <path>] [--max-parallel N] [--terminals-json FILE] [--json]
+# Exit: 0 plan computed | 1 error (unknown release, kb-terminals unavailable) | 2 usage
+kb-release-plan-run() {
+    local release_id="" opt_repo="" opt_json=0 opt_max="" opt_terms=""
+    local usage="Usage: kb-release plan-run <release-id> [--repo-dir <path>] [--max-parallel N] [--terminals-json FILE] [--json]"
+    while [[ $# -gt 0 ]]; do
+        case "${1-}" in
+            --repo-dir|--max-parallel|--terminals-json)
+                if [[ $# -lt 2 ]]; then echo "Error: ${1-} needs a value" >&2; echo "$usage" >&2; return 2; fi
+                case "${1-}" in
+                    --repo-dir) opt_repo="${2-}" ;;
+                    --max-parallel) opt_max="${2-}" ;;
+                    --terminals-json) opt_terms="${2-}" ;;
+                esac
+                shift 2 ;;
+            --json) opt_json=1; shift ;;
+            --help|-h)
+                echo "$usage"
+                echo ""
+                echo "Compute the execution plan for a release's open items: in-release blockedBy order, items that"
+                echo "share a file or a serialization hotspot (kanban-helpers.sh, tap-mirrored sources, claude/CLAUDE.md)"
+                echo "in different waves, waves capped at maxParallel (release.orchestration.maxParallel, default 2), a"
+                echo "terminal/persona per item from kb-terminals, and refusals with reasons. Read-only; deterministic."
+                echo "--repo-dir is the checkout whose sync-tap.sh defines the tap hotspots (default: this checkout)."
+                return 0 ;;
+            -*) echo "Error: Unknown option: ${1-}" >&2; echo "$usage" >&2; return 2 ;;
+            *)
+                if [[ -z "$release_id" ]]; then release_id="${1-}"
+                else echo "Error: Unexpected argument: ${1-}" >&2; echo "$usage" >&2; return 2; fi
+                shift ;;
+        esac
+    done
+    if [[ -z "$release_id" ]]; then echo "Error: Release ID is required" >&2; echo "$usage" >&2; return 2; fi
+    if ! _kb_release_valid_token "$release_id"; then echo "Error: invalid release id: $release_id" >&2; return 2; fi
+    if [[ -n "$opt_max" && ! "$opt_max" =~ ^[1-9][0-9]*$ ]]; then
+        echo "Error: --max-parallel must be a positive integer: $opt_max" >&2; return 2
+    fi
+    _kb_release_stage_ctx || return 1
+    local hooks_dir; hooks_dir="$(dirname "$_KB_RS_CLI")"
+    local repo="$opt_repo"
+    if [[ -z "$repo" ]]; then
+        # Only a checkout that carries sync-tap.sh defines the tap hotspots; an unrelated repo must not silently win.
+        local _kb_rs_top; _kb_rs_top="$(git rev-parse --show-toplevel 2>/dev/null)"
+        if [[ -n "$_kb_rs_top" && -f "$_kb_rs_top/sync-tap.sh" ]]; then repo="$_kb_rs_top"; else repo="$(dirname "$hooks_dir")"; fi
+    fi
+    local args=(plan --release "$release_id" --kanban-dir "$_KB_RS_KDIR" --repo-root "$repo")
+    [[ -n "$opt_max" ]] && args+=(--max-parallel "$opt_max")
+    [[ -n "$opt_terms" ]] && args+=(--terminals-json "$opt_terms")
+    (( opt_json )) && args+=(--json)
+    python3 "$hooks_dir/release_orchestrator.py" "${args[@]}"
+}
+
 # XACA-1350-005: the auto-promote chain driver (spec 3.3). Thin shell around kanban-hooks/release_chain.py, which owns
 # every rule; every promote it makes is POST /api/releases/<id>/promote, the same gated endpoint as kb-release promote.
 # Usage: kb-release chain <REL-ID> [--repo-dir <path>] [--actor <name>] [--dry-run] [--json]
@@ -31438,6 +31493,10 @@ kb-release() {
             # XACA-1350-004: the resume plan `kb-run <REL-ID>` starts from (spec 5.2)
             kb-release-resume "$@"
             ;;
+        plan-run)
+            # XACA-1543-005: read-only run-planner (waves, terminals, refusals)
+            kb-release-plan-run "$@"
+            ;;
         chain)
             # XACA-1350-005: auto-promote chain QA>ALPHA>BETA>CR (spec 3.3)
             kb-release-chain "$@"
@@ -31500,6 +31559,8 @@ kb-release() {
             echo "                                              PROD close-out: tag, merge to production + integration, delete branch, kb-cr close, promote (XACA-1353)"
             echo "  kb-release resume <id> [--repo-dir PATH] [--json]"
             echo "                                              What a release session resumes with, from the record (XACA-1350)"
+            echo "  kb-release plan-run <id> [--repo-dir PATH] [--max-parallel N] [--terminals-json FILE] [--json]"
+            echo "                                              Read-only run plan: waves, contention, terminal per item, refusals (XACA-1543)"
             echo "  kb-release chain <id> [--repo-dir PATH] [--actor NAME] [--dry-run] [--json]"
             echo "                                              Auto-promote chain QA>ALPHA>BETA>CR with stop conditions (XACA-1350)"
             echo "  kb-release plan <id> --reason \"...\"       Demote back to PLANNED (XACA-0729; reason required)"

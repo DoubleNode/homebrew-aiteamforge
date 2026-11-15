@@ -633,7 +633,7 @@ class TestKbReleasePlanDispatcher(unittest.TestCase):
         """kb-release help must document `plan` with its required --reason and PLANNED."""
         self.assertIsNotNone(self.dispatch_body)
         plan_help = [ln for ln in self.dispatch_body.splitlines()
-                     if "kb-release plan" in ln and "echo" in ln]
+                     if "kb-release plan " in ln and "echo" in ln]  # trailing space: not `plan-run` (XACA-1543)
         self.assertTrue(plan_help, "'kb-release plan' not documented in the help) branch")
         self.assertIn("--reason", plan_help[0], "plan help line must show the required --reason")
         self.assertIn("PLANNED", plan_help[0], "Help text for kb-release plan must mention PLANNED")

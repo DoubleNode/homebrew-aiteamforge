@@ -123,7 +123,7 @@ def _path_kind(path):
     while p.startswith("./"):
         p = p[2:]
     p = p.lower()
-    if not p:
+    if not p.strip("/"):  # "", "/" or "//": no basename, no vote (XACA-1543-012)
         return None
     parts = p.split("/")
     name = parts[-1]
