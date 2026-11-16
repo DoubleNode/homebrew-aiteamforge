@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1830: kb-backlog pr-merged --landed-commit for CLOSED-but-landed PRs (XACA-1830)
+- Tap files updated in this publish: `share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1548: Coordinator mode in kb-run <REL-ID> (XACA-1548)
 - XACA-1547: Crash-safe release-orchestrator run resume (XACA-1547)
 - Tap files updated in this publish: `share/kanban-hooks/orchestrator_monitor.py`,`share/kanban-hooks/orchestrator_run_cli.py` `share/kanban-hooks/release_orchestrator.py`,`share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.

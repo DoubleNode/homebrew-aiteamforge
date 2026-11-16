@@ -5869,17 +5869,34 @@ kb-ci-priority() {
 #     explicit item. A failure to derive the id never blocks recording.
 #   * Idempotent: same PR + repo already recorded = no-op (rc 0). A DIFFERENT PR on the same item
 #     OVERWRITES (latest merge wins; an item spans several PRs, the gate only tests truthiness).
-# rc: 0 recorded/already recorded, 1 gh/board/usage failure, 2 item unresolvable, 3 PR not merged.
+#   * LANDED-COMMIT <sha> (optional 3rd arg, `kb-backlog pr-merged ... --landed-commit <sha>`, XACA-1830):
+#     `gh pr merge` can 502 AFTER GitHub applied the squash; the PR then reads CLOSED, never MERGED.
+#     Opt-in only, and only for state CLOSED (OPEN is always refused; MERGED ignores it with a warning).
+#     <sha> must be full 40-hex. Verified against GitHub's API, never local git, all fail-closed:
+#     commits/<sha> returns that sha and a subject ending "(#<PR>)"; compare/<base>...<sha> status is
+#     behind|identical (the commit is ON the PR's base branch). Records mergedAt = the commit's
+#     committer date plus landedVia: "closed-pr-landed-commit". No flag = default path unchanged.
+#     LIMIT (by design, XACA-1830-005): the "(#<PR>)" subject proof fits SQUASH merges (kb-merge's
+#     default) only. A --merge-method merge PR ("Merge pull request #N from ...") or a rebase merge
+#     (commits keep their own subjects) is REFUSED (rc 3, fail closed), never guessed; widen it in a
+#     ticket of its own if one ever 5xx's.
+# rc: 0 recorded/already recorded, 1 gh/board/usage failure, 2 item unresolvable, 3 PR not merged
+#     (or, with LANDED-COMMIT, the commit is not proven to be this PR's merge on its base).
 _kb_pr_merged_record() {
-    local item="${1-}" pr="${2-}"
+    local item="${1-}" pr="${2-}" landed="${3-}"
     [[ "$pr" =~ ^[0-9]+$ ]] || { echo "Error: PR number required (got '$pr')" >&2; return 1; }
+    if [[ -n "$landed" ]]; then
+        [[ "$landed" =~ ^[0-9a-fA-F]{40}$ ]] \
+            || { echo "Error: --landed-commit needs a full 40-hex commit SHA (got '$landed')" >&2; return 1; }
+        landed=$(printf '%s' "$landed" | tr '[:upper:]' '[:lower:]')
+    fi
     # XACA-1503-003: a missing gh is its own error, not "could not read PR".
     command -v gh >/dev/null 2>&1 || { echo "Error: 'gh' not found on PATH - cannot read PR #$pr" >&2; return 1; }
     _kb_ensure_jq || return 1
 
     local info="" _try _st _oid
     for _try in 1 2 3; do
-        info=$(gh pr view "$pr" --json state,mergeCommit,mergedAt,headRefName,title,url 2>/dev/null) || info=""
+        info=$(gh pr view "$pr" --json state,mergeCommit,mergedAt,headRefName,title,url,baseRefName 2>/dev/null) || info=""
         [[ -n "$info" ]] || break
         _st=$(printf '%s' "$info" | jq -r '.state // ""' 2>/dev/null)
         _oid=$(printf '%s' "$info" | jq -r '.mergeCommit.oid // ""' 2>/dev/null)
@@ -5896,15 +5913,52 @@ _kb_pr_merged_record() {
     head=$(printf '%s' "$info" | jq -r '.headRefName // ""')
     title=$(printf '%s' "$info" | jq -r '.title // ""')
     url=$(printf '%s' "$info" | jq -r '.url // ""')
-    if [[ "$state" != "MERGED" ]]; then
+    local landed_via=""
+    if [[ "$state" == "CLOSED" && -n "$landed" ]]; then
+        landed_via="closed-pr-landed-commit"   # verified below, once repo is known
+    elif [[ "$state" != "MERGED" ]]; then
         echo "Error: PR #$pr is $state, not MERGED - refusing to record prMerged" >&2
+        if [[ "$state" == "CLOSED" ]]; then
+            echo "  Hint: if the merge actually landed (e.g. gh pr merge returned a 5xx after GitHub applied it)," >&2
+            echo "  re-run with: kb-backlog pr-merged <ITEM-ID> $pr --landed-commit <full-40-hex-sha-on-base>" >&2
+        fi
         return 3
     fi
-    if [[ -z "$sha" || -z "$merged_at" ]]; then
-        echo "Error: PR #$pr is MERGED but gh returned no mergeCommit/mergedAt" >&2
-        return 1
+    if [[ -z "$landed_via" ]]; then
+        [[ -n "$landed" ]] && echo "⚠️  prMerged: PR #$pr is MERGED - ignoring --landed-commit, using GitHub's merge commit" >&2
+        if [[ -z "$sha" || -z "$merged_at" ]]; then
+            echo "Error: PR #$pr is MERGED but gh returned no mergeCommit/mergedAt" >&2
+            return 1
+        fi
     fi
     repo=$(printf '%s' "$url" | sed -nE 's#^https?://[^/]+/([^/]+/[^/]+)/pull/[0-9]+.*#\1#p')
+    if [[ -n "$landed_via" ]]; then
+        # XACA-1830: prove <landed> is THIS PR's merge and is ON its base, via GitHub (fail closed).
+        local base c_out c_sha c_date c_subj cmp
+        base=$(printf '%s' "$info" | jq -r '.baseRefName // ""')
+        [[ -n "$repo" ]] || { echo "Error: PR #$pr: cannot derive owner/repo from url '$url' - refusing --landed-commit" >&2; return 1; }
+        [[ -n "$base" ]] || { echo "Error: PR #$pr: gh returned no baseRefName - refusing --landed-commit" >&2; return 1; }
+        c_out=$(gh api "repos/$repo/commits/$landed" \
+                --jq '(.sha // ""), (.commit.committer.date // ""), ((.commit.message // "") | split("\n")[0])' 2>/dev/null) \
+            || { echo "Error: could not read commit $landed via 'gh api repos/$repo/commits' - refusing --landed-commit" >&2; return 1; }
+        { IFS= read -r c_sha; IFS= read -r c_date; IFS= read -r c_subj; } <<< "$c_out"
+        if [[ "$c_sha" != "$landed" || -z "$c_date" ]]; then
+            echo "Error: GitHub returned no matching commit/date for $landed - refusing --landed-commit" >&2
+            return 1
+        fi
+        if [[ "$c_subj" != *"(#$pr)" ]]; then
+            echo "Error: commit ${landed:0:8} subject does not end with '(#$pr)': '$c_subj' - refusing --landed-commit" >&2
+            return 3
+        fi
+        cmp=$(gh api "repos/$repo/compare/$base...$landed" --jq '.status // ""' 2>/dev/null) \
+            || { echo "Error: could not read 'gh api repos/$repo/compare/$base...${landed:0:8}' - refusing --landed-commit" >&2; return 1; }
+        case "$cmp" in
+            behind|identical) ;;
+            "") echo "Error: compare $base...${landed:0:8} returned no status - refusing --landed-commit" >&2; return 1 ;;
+            *)  echo "Error: commit ${landed:0:8} is not on $base (compare status '$cmp') - refusing --landed-commit" >&2; return 3 ;;
+        esac
+        sha="$landed"; merged_at="$c_date"
+    fi
 
     if [[ -z "$item" ]]; then
         local src
@@ -5963,10 +6017,10 @@ _kb_pr_merged_record() {
 
     local ts; ts=$(_kb_get_timestamp)
     _kb_jq_update "$board_file" \
-        '.backlog[$idx].prMerged = {pr: $pr, mergeSha: $sha, mergedAt: $at, repo: $repo} | .backlog[$idx].updatedAt = $ts | .lastUpdated = $ts' \
-        --argjson idx "$idx" --argjson pr "$pr" --arg sha "$sha" --arg at "$merged_at" --arg repo "$repo" --arg ts "$ts" \
+        '.backlog[$idx].prMerged = ({pr: $pr, mergeSha: $sha, mergedAt: $at, repo: $repo} + (if $via == "" then {} else {landedVia: $via} end)) | .backlog[$idx].updatedAt = $ts | .lastUpdated = $ts' \
+        --argjson idx "$idx" --argjson pr "$pr" --arg sha "$sha" --arg at "$merged_at" --arg repo "$repo" --arg via "$landed_via" --arg ts "$ts" \
         || return 1
-    echo "✓ Recorded prMerged on [$item]: PR #$pr ${sha:0:8} ($repo)"
+    echo "✓ Recorded prMerged on [$item]: PR #$pr ${sha:0:8} ($repo)${landed_via:+ via landed commit (PR reads CLOSED)}"
     _kb_log_activity "field_update" "$item" "item" "prMerged" "${cur_pr:+PR #$cur_pr}" "PR #$pr" "" 2>/dev/null
     return 0
 }
@@ -11628,13 +11682,22 @@ kb-backlog() {
         pr-merged)
             # XACA-1347-029: record item.prMerged for an ALREADY-MERGED PR (manual retry / backfill
             # of old items before XACA-1352 flips gate enforcement). kb-merge does this automatically.
-            #   kb-backlog pr-merged <ITEM-ID> <PR#>
-            local pm_item="${1-}" pm_pr="${2-}"
-            if [[ -z "$pm_item" || -z "$pm_pr" ]]; then
-                echo "Usage: kb-backlog pr-merged <ITEM-ID> <PR#>   Record item.prMerged (PR must be MERGED per gh)"
+            #   kb-backlog pr-merged <ITEM-ID> <PR#> [--landed-commit <sha>]
+            # XACA-1830: --landed-commit = a CLOSED PR whose merge landed anyway (gh 5xx on merge).
+            local pm_item="" pm_pr="" pm_landed="" pm_seen_landed=""
+            while (( $# )); do
+                case "$1" in
+                    --landed-commit) pm_seen_landed=1; pm_landed="${2-}"; (( $# >= 2 )) && shift 2 || shift ;;
+                    --landed-commit=*) pm_seen_landed=1; pm_landed="${1#*=}"; shift ;;
+                    *) if [[ -z "$pm_item" ]]; then pm_item="$1"; elif [[ -z "$pm_pr" ]]; then pm_pr="$1"; fi; shift ;;
+                esac
+            done
+            if [[ -z "$pm_item" || -z "$pm_pr" || ( -n "$pm_seen_landed" && -z "$pm_landed" ) ]]; then
+                echo "Usage: kb-backlog pr-merged <ITEM-ID> <PR#> [--landed-commit <sha>]   Record item.prMerged (PR must be MERGED per gh;"
+                echo "       --landed-commit: PR reads CLOSED but its merge landed - full 40-hex sha, verified on the PR base via GitHub)"
                 return 1
             fi
-            _kb_pr_merged_record "$pm_item" "$pm_pr"
+            _kb_pr_merged_record "$pm_item" "$pm_pr" "$pm_landed"
             return $?
             ;;
 
