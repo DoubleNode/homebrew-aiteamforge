@@ -21,6 +21,32 @@ export type TicketView = {
   prMerged: number | null
 }
 
+// Tokens for one ticket, read from release.orchestration.tokens.perItem (XACA-1808): total = input + cacheCreate +
+// cacheRead + output. null = nothing to show (no block, or the ticket is not in perItem); '?' = a malformed block.
+export type Tok = { total: number; cacheRead: number } | '?' | null
+
+// The ticket a lane is working on (release.orchestration.lanes[].current, joined with the board's title and subitems).
+// status is an orchestrator_state.STATES name and stage its release_orchestrator.STATE_STAGE value; both are null when
+// the writer's value was not a string.
+export type LaneCurrent = {
+  id: string | null
+  status: string | null
+  stage: string | null
+  prNumber: number | null
+  title: string
+  subsDone: number
+  subsTotal: number
+  tokens: Tok
+}
+
+export type QueuedTicket = { id: string; title: string }
+
+// One dispatch slot. current is null while the slot is free (after DONE or CANCELLED, or not yet filled).
+export type Lane = { lane: number; since: string | null; current: LaneCurrent | null; queue: QueuedTicket[]; queueLen: number }
+
+// A ticket the run has finished (DONE or CANCELLED).
+export type FinishedTicket = { id: string; state: string; title: string; tokens: Tok }
+
 export type ReleaseView = {
   kind: 'release'
   name: string
@@ -36,6 +62,16 @@ export type ReleaseView = {
   // Open tickets, first few, for /ticket.
   open: Sub[]
   archived: boolean
+  // Orchestrated run (XACA-1786), all from the board's release.orchestration in the same jq pass.
+  // True when activeRunId is set and the run is not closed.
+  runActive: boolean
+  // The lane cap: orchestration.maxParallel (2 when absent or invalid).
+  maxParallel: number
+  // Lanes sorted by number, at most maxParallel. [] when no run is active; null when the block is malformed.
+  lanes: Lane[] | null
+  finished: FinishedTicket[]
+  // The whole run's tokens (orchestration.tokens.run).
+  runTok: Tok
 }
 
 export type View = (TicketView | ReleaseView) & {

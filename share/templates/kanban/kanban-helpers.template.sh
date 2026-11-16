@@ -16188,6 +16188,10 @@ kb-dispatch() {
             --arg id "$item" --arg wid "$wid" -c 2>/dev/null) || state=""
         if [[ -n "$state" ]] && jq -e --arg run "$run" --arg id "$item" \
             '.status == "in_progress" and .runId == $run and .windowRow and .windowItem == $id' <<<"$state" >/dev/null 2>&1; then
+            # XACA-1808: every confirmed dispatch records the model it used, so the monitor can prove (MODEL_MISMATCH) that the
+            # setting took effect. Rides the rc-neutral, silent-when-absent run-ledger hook; values with spaces are safe
+            # (each k=v is one argv element). Not on any failure path: only a DISPATCHED outcome is a dispatch.
+            _kb_orch_ledger_hook "$board_file" "$item" dispatch outcome=DISPATCHED model="$model" modelSource="$_KB_ORCH_MODEL_SOURCE" terminal="$terminal"
             _kb_dispatch_result DISPATCHED "" "" "$state"
             return 0
         fi

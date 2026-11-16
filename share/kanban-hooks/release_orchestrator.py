@@ -13,7 +13,9 @@ the ONLY part of this module that writes, and it is the shell-out boundary for b
                                             kanban_utils.update_board_safely; double start refused
   assign_lane / lanes_view / STATE_STAGE    the LANE summary release.orchestration.lanes[] (XACA-1546-011, ticket-lamp
                                             XACA-1786): one entry per dispatch slot, see LANES below
-  hook_append                               kb-ask / kb-answer hook: no-op unless the item carries orchestration.runId
+  hook_append                               kb-ask / kb-answer / kb-dispatch hook: no-op unless the item carries
+                                            orchestration.runId (a flat k=v `dispatch` event is nested for the caller)
+  write_tokens                              release.orchestration.tokens (XACA-1808), under the board lock
 
 The planner functions below never call the ledger functions and the ledger functions never call plan().
 The layers stay separate and individually callable:
@@ -322,12 +324,16 @@ KIND_QUESTION, KIND_ANSWER, KIND_STALL = "question", "answer", "stall"
 KIND_CRASH, KIND_FAILED, KIND_DONE = "crash", "failed", "done"
 KIND_VERDICT, KIND_RUN_END = "verdict", "run_end"
 KIND_LANE = "lane"          # a lane slot changed hands: {item, lane, action: "assign" | "free"} (XACA-1546-011)
+# XACA-1808 token telemetry: model_mismatch {item, expected, observed, signature}, token_budget {scope, item?, used, limit,
+# signature} (both appended ONCE per signature by the monitor), token_summary {run totals} (appended at ALL_DONE).
+KIND_MODEL_MISMATCH, KIND_TOKEN_BUDGET, KIND_TOKEN_SUMMARY = "model_mismatch", "token_budget", "token_summary"
 # kind -> fields that must be present (fail closed: an event the summariser cannot attribute is refused at write time).
 LEDGER_KINDS = {
     KIND_RUN_START: (), KIND_DISPATCH: ("item", "dispatch"), KIND_STATE: ("item", "from", "to"),
     KIND_QUESTION: ("item",), KIND_ANSWER: ("item",), KIND_STALL: ("item",), KIND_CRASH: ("item",),
     KIND_FAILED: ("item",), KIND_DONE: ("item",), KIND_VERDICT: (), KIND_RUN_END: (),
     KIND_LANE: ("item", "lane", "action"),
+    KIND_MODEL_MISMATCH: ("item",), KIND_TOKEN_BUDGET: (), KIND_TOKEN_SUMMARY: (),
 }
 _RESERVED_FIELDS = ("ts", "run", "kind")
 
@@ -561,6 +567,7 @@ def start_run(board_file, kanban_dir, release_id, plan_, coordinator, max_parall
         ledger_append(kanban_dir, run_id, KIND_RUN_START, now=now, release=release_id, coordinator=coordinator,
                       maxParallel=max_parallel, waves=waves)
         orch.pop("closedAt", None)
+        orch.pop("tokens", None)       # XACA-1808: a re-run starts with no telemetry; the previous run's numbers are not this run's
         if isinstance(plan_.get("contention"), list):
             # XACA-1546-003: the monitor's compute_slot_free needs the plan's contention pairs. A plan without the key
             # stores nothing, so "missing" stays distinguishable (the monitor then fails closed: every pair conflicts).
@@ -795,6 +802,22 @@ def close_run(board_file, kanban_dir, release_id, run_id, outcome="complete", de
     write_summary(board_file, release_id, _mut)
 
 
+def write_tokens(board_file, release_id, run_id, tokens):
+    """XACA-1808-006: store the token telemetry block at release.orchestration.tokens, under the board lock (the same
+    write_summary path as every other summary write). Refuses a run that is not the release's active run. A CLOSED run is
+    accepted on purpose (the final refresh at ALL_DONE is written just before close_run, but a late correction after close is
+    still the same run's own data). `tokens` must be a JSON object. Keys of the summary this does not touch are preserved."""
+    if not isinstance(tokens, dict):
+        raise LedgerError("tokens must be a JSON object, got %s" % type(tokens).__name__)
+
+    def _mut(orch):
+        if orch.get("activeRunId") != run_id:
+            raise LedgerError("%s is not the active run of %s (active: %s)" % (run_id, release_id, orch.get("activeRunId")))
+        orch["tokens"] = tokens
+
+    write_summary(board_file, release_id, _mut)
+
+
 def item_run_id(board_file, item_id):
     """item.orchestration.runId from the board, or None when the item has none (or does not exist). Read-only."""
     try:
@@ -841,6 +864,14 @@ def hook_append(board_file, item_id, kind, kanban_dir=None, **fields):
     if not os.path.isfile(ledger_path(kdir, run_id)):
         raise LedgerError("no ledger for run %s (item %s); not creating one from a hook" % (run_id, item_id))
     fields.setdefault("item", item_id)
+    if kind == KIND_DISPATCH and "dispatch" not in fields:
+        # XACA-1808-D: kb-dispatch reports a DISPATCHED outcome through the shell hook, whose k=v pairs are flat strings, but a
+        # `dispatch` event carries the kb-dispatch --json object NESTED under `dispatch` (see KIND_* above). Nest everything but
+        # `item`, and lift `model` to the top level too, so a reader can use either spelling (orchestrator_tokens reads both).
+        nested = {k: v for k, v in fields.items() if k != "item"}
+        fields = {"item": fields["item"], "dispatch": nested}
+        if "model" in nested:
+            fields["model"] = nested["model"]
     return ledger_append(kdir, run_id, kind, **fields)
 # ================================================================ end LEDGER (XACA-1546-001)
 

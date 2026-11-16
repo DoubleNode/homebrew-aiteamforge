@@ -54,7 +54,7 @@ import urllib.request
 import urllib.error
 import base64
 import glob
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse, urlencode, parse_qs
 
@@ -5274,6 +5274,196 @@ class LcarsHelpersNotFound(RuntimeError):
         )
 
 
+# ---------------------------------------------------------------------------
+# XACA-1549-001: read-only view of a release's orchestrator run
+# (GET /api/releases/<id>/orchestration). Reads release.orchestration (the summary
+# kanban-hooks/release_orchestrator.py writes) plus the ledger tail via the
+# orchestrator's own fail-closed reader. NEVER shells out (no tmux/gh: that is
+# orchestrator_monitor.status()), NEVER takes the board lock, NEVER appends.
+# FAIL CLOSED: a read failure is reported in `readError`, never as `active: false`.
+# ---------------------------------------------------------------------------
+try:
+    import release_orchestrator as _release_orchestrator
+except Exception as _e:  # pragma: no cover - module missing/unimportable => readError, not emptiness
+    _release_orchestrator = None
+    _RELEASE_ORCHESTRATOR_IMPORT_ERROR = str(_e)
+else:
+    _RELEASE_ORCHESTRATOR_IMPORT_ERROR = None
+
+try:
+    from orchestrator_state import _question_open as _orch_question_open
+except Exception:  # pragma: no cover - mirror kanban-hooks/orchestrator_state.py::_question_open exactly
+    _orch_question_open = None
+
+
+def _question_is_open(pq):
+    """XACA-1549-018: same rule as orchestrator_state._question_open (a dict is open only if ANY value is truthy).
+    Calls the real function when importable; otherwise mirrors it (kanban-hooks/orchestrator_state.py)."""
+    if _orch_question_open is not None:
+        return _orch_question_open({"pendingQuestion": pq})
+    if isinstance(pq, dict):
+        return any(bool(v) for v in pq.values())
+    return bool(pq)
+
+
+ORCHESTRATION_EVENTS_TAIL = 50
+_RELEASE_ID_OK_RE = re.compile(r'[A-Za-z0-9_-]+')
+
+
+def _orch_age_seconds(ts, now_dt):
+    """Whole seconds from ISO `ts` to now_dt (>= 0), or None when `ts` is not a parseable ISO timestamp."""
+    if not isinstance(ts, str):
+        return None
+    try:
+        then = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+    except ValueError:
+        return None
+    if then.tzinfo is None:
+        then = then.replace(tzinfo=timezone.utc)
+    return max(0, int((now_dt - then).total_seconds()))
+
+
+def _orch_token_budget(all_events):
+    """XACA-1549-010: the latest `token_budget` ledger event per (scope, item), from the FULL ledger (not the displayed
+    tail: a budget event is appended once per signature, so it ages out of the last 50 while the run is still over budget).
+    Writer: orchestrator_monitor TOKEN_BUDGET -> {scope: "item"|"run", item, used, limit}. A malformed entry is skipped."""
+    latest = {}
+    for ev in all_events:
+        if not isinstance(ev, dict) or ev.get('kind') != 'token_budget':
+            continue
+        scope, item = ev.get('scope'), ev.get('item')
+        used, limit = ev.get('used'), ev.get('limit')
+        if scope not in ('item', 'run'):
+            continue
+        if scope == 'item' and not (isinstance(item, str) and item):
+            continue
+        if not isinstance(item, str) or not item:
+            item = None
+        if any(isinstance(v, bool) or not isinstance(v, (int, float)) or v != v or v in (float('inf'), float('-inf'))
+               for v in (used, limit)):
+            continue
+        key = (scope, item if scope == 'item' else None)
+        latest.pop(key, None)       # re-insert so dict order is by latest event
+        latest[key] = {"scope": scope, "item": key[1], "used": used, "limit": limit, "ts": ev.get('ts')}
+    return list(latest.values())
+
+
+def build_release_orchestration_view(release_id, release, board, kanban_dir, now_dt=None):
+    """Pure(ish) builder for the /orchestration response (see the module block above). `board` supplies backlog titles,
+    pendingQuestion and terminals; `kanban_dir` locates the ledger. Never raises for bad DATA: every problem lands in
+    `readError` and the safe parts are still returned."""
+    now_dt = now_dt or datetime.now(timezone.utc)
+    now_iso = now_dt.strftime('%Y-%m-%dT%H:%M:%SZ')
+    orch = release.get('orchestration') if isinstance(release, dict) else None
+    if orch is None or orch == {}:
+        return {"active": False, "release": release_id}
+    errors = []
+    if not isinstance(orch, dict):
+        return {"active": True, "release": release_id, "run": None, "startedAt": None, "closedAt": None,
+                "coordinator": None, "maxParallel": None, "now": now_iso, "waves": [], "lanes": [], "events": [],
+                "eventsTotal": 0, "tokens": None, "tokenBudget": [],
+                "readError": "release.orchestration is %s, expected an object" % type(orch).__name__}
+    run_id = orch.get('activeRunId')
+    if not run_id:
+        return {"active": False, "release": release_id}
+
+    items_map = orch.get('items')
+    if not isinstance(items_map, dict):
+        if items_map is not None:
+            errors.append("orchestration.items is %s, expected an object" % type(items_map).__name__)
+        items_map = {}
+    waves_raw = orch.get('waves')
+    if not isinstance(waves_raw, list):
+        errors.append("orchestration.waves is %s, expected a list of lists" % type(waves_raw).__name__)
+        waves_raw = [sorted(k for k in items_map if isinstance(k, str))] if items_map else []
+
+    board = board if isinstance(board, dict) else {}
+    terminals = board.get('terminals') if isinstance(board.get('terminals'), dict) else {}
+    backlog = {it.get('id'): it for it in (board.get('backlog') or []) if isinstance(it, dict)}
+
+    def _card(iid):
+        st = items_map.get(iid)
+        st = st if isinstance(st, dict) else {}
+        terminal = st.get('terminal') if isinstance(st.get('terminal'), str) else None
+        tinfo = terminals.get(terminal) if terminal else None
+        tinfo = tinfo if isinstance(tinfo, dict) else {}
+        state = st.get('state')
+        bl = backlog.get(iid) or {}
+        pq = bl.get('pendingQuestion')
+        pq_out = None
+        if isinstance(pq, dict):
+            # XACA-1549-018: an empty / all-falsy pendingQuestion is NOT an open question.
+            if _question_is_open(pq):
+                pq_out = {"threadId": pq.get('threadId'), "question": pq.get('question'),
+                          "askedAt": pq.get('askedAt'), "ageSeconds": _orch_age_seconds(pq.get('askedAt'), now_dt)}
+        elif pq is not None:
+            errors.append("%s pendingQuestion is %s, expected an object" % (iid, type(pq).__name__))
+        return {"id": iid, "title": bl.get('title'), "terminal": terminal,
+                "avatar": tinfo.get('avatar'), "persona": tinfo.get('developer'),
+                "state": state if isinstance(state, str) and state else "UNKNOWN",
+                "since": st.get('since'), "pendingQuestion": pq_out}
+
+    waves = []
+    seen = set()
+    for wi, wave in enumerate(waves_raw):
+        if not isinstance(wave, list):
+            errors.append("orchestration.waves[%d] is %s, expected a list" % (wi, type(wave).__name__))
+            continue
+        out = []
+        for iid in wave:
+            if not isinstance(iid, str):
+                errors.append("orchestration.waves[%d] holds a non-string item id %r" % (wi, iid))
+                continue
+            seen.add(iid)
+            out.append(_card(iid))
+        waves.append(out)
+
+    # XACA-1549-012: an item in orchestration.items but in no wave must never be silently absent.
+    # It rides as an extra trailing wave, flagged via `unwavedWave` (its index) so the UI does not call it "WAVE n".
+    orphans = sorted(k for k in items_map if isinstance(k, str) and k not in seen)
+    unwaved_idx = None
+    if orphans:
+        unwaved_idx = len(waves)
+        waves.append([_card(iid) for iid in orphans])
+        errors.append("orchestration.items holds item(s) in no wave: %s" % ", ".join(orphans))
+
+    events, total = [], 0
+    all_events = []
+    if _release_orchestrator is None:
+        errors.append("ledger reader unavailable: release_orchestrator failed to import (%s)"
+                      % _RELEASE_ORCHESTRATOR_IMPORT_ERROR)
+    else:
+        try:
+            all_events = list(_release_orchestrator.ledger_read(str(kanban_dir), run_id))
+        except _release_orchestrator.LedgerCorrupt as exc:
+            all_events = list(exc.events)       # the lines that parsed; the corruption is reported, not hidden
+            errors.append(str(exc))
+        except _release_orchestrator.LedgerError as exc:
+            all_events = []
+            errors.append("ledger unreadable: %s" % exc)
+        except Exception as exc:                # any other read failure must still not look like emptiness
+            all_events = []
+            errors.append("ledger read failed: %s: %s" % (type(exc).__name__, exc))
+        total = len(all_events)
+        events = all_events[-ORCHESTRATION_EVENTS_TAIL:]
+    token_budget = _orch_token_budget(all_events)
+
+    lanes = orch.get('lanes')
+    if not isinstance(lanes, list):
+        if lanes is not None:
+            errors.append("orchestration.lanes is %s, expected a list" % type(lanes).__name__)
+        lanes = []
+    view = {"active": not orch.get('closedAt'), "release": release_id, "run": run_id,
+            "startedAt": orch.get('startedAt'), "closedAt": orch.get('closedAt'),
+            "coordinator": orch.get('coordinator'), "maxParallel": orch.get('maxParallel'),
+            "now": now_iso, "waves": waves, "lanes": lanes, "events": events, "eventsTotal": total,
+            "tokens": orch.get('tokens'), "tokenBudget": token_budget,
+            "readError": "; ".join(errors) if errors else None}
+    if unwaved_idx is not None:
+        view["unwavedWave"] = unwaved_idx
+    return view
+
+
 class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     """Custom handler for LCARS Kanban Monitor"""
 
@@ -9172,6 +9362,47 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             self.wfile.write(json.dumps(progress, indent=2).encode())
         except Exception as e:
             self.send_error(500, f"Error calculating progress: {e}")
+
+    def handle_release_orchestration(self, release_id):
+        """GET /api/releases/<id>/orchestration (XACA-1549-001) - read-only orchestrator run view.
+
+        200 for every known release (a read failure is `readError`, never `active: false`); 404 unknown release;
+        400 malformed id. No board lock, no ledger append, no tmux/gh."""
+        try:
+            if not _RELEASE_ID_OK_RE.fullmatch(release_id or ''):
+                self.send_error(400, "Invalid release id")
+                return
+            data = self._load_releases_config(_read_only=True)
+            release = self._find_release_by_id(data, release_id)
+            if not release:
+                for archived in self._load_archived_releases():
+                    if archived.get('id') == release_id:
+                        release = archived
+                        break
+            if not release:
+                self.send_error(404, f"Release not found: {release_id}")
+                return
+            try:
+                board = _cached_board(get_board_file(LCARS_TEAM))
+            except (OSError, ValueError, TypeError) as exc:
+                board = None
+                board_err = f"board unreadable for title/terminal join: {exc}"
+            else:
+                board_err = None
+            view = build_release_orchestration_view(
+                release_id, release, board, TEAM_KANBAN_DIRS.get(LCARS_TEAM, KANBAN_DIR))
+            # Gate on the run, not `active`: a CLOSED run is active:false yet still carries its waves, and
+            # the board join failure must surface there too. Only the bare no-run payload skips it.
+            if board_err and (view.get('run') or view.get('active') is not False):
+                view['readError'] = "; ".join(filter(None, [view.get('readError'), board_err]))
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self._send_cors_headers()
+            self.send_header('Cache-Control', 'no-cache')
+            self.end_headers()
+            self.wfile.write(json.dumps(view, indent=2).encode())
+        except Exception as e:
+            self.send_error(500, f"Error loading release orchestration: {e}")
 
     def serve_unassigned_items(self):
         """GET /api/items/unassigned - Items without release assignment (current team only)"""
@@ -22778,6 +23009,9 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         # Release API endpoints
         elif path == '/api/releases':
             self.serve_releases_list(parsed.query)
+        elif path.startswith('/api/releases/') and path.endswith('/orchestration'):
+            # XACA-1549-001: BEFORE the broader /api/releases/<id> matcher below, or it would swallow this
+            self.handle_release_orchestration(path[len('/api/releases/'):-len('/orchestration')])
         elif path.startswith('/api/releases/') and path.endswith('/items'):
             release_id = path.replace('/api/releases/', '').replace('/items', '')
             self.serve_release_items(release_id)

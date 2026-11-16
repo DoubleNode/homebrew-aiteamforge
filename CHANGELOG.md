@@ -6,6 +6,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1786: Bump ticket-lamp to 0.3.0 for the lane lines (XACA-1786)
+- XACA-1549: LCARS Releases tab orchestration panel (XACA-1549)
+- XACA-1808: Release orchestrator token telemetry, MODEL_MISMATCH and TOKEN_BUDGET (XACA-1808)
+- Tap files updated in this publish: `share/claude-mods/ticket-lamp/.claude-plugin/plugin.json`,`share/claude-mods/ticket-lamp/README.md` `share/claude-mods/ticket-lamp/hooks/lanes.test.tsx`,`share/claude-mods/ticket-lamp/hooks/register.tsx` `share/claude-mods/ticket-lamp/tests/gen_lanes_fixture.py`,`share/claude-mods/ticket-lamp/tests/lanes.fixture.json` `share/claude-mods/ticket-lamp/tests/lanes.fixture.ts`,`share/claude-mods/ticket-lamp/tests/release-baseline.snapshot.ts` (+12 more). Run `brew upgrade aiteamforge` to receive them.
 - XACA-1546: Release orchestrator run ledger + kb-release-orchestrate watch verdict monitor (XACA-1546)
 - Tap files updated in this publish: `share/kanban-hooks/orchestrator_monitor.py`,`share/kanban-hooks/orchestrator_state.py` `share/kanban-hooks/release_orchestrator.py`,`share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1543: kb-release plan-run read-only release run-planner (XACA-1543)

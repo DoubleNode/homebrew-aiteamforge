@@ -10991,6 +10991,10 @@ function startAutoRefresh() {
             if (!refreshPaused && !boardLoadInFlight) {
                 loadBoardData();
             }
+            // XACA-1549-003: the Releases tab has no timer of its own; its orchestration panels ride this tick.
+            if (!refreshPaused) {
+                refreshOrchestrationPanels();
+            }
         }, CONFIG.refreshInterval);
     }
 }
@@ -11890,6 +11894,9 @@ function displayReleases(releases, flowConfig = null, projectEnvironments = {}) 
     // XACA-0045: Check plan existence for DOCS buttons
     checkPlanDocsButtons(dashboard);
 
+    // XACA-1549: fill the read-only orchestration panels
+    if (typeof hydrateOrchestrationPanels === 'function') hydrateOrchestrationPanels(dashboard);
+
     // Update release filter dropdown with current releases
     populateReleaseFilterOptions();
 
@@ -12183,6 +12190,7 @@ function renderReleaseCard(release, flowConfig = null, projectEnvironments = {})
                     ${platformsHtml}
                 </div>
                 ${releaseLifecycleHtml(release)}
+                ${release.status !== 'archived' && typeof renderOrchestrationPanel === 'function' ? renderOrchestrationPanel(release.id, release) : ''}
                 ${linkedCRsHtml}
             </div>
             <div class="release-card-items" id="release-items-${release.id}">
@@ -12200,6 +12208,506 @@ function renderReleaseCard(release, flowConfig = null, projectEnvironments = {})
         </div>
     `;
 }
+
+// ORCH-PANEL-BEGIN
+// ═══════════════════════════════════════════════════════════════════════════════
+// XACA-1549: Release orchestration panel (READ-ONLY; no action buttons by design,
+// XACA-1351 retired push-to-promote). Backend: GET /api/releases/<id>/orchestration.
+// All server strings are escaped at the sink (escapeHtml for content, escapeAttr for
+// attributes). Refresh piggybacks on the existing auto-refresh tick (no new timer).
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Mirror of kanban-hooks/orchestrator_state.py STATES. Every state gets a text label and a
+// class; colour is never the only signal.
+const ORCH_STATE_META = {
+    QUEUED:              { label: 'QUEUED',          cls: 'queued' },
+    DISPATCHING:         { label: 'DISPATCHING',     cls: 'dispatching' },
+    RUNNING:             { label: 'RUNNING',         cls: 'running' },
+    QUESTION_PENDING:    { label: 'QUESTION PENDING', cls: 'question-pending' },
+    IN_REVIEW:           { label: 'IN REVIEW',       cls: 'in-review' },
+    MERGED_PENDING_DONE: { label: 'MERGED, PENDING DONE', cls: 'merged-pending-done' },
+    DONE:                { label: 'DONE',            cls: 'done' },
+    FAILED:              { label: 'FAILED',          cls: 'failed' },
+    CRASHED:             { label: 'CRASHED',         cls: 'crashed' },
+    STALLED:             { label: 'STALLED',         cls: 'stalled' },
+    CANCELLED:           { label: 'CANCELLED',       cls: 'cancelled' },
+    UNKNOWN:             { label: 'UNKNOWN',         cls: 'unknown' }
+};
+const ORCH_FLAG_STATES = ['STALLED', 'CRASHED', 'FAILED'];
+const ORCH_QUESTION_AMBER_SECONDS = 600;
+const ORCH_QUESTION_RED_SECONDS = 1800;
+const orchPanelCache = new Map();   // releaseId -> last rendered html (avoids a blank flash on re-render)
+const orchInFlight = new Set();     // releaseId -> a fetch is outstanding
+
+function orchStateInfo(state) {
+    if (typeof state === 'string' && Object.prototype.hasOwnProperty.call(ORCH_STATE_META, state)) {
+        return ORCH_STATE_META[state];
+    }
+    if (state === null || state === undefined || state === '') return ORCH_STATE_META.UNKNOWN;
+    return { label: 'UNRECOGNISED: ' + String(state), cls: 'unrecognised' };
+}
+
+function orchStateChipHtml(state) {
+    const info = orchStateInfo(state);
+    return '<span class="orch-chip orch-chip-' + info.cls + '">' + escapeHtml(info.label) + '</span>';
+}
+
+function orchFormatDuration(seconds) {
+    if (typeof seconds !== 'number' || !isFinite(seconds) || seconds < 0) return '';
+    const s = Math.floor(seconds);
+    if (s < 60) return s + 's';
+    const m = Math.floor(s / 60);
+    if (m < 60) return m + 'm';
+    const h = Math.floor(m / 60);
+    if (h < 24) return h + 'h ' + (m % 60) + 'm';
+    return Math.floor(h / 24) + 'd ' + (h % 24) + 'h';
+}
+
+function orchSecondsBetween(fromIso, toIso) {
+    const a = Date.parse(fromIso);
+    const b = Date.parse(toIso);
+    if (isNaN(a) || isNaN(b)) return null;
+    return Math.max(0, (b - a) / 1000);
+}
+
+// 'ok' | 'amber' (over 10 min) | 'red' (over 30 min)
+function orchQuestionSeverity(ageSeconds) {
+    if (typeof ageSeconds !== 'number' || !isFinite(ageSeconds)) return 'ok';
+    if (ageSeconds > ORCH_QUESTION_RED_SECONDS) return 'red';
+    if (ageSeconds > ORCH_QUESTION_AMBER_SECONDS) return 'amber';
+    return 'ok';
+}
+
+function orchQuestionHtml(q, now) {
+    if (!q || typeof q !== 'object') return '';
+    let age = (typeof q.ageSeconds === 'number' && isFinite(q.ageSeconds)) ? q.ageSeconds : null;
+    if (age === null && q.askedAt) age = orchSecondsBetween(q.askedAt, now);
+    const sev = orchQuestionSeverity(age);
+    const label = sev === 'red' ? 'OVERDUE' : (sev === 'amber' ? 'WAITING' : 'OPEN');
+    const ageText = age === null ? 'age unknown' : orchFormatDuration(age);
+    return '<div class="orch-question orch-question-' + sev + '" role="note">' +
+        '<span class="orch-question-label">QUESTION ' + label + '</span> ' +
+        '<span class="orch-question-age">' + escapeHtml(ageText) + '</span>' +
+        '<div class="orch-question-text">' + escapeHtml(q.question || '') + '</div>' +
+        '</div>';
+}
+
+function orchCompactNumber(n) {
+    if (n >= 1e9) return (n / 1e9).toFixed(1).replace(/\.0$/, '') + 'B';
+    if (n >= 1e6) return (n / 1e6).toFixed(1).replace(/\.0$/, '') + 'M';
+    if (n >= 1e3) return (n / 1e3).toFixed(1).replace(/\.0$/, '') + 'K';
+    return String(n);
+}
+
+function orchIsCount(v) {
+    return typeof v === 'number' && isFinite(v) && v >= 0;
+}
+
+// B = {model, input, cacheCreate, cacheRead, output, turns}; model is a comma-joined sorted list of observed ids or null.
+function orchTokenEntryValid(e) {
+    return !!e && typeof e === 'object' && !Array.isArray(e) &&
+        orchIsCount(e.input) && orchIsCount(e.cacheCreate) && orchIsCount(e.cacheRead) && orchIsCount(e.output) &&
+        (e.model === null || e.model === undefined || typeof e.model === 'string') &&
+        (e.turns === undefined || e.turns === null || orchIsCount(e.turns));
+}
+
+function orchTokenTotal(e) {
+    return e.input + e.cacheCreate + e.cacheRead + e.output;
+}
+
+function orchObservedText(v) {
+    if (Array.isArray(v)) return v.filter(x => typeof x === 'string' || typeof x === 'number').join(', ');
+    return (typeof v === 'string' || typeof v === 'number') ? String(v) : '';
+}
+
+// Contract (XACA-1808, kanban-hooks/orchestrator_tokens.py; pinned by tests/fixtures/xaca-1808/orchestration-tokens.contract.json):
+//   {run: B, perItem: {<id>: B}, coordinator: B, updatedAt, complete: bool, unattributed: int, modelMismatch: [{item, expected, observed[]}]}
+// The `run` block is authoritative for the run total (never re-summed from perItem). Returns {kind:'none'|'bad'|'ok', ...}.
+function orchTokenModel(tokens) {
+    if (tokens === null || tokens === undefined) return { kind: 'none' };
+    if (typeof tokens !== 'object' || Array.isArray(tokens)) return { kind: 'bad' };
+    const per = tokens.perItem;
+    if (!per || typeof per !== 'object' || Array.isArray(per)) return { kind: 'bad' };
+    if (!orchTokenEntryValid(tokens.run) || !orchTokenEntryValid(tokens.coordinator)) return { kind: 'bad' };
+    for (const id of Object.getOwnPropertyNames(per)) {
+        if (!orchTokenEntryValid(per[id])) return { kind: 'bad' };
+    }
+    let mismatches = [];
+    if (tokens.modelMismatch !== undefined && tokens.modelMismatch !== null) {
+        if (!Array.isArray(tokens.modelMismatch)) return { kind: 'bad' };
+        mismatches = tokens.modelMismatch.filter(m => m && typeof m === 'object' && !Array.isArray(m));
+    }
+    return { kind: 'ok', perItem: per, run: tokens.run, runTotal: orchTokenTotal(tokens.run),
+        coordinator: tokens.coordinator, coordinatorTotal: orchTokenTotal(tokens.coordinator),
+        partial: tokens.complete === false,
+        unattributed: orchIsCount(tokens.unattributed) ? tokens.unattributed : 0,
+        mismatches: mismatches };
+}
+
+function orchBadgeHtml(text) {
+    return '<span class="orch-badge orch-badge-token">' + escapeHtml(text) + '</span>';
+}
+
+function orchMismatchText(m) {
+    const exp = orchObservedText(m.expected), obs = orchObservedText(m.observed);
+    return 'MODEL MISMATCH (expected ' + (exp || 'unknown') + ', observed ' + (obs || 'unknown') + ')';
+}
+
+// Server `tokenBudget` (latest token_budget ledger event per scope+item) -> clean list; anything malformed is dropped.
+function orchBudgetList(list) {
+    if (!Array.isArray(list)) return [];
+    return list.filter(b => b && typeof b === 'object' && (b.scope === 'item' || b.scope === 'run') &&
+        typeof b.used === 'number' && isFinite(b.used) && typeof b.limit === 'number' && isFinite(b.limit));
+}
+
+function orchBudgetText(b) {
+    return 'TOKEN BUDGET (used ' + b.used + ' > limit ' + b.limit + ')';
+}
+
+function orchTokenCellHtml(entry) {
+    if (!entry) return '';
+    const total = orchTokenTotal(entry);
+    const full = 'input ' + entry.input + ', cache create ' + entry.cacheCreate + ', cache read ' + entry.cacheRead +
+        ', output ' + entry.output + ', total ' + total;
+    const model = typeof entry.model === 'string' && entry.model ? entry.model : 'model unknown';
+    return '<div class="orch-tokens" title="' + escapeAttr(full) + '" aria-label="' + escapeAttr('Tokens: ' + full) + '">' +
+        '<span class="orch-tokens-label">TOKENS</span> ' +
+        '<span class="orch-tokens-total">' + escapeHtml(orchCompactNumber(total)) + '</span> ' +
+        '<span class="orch-tokens-model">' + escapeHtml(model) + '</span>' +
+        (typeof entry.turns === 'number' && isFinite(entry.turns) ? ' <span class="orch-tokens-turns">' + escapeHtml(entry.turns + ' turns') + '</span>' : '') +
+        '</div>';
+}
+
+function orchAvatarHtml(t) {
+    const terminal = typeof t.terminal === 'string' ? t.terminal : '';
+    const avatarKey = (typeof t.avatar === 'string' && t.avatar) ? t.avatar : terminal;
+    const url = avatarKey ? getDeveloperAvatarUrl(CONFIG.team, avatarKey) : '';
+    const who = (typeof t.persona === 'string' && t.persona) ? t.persona : terminal;
+    if (!url) return '<span class="orch-avatar orch-avatar-none" aria-hidden="true">?</span>';
+    return '<img class="orch-avatar lcars-avatar" src="' + escapeAttr(url) + '" alt="' + escapeAttr(who || 'terminal') + '"' +
+        ' data-developer="' + escapeAttr(who) + '" data-terminal="' + escapeAttr(terminal) + '" data-role=""' +
+        ' onerror="this.onerror=null;this.src=\'images/default_avatar.svg\'">';
+}
+
+function orchTicketCardHtml(t, now, tokenEntry, badgeTexts) {
+    t = (t && typeof t === 'object') ? t : {};
+    const info = orchStateInfo(t.state);
+    const inState = t.since ? orchSecondsBetween(t.since, now) : null;
+    const inStateText = inState === null ? '' : orchFormatDuration(inState);
+    // Flag states are carried by the state chip's own text plus the alert card style; a separate badge
+    // repeating the same word ("STALLED STALLED") added nothing (seen in the rendered check).
+    const flagged = ORCH_FLAG_STATES.indexOf(t.state) !== -1;
+    const idText = typeof t.id === 'string' ? t.id : '';
+    const aria = idText + ' ' + (t.title || '') + ', ' + info.label + (inStateText ? ', ' + inStateText + ' in state' : '');
+    const where = [t.terminal, t.persona].filter(x => typeof x === 'string' && x).join(' / ');
+    return '<li class="orch-card orch-card-' + info.cls + (flagged ? ' orch-card-alert' : '') + '"' +
+        ' aria-label="' + escapeAttr(aria) + '" data-ticket-id="' + escapeAttr(idText) + '">' +
+        '<div class="orch-card-head">' + orchAvatarHtml(t) +
+        '<div class="orch-card-who"><span class="orch-card-id">' + escapeHtml(idText) + '</span>' +
+        '<span class="orch-card-where">' + escapeHtml(where || 'unassigned') + '</span></div></div>' +
+        '<div class="orch-card-title">' + escapeHtml(t.title || '') + '</div>' +
+        '<div class="orch-card-state">' + orchStateChipHtml(t.state) +
+        (inStateText ? '<span class="orch-card-since" title="' + escapeAttr('Since ' + (t.since || '')) + '">' + escapeHtml(inStateText) + ' in state</span>' : '') +
+        '</div>' +
+        orchQuestionHtml(t.pendingQuestion, now) +
+        orchTokenCellHtml(tokenEntry) +
+        (badgeTexts && badgeTexts.length ? '<div class="orch-card-badges">' + badgeTexts.map(orchBadgeHtml).join('') + '</div>' : '') +
+        '</li>';
+}
+
+// Mirror of kanban-hooks/release_orchestrator.py LEDGER_KINDS (the ledger envelope is {ts, run, kind, ...fields}).
+const ORCH_EVENT_KINDS = ['run_start', 'dispatch', 'state', 'question', 'answer', 'stall', 'crash', 'failed', 'done',
+    'verdict', 'run_end', 'lane', 'model_mismatch', 'token_budget', 'token_summary'];
+
+function orchStr(v) {
+    return (typeof v === 'string' || typeof v === 'number') ? String(v) : '';
+}
+
+// Distinguishing fields per kind, as plain strings (escaped at the sink). Never dumps an object raw.
+// Free text (question/answer/detail) is truncated so one long event can't swamp the feed.
+const ORCH_EVENT_TEXT_MAX = 160;
+function orchClip(t) { return t.length > ORCH_EVENT_TEXT_MAX ? t.slice(0, ORCH_EVENT_TEXT_MAX - 1) + '\u2026' : t; }
+
+// Distinguishing fields per kind, from each WRITER's real field set (PR #1344 review round 2):
+//   dispatch  kb-dispatch --json, nested under `dispatch`: {item, terminal, model, outcome, reason, ...};
+//             outcome DISPATCHED | REFUSED | DISPATCH_FAILED (orchestrator_monitor branches on it)
+//   state     record_state: item, from, to, detail?        verdict  orchestrator_monitor: verdict, item?, detail
+//   model_mismatch {item, expected, observed (list)}   token_budget {scope: item|run, item, used, limit}
+//   token_summary  {total, complete, unattributed, modelMismatch (count), items (count); totals/coordinator are objects: skipped}
+//   question  kb-ask hook: thread, question, to             answer   kb-answer hook: thread, question, answer, askedBy
+// Returns {parts: [plain strings, escaped at the sink], alert: bool}. Never dumps an object raw.
+function orchEventDetails(ev) {
+    const out = [];
+    let alert = false;
+    const add = (label, v) => { const t = orchStr(v); if (t) out.push(label + '=' + orchClip(t)); };
+    switch (ev.kind) {
+        case 'run_start':
+            add('coordinator', ev.coordinator); add('maxParallel', ev.maxParallel);
+            break;
+        case 'dispatch': {
+            add('item', ev.item);
+            const d = ev.dispatch;
+            if (d && typeof d === 'object' && !Array.isArray(d)) {
+                const outcome = orchStr(d.outcome);
+                if (outcome) {
+                    out.push('outcome=' + outcome);
+                    alert = outcome !== 'DISPATCHED';
+                }
+                add('reason', d.reason); add('terminal', d.terminal); add('model', d.model);
+            }
+            break;
+        }
+        case 'state': {
+            const from = orchStr(ev.from), to = orchStr(ev.to);
+            add('item', ev.item);
+            if (from || to) out.push((from || '?') + ' \u2192 ' + (to || '?'));
+            add('detail', ev.detail);
+            break;
+        }
+        case 'question':
+            add('item', ev.item); add('to', ev.to); add('question', ev.question);
+            break;
+        case 'answer':
+            add('item', ev.item); add('askedBy', ev.askedBy); add('answer', ev.answer);
+            break;
+        case 'lane':
+            add('item', ev.item); add('lane', ev.lane); add('action', ev.action);
+            break;
+        case 'verdict':
+            add('verdict', ev.verdict); add('item', ev.item); add('detail', ev.detail);
+            break;
+        case 'run_end':
+            add('outcome', ev.outcome); add('detail', ev.detail);
+            break;
+        case 'model_mismatch':
+            add('item', ev.item); add('expected', ev.expected); add('observed', orchObservedText(ev.observed));
+            break;
+        case 'token_budget':
+            alert = true;
+            add('scope', ev.scope); add('item', ev.item); add('used', ev.used); add('limit', ev.limit);
+            break;
+        case 'token_summary':
+            add('total', ev.total);
+            if (ev.complete === false) out.push('complete=false');
+            else if (ev.complete === true) out.push('complete=true');
+            add('unattributed', ev.unattributed); add('modelMismatch', ev.modelMismatch); add('items', ev.items);
+            break;
+        default:
+            add('item', ev.item);
+    }
+    ['message', 'reason'].forEach(k => add(k, ev[k]));
+    return { parts: out, alert: alert };
+}
+
+function orchEventsHtml(events, total) {
+    const list = Array.isArray(events) ? events.slice().reverse() : [];   // newest first for display
+    const shown = list.length;
+    const totalText = (typeof total === 'number' && total > shown) ? ' of ' + total : '';
+    const rows = list.map(ev => {
+        ev = (ev && typeof ev === 'object') ? ev : {};
+        // The ledger writes `kind`; `type` is a legacy fallback only.
+        const kind = orchStr(ev.kind) || orchStr(ev.type) || 'unknown';
+        const evShape = Object.assign({}, ev, { kind: kind });
+        const det = orchEventDetails(evShape);
+        const extra = det.parts.map(escapeHtml).join(' ');
+        // A failed/refused dispatch is the only place the panel shows it: flag it in TEXT as well as style.
+        return '<li class="orch-event' + (det.alert ? ' orch-event-alert' : '') + '"><time class="orch-event-ts">' + escapeHtml(ev.ts || '') + '</time> ' +
+            (det.alert ? '<span class="orch-event-flag">' + (kind === 'token_budget' ? 'OVER BUDGET' : 'NOT DISPATCHED') + '</span> ' : '') +
+            '<span class="orch-event-kind">' + escapeHtml(kind) + '</span> ' +
+            '<span class="orch-event-extra">' + extra + '</span></li>';
+    }).join('');
+    return '<details class="orch-events"><summary class="orch-events-summary">EVENT FEED (' + shown + totalText + ')</summary>' +
+        (rows ? '<ol class="orch-events-list">' + rows + '</ol>' : '<div class="orch-events-none">No events recorded</div>') +
+        '</details>';
+}
+
+function orchEmptyHtml(releaseId) {
+    const target = (typeof releaseId === 'string' && releaseId) ? escapeHtml(releaseId) : '&lt;REL-ID&gt;';
+    return '<div class="orch-empty" role="status">No orchestration run, start with <code>kb-run ' + target + '</code></div>';
+}
+
+function orchErrorHtml(reason, releaseId) {
+    const rel = (typeof releaseId === 'string' && releaseId) ? escapeHtml(releaseId) : '&lt;REL-ID&gt;';
+    return '<div class="orch-error" role="alert"><span class="orch-error-label">ORCHESTRATION DATA UNAVAILABLE</span> ' +
+        '<span class="orch-error-reason">' + escapeHtml(reason || 'unknown error') + '</span>' +
+        '<div class="orch-error-hint">Check with <code>kb-release-orchestrate status ' + rel + '</code></div></div>';
+}
+
+function orchShell(inner, releaseId) {
+    return '<section class="orch-panel" data-orch-release="' + escapeAttr(releaseId) + '" aria-label="Orchestration">' +
+        '<div class="orch-header"><h4 class="orch-title">ORCHESTRATION</h4></div>' + inner + '</section>';
+}
+
+// Pure: data (parsed JSON) -> panel inner html.
+function orchPanelInnerHtml(data, releaseId) {
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return orchErrorHtml('Malformed response', releaseId);
+    releaseId = (typeof data.release === 'string' && data.release) ? data.release : releaseId;
+    const err = data.readError ? orchErrorHtml(String(data.readError), releaseId) : '';
+    const waves = Array.isArray(data.waves) ? data.waves : [];
+    if (data.active !== true && data.active !== false) return orchErrorHtml('Malformed response', releaseId);
+    // `active:false` means BOTH "no run" and "run closed" (closedAt set; the server still sends the run).
+    // Discriminate on `run`: only a payload with no run at all is the empty state (XACA-1549 test gate).
+    const hasRun = typeof data.run === 'string' && data.run !== '';
+    if (!hasRun) {
+        if (data.readError) return err;
+        if (data.active === false) return orchEmptyHtml(data.release);
+        return orchErrorHtml('Malformed response: an active run with no run id', releaseId);
+    }
+    const now = data.now;
+    const tm = orchTokenModel(data.tokens);
+    const per = tm.kind === 'ok' ? tm.perItem : {};
+    const budgets = orchBudgetList(data.tokenBudget);
+    const itemBadges = {};
+    const addBadge = (id, text) => { if (typeof id === 'string' && id) (itemBadges[id] = itemBadges[id] || []).push(text); };
+    if (tm.kind === 'ok') tm.mismatches.forEach(m => addBadge(m.item, orchMismatchText(m)));
+    budgets.filter(b => b.scope === 'item').forEach(b => addBadge(b.item, orchBudgetText(b)));
+    const hasOwn = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+    const meta = [];
+    if (data.run) meta.push('<span class="orch-meta-item">RUN ' + escapeHtml(data.run) + '</span>');
+    if (data.coordinator) meta.push('<span class="orch-meta-item">COORDINATOR ' + escapeHtml(data.coordinator) + '</span>');
+    if (data.maxParallel !== undefined && data.maxParallel !== null) meta.push('<span class="orch-meta-item">MAX PARALLEL ' + escapeHtml(String(data.maxParallel)) + '</span>');
+    if (data.startedAt) meta.push('<span class="orch-meta-item">STARTED ' + escapeHtml(data.startedAt) + '</span>');
+    meta.push('<span class="orch-meta-item orch-run-state">' + (data.closedAt ? 'CLOSED ' + escapeHtml(data.closedAt) : 'ACTIVE') + '</span>');
+    const waveHtml = waves.map((wave, i) => {
+        const tickets = Array.isArray(wave) ? wave : [];
+        const done = tickets.filter(t => t && t.state === 'DONE').length;
+        const waveName = (i === data.unwavedWave) ? 'NOT IN ANY WAVE' : 'WAVE ' + (i + 1);
+        return '<li class="orch-wave"><div class="orch-wave-label">' + waveName +
+            ' <span class="orch-wave-count">' + done + '/' + tickets.length + ' DONE</span></div>' +
+            '<ul class="orch-cards">' + tickets.map(t => orchTicketCardHtml(t, now, t && hasOwn(per, t.id) ? per[t.id] : null, t && hasOwn(itemBadges, t.id) ? itemBadges[t.id] : null)).join('') + '</ul></li>';
+    }).join('');
+    let tokenSummary = '';
+    const runBudgets = budgets.filter(b => b.scope === 'run').map(b => orchBadgeHtml(orchBudgetText(b))).join('');
+    if (tm.kind === 'bad') {
+        tokenSummary = '<div class="orch-tokens-summary orch-tokens-bad" role="note">tokens unavailable' + runBudgets + '</div>';
+    } else if (tm.kind === 'ok') {
+        const full = 'Run total ' + tm.runTotal + ', coordinator ' + tm.coordinatorTotal;
+        const runModel = typeof tm.run.model === 'string' && tm.run.model ? tm.run.model : 'model unknown';
+        const coordModel = typeof tm.coordinator.model === 'string' && tm.coordinator.model ? tm.coordinator.model : 'model unknown';
+        tokenSummary = '<div class="orch-tokens-summary" title="' + escapeAttr(full) + '" aria-label="' + escapeAttr(full) + '">' +
+            '<span class="orch-tokens-label">RUN TOTAL</span> <span class="orch-tokens-total">' + escapeHtml(orchCompactNumber(tm.runTotal)) + '</span>' +
+            ' <span class="orch-tokens-model">' + escapeHtml(runModel) + '</span>' +
+            ' <span class="orch-tokens-label">COORDINATOR</span> <span class="orch-tokens-total">' + escapeHtml(orchCompactNumber(tm.coordinatorTotal)) + '</span>' +
+            ' <span class="orch-tokens-model">' + escapeHtml(coordModel) + '</span>' +
+            (tm.partial ? orchBadgeHtml('PARTIAL') : '') +
+            (tm.unattributed > 0 ? ' <span class="orch-tokens-unattributed">' + escapeHtml(tm.unattributed + ' unattributed session(s)') + '</span>' : '') +
+            (tm.mismatches.length ? ' <span class="orch-tokens-mismatch-count">' + escapeHtml(tm.mismatches.length + ' model mismatch(es)') + '</span>' : '') +
+            runBudgets + '</div>';
+    } else if (runBudgets) {
+        tokenSummary = '<div class="orch-tokens-summary">' + runBudgets + '</div>';
+    }
+    const runHtml = '<div class="orch-meta">' + meta.join('') + '</div>' +
+        (waveHtml ? '<ol class="orch-waves">' + waveHtml + '</ol>' : '<div class="orch-empty">Run has no waves yet</div>') +
+        tokenSummary + orchEventsHtml(data.events, data.eventsTotal);
+    // With a readError the data below may be partial or old: say so in text, not just colour/opacity.
+    if (data.readError) {
+        return err + '<div class="orch-run orch-stale"><div class="orch-stale-label">LAST READABLE DATA</div>' + runHtml + '</div>';
+    }
+    return err + '<div class="orch-run">' + runHtml + '</div>';
+}
+
+// Fetch + render to html. Network failure, non-200 and bad JSON all become the ERROR panel, never empty.
+async function orchLoadInnerHtml(releaseId) {
+    let response;
+    try {
+        response = await fetch(apiUrl('/api/releases/' + encodeURIComponent(releaseId) + '/orchestration'));
+    } catch (e) {
+        return orchErrorHtml('Fetch failed: ' + (e && e.message ? e.message : e), releaseId);
+    }
+    if (!response.ok) return orchErrorHtml('Server returned HTTP ' + response.status, releaseId);
+    let data;
+    try {
+        data = await response.json();
+    } catch (e) {
+        return orchErrorHtml('Response was not valid JSON', releaseId);
+    }
+    return orchPanelInnerHtml(data, releaseId);
+}
+
+// Called from renderReleaseCard after the stages section. Returns the shell (with the cached
+// render if we have one); hydrateOrchestrationPanels() fills it.
+function renderOrchestrationPanel(releaseId, release) {
+    if (!releaseId) return '';
+    // No orchestration summary on the release at all: the empty state is known without a fetch, so don't
+    // make every release card hit the endpoint on every refresh tick. The shell carries no
+    // data-orch-release, so hydrateOrchestrationPanels() skips it. Anything present (even malformed)
+    // still fetches, so the server can report readError instead of us guessing "empty".
+    if (release && typeof release === 'object' && release.orchestration == null) {
+        return '<section class="orch-panel" aria-label="Orchestration">' +
+            '<div class="orch-header"><h4 class="orch-title">ORCHESTRATION</h4></div>' + orchEmptyHtml(releaseId) + '</section>';
+    }
+    const cached = orchPanelCache.get(releaseId);
+    return orchShell(cached || '<div class="orch-loading" role="status">Loading orchestration...</div>', releaseId);
+}
+
+// Last html written into each panel element. The cache alone is not enough: a re-rendered release card gets a
+// fresh element, and an unchanged payload must not touch the DOM at all (focus, scroll and role=alert survive).
+const orchRendered = new WeakMap();
+
+function orchSwapPanel(el, inner) {
+    if (orchRendered.get(el) === inner) return false;
+    const header = el.querySelector('.orch-header');
+    const html = (header ? header.outerHTML : '<div class="orch-header"><h4 class="orch-title">ORCHESTRATION</h4></div>') + inner;
+    // keep the event feed's open state and scroll across the swap
+    const wasOpen = !!el.querySelector('.orch-events[open]');
+    const oldList = el.querySelector('.orch-events-list');
+    const scrollTop = oldList ? oldList.scrollTop : 0;
+    // record what had focus: the EVENT FEED summary, or a ticket card
+    const active = (typeof document !== 'undefined') ? document.activeElement : null;
+    let focusSummary = false, focusTicket = null;
+    if (active && typeof el.contains === 'function' && el.contains(active)) {
+        if (active.classList && active.classList.contains('orch-events-summary')) {
+            focusSummary = true;
+        } else if (typeof active.closest === 'function') {
+            const card = active.closest('[data-ticket-id]');
+            if (card) focusTicket = card.getAttribute('data-ticket-id');
+        }
+    }
+    el.innerHTML = html;
+    orchRendered.set(el, inner);
+    const feed = el.querySelector('.orch-events');
+    if (wasOpen && feed) feed.setAttribute('open', '');
+    const list = el.querySelector('.orch-events-list');
+    if (list && scrollTop) list.scrollTop = scrollTop;
+    let target = null;
+    if (focusSummary) {
+        target = el.querySelector('.orch-events-summary');
+    } else if (focusTicket !== null && typeof el.querySelectorAll === 'function') {
+        target = Array.from(el.querySelectorAll('[data-ticket-id]')).find(c => c.getAttribute('data-ticket-id') === focusTicket) || null;
+    }
+    if (target && typeof target.focus === 'function') target.focus();
+    return true;
+}
+
+async function loadOrchestrationPanel(releaseId) {
+    if (orchInFlight.has(releaseId)) return;
+    orchInFlight.add(releaseId);
+    try {
+        const inner = await orchLoadInnerHtml(releaseId);
+        orchPanelCache.set(releaseId, inner);
+        document.querySelectorAll('.orch-panel').forEach(el => {
+            if (el.dataset.orchRelease !== releaseId) return;
+            orchSwapPanel(el, inner);
+        });
+    } finally {
+        orchInFlight.delete(releaseId);
+    }
+}
+
+// Fill every orchestration panel in `root` (or the document). Also the refresh entry point.
+function hydrateOrchestrationPanels(root) {
+    (root || document).querySelectorAll('.orch-panel').forEach(el => {
+        if (el.dataset.orchRelease) loadOrchestrationPanel(el.dataset.orchRelease);
+    });
+}
+
+// Piggybacks on the existing startAutoRefresh() tick: only when the Releases tab is showing.
+function refreshOrchestrationPanels() {
+    const section = document.querySelector('.releases-section');
+    if (!section || !section.classList.contains('active')) return;
+    hydrateOrchestrationPanels(section);
+}
+// ORCH-PANEL-END
 
 /**
  * Toggle release expanded state

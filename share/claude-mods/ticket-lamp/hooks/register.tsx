@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Prior, ReleaseView, Role, Source, Sub, TicketView, View } from '../types'
+import type { FinishedTicket, Lane, LaneCurrent, Prior, ReleaseView, Role, Source, Sub, TicketView, View } from '../types'
 import { createSwitch } from './switches'
 import type { SwitchIo } from './switches'
 
@@ -73,11 +73,33 @@ const TICKET_FILTER = `. as $b
       prMerged: (($i.prMerged // {}).pr // null) }
   end`
 
+// Lane lines (XACA-1786): the SAME pass also reads release.orchestration, the summary the release orchestrator writes
+// (kanban-hooks/release_orchestrator.py: lanes[], maxParallel, activeRunId, closedAt, items{}) and the token block
+// (orchestrator_tokens.py). Nothing here may raise: a jq error would hide the whole release line, so every piece that
+// reads orchestration is wrapped and falls back to "no lanes" / "tok ?". lanes is null when the block is malformed.
 const RELEASE_FILTER = `. as $b
 | ([$b.releases[]? | select(.id == $id)] | first) as $r
 | if $r == null then {found: false}
   else [$b.backlog[]? | select((.releaseAssignment // {}).releaseId == $id)] as $items
-  | { found: true, kind: "release", name: ($r.name // ""), short: ($r.shortTitle // ""),
+  | ($r.orchestration | if type == "object" then . else {} end) as $o
+  | ($o.tokens) as $t
+  | ($o.activeRunId | type == "string" and length > 0) as $hasRun
+  | ($hasRun and (($o.closedAt // null) == null or $o.closedAt == false or $o.closedAt == "")) as $active
+  | ($o.maxParallel | if type == "number" and . >= 1 and . == floor then . else 2 end) as $mp
+  | def num: type == "number" and . >= 0;
+    def blk($x): if ($x | type) == "object" and ([$x.input, $x.cacheCreate, $x.cacheRead, $x.output] | all(num))
+      then {total: ($x.input + $x.cacheCreate + $x.cacheRead + $x.output), cacheRead: $x.cacheRead} else "?" end;
+    def tok($i): if $t == null or ($i | type) != "string" then null
+      elif ($t | type) != "object" or ($t.perItem | type) != "object" then "?"
+      elif ($t.perItem | has($i) | not) then null
+      else blk($t.perItem[$i]) end;
+    def item($i): [$b.backlog[]? | select(.id == $i)] | first;
+    def title($i): (item($i) | (.title // "") | if type == "string" then . else "" end);
+    def subs($i): (item($i) | (.subitems // []) | if type == "array" then [.[] | objects] else [] end);
+    def badcur: {id: null, status: null, stage: null, prNumber: null, title: "", subsDone: 0, subsTotal: 0, tokens: null};
+    def str: if type == "string" then . else null end;
+    def lane_no($k): (.lane | if type == "number" and . >= 1 and . == floor then . else null end) // ($k + 1);
+    { found: true, kind: "release", name: ($r.name // ""), short: ($r.shortTitle // ""),
       status: ($r.status // ""), stage: ($r.stage // ""),
       platforms: [($r.platforms // {}) | to_entries[] | "\\(.key):\\(.value.environment // "PLANNED")"],
       version: ([($r.platforms // {})[] | .version // empty] | first // ""),
@@ -86,7 +108,30 @@ const RELEASE_FILTER = `. as $b
                  cancelled: ([$items[] | select(.status == "cancelled")] | length),
                  total: ($items | length) },
       open: [$items[] | select((.status // "todo") as $s | ($s != "completed" and $s != "cancelled"))
-             | {id, title: (.title // ""), status: (.status // "todo")}] | .[:12] }
+             | {id, title: (.title // ""), status: (.status // "todo")}] | .[:12],
+      runActive: $active, maxParallel: $mp,
+      runTok: (try (if $t == null then null elif ($t | type) != "object" then "?" else blk($t.run) end) catch "?"),
+      lanes: (if ($active | not) then [] else (try (
+        if ($o.lanes | type) != "array" then null
+        else [$o.lanes | to_entries[] | select(.value | type == "object") | .key as $k | .value
+              | {no: lane_no($k), e: .}]
+          | group_by(.no) | map(.[0]) | map(select(.e.current != null or .no <= $mp))
+          | map(.e as $e | {lane: .no, since: ($e.since | str),
+              current: ($e.current as $c
+                | if ($e | has("current") | not) or (($c | type) != "null" and ($c | type) != "object") then badcur
+                  elif $c == null then null
+                  else ($c.id | str) as $cid
+                    | {id: $cid, status: ($c.status | str), stage: ($c.stage | str),
+                       prNumber: ($c.prNumber | if type == "number" then . else null end),
+                       title: title($cid), subsTotal: (subs($cid) | length),
+                       subsDone: ([subs($cid)[] | select(.status == "completed" or .status == "cancelled")] | length),
+                       tokens: tok($cid)} end),
+              queueLen: ([($e.queue | if type == "array" then . else [] end)[] | strings] | length),
+              queue: [($e.queue | if type == "array" then . else [] end)[] | strings | {id: ., title: title(.)}] | .[:40]})
+        end) catch null) end),
+      finished: (try ([($o.items | if type == "object" then . else {} end) | to_entries[]
+                 | select((.value | type) == "object" and (.value.state == "DONE" or .value.state == "CANCELLED"))
+                 | {id: .key, state: .value.state, title: title(.key), tokens: tok(.key)}] | sort_by(.id) | .[:40]) catch []) }
   end`
 
 type Teams = Record<string, { kanban_dir?: string; team_code?: string }>
@@ -162,6 +207,100 @@ export function releaseVerdict(r: ReleaseView): { text: string; color: string } 
 
   return { text: stage, color: isPlanned ? '' : BLUE }
 }
+
+// ---- lane lines (XACA-1786) ------------------------------------------------------------------------------------------
+// release_orchestrator.STATE_STAGE, status -> stage. A copy: tests/lanes.test.tsx checks it against the stage vocabulary the
+// REAL writer produced into tests/lanes.fixture.json, so a new or renamed stage fails the suite instead of drifting.
+export const LANE_STAGE: Record<string, string> = {
+  QUEUED: 'queued', DISPATCHING: 'dispatching', RUNNING: 'coding', QUESTION_PENDING: 'question', IN_REVIEW: 'review',
+  MERGED_PENDING_DONE: 'merged', DONE: 'done', FAILED: 'failed', CRASHED: 'crashed', STALLED: 'stalled',
+  CANCELLED: 'cancelled', UNKNOWN: 'unknown',
+}
+// The fallback for anything not understood. Dim, never green, never a check mark.
+const LANE_UNKNOWN = { text: '?', color: '' }
+const isObj = (x: unknown): x is Record<string, unknown> => x !== null && typeof x === 'object' && !Array.isArray(x)
+const isCount = (x: unknown): x is number => typeof x === 'number' && Number.isInteger(x) && x >= 0
+
+// One lane's verdict, keyed on the current ticket's stage with its status as a cross-check. Every state carries a word or
+// glyph, so colour is never the only signal. Unknown, unrecognised, mismatched or malformed input is a dim "?".
+export function laneVerdict(lane: unknown): { text: string; color: string } {
+  if (!isObj(lane)) return LANE_UNKNOWN
+  const cur = lane.current
+  if (cur === null) return { text: 'idle', color: '' }
+  if (!isObj(cur)) return LANE_UNKNOWN
+  const { status, stage, prNumber } = cur
+  if (typeof status !== 'string' || typeof stage !== 'string') return LANE_UNKNOWN
+  if (!Object.prototype.hasOwnProperty.call(LANE_STAGE, status) || LANE_STAGE[status] !== stage) return LANE_UNKNOWN
+  switch (stage) {
+    case 'coding': return { text: 'implementing', color: BLUE }
+    case 'review': return { text: typeof prNumber === 'number' && prNumber > 0 ? `PR #${prNumber} gates` : 'in review', color: BLUE }
+    case 'merged': return { text: 'merged ✓', color: GREEN }
+    case 'done': return { text: 'done ✓', color: GREEN }
+    case 'question': return { text: 'question !', color: AMBER }
+    case 'stalled': return { text: 'stalled !', color: AMBER }
+    case 'crashed': return { text: 'crashed ✗', color: RED }
+    case 'failed': return { text: 'failed ✗', color: RED }
+    case 'queued':
+    case 'dispatching': return { text: 'dispatching…', color: '' }
+    case 'cancelled': return { text: 'cancelled –', color: '' }
+    default: return LANE_UNKNOWN
+  }
+}
+
+// 1234 -> "1.2k", 1206200 -> "1.2M". Whole numbers below 1000.
+export function fmtTokens(n: number): string {
+  const sizes = [1, 1e3, 1e6, 1e9]
+  const names = ['', 'k', 'M', 'B']
+  let i = n >= 1e9 ? 3 : n >= 1e6 ? 2 : n >= 1e3 ? 1 : 0
+  if (i < 3 && Math.round(n / (sizes[i] ?? 1)) >= 1000) i += 1
+  if (i === 0) return String(Math.round(n))
+  const v = n / (sizes[i] ?? 1)
+
+  return `${v >= 100 ? Math.round(v) : Math.round(v * 10) / 10}${names[i] ?? ''}`
+}
+
+// The token figure for a ticket. null = show nothing (no block, or the ticket is not in it); a malformed block is "tok ?",
+// never 0. Reads the jq pass's {total, cacheRead} or "?".
+export function tokenText(t: unknown): string | null {
+  if (t === null || t === undefined) return null
+  if (isObj(t) && typeof t.total === 'number' && Number.isFinite(t.total) && t.total >= 0) return `${fmtTokens(t.total)} tok`
+
+  return 'tok ?'
+}
+
+// cacheRead / total, whole percent; null when it cannot be told (malformed, or nothing sent yet: no division by zero).
+export function cacheShare(t: unknown): number | null {
+  if (!isObj(t) || typeof t.total !== 'number' || typeof t.cacheRead !== 'number') return null
+  if (!(t.total > 0) || !(t.cacheRead >= 0) || t.cacheRead > t.total) return null
+
+  return Math.round((t.cacheRead / t.total) * 100)
+}
+
+// "1.2M tok · 98% cache-read" for /ticket.
+export function tokenDetail(t: unknown): string {
+  const text = tokenText(t)
+  if (text === null) return 'tokens —'
+  const share = cacheShare(t)
+
+  return share === null ? text : `${text} · ${share}% cache-read`
+}
+
+const laneNo = (l: Lane, i: number) => (isCount(l.lane) && l.lane >= 1 ? l.lane : i + 1)
+
+// The lanes to draw, mirroring release_orchestrator.lanes_view: only for an active run, only objects, ordered by lane number.
+// An OCCUPIED lane (current not null) is always drawn, at any lane number: the writer keeps it above maxParallel and a
+// stalled, crashed or failed ticket is exactly the one a human must see. An EMPTY lane is drawn only when numbered
+// 1..maxParallel (2 when that is not a count >= 1). The cap is on lane number and occupancy, never on array position.
+export function laneList(v: Pick<ReleaseView, 'runActive' | 'lanes' | 'maxParallel'>): Lane[] {
+  if (v.runActive !== true || !Array.isArray(v.lanes)) return []
+  const cap = isCount(v.maxParallel) && v.maxParallel >= 1 ? v.maxParallel : 2
+
+  return v.lanes
+    .flatMap((l, i) => (isObj(l) ? [{ ...(l as Lane), lane: laneNo(l as Lane, i) }] : []))
+    .filter(l => (l.current !== null && l.current !== undefined) || l.lane <= cap)
+    .sort((a, b) => a.lane - b.lane)
+}
+const laneCurrent = (l: Lane): LaneCurrent | null => (isObj(l.current) ? (l.current as LaneCurrent) : null)
 
 async function run($: EngineInterface, argv: string[], timeoutMs = 20_000): Promise<string | null> {
   const ran = await $.process.run(argv, { timeoutMs }).catch(() => null)
@@ -247,6 +386,7 @@ async function readView($: EngineInterface, board: string, id: string): Promise<
       found: true, kind: 'release', name: r.name ?? '', short: r.shortTitle ?? '', status: r.status ?? 'archived',
       stage: r.stage ?? '', platforms: [], version: '', target: r.targetDate ?? '', branch: '',
       tickets: { completed: 0, cancelled: 0, total: 0 }, open: [], archived: true,
+      runActive: false, maxParallel: 2, lanes: [], finished: [], runTok: null,
     }
   } catch {
     return null
@@ -389,6 +529,62 @@ async function checkOnce($: EngineInterface, force: boolean): Promise<void> {
   }
 }
 
+// The ticket ids laneDetails prints for an active run: each drawn lane's current ticket and the queue entries it lists.
+export function runTicketIds(v: ReleaseView): Set<string> {
+  const ids = new Set<string>()
+  for (const l of laneList(v)) {
+    const cur = laneCurrent(l)
+    if (cur !== null && typeof cur.id === 'string') ids.add(cur.id)
+    for (const q of Array.isArray(l.queue) ? l.queue.filter(isObj) : []) if (typeof q.id === 'string') ids.add(q.id)
+  }
+
+  return ids
+}
+
+// /ticket in a release session: every lane with its current ticket, verdict, full queue and tokens, then the tickets the run
+// has finished. Empty for a release with no orchestration. Reads only what the board's jq pass returned.
+export function laneDetails(v: ReleaseView): string[] {
+  const out: string[] = []
+  const finished = (Array.isArray(v.finished) ? v.finished.filter(isObj) : []) as FinishedTicket[]
+  if (v.runActive === true) {
+    const run = v.runTok === null || v.runTok === undefined ? '' : `   run: ${tokenDetail(v.runTok)}`
+    out.push(`orchestrated run: active   maxParallel: ${isCount(v.maxParallel) && v.maxParallel >= 1 ? v.maxParallel : 2}${run}`)
+    if (!Array.isArray(v.lanes)) {
+      out.push('lanes: ? (release.orchestration.lanes is malformed, so no lane is shown)')
+    } else {
+      const lanes = laneList(v)
+      if (lanes.length === 0) out.push('lanes: none reported yet')
+      lanes.forEach((l, i) => {
+        const cur = laneCurrent(l)
+        const lv = laneVerdict(l)
+        const queue = Array.isArray(l.queue) ? l.queue.filter(isObj) : []
+        const head = `  L${laneNo(l, i)}  `
+        if (cur === null) {
+          out.push(`${head}${lv.text}`)
+        } else {
+          out.push(`${head}${typeof cur.id === 'string' ? cur.id : '?'} — ${cur.title || '(no title)'}`)
+          const subs = isCount(cur.subsTotal) && cur.subsTotal > 0 ? `   subs ${cur.subsDone}/${cur.subsTotal}` : ''
+          out.push(`        ${lv.text}${subs}   ${tokenDetail(cur.tokens)}`)
+        }
+        const n = isCount(l.queueLen) ? l.queueLen : queue.length
+        if (n > 0) {
+          out.push(`        queue (${n}):`)
+          for (const q of queue) out.push(`          · ${String(q.id)} ${String(q.title ?? '').slice(0, 80)}`.trimEnd())
+          if (n > queue.length) out.push(`          … and ${n - queue.length} more`)
+        }
+      })
+    }
+  }
+  if (finished.length > 0) {
+    out.push('finished this run:')
+    for (const f of finished) {
+      out.push(`  ${f.state === 'DONE' ? '✓' : '–'} ${String(f.id)} ${String(f.title ?? '').slice(0, 80)}   ${tokenDetail(f.tokens)}`.replace(/\s+$/, ''))
+    }
+  }
+
+  return out
+}
+
 function details(v: View): string {
   if (!v.found) return `${v.id}: not found on any board (archived, another machine, or a typo). The line stays hidden.`
   const by =
@@ -418,8 +614,16 @@ function details(v: View): string {
       `platforms: ${v.platforms.join(', ') || '—'}   version: ${v.version || '—'}   target: ${v.target || '—'}   branch: ${v.branch || '—'}`,
       `tickets: ${completed} completed of ${total - cancelled}${cancelled > 0 ? ` (+${cancelled} cancelled, not counted)` : ''}`,
     )
-    if (v.open.length > 0) lines.push('open tickets:')
-    for (const s of v.open) lines.push(`  ${s.status === 'in_progress' ? '▶' : '·'} ${s.id} [${s.status}] ${s.title.slice(0, 90)}`)
+    // A ticket the orchestrated-run section below already lists (a lane's current or a queued one) is not listed twice.
+    const inRun = runTicketIds(v)
+    const rest = v.open.filter(s => !inRun.has(s.id))
+    const inRunCount = v.open.length - rest.length
+    if (rest.length > 0) lines.push('open tickets:')
+    for (const s of rest) lines.push(`  ${s.status === 'in_progress' ? '▶' : '·'} ${s.id} [${s.status}] ${s.title.slice(0, 90)}`)
+    if (inRunCount > 0) {
+      lines.push(rest.length > 0 ? `  (+${inRunCount} more open, listed under the orchestrated run below)` : `open tickets: all ${inRunCount} are listed under the orchestrated run below`)
+    }
+    lines.push(...laneDetails(v))
   }
 
   return lines.join('\n')
@@ -517,6 +721,7 @@ export const register: Register = on => {
       const verdict = releaseVerdict(v)
       const { completed, cancelled, total } = v.tickets
       const deliverable = total - cancelled
+      const lanes = laneList(v)
 
       return (
         <Box flexDirection="column">
@@ -540,6 +745,33 @@ export const register: Register = on => {
             {v.target !== '' && <Text dimColor> · target {v.target}</Text>}
             {v.source === 'pinned' && <Text dimColor> · 📌</Text>}
           </Text>
+          {lanes.map((l, i) => {
+            const cur = laneCurrent(l)
+            const lv = laneVerdict(l)
+            const resolved = cur?.subsDone
+            const subsTotal = cur?.subsTotal
+            const queued = isCount(l.queueLen) ? l.queueLen : 0
+            const tok = cur === null ? null : tokenText(cur.tokens)
+
+            return (
+              <Text key={`lane-${laneNo(l, i)}`} wrap="truncate-end">
+                <Text dimColor>{` ${i === lanes.length - 1 ? '└' : '├'} L${laneNo(l, i)} `}</Text>
+                {cur !== null && <Text weight="bold">{typeof cur.id === 'string' ? cur.id : '?'}</Text>}
+                {cur !== null && <Text dimColor> · </Text>}
+                <Text color={lv.color || undefined} dimColor={lv.color === ''} weight={lv.color === GREEN ? 'bold' : undefined}>
+                  {lv.text}
+                </Text>
+                {cur !== null && isCount(subsTotal) && subsTotal > 0 && isCount(resolved) && <Text dimColor> · subs </Text>}
+                {cur !== null && isCount(subsTotal) && subsTotal > 0 && isCount(resolved) && (
+                  <Text color={resolved === subsTotal ? GREEN : undefined}>{`${resolved}/${subsTotal}`}</Text>
+                )}
+                {queued > 0 && <Text dimColor>{` · +${queued} queued`}</Text>}
+                {tok !== null && <Text dimColor>{` · ${tok}`}</Text>}
+                {/* Title LAST: truncate-end eats it first, so a narrow terminal keeps the verdict (render check, 60 cols). */}
+                {cur !== null && typeof cur.title === 'string' && cur.title !== '' && <Text dimColor>{` · ${short(cur.title, 32)}`}</Text>}
+              </Text>
+            )
+          })}
           {below}
         </Box>
       )
