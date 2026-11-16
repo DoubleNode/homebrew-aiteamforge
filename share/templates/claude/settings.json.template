@@ -214,6 +214,6 @@
   },
   "alwaysThinkingEnabled": true,
   "mcpServers": {},
-  "env": {"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "50"},
+  "env": {"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "25"},
   "skipDangerousModePermissionPrompt": true
 }

@@ -2,7 +2,19 @@
 # kb-compaction-quality-watch.sh — XACA-1283-002
 #
 # Watches whether CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=50 (P=50) is hurting WORK
-# QUALITY, and recommends (never performs) a revert when it is. The design,
+# QUALITY, and recommends (never performs) a revert when it is.
+#
+# XACA-1837 STATUS NOTE: this watch was built for, and is BOUND to, the P=50
+# pilot (7-day watch concluded; Stage B gate passed 2026-10-01). The shipped
+# value is now P=25 (XACA-1837). T_1M/T_HAIKU/S1_CUTOFF below are FIXED P=50
+# measurement constants — the anchor is "the context size where P=50 WOULD have
+# compacted" — and they match the recorded baseline JSONs, so they are
+# deliberately NOT derived from the live setting. Under P=25 sessions compact at
+# ~245,000 (1M) before ever reaching the 490,000 anchor, so expect few anchors
+# and NOT_BOUND / INSUFFICIENT_DATA (rc=3) on a P=25 machine: that is the
+# watch reporting that its premise no longer applies, not a quality finding.
+# Re-basing it for P=25 means new constants AND a new baseline; that is a
+# separate decision (see XACA-1837 report). The design,
 # every threshold and the reasoning behind each one live in
 # docs/compaction-quality-watch.md — that doc is authoritative; this header only
 # summarises it so a reader on a tap machine (no docs/ checkout) is not lost.

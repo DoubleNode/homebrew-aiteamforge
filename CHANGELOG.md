@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1837: Ship CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=25 in tap settings template (XACA-1837)
+- Tap files updated in this publish: `share/scripts/kb-compaction-premise-check.sh`,`share/scripts/kb-compaction-quality-watch.sh` `share/templates/claude/settings.json.template`. Run `brew upgrade aiteamforge` to receive them.
 
 ## [0.21.22] - 2026-11-16
 - XACA-1830: kb-backlog pr-merged --landed-commit for CLOSED-but-landed PRs (XACA-1830)

@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # kb-compaction-premise-check.sh — XACA-1277 ratchet
 #
-# XACA-1277 decided to HOLD a P=50 CLAUDE_AUTOCOMPACT_PCT_OVERRIDE pilot on
-# M3Pro only. That decision rests on premises that are KNOWN to be movable.
+# XACA-1277 piloted CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=50 on M3Pro only; XACA-1837
+# moved the shipped value to 25 (live on M3Pro since 2026-11-16; the default P
+# below is now 25, and P=50 is kept as a historical, still-baselined value).
+# The XACA-1277 decision rests on premises that are KNOWN to be movable.
 # Memory entry `feedback_completed_fixes_expire_when_premises_change` records
 # that XACA-0284 regrew four times precisely because it shipped prose with no
 # mechanism to notice when its premise moved. This script is that mechanism.
@@ -76,7 +78,7 @@
 # NOT wired into CI, and NOT wired into any hook. Run it by hand:
 #
 #     bash scripts/kb-compaction-premise-check.sh
-#     KB_COMPACTION_P=50 bash scripts/kb-compaction-premise-check.sh   # explicit P
+#     KB_COMPACTION_P=50 bash scripts/kb-compaction-premise-check.sh   # explicit P (historical pilot value)
 #
 # Suggested cadence: after every Claude Code version bump, and at the
 # MODEL_SELECTION.md quarterly review.
@@ -96,7 +98,7 @@ set -uo pipefail
 # Real path to THIS script, for the pin-remediation hint (`$0` resolves to the
 # caller's shell when the hint is pasted into an interactive prompt: rc=126).
 SELF="$0"
-P="${KB_COMPACTION_P:-50}"
+P="${KB_COMPACTION_P:-25}"   # XACA-1837: shipped value (was 50, the XACA-1277 pilot)
 # Non-blocking (PR #927 round 2): an out-of-range or non-numeric P silently
 # produced a confident-looking FAIL at rc=1 -- a wrong answer that looks like a
 # finding. Refuse the input instead.
@@ -111,9 +113,26 @@ BASE_RESERVE_OUTPUT=20000       # W6:   window - min(maxOutputTokens, 20000)
 BASE_BUFFER_DEFAULT="0.2"       # zPe:  coded precomputeBufferFraction default
 BASE_DEFAULT_1M=967000          # default threshold, 1M-window tier
 BASE_DEFAULT_200K=167000        # default threshold, 200K tier (Haiku 4.5)
-BASE_P50_1M=490000
+BASE_P50_1M=490000              # historical XACA-1277 pilot value (P=50)
 BASE_P50_200K=90000
+# XACA-1837: P=25 baselines. DERIVED, not hand-computed, by extracting this
+# script's own derive() and feeding it the baseline reserves above
+# (RESERVE_OUTPUT=20000, RESERVE_HEADROOM=13000) on 2026-11-16; installed
+# binary at the time was 2.1.325. The live binary's A0/A5 anchors did not match
+# on 2.1.325 so reserves could not be read from it that day (A4 headroom=13000
+# did match); the same derive() run at P=50 reproduced BASE_P50_* exactly,
+# which is what justifies trusting the baseline reserves.
+BASE_P25_1M=245000
+BASE_P25_200K=45000
 BASE_HAIKU_PEAK=80702           # XACA-1277-005 observed peak, N=194 turns
+# XACA-1837 (PR #1355 tester round 1): at the shipped P=25 the 200K-tier
+# threshold (45000) sits BELOW the recorded Haiku peak, so check C's OVER/NEAR
+# branches would FAIL on every machine with real Haiku data -- and advise
+# "Raise P", contradicting the decision claude/MODEL_SELECTION.md §5 records:
+# Haiku is not a routing tier (XACA-1165), so early compaction on that tier is
+# ACCEPTED at P=25. Only that one recorded decision is exempt; any other P
+# keeps the original fail-closed C semantics.
+HAIKU_EXPOSURE_ACCEPTED_P=25
 
 RC=0
 FAIL_N=0
@@ -866,8 +885,8 @@ if [ -z "${BUFFER_DEFAULT:-}" ]; then
 elif [ "$BUFFER_DEFAULT" = "$BASE_BUFFER_DEFAULT" ]; then
   pass "A6 coded bufferFraction default = $BUFFER_DEFAULT (baseline $BASE_BUFFER_DEFAULT)"
 else
-  # The outer clamp binds only when f > 0.5 at P=50. A rise past that is the
-  # condition under which P=50 stops being robust.
+  # The outer clamp binds only when (1-f) < P/100 (f > 0.5 at P=50, f > 0.75 at
+  # P=25). A rise past that is the condition under which P stops being robust.
   BINDS=$(awk -v f="$BUFFER_DEFAULT" -v p="$P" 'BEGIN{print ((1-f) < (p/100)) ? "yes" : "no"}')
   if [ "$BINDS" = "yes" ]; then
     fail "A6 coded bufferFraction default moved to $BUFFER_DEFAULT — at P=$P the OUTER clamp now binds and the effective threshold is no longer P% of W6."
@@ -940,12 +959,13 @@ note "1M tier   (Opus 5 / Sonnet 5 / Fable 5):  default $D1M   |  P=$P -> $P1M"
 note "200K tier (Haiku 4.5):                    default $D200   |  P=$P -> $P200"
 [ "$D1M"  = "$BASE_DEFAULT_1M"   ] || fail "B1 1M default threshold $D1M != baseline $BASE_DEFAULT_1M"
 [ "$D200" = "$BASE_DEFAULT_200K" ] || fail "B2 200K default threshold $D200 != baseline $BASE_DEFAULT_200K"
-if [ "$P" = "50" ]; then
-  [ "$P1M"  = "$BASE_P50_1M"   ] || fail "B3 1M P=50 threshold $P1M != baseline $BASE_P50_1M"
-  [ "$P200" = "$BASE_P50_200K" ] || fail "B4 200K P=50 threshold $P200 != baseline $BASE_P50_200K"
-  [ "$FAIL_N" -eq "$B_FAILS_BEFORE" ] && pass "B  all four thresholds match the XACA-1277 baselines"
+if [ "$P" = "50" ] || [ "$P" = "25" ]; then
+  if [ "$P" = "50" ]; then BP1M="$BASE_P50_1M"; BP200="$BASE_P50_200K"; else BP1M="$BASE_P25_1M"; BP200="$BASE_P25_200K"; fi
+  [ "$P1M"  = "$BP1M"  ] || fail "B3 1M P=$P threshold $P1M != baseline $BP1M"
+  [ "$P200" = "$BP200" ] || fail "B4 200K P=$P threshold $P200 != baseline $BP200"
+  [ "$FAIL_N" -eq "$B_FAILS_BEFORE" ] && pass "B  all four thresholds match the recorded baselines (P=$P)"
 else
-  warn "B  P=$P is not the piloted P=50; baselines B3/B4 not compared."
+  warn "B  P=$P has no recorded baseline (only P=25 shipped, P=50 historical); baselines B3/B4 not compared."
 fi
 fi   # DERIVE_OK
 echo
@@ -1111,15 +1131,20 @@ else
     PCT=$(awk -v o="$OBS" -v t="$P200" 'BEGIN{printf "%.1f", 100*o/t}')
     note "observed peak $OBS over $TURNS Haiku turns = ${PCT}% of threshold($P)  [XACA-1277-005 baseline peak: $BASE_HAIKU_PEAK / N=194]"
     # Trip on MOVEMENT from the recorded baseline, not on a fixed fraction of
-    # the threshold. The margin at rest is only 11.5% ($BASE_HAIKU_PEAK vs
-    # $P200), so an 85%-of-threshold warn would fire on day one and every day
-    # after — a warning that is always on carries no information. What this
-    # ratchet actually needs to notice is the peak CREEPING UP, which is the
-    # workload shift XACA-1277-005's N=194 could not rule out.
+    # the threshold. At the historical P=50 the margin at rest was only 11.5%
+    # (80702 vs 90000), so an 85%-of-threshold warn would have fired on day one
+    # and every day after — a warning that is always on carries no information.
+    # What this ratchet needs to notice is the peak CREEPING UP, the workload
+    # shift XACA-1277-005's N=194 could not rule out. At the shipped P=25 the
+    # threshold (45000) is BELOW the baseline peak, so there is no margin at
+    # all; that exposure is the accepted decision handled first below.
     OVER=$(awk -v o="$OBS" -v t="$P200" 'BEGIN{print (o>=t)?"1":"0"}')
     GREW=$(awk -v o="$OBS" -v b="$BASE_HAIKU_PEAK" 'BEGIN{print (o>b)?"1":"0"}')
     NEAR=$(awk -v o="$OBS" -v t="$P200" 'BEGIN{print (o>=0.95*t)?"1":"0"}')
-    if [ "$OVER" = "1" ]; then
+    if [ "$P" = "$HAIKU_EXPOSURE_ACCEPTED_P" ] && { [ "$OVER" = "1" ] || [ "$NEAR" = "1" ]; }; then
+      # Positive evidence of the exposure, so a partial read cannot weaken it.
+      warn "C  Haiku peak $OBS is at/near threshold($P)=$P200 — P=$P compacts Haiku 4.5 sessions early. ACCEPTED exposure, not drift: Haiku is not a routing tier (XACA-1165), see claude/MODEL_SELECTION.md §5 (XACA-1837). Re-open that decision if Haiku becomes a dispatch target again."
+    elif [ "$OVER" = "1" ]; then
       fail "C  Haiku peak has REACHED threshold($P) — P=$P now compacts Haiku sessions early. Raise P, or stop applying the override to 200K-tier work."
     elif [ "$NEAR" = "1" ]; then
       fail "C  Haiku peak is within 5% of threshold($P). Treat as drift: the margin XACA-1277-005 cleared P=$P on has effectively gone."
@@ -1155,8 +1180,8 @@ fi   # C threshold available
 
 # ── D. Entrypoint premise ───────────────────────────────────────────────────
 echo "D. CLAUDE_CODE_ENTRYPOINT premise (remote_cowork / local-agent)"
-note "Under those entrypoints Sonnet 5 may map to a 500,000 window; at P=50 that"
-note "is 240,000 against observed Sonnet subagent peaks near 920K — a severe"
+note "Under those entrypoints Sonnet 5 may map to a 500,000 window; at P=$P that"
+note "is roughly $(( (500000 - 20000) * P / 100 )) against observed Sonnet subagent peaks near 920K — a severe"
 note "regression. XACA-1277-005's clearance is CONDITIONAL on neither appearing."
 case "${CLAUDE_CODE_ENTRYPOINT:-}" in
   remote_cowork|local-agent)
