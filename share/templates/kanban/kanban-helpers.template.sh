@@ -14620,9 +14620,15 @@ _kb_build_launch_prompt() {
 
     # XACA-1350-004: release session (`kb-run <REL-ID>`). The resume plan is computed from the release record by
     # kanban-hooks/release_resume.py; this branch only frames it. Returns before the item-only sections below.
+    # XACA-1548-003: coordinator mode shares the whole release block below; the flag survives the normalisation.
+    local _kb_orch_coord_mode=0
+    if [[ "$launch_mode" == "release-orchestrate" ]]; then _kb_orch_coord_mode=1; launch_mode="release"; fi
     if [[ "$launch_mode" == "release" ]]; then
         local _kb_prompt_extra="${launch_extra//\\/\\\\}"   # XACA-1128: plan text carries item titles (user text)
         prompt+="\n\n## Release Resume Plan (computed from the release record; do not re-derive it)\n${_kb_prompt_extra}\n"
+        if (( _kb_orch_coord_mode )); then
+            prompt+="$(_kb_release_orch_prompt_rules "$item_id" "${launch_extra2//\\/\\\\}")"
+        fi
         prompt+="\n## Release session rules\n"
         prompt+="- Resume exactly at the row above. NEVER re-run a test record that is still current.\n"
         prompt+="- Stage changes happen ONLY through \`kb-release promote\` (the one gated endpoint). Never edit board or release JSON.\n"
@@ -14630,7 +14636,11 @@ _kb_build_launch_prompt() {
         prompt+="- Missing automated tests: \`kb-release test ${_kb_prompt_item_id} --repo-dir . --only-missing\`. Manual cases: \`kb-release walkthrough ${_kb_prompt_item_id}\`, one case at a time, each answer recorded at once.\n"
         prompt+="- DEV->QA is the lead's deliberate call. GAMMA and PROD need the lead's explicit deploy confirmation. Waivers are the lead's alone (\`kb-release waive\`).\n"
         prompt+="- CR stage: \`kb-release cr-stage ${_kb_prompt_item_id}\`. GAMMA failure: \`kb-release gamma-fail ${_kb_prompt_item_id}\`.\n"
-        prompt+="\nReview the plan, tell the lead what you will do, then do it. Stop at the first human gate."
+        if (( _kb_orch_coord_mode )); then
+            prompt+="\nIn coordinator mode the resume plan above is context until ALL_DONE. Tell the lead the run is live, then start the monitor loop now."
+        else
+            prompt+="\nReview the plan, tell the lead what you will do, then do it. Stop at the first human gate."
+        fi
         _KB_LAUNCH_PROMPT="$prompt"
         return 0
     fi
@@ -15166,9 +15176,29 @@ kb-run() {
     # XACA-1544-001: --orchestrated <RUN-ID> / --coordinator <team:terminal> take a value, so this is a
     # shifting loop. A flag with a missing value is a usage error, never silently ignored.
     local selector="" _kb_yes=0 _kb_orch_run="" _kb_orch_coord="" _kb_orch_flag=0
+    # XACA-1547-003: --resume (with --orchestrated) relaunches a CRASHED worker of the same run. Read by _kb_orch_check and
+    # _kb_set_item_orchestration through zsh dynamic scope; local here, so it never leaks into a later kb-run.
+    local _KB_ORCH_RESUME=0
+    # XACA-1548: coordinator-mode flags of a RELEASE session, passed through to _kb_release_run untouched.
+    local -a _kb_rel_flags=()
     while (( $# > 0 )); do
         case "$1" in
             --yes|-y) _kb_yes=1; shift ;;
+            --resume) _KB_ORCH_RESUME=1; shift ;;
+            --orchestrate|--no-orchestrate|--force-coordinator-pane) _kb_rel_flags+=("$1"); shift ;;
+            --max-parallel=*|--exclude=*|--model=*|--worker-model=*)
+                # The `=` spelling must never fall into the selector catch-all below: that silently dropped the cap or the exclusion.
+                if [[ -z "${1#*=}" || "${1#*=}" == -* ]]; then
+                    echo "Error: kb-run ${1%%=*} needs a value" >&2
+                    return 1
+                fi
+                _kb_rel_flags+=("${1%%=*}" "${1#*=}"); shift ;;
+            --max-parallel|--exclude|--model|--worker-model)
+                if (( $# < 2 )) || [[ -z "${2-}" || "${2-}" == -* ]]; then
+                    echo "Error: kb-run $1 needs a value" >&2
+                    return 1
+                fi
+                _kb_rel_flags+=("$1" "$2"); shift 2 ;;
             --orchestrated|--coordinator)
                 if (( $# < 2 )) || [[ -z "${2-}" || "${2-}" == -* ]]; then
                     echo "Error: kb-run $1 needs a value" >&2
@@ -15183,6 +15213,10 @@ kb-run() {
         echo "Error: kb-run --coordinator is only valid with --orchestrated <RUN-ID>" >&2
         return 1
     fi
+    if [[ "$_KB_ORCH_RESUME" == "1" && "$_kb_orch_flag" != "1" ]]; then
+        echo "Error: kb-run --resume is only valid with --orchestrated <RUN-ID> (to resume a paused card, use kb-resume)" >&2
+        return 1
+    fi
 
     # XACA-1350-002 (spec 5.1): any ^REL- selector is a RELEASE session. Dispatched BEFORE the usage block, team
     # resolution and _kb_resolve_selector: a release id is never an item selector and must not reach that path.
@@ -15192,16 +15226,24 @@ kb-run() {
             echo "Error: --orchestrated applies to an item, not a release session ($selector)" >&2
             return 1
         fi
-        _kb_release_run "$selector" "$_kb_yes"
+        _kb_release_run "$selector" "$_kb_yes" ${_kb_rel_flags[@]+"${_kb_rel_flags[@]}"}
         return $?
+    fi
+    if (( ${#_kb_rel_flags[@]} > 0 )); then
+        echo "Error: kb-run ${_kb_rel_flags[*]} applies to a release session (kb-run <REL-ID>) only" >&2
+        return 1
     fi
 
     if [[ -z "$selector" ]]; then
         echo "Usage: kb-run <id> [--yes] [--orchestrated <RUN-ID> [--coordinator <team:terminal>]]"
         echo "       kb-run <REL-ID> [--yes]   release session: attach/create the release worktree, resume from the record (XACA-1350)"
+        echo "         [--orchestrate | --no-orchestrate] [--max-parallel N] [--exclude ITEM]... [--model M] [--worker-model M]"
+        echo "         [--force-coordinator-pane]   coordinator mode (XACA-1548); KB_RELEASE_AUTORUN=1|0 answers the DEV question"
         echo "  --yes, -y   skip the confirmation prompt (required without a tty; or set KB_ASSUME_YES=1)"
         echo "  --orchestrated <RUN-ID>   worker mode for a release-orchestrator run (XACA-1544): stamps"
         echo "              item.orchestration and adds the worker rules to the prompt. Normally sent by kb-dispatch."
+        echo "  --resume    with --orchestrated: relaunch a crashed worker of that run (in_progress item, same runId);"
+        echo "              keeps the worktree and dispatchedAt, bumps orchestration.resumeCount (XACA-1547)."
         echo "Launches Claude Code with task details and auto-creates worktree."
         echo "Use 'kb-backlog list' to see available items"
         echo "Example: kb-run XFRE-0001"
@@ -15622,8 +15664,9 @@ _kb_orch_check() {
         echo "Error: --orchestrated: '$run' is not a run id (expected RUN-<REL-ID>-<yyyymmddThhmmss>)" >&2
         return 1
     fi
-    local rel info item_rel item_status run_coord
+    local rel info item_rel item_status run_coord item_run
     rel=$(_kb_orch_run_release "$run")
+    # item_run is LAST: an empty middle field would collapse under IFS=$'\t' (tab is IFS whitespace).
     info=$(_kb_jq_read "$board_file" "${_KB_ITEM_STATUS_JQ_DEFS}"'
         ([.backlog[]? | select(.id == $id)] | first) as $it
         | ([.releases[]? | select(.id == $rel) | .orchestration] | first) as $o
@@ -15632,9 +15675,10 @@ _kb_orch_check() {
             (if ($o | type) == "object" and ($o.activeRunId // "") == $run and ($o.closedAt // null) == null
              then ($o.coordinator // "" | if type == "object" then (.address // "") else . end
                    | if type == "string" and . != "" then . else "-" end)
-             else "INACTIVE" end) ] | @tsv' \
+             else "INACTIVE" end),
+            (($it.orchestration // {}) | if type == "object" then (.runId // "" | tostring) else "" end) ] | @tsv' \
         --arg id "$item_id" --arg rel "$rel" --arg run "$run" -r 2>/dev/null) || info=""
-    IFS=$'\t' read -r item_rel item_status run_coord <<<"$info"
+    IFS=$'\t' read -r item_rel item_status run_coord item_run <<<"$info"
     if [[ "$item_rel" != "$rel" ]]; then
         echo "Error: --orchestrated: [$item_id] is assigned to '${item_rel:-no release}', not to run $run's release $rel" >&2
         return 1
@@ -15643,9 +15687,15 @@ _kb_orch_check() {
         echo "Error: --orchestrated: $run is not the active, open run of $rel (release.orchestration.activeRunId)" >&2
         return 1
     fi
-    if [[ "$item_status" != "todo" ]]; then
+    if [[ "${_KB_ORCH_RESUME:-0}" == "1" ]]; then
+        # XACA-1547-003: a resume relaunches THIS run's worker; it never adopts a todo item or another run's item.
+        if [[ "$item_status" != "in_progress" || "$item_run" != "$run" ]]; then
+            echo "Error: --orchestrated --resume: [$item_id] is '${item_status}' in run '${item_run:-none}'; only an in_progress item of $run is resumed" >&2
+            return 1
+        fi
+    elif [[ "$item_status" != "todo" ]]; then
         echo "Error: --orchestrated: [$item_id] is '${item_status}'; only a todo item starts an orchestrated worker" >&2
-        echo "       (to resume an existing worker, run kb-run $item_id without --orchestrated: the stamp stays on the item)" >&2
+        echo "       (to relaunch a crashed worker of this run: kb-dispatch $item_id --terminal <T> --run $run --resume)" >&2
         return 1
     fi
     [[ -z "$coord" && "$run_coord" != "-" ]] && coord="$run_coord"
@@ -15674,15 +15724,26 @@ _kb_set_item_orchestration() {
     (( $# >= 7 )) && with_wt=1
     _kb_orch_check "$board_file" "$item_id" "$run" "$coord" || return 1
     coord="$_KB_ORCH_COORDINATOR"
-    local ts nonce got
+    local ts nonce got mode="new"
+    [[ "${_KB_ORCH_RESUME:-0}" == "1" ]] && mode="resume"
     ts=$(_kb_get_timestamp)
     nonce="${ts}-$$-${RANDOM}${RANDOM}"
+    # XACA-1547-003: mode "resume" CASes on (in_progress AND orchestration.runId == run) instead of todo, keeps runId and
+    # dispatchedAt (token attribution and the dispatch-age clocks key on the FIRST dispatch), and bumps resumeCount, which
+    # is kb-dispatch --resume's proof that THIS relaunch reached its stamp (a stale window row is not).
     if ! _kb_jq_update "$board_file" "${_KB_ITEM_STATUS_JQ_DEFS}"'
-        if any(.backlog[]?; .id == $id and (kb_resolve_item_status) == "todo") then
+        def eligible: if $mode == "resume"
+            then (kb_resolve_item_status) == "in_progress"
+                 and ((.orchestration // {}) | type == "object" and .runId == $run)
+            else (kb_resolve_item_status) == "todo" end;
+        if any(.backlog[]?; .id == $id and eligible) then
             .backlog |= map(
                 if .id == $id then
-                    .orchestration = ((if (.orchestration | type) == "object" then .orchestration else {} end)
-                                      + {runId: $run, coordinator: $coord, dispatchedAt: $ts, claim: $nonce})
+                    (if (.orchestration | type) == "object" then .orchestration else {} end) as $base
+                    | .orchestration = (if $mode == "resume"
+                        then $base + {coordinator: $coord, claim: $nonce, resumedAt: $ts,
+                                      resumeCount: ((if ($base.resumeCount | type) == "number" then $base.resumeCount else 0 end) + 1)}
+                        else $base + {runId: $run, coordinator: $coord, dispatchedAt: $ts, claim: $nonce} end)
                     | .status = "in_progress" | .startedAt //= $ts | .updatedAt = $ts
                     | if $withwt == "1" then .activelyWorking = true | .workStartedAt = $ts | .worktree = $wt
                         | .worktreeBranch = $wtb | .worktreeWindowId = $wid else . end
@@ -15690,18 +15751,26 @@ _kb_set_item_orchestration() {
             .lastUpdated = $ts
         else . end' \
         --arg id "$item_id" --arg run "$run" --arg coord "$coord" --arg ts "$ts" --arg nonce "$nonce" \
-        --arg withwt "$with_wt" --arg wt "$wt" --arg wtb "$wtb" --arg wid "$wid"; then
+        --arg withwt "$with_wt" --arg wt "$wt" --arg wtb "$wtb" --arg wid "$wid" --arg mode "$mode"; then
         echo "Error: --orchestrated: could not write item.orchestration for [$item_id]" >&2
         return 1
     fi
     got=$(_kb_jq_read "$board_file" '[.backlog[]? | select(.id == $id) | .orchestration.claim // empty] | first // ""' \
         --arg id "$item_id" -r 2>/dev/null)
     if [[ "$got" != "$nonce" ]]; then
-        echo "Error: --orchestrated: [$item_id] was no longer todo when the stamp was written (a concurrent start won); not launching" >&2
+        if [[ "$mode" == "resume" ]]; then
+            echo "Error: --orchestrated --resume: [$item_id] was no longer an in_progress item of $run when the stamp was written (a concurrent start won); not launching" >&2
+        else
+            echo "Error: --orchestrated: [$item_id] was no longer todo when the stamp was written (a concurrent start won); not launching" >&2
+        fi
         return 1
     fi
     _KB_ORCH_COORDINATOR="$coord"
-    echo "✓ Orchestrated worker: run $run, coordinator $coord"
+    if [[ "$mode" == "resume" ]]; then
+        echo "✓ Orchestrated worker RESUMED: run $run, coordinator $coord"
+    else
+        echo "✓ Orchestrated worker: run $run, coordinator $coord"
+    fi
     return 0
 }
 
@@ -15726,18 +15795,21 @@ _kb_orchestrated_worker_rules() {
 # Per-dispatch worker model, highest precedence first:
 #   --model > item.orchestration.model > $KB_ORCH_WORKER_MODEL > $KB_ORCH_MODEL
 #   > release.orchestration.{workerModel|model} > releaseConfig.orchestration.{workerModel|model} > claude-fable-5-2
+# 5th arg role (XACA-1548-013): "worker" (default, the order above) or "coordinator": the same layers with coordinatorModel in
+# place of workerModel, $KB_ORCH_COORDINATOR_MODEL in place of $KB_ORCH_WORKER_MODEL, and no item layer.
 # The FIRST layer that is present decides; a present-but-empty or non-string value is a refusal, never a fall-through
 # (an empty or unknown id must never silently become the default). "inherit" = no override (export nothing).
 # Allowed: releaseConfig.orchestration.allowedModels (non-empty string array) else _KB_ORCH_BUILTIN_MODELS.
 # Publishes $_KB_ORCH_MODEL / $_KB_ORCH_MODEL_SOURCE; rc 1 with $_KB_ORCH_MODEL_REASON on refusal.
 _kb_orch_resolve_model() {
-    local board_file="${1-}" item="${2-}" rel="${3-}" cli="${4-}"
+    local board_file="${1-}" item="${2-}" rel="${3-}" cli="${4-}" role="${5:-worker}" rolekey="workerModel"
     _KB_ORCH_MODEL="" _KB_ORCH_MODEL_SOURCE="" _KB_ORCH_MODEL_REASON=""
+    [[ "$role" == "coordinator" ]] && rolekey="coordinatorModel"
     local layers vtype val src
     # One read: each present layer as "<source>\t<json type>\t<string value or empty>".
     layers=$(_kb_jq_read "$board_file" '
         def lay($o; $src): if ($o | type) == "object" then
-              (if $o.workerModel != null then [$src + ".workerModel", $o.workerModel]
+              (if $o[$rk] != null then [$src + "." + $rk, $o[$rk]]
                elif $o.model != null then [$src + ".model", $o.model] else empty end)
             else empty end;
         [ ((.backlog[]? | select(.id == $id) | .orchestration) as $io
@@ -15745,7 +15817,7 @@ _kb_orch_resolve_model() {
           ((.releases[]? | select(.id == $rel) | .orchestration) | lay(.; "release.orchestration")),
           (.releaseConfig.orchestration | lay(.; "releaseConfig.orchestration")) ]
         | .[] | [.[0], (.[1] | type), (if (.[1] | type) == "string" then .[1] else "" end)] | @tsv' \
-        --arg id "$item" --arg rel "$rel" -r 2>/dev/null) || layers=""
+        --arg id "$item" --arg rel "$rel" --arg rk "$rolekey" -r 2>/dev/null) || layers=""
     local item_layer="" rest_layers=""
     if [[ "$layers" == item.orchestration.model$'\t'* ]]; then
         item_layer="${layers%%$'\n'*}"
@@ -15757,7 +15829,9 @@ _kb_orch_resolve_model() {
         src="--model" vtype="string" val="$cli"
     elif [[ -n "$item_layer" ]]; then
         IFS=$'\t' read -r src vtype val <<<"$item_layer"
-    elif [[ -n "${KB_ORCH_WORKER_MODEL+x}" ]]; then
+    elif [[ "$role" == "coordinator" && -n "${KB_ORCH_COORDINATOR_MODEL+x}" ]]; then
+        src="env KB_ORCH_COORDINATOR_MODEL" vtype="string" val="$KB_ORCH_COORDINATOR_MODEL"
+    elif [[ "$role" != "coordinator" && -n "${KB_ORCH_WORKER_MODEL+x}" ]]; then
         src="env KB_ORCH_WORKER_MODEL" vtype="string" val="$KB_ORCH_WORKER_MODEL"
     elif [[ -n "${KB_ORCH_MODEL+x}" ]]; then
         src="env KB_ORCH_MODEL" vtype="string" val="$KB_ORCH_MODEL"
@@ -15938,7 +16012,8 @@ _kb_orch_type() {
 # bootstrap and the kb-run line. Publishes $_KB_ORCH_PANE; rc 1 + $_KB_ORCH_OPEN_REASON on failure. A window that
 # was created is never killed, whatever happens after.
 _kb_open_lane_window() {
-    local sess="${1-}" item="${2-}" run="${3-}" coord="${4-}" model="${5-}"
+    local sess="${1-}" item="${2-}" run="${3-}" coord="${4-}" model="${5-}" resume_flag=""
+    [[ "${6-}" == "resume" ]] && resume_flag=" --resume"     # XACA-1547-003
     _KB_ORCH_PANE="" _KB_ORCH_OPEN_REASON=""
     local pane
     pane=$(tmux new-window -d -P -F '#{pane_id}' -t "=${sess}:" -n "$item" -c "$_KB_ORCH_BOOT_DIR" 2>&1) || {
@@ -15971,7 +16046,7 @@ _kb_open_lane_window() {
         _KB_ORCH_OPEN_REASON="SHELL_NOT_READY: the pane left its shell during bootstrap"
         return 1
     fi
-    _kb_orch_type "$pane" "kb-run ${item} --yes --orchestrated ${run} --coordinator ${coord}" || {
+    _kb_orch_type "$pane" "kb-run ${item} --yes --orchestrated ${run} --coordinator ${coord}${resume_flag}" || {
         _KB_ORCH_OPEN_REASON="SEND_FAILED: kb-run line"
         return 1
     }
@@ -16010,12 +16085,15 @@ _kb_dispatch_refuse() {
 # --json prints exactly one object (the XACA-1546 ledger contract):
 #   {item, terminal, session, window, model, run, outcome, reason, observed, ts}
 kb-dispatch() {
-    local item="" terminal="" run="" team="" cli_model="" coord="" deadline="${KB_DISPATCH_DEADLINE:-90}" want_json=0
+    local item="" terminal="" run="" team="" cli_model="" coord="" deadline="${KB_DISPATCH_DEADLINE:-90}" want_json=0 resume=0
     if [[ "${1-}" == "-h" || "${1-}" == "--help" || $# -eq 0 ]]; then
         echo "Usage: kb-dispatch <ITEM> --terminal <name> --run <RUN-ID> [--team T] [--model M|inherit]"
-        echo "                   [--coordinator team:terminal] [--deadline SECS] [--json]"
+        echo "                   [--coordinator team:terminal] [--deadline SECS] [--resume] [--json]"
         echo "Opens a NEW detached tmux window <ITEM> in session <team>-<terminal>, bootstraps it like that"
         echo "terminal's startup script and runs 'kb-run <ITEM> --yes --orchestrated <RUN-ID>' (XACA-1544)."
+        echo "--resume (XACA-1547): relaunch a CRASHED worker of <RUN-ID>: the item must be in_progress in that run;"
+        echo "  a leftover <ITEM> window whose panes are all at a shell is renamed <ITEM>~crashed-<HHMMSS> (kept, never"
+        echo "  killed); a live one refuses WORKER_ALIVE. The lane cap is not re-checked (the item already holds its slot)."
         echo "Exit: 0 DISPATCHED, 2 usage, 3 REFUSED (no window created), 4 DISPATCH_FAILED (window left open)."
         [[ $# -eq 0 ]] && return 2
         return 0
@@ -16023,6 +16101,7 @@ kb-dispatch() {
     while (( $# > 0 )); do
         case "$1" in
             --json) want_json=1; shift ;;
+            --resume) resume=1; shift ;;
             --terminal|--run|--team|--model|--coordinator|--deadline)
                 if (( $# < 2 )) || [[ -z "${2-}" ]]; then echo "kb-dispatch: $1 needs a value" >&2; return 2; fi
                 case "$1" in
@@ -16090,7 +16169,22 @@ kb-dispatch() {
     fi
     local istatus irel
     IFS=$'\t' read -r istatus irel <<<"$iteminfo"
-    if [[ "$istatus" != "todo" ]]; then
+    local resume_base=0
+    if (( resume )); then
+        # XACA-1547-003: only THIS run's in_progress item is resumed; kb-run re-checks the same CAS before it stamps.
+        local irun
+        irun=$(_kb_jq_read "$board_file" '
+            ([.backlog[]? | select(.id == $id)] | first | .orchestration // {}) as $o
+            | if ($o | type) == "object" then
+                [($o.runId // "" | tostring), ($o.resumeCount // 0 | if type == "number" then tostring else "0" end)] | join(" ")
+              else " 0" end' --arg id "$item" -r 2>/dev/null) || irun=""
+        resume_base="${irun##* }"
+        irun="${irun% *}"
+        [[ "$resume_base" =~ ^[0-9]+$ ]] || resume_base=0
+        if [[ "$istatus" != "in_progress" || "$irun" != "$run" ]]; then
+            _kb_dispatch_refuse ITEM_NOT_RESUMABLE "$item is '${istatus}' in run '${irun:-none}'; --resume relaunches only an in_progress item of $run"; return 3
+        fi
+    elif [[ "$istatus" != "todo" ]]; then
         _kb_dispatch_refuse ITEM_NOT_TODO "$item is '${istatus}', only a todo item is dispatched"; return 3
     fi
     if [[ "$irel" != "$rel" ]]; then
@@ -16107,7 +16201,8 @@ kb-dispatch() {
     if [[ ! "$open_lanes" =~ ^[0-9]+$ ]]; then
         _kb_dispatch_refuse CONFIG_INVALID "cannot count open lanes for $run"; return 3
     fi
-    if (( open_lanes >= max_par )); then
+    # A resumed item is itself one of the open lanes it would be counted against (XACA-1547-003).
+    if (( ! resume && open_lanes >= max_par )); then
         _kb_dispatch_refuse LANES_FULL "$open_lanes open lane(s), maxParallel $max_par"; return 3
     fi
 
@@ -16143,7 +16238,38 @@ kb-dispatch() {
         _kb_dispatch_refuse DUPLICATE_WINDOW "cannot list tmux windows to rule out a duplicate"; return 3
     fi
     if grep -qxF -- "$item" <<<"$wins"; then
-        _kb_dispatch_refuse DUPLICATE_WINDOW "a window named ${item} already exists"; return 3
+        if (( ! resume )); then
+            _kb_dispatch_refuse DUPLICATE_WINDOW "a window named ${item} already exists"; return 3
+        fi
+        # XACA-1547-003: the crashed worker's own window. Only a window in THIS terminal's session whose every pane sits at
+        # a shell is set aside; it is RENAMED (kept for inspection, never killed) so the fresh window can take the name.
+        # FAIL CLOSED (PR #1348 review): "dead" needs POSITIVE evidence. A failed list-panes, an empty one (tmux has been
+        # measured returning rc 0 + no output, XACA-1255-019) or one with no row for this window inspects zero panes, and
+        # zero inspected panes must never read as "every pane is at a shell".
+        local wrows p_sess p_win p_id alive=0 foreign=0 inspected=0
+        if ! wrows=$(tmux list-panes -a -F '#{session_name}'$'\t''#{window_name}'$'\t''#{pane_id}' 2>/dev/null); then
+            _kb_dispatch_refuse WORKER_ALIVE "cannot list tmux panes to prove ${session}:${item} is dead"; return 3
+        fi
+        while IFS=$'\t' read -r p_sess p_win p_id; do
+            [[ "$p_win" == "$item" ]] || continue
+            if [[ "$p_sess" != "$session" ]]; then foreign=1; continue; fi
+            inspected=$((inspected + 1))
+            _kb_orch_pane_at_shell "$p_id" || alive=1
+        done <<<"$wrows"
+        if (( foreign )); then
+            _kb_dispatch_refuse DUPLICATE_WINDOW "a window named ${item} exists outside ${session}"; return 3
+        fi
+        if (( inspected == 0 )); then
+            _kb_dispatch_refuse WORKER_ALIVE "no pane of ${session}:${item} could be inspected; cannot prove the worker is dead"; return 3
+        fi
+        if (( alive )); then
+            _kb_dispatch_refuse WORKER_ALIVE "${session}:${item} still runs a non-shell process; the worker has not crashed"; return 3
+        fi
+        local aside="${item}~crashed-$(date -u +%H%M%S)"
+        if ! tmux rename-window -t "=${session}:${item}" "$aside" 2>/dev/null; then
+            _kb_dispatch_refuse DUPLICATE_WINDOW "could not set the crashed window ${session}:${item} aside"; return 3
+        fi
+        echo "ℹ kb-dispatch --resume: crashed window kept as ${session}:${aside}" >&2
     fi
 
     # ── model (XACA-1544-012) ────────────────────────────────────────────────
@@ -16160,7 +16286,7 @@ kb-dispatch() {
     fi
 
     # ── open + bootstrap (a window exists from here on; it is never killed) ──
-    if ! _kb_open_lane_window "$session" "$item" "$run" "$coord" "$model"; then
+    if ! _kb_open_lane_window "$session" "$item" "$run" "$coord" "$model" "$( (( resume )) && echo resume)"; then
         local why="${_KB_ORCH_OPEN_REASON%%:*}" tail=""
         [[ -n "$_KB_ORCH_PANE" ]] && tail=$(tmux capture-pane -p -t "$_KB_ORCH_PANE" -S -20 2>/dev/null)
         observed=$(jq -cn --arg pane "$_KB_ORCH_PANE" --arg tail "$tail" '{pane: $pane, paneTail: $tail}')
@@ -16184,14 +16310,22 @@ kb-dispatch() {
             | ([.activeWindows[]? | select(.id == $wid)] | first) as $w
             | {status: ($it | kb_resolve_item_status),
                runId: (($it.orchestration // {}) | if type == "object" then .runId else null end),
+               resumeCount: (($it.orchestration // {}) | if type == "object" then (.resumeCount // 0) else 0 end),
                windowRow: ($w != null), windowItem: ($w.workingOnId // null)}' \
             --arg id "$item" --arg wid "$wid" -c 2>/dev/null) || state=""
-        if [[ -n "$state" ]] && jq -e --arg run "$run" --arg id "$item" \
-            '.status == "in_progress" and .runId == $run and .windowRow and .windowItem == $id' <<<"$state" >/dev/null 2>&1; then
+        # XACA-1547-003: a resume is confirmed only by resumeCount moving past its pre-dispatch value: the crashed worker's
+        # in_progress status and window row already satisfy the rest, so without it a resume would confirm instantly.
+        if [[ -n "$state" ]] && jq -e --arg run "$run" --arg id "$item" --argjson resume "$resume" --argjson base "$resume_base" \
+            '.status == "in_progress" and .runId == $run and .windowRow and .windowItem == $id
+             and ($resume == 0 or ((.resumeCount | type) == "number" and .resumeCount > $base))' <<<"$state" >/dev/null 2>&1; then
             # XACA-1808: every confirmed dispatch records the model it used, so the monitor can prove (MODEL_MISMATCH) that the
             # setting took effect. Rides the rc-neutral, silent-when-absent run-ledger hook; values with spaces are safe
             # (each k=v is one argv element). Not on any failure path: only a DISPATCHED outcome is a dispatch.
-            _kb_orch_ledger_hook "$board_file" "$item" dispatch outcome=DISPATCHED model="$model" modelSource="$_KB_ORCH_MODEL_SOURCE" terminal="$terminal"
+            if (( resume )); then
+                _kb_orch_ledger_hook "$board_file" "$item" dispatch outcome=DISPATCHED model="$model" modelSource="$_KB_ORCH_MODEL_SOURCE" terminal="$terminal" resume=1
+            else
+                _kb_orch_ledger_hook "$board_file" "$item" dispatch outcome=DISPATCHED model="$model" modelSource="$_KB_ORCH_MODEL_SOURCE" terminal="$terminal"
+            fi
             _kb_dispatch_result DISPATCHED "" "" "$state"
             return 0
         fi
@@ -31316,6 +31450,501 @@ kb-release-close-out() {
     _kb_release_close_out "$bf" "$release_id" "${args[@]}"
 }
 
+# ---------------------------------------------------------------------------------------------------------------------
+# XACA-1548 (EPIC-0072 T7): coordinator mode in `kb-run <REL-ID>`.
+#
+# A thin driver over deterministic tools: the gated promote (kb-release promote), the planner (kb-release plan-run), the
+# run ledger and summary (kanban-hooks/orchestrator_run_cli.py over release_orchestrator.py), the dispatcher (kb-dispatch)
+# and the monitor (kb-release-orchestrate watch). The model's job is judgement, in the release-orchestrate prompt.
+#
+#   _kb_release_orch_available      the dev-team-only python modules exist (a tap install has none: today's flow, unchanged)
+#   _kb_release_orch_active_run     the open run id of a release, "" when none
+#   _kb_release_orch_open_items     how many assigned items are neither completed nor cancelled
+#   _kb_release_orch_settings       coordinator model, worker model, maxParallel, each with its SOURCE (refuses invalid)
+#   _kb_release_orch_precondition   tmux pane + a terminal that is never routed to (coordinatorOnly or empty roles)
+#   _kb_release_orch_entry          mode choice, settings, precondition, gated PLANNED->DEV promote. rc 0 orchestrate,
+#                                   10 manual (today's flow), 11 stop with nothing wrong, 12 resume the open run, else error
+#   _kb_release_orch_start          plan-run -> render -> HARD approval stop -> mint run -> dispatch wave 1
+#   _kb_release_orch_prompt_ctx     the run/settings/waves block for the coordinator prompt
+#   _kb_release_orch_coordinate     start (or resume) and launch the coordinator session
+#   kb-release handoff              ALL_DONE: close the run, then the XACA-1350 resume plan ("DEV, items done")
+# Globals set by _kb_release_run from the flags: _KB_O_MODE (orchestrate|manual|""), _KB_O_MAXPAR, _KB_O_MODEL,
+# _KB_O_WMODEL, _KB_O_FORCE, _KB_O_EXCL (array).
+# ---------------------------------------------------------------------------------------------------------------------
+_kb_release_orch_available() {
+    local _s _d
+    _s=$(_kb_board_settings_script 2>/dev/null) || return 1
+    _d=$(dirname "$_s")
+    [[ -f "$_d/orchestrator_run_cli.py" && -f "$_d/release_orchestrator.py" && -f "$_d/orchestrator_monitor.py" ]]
+}
+
+# _kb_release_orch_active_run <board_file> <REL-ID> -> the activeRunId of an OPEN run (closedAt unset), else nothing.
+_kb_release_orch_active_run() {
+    _kb_jq_read "${1-}" '[.releases[]? | select(.id == $rel) | .orchestration
+        | select(type == "object" and (.activeRunId // "") != "" and (.closedAt // null) == null) | .activeRunId] | first // ""' \
+        --arg rel "${2-}" -r 2>/dev/null
+}
+
+# _kb_release_orch_open_items <board_file> <REL-ID> -> count of assigned items that are not completed/cancelled.
+_kb_release_orch_open_items() {
+    _kb_jq_read "${1-}" "${_KB_ITEM_STATUS_JQ_DEFS}"'
+        [.backlog[]? | select(.releaseAssignment.releaseId == $rel) | kb_resolve_item_status
+         | select(. != "completed" and . != "cancelled" and . != "done")] | length' \
+        --arg rel "${2-}" -r 2>/dev/null
+}
+
+# _kb_release_orch_settings <board_file> <REL-ID>
+# Resolves the coordinator model, the worker model and maxParallel. Models REUSE kb-dispatch's resolver
+# (_kb_orch_resolve_model, XACA-1544-012): flags > env > release.orchestration > releaseConfig.orchestration > built-in
+# claude-fable-5-2, "inherit" = no override, validated against releaseConfig.orchestration.allowedModels, an empty or unknown
+# value REFUSED (never defaulted). The coordinator takes --model; the worker takes --worker-model, else --model.
+# maxParallel: --max-parallel > release.orchestration.maxParallel > releaseConfig.orchestration.maxParallel > 2; a present
+# but invalid value is refused, not skipped. Publishes _KB_O_CMODEL/_CSRC, _KB_O_WMODEL_R/_WSRC, _KB_O_MAXPAR_R/_MAXSRC;
+# rc 1 with _KB_O_REASON on a refusal.
+_kb_release_orch_settings() {
+    local bf="${1-}" rel="${2-}" wcli
+    _KB_O_REASON="" _KB_O_CMODEL="" _KB_O_CSRC="" _KB_O_WMODEL_R="" _KB_O_WSRC="" _KB_O_MAXPAR_R="" _KB_O_MAXSRC=""
+    if ! _kb_orch_resolve_model "$bf" "" "$rel" "${_KB_O_MODEL-}" coordinator; then
+        _KB_O_REASON="coordinator: $_KB_ORCH_MODEL_REASON"; return 1
+    fi
+    _KB_O_CMODEL="$_KB_ORCH_MODEL" _KB_O_CSRC="$_KB_ORCH_MODEL_SOURCE"
+    wcli="${_KB_O_WMODEL-}"; [[ -z "$wcli" ]] && wcli="${_KB_O_MODEL-}"
+    if ! _kb_orch_resolve_model "$bf" "" "$rel" "$wcli" worker; then
+        _KB_O_REASON="worker: $_KB_ORCH_MODEL_REASON"; return 1
+    fi
+    _KB_O_WMODEL_R="$_KB_ORCH_MODEL" _KB_O_WSRC="$_KB_ORCH_MODEL_SOURCE"
+    [[ -n "${_KB_O_WMODEL-}" && "$_KB_O_WSRC" == "--model" ]] && _KB_O_WSRC="--worker-model"
+    local layers
+    layers=$(_kb_jq_read "$bf" '
+        def v($o; $src): if ($o | type) == "object" and ($o | has("maxParallel")) then [$src, ($o.maxParallel | tojson)] else empty end;
+        [ (([.releases[]? | select(.id == $rel)] | first | .orchestration) | v(.; "release.orchestration.maxParallel")),
+          (.releaseConfig.orchestration | v(.; "releaseConfig.orchestration.maxParallel")) ]
+        | first // empty | @tsv' --arg rel "$rel" -r 2>/dev/null) || layers=""
+    local mp src
+    if [[ -n "${_KB_O_MAXPAR-}" ]]; then
+        mp="$_KB_O_MAXPAR" src="--max-parallel"
+    elif [[ -n "$layers" ]]; then
+        IFS=$'\t' read -r src mp <<<"$layers"
+    else
+        mp=2 src="built-in default"
+    fi
+    if [[ ! "$mp" =~ ^[1-9][0-9]*$ ]]; then
+        _KB_O_REASON="maxParallel from ${src} is not a positive integer (${mp})"; return 1
+    fi
+    _KB_O_MAXPAR_R="$mp" _KB_O_MAXSRC="$src"
+    return 0
+}
+
+# _kb_release_orch_precondition <team> <context>
+# The coordinator must run IN a tmux pane (XACA-0926: a non-tmux address cannot be reached) on a terminal that is never
+# routed to (coordinatorOnly, or empty roles: XACA-1542). Otherwise refuse, unless --force-coordinator-pane. rc 0 ok.
+_kb_release_orch_precondition() {
+    local team="${1-}" context="${2-}" term row why=""
+    term="${context#*:}"; term="${term%%:*}"
+    if [[ -z "${TMUX-}" ]]; then
+        why="not running inside a tmux pane (workers address the coordinator over kb-msg, which cannot reach a non-tmux session)"
+    else
+        row=$(kb-terminals status --json --team "$team" 2>/dev/null | jq -r --arg n "$term" '
+            ([.terminals[]? | select(.name == $n)] | first) as $t
+            | if $t == null then "UNKNOWN"
+              elif ($t.coordinatorOnly == true) or (($t.roles // []) | length) == 0 then "OK"
+              else "ROLES" end' 2>/dev/null) || row=""
+        case "$row" in
+            OK) return 0 ;;
+            ROLES) why="terminal '${term}' is dispatchable (non-empty roles, not coordinatorOnly): workers would be routed into the coordinator's own session. Run kb-run from a terminal with empty roles or coordinatorOnly (kb-terminals set <name> --coordinator-only)" ;;
+            UNKNOWN) why="terminal '${term}' is not in the ${team} terminal registry, so it cannot be shown to be coordinator-safe" ;;
+            *) why="kb-terminals status --json failed for team ${team}, so the coordinator terminal cannot be verified" ;;
+        esac
+    fi
+    if (( ${_KB_O_FORCE:-0} )); then
+        echo "⚠ kb-run: coordinator precondition NOT met (${why}); continuing because --force-coordinator-pane was given" >&2
+        return 0
+    fi
+    echo "✗ kb-run: coordinator mode refused: ${why}" >&2
+    echo "  Re-run from a suitable terminal, pass --force-coordinator-pane to override, or use --no-orchestrate." >&2
+    return 1
+}
+
+# _kb_release_orch_entry <REL-ID> <team> <stage> <assume_yes> <context>
+# rc 0 orchestrate (promoted when it was PLANNED) | 10 manual: today's flow, and SILENT unless the user asked for
+# coordinator mode | 11 stop, nothing wrong | 12 resume the release's open run | else an error code to return.
+_kb_release_orch_entry() {
+    local rel="${1-}" team="${2-}" stage="${3-}" yes="${4:-0}" context="${5-}" bf n_open active mode="${_KB_O_MODE-}"
+    if [[ -z "$mode" && -n "${KB_RELEASE_AUTORUN-}" ]]; then
+        case "$KB_RELEASE_AUTORUN" in
+            1|true|yes|on|auto|orchestrate) mode=orchestrate ;;
+            0|false|no|off|manual) mode=manual ;;
+            *) echo "✗ kb-run: KB_RELEASE_AUTORUN='${KB_RELEASE_AUTORUN}' is not one of 1/true/yes/on/auto/orchestrate or 0/false/no/off/manual" >&2
+               return 2 ;;
+        esac
+    fi
+    [[ "$mode" == "manual" ]] && return 10
+    if ! _kb_release_orch_available; then
+        if [[ "$mode" == "orchestrate" ]]; then
+            echo "✗ kb-run: coordinator mode is not available in this install (kanban-hooks/orchestrator_run_cli.py is dev-team only); use --no-orchestrate" >&2
+            return 2
+        fi
+        return 10
+    fi
+    if [[ "$stage" != "PLANNED" && "$stage" != "DEV" ]]; then
+        [[ "$mode" == "orchestrate" ]] && echo "ℹ kb-run: $rel is at $stage; coordinator mode applies to PLANNED/DEV only, running today's flow."
+        return 10
+    fi
+    bf=$(_kb_get_board_file "$team" 2>/dev/null) || bf=""
+    if [[ ! -f "$bf" ]]; then
+        [[ "$mode" == "orchestrate" ]] && { echo "✗ kb-run: no board for team '$team'" >&2; return 1; }
+        return 10
+    fi
+    # No tty and nobody asked for it: manual, silently (fail-safe: never auto-run unattended by accident).
+    # This MUST precede the open-run branch: --yes is not an orchestrate decision, so a no-tty `kb-run REL --yes` must
+    # never resume (and launch) a coordinator unattended (XACA-1548 gate round 1).
+    if [[ -z "$mode" && ! -t 0 ]]; then return 10; fi
+    active=$(_kb_release_orch_active_run "$bf" "$rel")
+    if [[ -n "$active" ]]; then
+        _kb_release_orch_precondition "$team" "$context" || return 1
+        echo "↻ $rel has an open orchestrated run ($active): resuming it, not starting another."
+        if [[ -n "${_KB_O_MAXPAR-}" || ${#_KB_O_EXCL[@]} -gt 0 ]]; then
+            echo "⚠ kb-run: --max-parallel / --exclude are ignored: they apply to a NEW run's plan" >&2
+        fi
+        if [[ -n "${_KB_O_MODEL-}" || -n "${_KB_O_WMODEL-}" ]]; then
+            echo "⚠ kb-run: --model / --worker-model are ignored on resume: the run keeps the models recorded when it started" >&2
+        fi
+        return 12
+    fi
+    n_open=$(_kb_release_orch_open_items "$bf" "$rel")
+    if [[ ! "$n_open" =~ ^[0-9]+$ ]] || (( n_open == 0 )); then
+        [[ "$mode" == "orchestrate" ]] && echo "ℹ kb-run: $rel has no open items; nothing to orchestrate."
+        return 10
+    fi
+    if ! _kb_release_orch_settings "$bf" "$rel"; then
+        echo "✗ kb-run: invalid orchestration setting: ${_KB_O_REASON}" >&2
+        return 2
+    fi
+    echo "Release $rel: $n_open open item(s). Orchestration settings:"
+    echo "  coordinator model: ${_KB_O_CMODEL}   (source: ${_KB_O_CSRC})"
+    echo "  worker model:      ${_KB_O_WMODEL_R}   (source: ${_KB_O_WSRC})"
+    echo "  max parallel:      ${_KB_O_MAXPAR_R}   (source: ${_KB_O_MAXSRC})"
+    if [[ -z "$mode" ]]; then
+        local ans=""
+        echo "How should the tickets run?"
+        echo "  [a] Auto-run all tickets to completion (orchestrated)"
+        echo "  [m] Run them yourself (today's flow)"
+        printf 'Choice [a/M]: '
+        read -r ans || ans=""
+        case "$ans" in a|A|auto|orchestrate|orchestrated) mode=orchestrate ;; *) mode=manual ;; esac
+        [[ "$mode" == "manual" ]] && return 10
+    fi
+    # A NEW run always ends at the plan approval, which --yes / KB_ASSUME_YES never skip and which needs a terminal. Without
+    # one the run cannot start, so refuse HERE, before the irreversible PLANNED->DEV promote (XACA-1548 gate round 1).
+    if [[ ! -t 0 ]]; then
+        echo "✗ kb-run: coordinator mode needs a terminal for the plan approval (--yes and KB_ASSUME_YES do not skip it). Nothing promoted, nothing dispatched; run kb-run interactively, or use --no-orchestrate." >&2
+        return 2
+    fi
+    _kb_release_orch_precondition "$team" "$context" || return 1
+    if [[ "$stage" == "PLANNED" ]]; then
+        # -001: the DEV promote goes through the EXISTING gated path; stage is never written directly here.
+        local _kb_confirm_rc prc
+        _kb_confirm_launch kb-run "Promote $rel PLANNED -> DEV through the release gate (cuts the release branch)? [Y/n]: " "$yes"
+        _kb_confirm_rc=$?
+        if (( _kb_confirm_rc == 2 )); then return 2
+        elif (( _kb_confirm_rc != 0 )); then echo "Cancelled. $rel stays PLANNED; nothing promoted, nothing dispatched."; return 11; fi
+        kb-release-promote "$rel" --to DEV
+        prc=$?
+        if (( prc != 0 )); then
+            echo "✗ kb-run: the DEV promote did not go through (kb-release promote rc $prc); stopping before plan-run. Nothing was dispatched." >&2
+            return $prc
+        fi
+    fi
+    return 0
+}
+
+# _kb_release_orch_start <REL-ID> <team> <board_file> <coordinator team:terminal>
+# plan-run -> render -> approval -> mint run -> dispatch wave 1. Publishes _KB_O_RUN. rc 0 started | 11 declined or nothing to
+# do | 2 no terminal | else error. APPROVAL IS A HARD STOP: --yes and KB_ASSUME_YES never skip it; without a tty it refuses (rc 2). Nothing
+# is written (no ledger, no summary) and nothing is typed anywhere before the approval.
+_kb_release_orch_start() {
+    local rel="${1-}" team="${2-}" bf="${3-}" coord="${4-}" hooks cli maxpar tmpd plan_raw plan_file
+    local -a excl xa margs
+    _KB_O_RUN=""
+    hooks=$(dirname "$(_kb_board_settings_script)") || return 1
+    cli="$hooks/orchestrator_run_cli.py"
+    maxpar="$_KB_O_MAXPAR_R"
+    excl=("${_KB_O_EXCL[@]}")
+    tmpd=$(mktemp -d "${TMPDIR:-/tmp}/kb-orch-start.XXXXXX") || { echo "✗ kb-run: cannot create a temp dir" >&2; return 1; }
+    plan_raw="$tmpd/plan-raw.json" plan_file="$tmpd/plan.json"
+    local ans arg n_flag_excl=${#excl[@]}
+    while :; do
+        kb-release-plan-run "$rel" --max-parallel "$maxpar" --json >"$plan_raw" </dev/null || {
+            echo "✗ kb-run: kb-release plan-run failed; nothing dispatched" >&2; rm -r -f "$tmpd"; return 1; }
+        if (( ${#excl[@]} > 0 )); then
+            xa=()
+            for arg in "${excl[@]}"; do xa+=(--exclude "$arg"); done
+            if ! python3 "$cli" exclude --plan-file "$plan_raw" --board "$bf" "${xa[@]}" >"$plan_file"; then
+                if (( ${#excl[@]} > n_flag_excl )); then
+                    # the refused id was typed at the approval prompt: drop it and ask again (nothing has been written yet)
+                    echo "  'x ${excl[-1]}' refused (see above); it is not excluded. Edit again or approve." >&2
+                    excl=("${excl[@]:0:${#excl[@]}-1}")
+                    continue
+                fi
+                echo "✗ kb-run: --exclude refused; nothing dispatched" >&2; rm -r -f "$tmpd"; return 1
+            fi
+        else
+            cp "$plan_raw" "$plan_file"
+        fi
+        echo "═════════════ RELEASE RUN PLAN: $rel ═════════════"
+        python3 "$cli" render --plan-file "$plan_file" || { rm -r -f "$tmpd"; return 1; }
+        if ! jq -e '(.waves | length) > 0' "$plan_file" >/dev/null 2>&1; then
+            echo "Nothing is schedulable: no run started, nothing dispatched."
+            rm -r -f "$tmpd"; return 11
+        fi
+        echo "─────────────────────────────────────"
+        printf 'Approve this plan and dispatch wave 1 now? [y/N, or edit: "p <N>" = max parallel, "x <ITEM-ID>" = exclude]: '
+        if [[ ! -t 0 ]]; then
+            echo ""
+            echo "✗ kb-run: plan approval needs a terminal; --yes and KB_ASSUME_YES do not skip it. Nothing was started or dispatched." >&2
+            rm -r -f "$tmpd"; return 2
+        fi
+        ans="" arg=""
+        read -r ans arg || ans=""
+        case "$ans" in
+            y|Y|yes|YES) break ;;
+            p|P)
+                if [[ "$arg" =~ ^[1-9][0-9]*$ ]]; then maxpar="$arg"; _KB_O_MAXPAR_R="$arg"; _KB_O_MAXSRC="--max-parallel (edited at approval)"
+                else echo "  'p' needs a positive integer"; fi ;;
+            x|X)
+                if [[ "$arg" =~ ^[A-Z][A-Z0-9]*-[0-9]+$ ]]; then excl+=("$arg"); else echo "  'x' needs an item id"; fi ;;
+            *) echo "Not approved. Nothing started, nothing dispatched ($rel stays as it is)."; rm -r -f "$tmpd"; return 11 ;;
+        esac
+    done
+    # ── approved: from here on we write ───────────────────────────────────────────────────────────────
+    local meta run iid term out drc
+    meta=$(jq -cn --arg cm "$_KB_O_CMODEL" --arg cs "$_KB_O_CSRC" --arg wm "$_KB_O_WMODEL_R" --arg ws "$_KB_O_WSRC" \
+        --arg ms "$_KB_O_MAXSRC" '{models: {coordinator: {model: $cm, source: $cs}, worker: {model: $wm, source: $ws}}, maxParallelSource: $ms}') || {
+        rm -r -f "$tmpd"; return 1; }
+    run=$(python3 "$cli" start --board "$bf" --kanban-dir "$_KB_RS_KDIR" --release "$rel" --plan-file "$plan_file" \
+        --coordinator "$coord" --max-parallel "$maxpar" --meta-json "$meta") || {
+        echo "✗ kb-run: could not start the run; nothing dispatched" >&2; rm -r -f "$tmpd"; return 1; }
+    _KB_O_RUN="$run"
+    echo "✓ Run started: $run  (coordinator $coord, max parallel $maxpar)"
+    while IFS=$'\t' read -r iid term; do
+        [[ -n "$iid" ]] || continue
+        if [[ -z "$term" ]]; then
+            echo "  ⚠ $iid: no terminal fits it (NO_TERMINAL); left QUEUED for the coordinator to report"
+            continue
+        fi
+        margs=()
+        # Only a CLI-flag model is passed: any other layer is resolved identically by kb-dispatch itself, and passing it would
+        # beat a per-item item.orchestration.model override.
+        [[ "$_KB_O_WSRC" == --* ]] && margs=(--model "$_KB_O_WMODEL_R")
+        out=$(kb-dispatch "$iid" --terminal "$term" --run "$run" --team "$team" --coordinator "$coord" ${margs[@]+"${margs[@]}"} --json 2>"$tmpd/disp.err" </dev/null)
+        drc=$?
+        if ! jq -e 'type == "object"' <<<"$out" >/dev/null 2>&1; then
+            out=$(jq -cn --arg item "$iid" --arg terminal "$term" --arg run "$run" --arg err "$(cat "$tmpd/disp.err" 2>/dev/null)" --arg rc "$drc" \
+                '{item: $item, terminal: $terminal, run: $run, outcome: "DISPATCH_FAILED", reason: "NO_RESULT", observed: {detail: ("kb-dispatch rc " + $rc + ": " + $err)}}')
+        fi
+        python3 "$hooks/release_orchestrator.py" ledger-append --kanban-dir "$_KB_RS_KDIR" --run "$run" --kind dispatch \
+            --field "item=$iid" --json-field "dispatch=$out" >/dev/null 2>"$tmpd/ledger.err" </dev/null \
+            || echo "  ⚠ run-ledger append failed for $iid: $(cat "$tmpd/ledger.err")" >&2
+        echo "  $(jq -r '"\(.item) -> \(.outcome)\(if .reason then " (" + .reason + ")" else "" end) via \(.terminal)"' <<<"$out" 2>/dev/null)"
+    done < <(jq -r '.waves[0].items[] | [.id, (.terminal // "")] | @tsv' "$plan_file")
+    rm -r -f "$tmpd"
+    return 0
+}
+
+# _kb_release_orch_prompt_ctx <board_file> <REL-ID> <RUN-ID> <team> <coordinator>
+# The run/settings/waves block the release-orchestrate prompt carries. Read from the run's persisted summary, so a RESUMED
+# coordinator sees exactly what the run started with.
+_kb_release_orch_prompt_ctx() {
+    local bf="${1-}" rel="${2-}" run="${3-}" team="${4-}" coord="${5-}"
+    _kb_jq_read "$bf" '
+        ([.releases[]? | select(.id == $rel)] | first | .orchestration // {}) as $o
+        | ($o.models // {}) as $m
+        | ($m.worker.source // "") as $ws
+        | [ "- Run id: " + $run,
+            "- Release: " + $rel + "   Team: " + $team,
+            "- Coordinator address (workers kb-ask / kb-msg you here): " + $coord,
+            "- Max parallel (a FIRM cap, enforced again by kb-dispatch): " + (($o.maxParallel // 2) | tostring) + "   (source: " + ($o.maxParallelSource // "unrecorded") + ")",
+            "- Coordinator model (this session): " + ($m.coordinator.model // "unrecorded") + "   (source: " + ($m.coordinator.source // "unrecorded") + ")",
+            "- Worker model: " + ($m.worker.model // "unrecorded") + "   (source: " + ($ws | if . == "" then "unrecorded" else . end) + ")",
+            "- kb-dispatch model flag: " + (if ($ws | startswith("--")) then "--model " + $m.worker.model else "none; kb-dispatch resolves the worker model itself" end),
+            "- Waves: " + ([($o.waves // []) | to_entries[] | "wave " + ((.key + 1) | tostring) + " = " + (.value | map(. as $i | $i + "(" + (($o.items[$i].terminal) // "-") + ")") | join(", "))] | join("; ")),
+            "- Excluded by the lead: " + (($o.excluded // []) | if length == 0 then "none" else join(", ") end) ]
+        | .[]' --arg rel "$rel" --arg run "$run" --arg team "$team" --arg coord "$coord" -r
+}
+
+# _kb_release_orch_coordinate <REL-ID> <team> <name> <stage> <plan_text> <assume_yes> <resume 0|1> <context>
+# Starts the run (or re-attaches to the open one) and launches the coordinator session. The model rides ANTHROPIC_MODEL for
+# this one launch (cc() forwards no extra arguments on its persona path); "inherit" sets nothing.
+_kb_release_orch_coordinate() {
+    local rel="${1-}" team="${2-}" name="${3-}" stage="${4-}" plan_text="${5-}" yes="${6:-0}" resume="${7:-0}" context="${8-}"
+    local bf term coord run rc
+    bf=$(_kb_get_board_file "$team") || return 1
+    term="${context#*:}"; term="${term%%:*}"
+    coord="${team}:${term}"
+    if (( resume )); then
+        run=$(_kb_release_orch_active_run "$bf" "$rel")
+        [[ -n "$run" ]] || { echo "✗ kb-run: the open run of $rel disappeared; re-run kb-run" >&2; return 1; }
+        _kb_confirm_launch kb-run "Resume the coordinator for $run? [Y/n]: " "$yes"
+        rc=$?
+        if (( rc == 2 )); then return 2
+        elif (( rc != 0 )); then echo "Cancelled. Coordinator not started."; return 0; fi
+    else
+        _kb_release_orch_start "$rel" "$team" "$bf" "$coord"
+        rc=$?
+        if (( rc == 11 )); then return 0; elif (( rc != 0 )); then return $rc; fi
+        run="$_KB_O_RUN"
+    fi
+    local ctx cmodel
+    if ! ctx=$(_kb_release_orch_prompt_ctx "$bf" "$rel" "$run" "$team" "$coord") || [[ -z "$ctx" ]]; then
+        echo "✗ kb-run: cannot build the run context for $run; coordinator not launched (the run and any wave-1 dispatches already made are kept: re-run kb-run to resume it)" >&2
+        return 1
+    fi
+    cmodel=$(_kb_jq_read "$bf" '[.releases[]? | select(.id == $rel) | .orchestration.models.coordinator.model] | first // "inherit"' --arg rel "$rel" -r 2>/dev/null) || cmodel=""
+    # The recorded value is re-validated at launch (a resumed run may predate a narrowed allowedModels): an empty, unreadable,
+    # malformed or no-longer-allowed model is REFUSED, never silently launched or defaulted to inherit. Only a MISSING record
+    # (the jq default above) or an explicit "inherit" means no override.
+    if [[ "$cmodel" != "inherit" ]] && ! { [[ -n "$cmodel" ]] && _kb_orch_resolve_model "$bf" "" "$rel" "$cmodel" coordinator; }; then
+        echo "✗ kb-run: the recorded coordinator model is not usable (${_KB_ORCH_MODEL_REASON:-empty or unreadable}); coordinator not launched" >&2
+        return 2
+    fi
+    _kb_build_launch_prompt "$rel" "Release coordinator: ${name:-$rel} (stage $stage)" "" "" "" 0 "{}" "$team" release-orchestrate "$plan_text" "$ctx"
+    local prompt="$_KB_LAUNCH_PROMPT"
+    export CC_SESSION_NAME="${rel}: ${name:-release} (coordinator)"
+    if ! _kb_ensure_cc_function "kb-run"; then unset CC_SESSION_NAME; return 1; fi
+    if [[ "$cmodel" == "inherit" ]]; then
+        echo -e "$prompt" | \cc
+    else
+        echo -e "$prompt" | ANTHROPIC_MODEL="$cmodel" \cc
+    fi
+    local _kb_cc_rc=$?
+    unset CC_SESSION_NAME
+    if (( _kb_cc_rc != 0 )); then
+        echo "✗ kb-run: cc exited $_kb_cc_rc -- the coordinator session may not have launched." >&2
+        return $_kb_cc_rc
+    fi
+    return 0
+}
+
+# XACA-1548-004: the ALL_DONE hand-off. Closes the run when every tracked item is DONE/CANCELLED (the monitor normally has
+# already; this is idempotent and refuses unfinished items), then prints the XACA-1350 resume plan: after a finished run
+# that is the "DEV, items done" row (dev-deploy-pending), from which the coordinator continues with the existing flow and
+# `kb-release chain`. It changes no stage.
+# Usage: kb-release handoff <REL-ID> [--repo-dir <path>] [--json]
+# Exit: 0 closed (or already) and the plan printed | 1 error | 2 usage | 3 the run still has unfinished items
+kb-release-handoff() {
+    local release_id="" opt_repo="$PWD" opt_json=0 bf team context hooks rc
+    local usage="Usage: kb-release handoff <release-id> [--repo-dir <path>] [--json]"
+    while [[ $# -gt 0 ]]; do
+        case "${1-}" in
+            --repo-dir)
+                if [[ $# -lt 2 ]]; then echo "Error: --repo-dir needs a value" >&2; echo "$usage" >&2; return 2; fi
+                opt_repo="${2-}"; shift 2 ;;
+            --json) opt_json=1; shift ;;
+            --help|-h)
+                echo "$usage"
+                echo ""
+                echo "ALL_DONE hand-off of an orchestrated run: close the run (refused while any tracked item is unfinished),"
+                echo "then print the XACA-1350 resume plan (the 'DEV, items done' row). Changes no stage."
+                return 0 ;;
+            -*) echo "Error: Unknown option: ${1-}" >&2; echo "$usage" >&2; return 2 ;;
+            *)
+                if [[ -z "$release_id" ]]; then release_id="${1-}"
+                else echo "Error: Unexpected argument: ${1-}" >&2; echo "$usage" >&2; return 2; fi
+                shift ;;
+        esac
+    done
+    if [[ -z "$release_id" ]]; then echo "Error: Release ID is required" >&2; echo "$usage" >&2; return 2; fi
+    if ! _kb_release_valid_token "$release_id"; then echo "Error: invalid release id: $release_id" >&2; return 2; fi
+    if ! _kb_release_orch_available; then
+        echo "✗ kb-release handoff: coordinator mode is not available in this install (kanban-hooks/orchestrator_run_cli.py is dev-team only)" >&2
+        return 1
+    fi
+    _kb_release_stage_ctx || return 1
+    context=$(_kb_detect_context 2>/dev/null); team="${context%%:*}"
+    bf=$(_kb_get_board_file "$team") || { echo "Error: no board for team '$team'" >&2; return 1; }
+    hooks="$(dirname "$_KB_RS_CLI")"
+    python3 "$hooks/orchestrator_run_cli.py" close --board "$bf" --kanban-dir "$_KB_RS_KDIR" --release "$release_id"
+    rc=$?
+    (( rc == 0 )) || return $rc
+    local -a args=(plan --release "$release_id" --kanban-dir "$_KB_RS_KDIR" --repo-dir "$opt_repo")
+    (( opt_json )) && args+=(--json)
+    python3 "$hooks/release_resume.py" "${args[@]}"
+}
+
+# XACA-1548-003: the release-orchestrate (coordinator) block of the `kb-run <REL-ID>` prompt. Args: the release id, the
+# run/settings block from _kb_release_orch_prompt_ctx (first line "- Run id: <RUN>"). Output via stdout; the caller escapes
+# backslashes in the user-derived inputs first (XACA-1128), exactly like _kb_orchestrated_worker_rules.
+# The prompt is a judgement layer over deterministic tools: the monitor (kb-release-orchestrate watch), the dispatcher
+# (kb-dispatch), the question channel (kb-ask list / kb-answer) and the freeze orders (kb-msg inbox --all).
+_kb_release_orch_prompt_rules() {
+    local rel="${1-}" ctx="${2-}" run r
+    run="${ctx#- Run id: }"; run="${run%%$'\n'*}"
+    [[ "$run" =~ ^RUN-REL- ]] || run="<RUN-ID>"
+    r="\n## Release orchestration: YOU ARE THE COORDINATOR (run ${run})\n"
+    r+="The plan was approved by the lead and wave 1 is already dispatched. Each ticket runs in its OWN worker window and carries its own worktree, PR, test/review gates, merge and \`kb-done\`. You run none of that. You keep the run moving, answer questions, and escalate what is not yours to decide.\n\n"
+    r+="### This run\n${ctx}\n\n"
+    r+="### Resumed run (XACA-1547)\n"
+    r+="If the plan below carries an \`ACTIVE ORCHESTRATED RUN (resumed, XACA-1547)\` report, it is the per-item truth: never re-dispatch an item whose redispatch is \`never\`. If it instead carries a \`⛔ ACTIVE ORCHESTRATED RUN ... could not be resumed\` / \`Do NOT dispatch\` block, that block OVERRIDES the loop: dispatch NOTHING (SLOT_FREE and ITEM_CRASHED included) and tell the user, until \`kb-release-orchestrate resume ${rel}\` succeeds.\n\n"
+    r+="### The loop (do not hand-roll polling)\n"
+    r+="1. Start the monitor in the BACKGROUND (Bash tool, run_in_background true; a foreground call is killed at 600s): \`kb-release-orchestrate watch ${rel} --run ${run}\`. Do not poll its output file; you are notified when it exits.\n"
+    r+="2. Its LAST stdout line is \`VERDICT: <NAME> run=.. item=.. detail=..\`. Act on the verdict (table below), then START THE MONITOR AGAIN. Read the verdict NAME, never only the exit code.\n"
+    r+="3. Keep a running status table in every reply: item, wave, worker terminal, state, PR, open question.\n\n"
+    r+="| Verdict (exit) | What you do |\n|---|---|\n"
+    r+="| QUESTION_PENDING (11) | Run \`kb-ask list\`. If the plan docs or release context answer it, reply with \`kb-answer <thread-id-prefix or ITEM-ID> \"<answer>\"\`. If it is a decision that belongs to the user (scope, risk, spend, a stage promote, anything irreversible), ask the user with AskUserQuestion, then relay their answer with \`kb-answer\`. Never guess a user-owned decision. |\n"
+    r+="| SLOT_FREE (10) | FIRST run \`kb-msg inbox --all\` and obey any freeze or hold order (dispatch nothing while one is in force; say so). Then dispatch the item the verdict names: \`kb-dispatch <ITEM> --terminal <T> --run ${run} --coordinator <your team:terminal above>\` (add the model flag from the settings above when it names one). The terminal is the one shown for that item in the plan or by \`kb-release plan-run ${rel}\`; never choose your own terminal. Never exceed the max-parallel cap. Check the dispatch result and report a REFUSED or DISPATCH_FAILED outcome to the user. |\n"
+    r+="| ITEM_STALLED (12) | Read the worker's pane tail (\`tmux capture-pane -p -t <session>:<ITEM> -S -40\`), ping it with \`kb-msg send\`, and tell the user if it is still stalled after the next verdict. Do not type into its pane. |\n"
+    r+="| ITEM_CRASHED (13) | Show the user the XACA-1547 remedy in the verdict detail (\`kb-dispatch <ITEM> --terminal <T> --run ${run} --resume\`) and run it only if they agree. |\n"
+    r+="| ITEM_FAILED (14) | Report to the user: the PR closed unmerged or the worker's \`kb-pr-monitor\` ended in a terminal verdict. Do not retry it yourself. |\n"
+    r+="| DISPATCH_FAILED (15) | Report to the user with the detail (window, reason, pane tail). Do not re-dispatch the same item until they decide. |\n"
+    r+="| MODEL_MISMATCH (17) | WARN-ONLY. A worker ran on a model other than the one its dispatch recorded: tell the user which item and models, and keep going. |\n"
+    r+="| TOKEN_BUDGET (16) | WARN-ONLY, delivered ONCE. PAUSE all new dispatches and ask the user. The pause is STICKY: keep it until the user answers. It never kills or nudges a running worker. |\n"
+    r+="| ALL_DONE (0) | Hand off (below). |\n"
+    r+="| TIMEOUT (31) | Nothing needed attention: start the monitor again. |\n"
+    r+="| USAGE (2) | The run or release is missing, closed or unreadable: report the detail to the user and stop. |\n\n"
+    r+="### Hand-off on ALL_DONE\n"
+    r+="The monitor has closed the run (\`run_end\`, \`closedAt\`). Run \`kb-release handoff ${rel}\` (idempotent: it closes the run if the monitor had not and REFUSES while any tracked item is unfinished), then read the resume plan it prints. After a finished run that is the \"DEV, items done\" row. Continue exactly as the Release Resume Plan rules below say: offer the DEV deploy and the tests, then \`kb-release chain ${rel}\`. Stop at the first human gate.\n\n"
+    r+="### Never\n"
+    r+="- Never merge a PR, run \`kb-done\`, cancel a protected [Review]/[Test]/[UX] subitem, or edit anything inside a worker's worktree or pane. Workers own their tickets through merge.\n"
+    r+="- Never promote past DEV: DEV->QA is the lead's deliberate call (the Release session rules below still apply).\n"
+    r+="- Never dispatch into your own terminal, never exceed the cap, never ignore a freeze order, and never edit board or release JSON.\n"
+    printf '%s' "$r"
+}
+
+# _kb_release_orch_resume <REL-ID> <team> [context]   (XACA-1547-001)
+# Prints the `kb-release-orchestrate resume` report and returns 0 when the release has an ACTIVE, open orchestrated run;
+# returns 1 (prints nothing) when it has none. A resume that fails (corrupt ledger, board write refused) still returns 0
+# with a loud DO-NOT-DISPATCH block, so the session never starts as if there were no run. The coordinator address is
+# re-attached only from inside tmux (context "team:terminal:..."): outside it there is no mailbox to point workers at.
+# Needs _KB_RS_KDIR and _KB_RS_CLI (set by _kb_release_stage_ctx).
+_kb_release_orch_resume() {
+    local release_id="${1-}" team="${2-}" context="${3-}" bf active mon out rc coord=""
+    bf=$(_kb_get_board_file "$team" 2>/dev/null) || return 1
+    [[ -f "$bf" ]] || return 1
+    active=$(_kb_jq_read "$bf" '[.releases[]? | select(.id == $rel) | .orchestration
+        | select(type == "object" and (.activeRunId // "") != "" and (.closedAt // null) == null) | .activeRunId] | first // ""' \
+        --arg rel "$release_id" -r 2>/dev/null) || active=""
+    [[ -n "$active" ]] || return 1
+    mon="$(dirname "$_KB_RS_CLI")/orchestrator_monitor.py"
+    if [[ -n "${TMUX-}" ]]; then
+        local _c_term="${context#*:}"
+        coord="${context%%:*}:${_c_term%%:*}"
+        _kb_orch_addr_valid "$coord" || coord=""
+    fi
+    local -a margs=(resume "$release_id" --kanban-dir "$_KB_RS_KDIR")
+    [[ -n "$coord" ]] && margs+=(--coordinator "$coord")
+    out=$(KB_KANBAN_DIR="$_KB_RS_KDIR" python3 "$mon" "${margs[@]}" 2>&1)
+    rc=$?
+    if (( rc == 4 )); then return 1; fi
+    if (( rc != 0 )); then
+        printf '⛔ ACTIVE ORCHESTRATED RUN %s could not be resumed (rc %s). Do NOT dispatch anything until\n   kb-release-orchestrate resume %s succeeds:\n%s\n' \
+            "$active" "$rc" "$release_id" "$out"
+        echo "⛔ kb-run: active run $active of $release_id could not be resumed (rc $rc); see the plan below" >&2
+        return 0
+    fi
+    printf 'ACTIVE ORCHESTRATED RUN (resumed, XACA-1547): never re-dispatch an item whose redispatch is "never".\n%s\n' "$out"
+    return 0
+}
+
 # XACA-1350-002/003/004 (spec 5.1): the release runner behind `kb-run <REL-ID>`.
 #   1. load the release record + resume plan (kanban-hooks/release_resume.py)
 #   2. attach to / create the release worktree on release.branch (a PLANNED release has none: stay put, the plan
@@ -31332,6 +31961,34 @@ kb-release-close-out() {
 _kb_release_run() {
     local release_id="${1-}" assume_yes="${2:-0}"
     if ! _kb_release_valid_token "$release_id"; then echo "Error: invalid release id: $release_id" >&2; return 2; fi
+    # XACA-1548: coordinator-mode flags (kb-run passes them through after the two positionals).
+    _KB_O_MODE="" _KB_O_MAXPAR="" _KB_O_MODEL="" _KB_O_WMODEL="" _KB_O_FORCE=0 _KB_O_RUN=""
+    _KB_O_EXCL=()
+    if (( $# > 2 )); then
+        shift 2
+        while (( $# > 0 )); do
+            case "$1" in
+                --orchestrate|--no-orchestrate)
+                    local _o_want="orchestrate"; [[ "$1" == "--no-orchestrate" ]] && _o_want="manual"
+                    if [[ -n "$_KB_O_MODE" && "$_KB_O_MODE" != "$_o_want" ]]; then
+                        echo "Error: kb-run: --orchestrate and --no-orchestrate contradict each other" >&2; return 2
+                    fi
+                    _KB_O_MODE="$_o_want"; shift ;;
+                --force-coordinator-pane) _KB_O_FORCE=1; shift ;;
+                --max-parallel)
+                    if [[ ! "${2-}" =~ ^[1-9][0-9]*$ ]]; then echo "Error: kb-run: --max-parallel must be a positive integer: '${2-}'" >&2; return 2; fi
+                    _KB_O_MAXPAR="$2"; shift 2 ;;
+                --exclude)
+                    if [[ ! "${2-}" =~ ^[A-Z][A-Z0-9]*-[0-9]+$ ]]; then echo "Error: kb-run: --exclude needs an item id: '${2-}'" >&2; return 2; fi
+                    _KB_O_EXCL+=("$2"); shift 2 ;;
+                --model|--worker-model)
+                    if [[ -z "${2-}" ]]; then echo "Error: kb-run: $1 needs a model id (an empty value is refused, never defaulted)" >&2; return 2; fi
+                    if [[ "$1" == "--model" ]]; then _KB_O_MODEL="$2"; else _KB_O_WMODEL="$2"; fi
+                    shift 2 ;;
+                *) echo "Error: kb-run: unknown release option: $1" >&2; return 2 ;;
+            esac
+        done
+    fi
     _kb_release_stage_ctx || return 1
     local resume_cli plan_json branch name stage context team
     resume_cli="$(dirname "$_KB_RS_CLI")/release_resume.py"
@@ -31382,6 +32039,34 @@ _kb_release_run() {
         fi
     fi
 
+    # XACA-1548 (EPIC-0072 T7): coordinator mode. After the close-out early-return, before the worktree and the legacy prompt.
+    # --no-orchestrate skips all of it. _kb_release_orch_entry returns 10 (SILENTLY, unless coordinator mode was asked for)
+    # whenever today's flow applies, so the legacy path below runs byte-identically.
+    local _o_orch=0 _o_resume=0 _o_rc=10
+    if [[ "$_KB_O_MODE" != "manual" ]]; then
+        _kb_release_orch_entry "$release_id" "$team" "$stage" "$assume_yes" "$context"
+        _o_rc=$?
+        case $_o_rc in
+            0) _o_orch=1 ;;
+            12) _o_orch=1; _o_resume=1 ;;
+            10) ;;
+            11) return 0 ;;
+            *) return $_o_rc ;;
+        esac
+    fi
+    if (( _o_orch && ! _o_resume )) && [[ "$stage" == "PLANNED" ]]; then
+        # The gated promote moved the release (and cut its branch): reload what the rest of this function reads.
+        plan_json=$(python3 "$resume_cli" plan --release "$release_id" --kanban-dir "$_KB_RS_KDIR" --json) || {
+            echo "✗ kb-run: cannot reload release $release_id after the DEV promote" >&2; return 1; }
+        branch=$(printf '%s\n' "$plan_json" | jq -r '.branch // empty')
+        name=$(printf '%s\n' "$plan_json" | jq -r '.name // empty')
+        stage=$(printf '%s\n' "$plan_json" | jq -r '.stage // empty')
+        if [[ "$stage" != "DEV" ]]; then
+            echo "✗ kb-run: after the promote $release_id is at '${stage:-?}', not DEV; stopping before plan-run" >&2
+            return 1
+        fi
+    fi
+
     if [[ -n "$branch" ]]; then
         local git_common git_root project_root wt_out wt_rc
         git_common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
@@ -31419,9 +32104,17 @@ _kb_release_run() {
     local -a plan_args=(plan --release "$release_id" --kanban-dir "$_KB_RS_KDIR")
     [[ -n "$branch" ]] && plan_args+=(--repo-dir "$PWD")
     plan_text=$(python3 "$resume_cli" "${plan_args[@]}") || return 1
+    # XACA-1547-001: an active orchestrated run is RESUMED (rehydrate + reconcile + re-attach), never restarted. The report
+    # rides the session's plan, so the coordinator starts from it. XACA-1548's coordinator branch keeps this call at its top.
+    local _orch_report=""
+    _orch_report=$(_kb_release_orch_resume "$release_id" "$team" "$context") && plan_text+=$'\n\n'"$_orch_report"
     echo "─────────────────────────────────────"
     printf '%s\n' "$plan_text"
     echo "─────────────────────────────────────"
+    if (( _o_orch )); then
+        _kb_release_orch_coordinate "$release_id" "$team" "$name" "$stage" "$plan_text" "$assume_yes" "$_o_resume" "$context"
+        return $?
+    fi
     _kb_confirm_launch kb-run "Start the release session? [Y/n]: " "$assume_yes"
     local _kb_confirm_rc=$?
     if [[ $_kb_confirm_rc -eq 2 ]]; then return 2
@@ -31526,6 +32219,10 @@ kb-release() {
             # XACA-1350-005: auto-promote chain QA>ALPHA>BETA>CR (spec 3.3)
             kb-release-chain "$@"
             ;;
+        handoff)
+            # XACA-1548-004: ALL_DONE hand-off of an orchestrated run (close the run, print the resume plan)
+            kb-release-handoff "$@"
+            ;;
         reschedule)
             kb-release-reschedule "$@"
             ;;
@@ -31588,6 +32285,8 @@ kb-release() {
             echo "                                              Read-only run plan: waves, contention, terminal per item, refusals (XACA-1543)"
             echo "  kb-release chain <id> [--repo-dir PATH] [--actor NAME] [--dry-run] [--json]"
             echo "                                              Auto-promote chain QA>ALPHA>BETA>CR with stop conditions (XACA-1350)"
+            echo "  kb-release handoff <id> [--repo-dir PATH] [--json]"
+            echo "                                              ALL_DONE hand-off of an orchestrated run: close it, print the resume plan (XACA-1548)"
             echo "  kb-release plan <id> --reason \"...\"       Demote back to PLANNED (XACA-0729; reason required)"
             echo "  kb-release reschedule <id> <date>          Change target date"
             echo "  kb-release link-cr <rel> <cr>              Link a CR to this release (XACA-0657)"

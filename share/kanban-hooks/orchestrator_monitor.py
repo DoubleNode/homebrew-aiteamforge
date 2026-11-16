@@ -6,6 +6,7 @@ SYNOPSIS
   kb-release-orchestrate watch  <REL-ID> [--run RUN] [--once] [--interval S=30] [--timeout S=3600] [--repeat-after S=1800]
                                 [--stall-seconds N] [--dispatch-seconds N] [--board FILE] [--kanban-dir DIR] [--repo owner/repo]
   kb-release-orchestrate status <REL-ID> [--json] [--run RUN] [--tokens] [same input flags]   (READ-ONLY, never writes)
+  kb-release-orchestrate resume <REL-ID> [--coordinator team:terminal] [--json] [--dry-run] [same input flags]   (XACA-1547)
   kb-release-orchestrate tokens <RUN-ID> [--json] [--since ISO] [--board FILE] [--kanban-dir DIR] [--projects-dir DIR]
   kb-release-orchestrate tokens --item <ID> [--json] [--since ISO] [--projects-dir DIR]        (XACA-1808, see TOKENS)
   watch also takes [--tokens-interval S=120] [--projects-dir DIR] [--worktrees-root DIR].
@@ -33,7 +34,8 @@ EXIT CODES / VERDICTS (stdout's LAST line is ALWAYS `VERDICT: <NAME> run=<RUN|->
   10  SLOT_FREE         a lane is free AND an item is eligible (compute_slot_free); detail names lane(s) + first eligible
   11  QUESTION_PENDING  an item has an open pendingQuestion; detail carries threadId and question age
   12  ITEM_STALLED      STALLED, or UNKNOWN persisted longer than dispatch_seconds (summary items[ID].since)
-  13  ITEM_CRASHED      CRASHED (worker gone)
+  13  ITEM_CRASHED      CRASHED (worker gone). The detail ends with the re-dispatch offer (XACA-1547-003):
+                        `kb-dispatch <ID> --terminal <T> --run <RUN> --resume`, or ask the lead to cancel / re-plan
   14  ITEM_FAILED       FAILED (PR closed unmerged / terminal kb-pr-monitor verdict)
   15  DISPATCH_FAILED   the item's LATEST ledger `dispatch` event has outcome DISPATCH_FAILED and the item is still
                         QUEUED / DISPATCHING / UNKNOWN
@@ -43,6 +45,14 @@ EXIT CODES / VERDICTS (stdout's LAST line is ALWAYS `VERDICT: <NAME> run=<RUN|->
   17  MODEL_MISMATCH    WARN-ONLY (XACA-1808): a worker session observed a model that does not match the model its dispatch
                         recorded (the live proof that the model setting took effect). Detail names item, expected, observed.
   31  TIMEOUT           watch: --timeout elapsed with nothing actionable
+
+RESUME (XACA-1547; a coordinator that starts on a release with an active run calls this BEFORE anything else)
+   0  RESUMED           rehydrated from the ledger, reconciled (the same derive-and-record step as a watch poll), optionally
+                        re-attached (--coordinator: summary + every open item's orchestration.coordinator), and reported.
+                        Per item: action live|closed|crashed|queued|failed|unknown, redispatch dispatch|resume|never; every
+                        in-flight item is "never". Appends ONE ledger `verdict` event, verdict RESUMED (not logged on --dry-run)
+   4  NO_ACTIVE_RUN     no active open run on the release: start a new one
+   2  USAGE             as for watch; a corrupt ledger is USAGE (fail closed), never a partial resume
 
 PRIORITY when several hold (highest first): QUESTION_PENDING(11) > ITEM_CRASHED(13) > ITEM_FAILED(14) > DISPATCH_FAILED(15)
   > ITEM_STALLED(12) > MODEL_MISMATCH(17) > TOKEN_BUDGET(16) > SLOT_FREE(10) > ALL_DONE(0). Ties within a verdict: lowest wave,
@@ -130,13 +140,13 @@ TELEMETRY_VERDICTS = ("MODEL_MISMATCH", "TOKEN_BUDGET")   # warn-only; never blo
 
 # verdict -> exit code
 EXIT = {
-    "ALL_DONE": 0, "HELP": 0, "STATUS": 0, "USAGE": 2, "PENDING": 3,
+    "ALL_DONE": 0, "HELP": 0, "STATUS": 0, "RESUMED": 0, "USAGE": 2, "PENDING": 3, "NO_ACTIVE_RUN": 4,
     "SLOT_FREE": 10, "QUESTION_PENDING": 11, "ITEM_STALLED": 12, "ITEM_CRASHED": 13, "ITEM_FAILED": 14,
     "DISPATCH_FAILED": 15, "TOKEN_BUDGET": 16, "MODEL_MISMATCH": 17, "TIMEOUT": 31,
 }
 PRIORITY = ("QUESTION_PENDING", "ITEM_CRASHED", "ITEM_FAILED", "DISPATCH_FAILED", "ITEM_STALLED", "MODEL_MISMATCH",
             "TOKEN_BUDGET", "SLOT_FREE", "ALL_DONE")
-NOT_LOGGED = ("PENDING", "USAGE", "HELP", "STATUS")
+NOT_LOGGED = ("PENDING", "USAGE", "HELP", "STATUS", "NO_ACTIVE_RUN")
 PRE_RUNNING = ("QUEUED", "DISPATCHING", "UNKNOWN")
 
 TMUX_FORMAT = "#{session_name}\t#{window_name}\t#{pane_current_command}"
@@ -440,7 +450,7 @@ def gather(ctx, rel, board, board_file, run, orch, events):
             except Exception as exc:  # noqa: BLE001 -- a gh failure is data, not a crash
                 prs[iid] = {"error": one_line(exc)}
     return {"now": now, "team": team, "thresholds": th, "sources": sources, "items": items, "windows": windows,
-            "panes": panes, "prs": prs, "terminals": terminals, "dispatches": dispatches}
+            "panes": panes, "prs": prs, "terminals": terminals, "dispatches": dispatches, "run": run}
 
 
 # ------------------------------------------------------------------ conditions
@@ -492,7 +502,9 @@ def build_conditions(orch, states, g, events, th):
             add("QUESTION_PENDING", iid, "thread=%s" % tid,
                 "%s: threadId=%s age=%s; %s" % (iid, tid, "%ds" % age if age is not None else "unknown", res["detail"]))
         elif st == "CRASHED":
-            add("ITEM_CRASHED", iid, res["detail"], "%s: %s" % (iid, res["detail"]))
+            # XACA-1547-003: the detail carries the re-dispatch offer; the signature keeps keying on the derived detail only.
+            add("ITEM_CRASHED", iid, res["detail"], "%s: %s; %s" % (
+                iid, res["detail"], crash_offer(iid, (g.get("terminals") or {}).get(iid), g.get("run"))))
         elif st == "FAILED":
             add("ITEM_FAILED", iid, "pr=%s:%s:%s" % (sig.get("pr_number"), sig.get("pr_state"), res["detail"]),
                 "%s: %s" % (iid, res["detail"]))
@@ -754,7 +766,11 @@ def _sync_lanes(ctx, board_file, kdir, run, orch, states, now, lines):
     return changed
 
 
-def _poll(ctx, once, read_only):
+def reconcile(ctx, read_only):
+    """The level-triggered half every poll AND `resume` share (XACA-1547-002): read summary + ledger (fail closed), gather
+    the live inputs, derive every tracked item's state, record each one that differs from the summary (ledger `state` event +
+    summary + lane mirror, via record_state), then the lane sync. read_only computes the same but writes nothing.
+    -> dict(board_file, kdir, board, rel, run, orch [re-read after writes], events, g, states, lines, changes)."""
     board_file, kdir, board, rel, run, orch = _summary_after(ctx)
     events = read_ledger(ctx, kdir, run)
     g = gather(ctx, rel, board, board_file, run, orch, events)
@@ -778,6 +794,14 @@ def _poll(ctx, once, read_only):
         board_file, kdir, board, rel, run, orch = _summary_after(ctx)     # re-read: since/lanes are now current
     if not read_only and _sync_lanes(ctx, board_file, kdir, run, orch, states, g["now"], lines):
         board_file, kdir, board, rel, run, orch = _summary_after(ctx)
+    return {"board_file": board_file, "kdir": kdir, "board": board, "rel": rel, "run": run, "orch": orch, "events": events,
+            "g": g, "states": states, "lines": lines, "changes": changes}
+
+
+def _poll(ctx, once, read_only):
+    r = reconcile(ctx, read_only)
+    board_file, kdir, board, run, orch, events = r["board_file"], r["kdir"], r["board"], r["run"], r["orch"], r["events"]
+    g, states, lines, changes = r["g"], r["states"], r["lines"], r["changes"]
     lines.extend(lane_lines(orch))
     th = g["thresholds"]
     conds = build_conditions(orch, states, g, events, th)
@@ -831,6 +855,115 @@ def _poll(ctx, once, read_only):
             ro.close_run(board_file, kdir, ctx.release_id, run, outcome="complete", detail=top["detail"], now=g["now"])
             lines.append("run %s closed (complete)" % run)
     return Result(top["verdict"], run, top["item"], top["detail"], lines, extra)
+
+
+# ------------------------------------------------------------------ resume (XACA-1547)
+def crash_offer(item, terminal, run):
+    """The ITEM_CRASHED / resume offer: relaunch the worker in place. `kb-dispatch --resume` keeps the item's worktree, branch
+    and dispatch stamp (it never re-stamps a todo item), refuses while a live worker still holds the window, and keeps the
+    crashed window (renamed) for inspection. The alternative is the lead's call (cancel / re-plan)."""
+    return ("offer: re-dispatch in place with `kb-dispatch %s --terminal %s --run %s --resume` "
+            "(keeps worktree + stamp), or ask the lead to cancel/re-plan" % (item, terminal or "<terminal>", run or "<RUN-ID>"))
+
+
+# What `resume` does with each derived state. Only QUEUED is ever (re)dispatched as new work, and only through SLOT_FREE;
+# CRASHED is offered a RESUME of the same worker. Every in-flight state is left alone: the worker is still on it.
+RESUME_ACTION = {
+    "DONE": "closed", "CANCELLED": "closed", "QUEUED": "queued", "CRASHED": "crashed", "FAILED": "failed",
+    "UNKNOWN": "unknown", "DISPATCHING": "live", "RUNNING": "live", "IN_REVIEW": "live", "QUESTION_PENDING": "live",
+    "STALLED": "live", "MERGED_PENDING_DONE": "live",     # merged, kb-done still owed: the worker closes it, never re-run
+}
+RESUME_REDISPATCH = {"queued": "dispatch", "crashed": "resume"}     # every other action: "never"
+
+
+def resume(ctx, coordinator=None, dry_run=False):
+    """`kb-release-orchestrate resume <REL-ID>` (XACA-1547-001/002). A coordinator that (re)starts calls this FIRST.
+    NO_ACTIVE_RUN (exit 4) when the release has no active open run: start a new run instead. Otherwise:
+      1 rehydrate: fold the ledger (fail closed: a corrupt ledger is USAGE, never a guess) into per-item history;
+      2 reconcile: the SAME derive-and-record step as every watch poll, so anything that changed while no coordinator was
+        looking is recorded now (an item merged meanwhile becomes DONE and frees its lane; a dead worker becomes CRASHED);
+      3 re-attach: with --coordinator, re-point the run at the new address (summary + every open item's stamp);
+      4 report per item: state, action (live / closed / crashed / queued / failed / unknown) and redispatch (dispatch / resume
+        / never). An in-flight item is ALWAYS "never": resume never re-dispatches running work (plan requirement 9);
+      5 append ONE `verdict` event, verdict RESUMED (no new ledger kind: LCARS and ticket-lamp already render verdicts).
+    --dry-run computes everything and writes nothing. Returns a Result (RESUMED / NO_ACTIVE_RUN / USAGE)."""
+    try:
+        if coordinator is not None and not ro.addr_valid(coordinator):
+            raise UsageError("--coordinator %r is not a team:terminal address" % (coordinator,))
+        _bf, _kd, _board, rel = locate_release(ctx)
+        orch0 = rel.get("orchestration")
+        if not (isinstance(orch0, dict) and orch0.get("activeRunId") and not orch0.get("closedAt")):
+            last = orch0.get("activeRunId") if isinstance(orch0, dict) else None
+            return Result("NO_ACTIVE_RUN", last, None, "%s has no active open run%s; start a new run" % (
+                ctx.release_id, " (last run %s is closed)" % last if last else ""))
+        before = {iid: (row or {}).get("state") for iid, row in (orch0.get("items") or {}).items()}
+        r = reconcile(ctx, dry_run)
+        run, orch, states, g, lines = r["run"], r["orch"], r["states"], r["g"], r["lines"]
+        hist = ro.rehydrate(r["events"])
+        prev = ro.coordinator_address(orch.get("coordinator"))
+        reattached = None
+        if coordinator is not None and not dry_run:
+            reattached = ro.reattach_coordinator(r["board_file"], ctx.release_id, run, coordinator, now=g["now"])
+            if reattached["previous"] != coordinator or reattached["items"]:
+                lines.append("re-attached: coordinator %s -> %s%s" % (
+                    reattached["previous"], coordinator,
+                    "; item stamps rewritten: %s" % ", ".join(reattached["items"]) if reattached["items"] else ""))
+        slot, slot_res = slot_condition(orch, states, _max_parallel(orch))
+    except UsageError as exc:
+        return Result("USAGE", ctx.run, None, str(exc))
+    except ValueError as exc:
+        return Result("USAGE", ctx.run, None, "bad configuration: %s" % exc)
+    except ro.LedgerError as exc:
+        return Result("USAGE", ctx.run, None, "ledger/summary write refused: %s" % exc)
+    items, counts = {}, {}
+    for iid in sorted(states):
+        st = states[iid]["state"]
+        action = RESUME_ACTION.get(st, "unknown")
+        h = hist["items"].get(iid) or {}
+        pq = (g["items"].get(iid) or {}).get("pendingQuestion")
+        row = {"state": st, "before": before.get(iid), "ledgerState": h.get("ledgerState"), "action": action,
+               "redispatch": RESUME_REDISPATCH.get(action, "never"), "terminal": g["terminals"].get(iid),
+               "detail": states[iid]["detail"], "dispatches": h.get("dispatches", 0),
+               "pendingQuestion": ({"threadId": pq.get("threadId"), "coordinator": pq.get("coordinator")}
+                                   if isinstance(pq, dict) and pq else None)}
+        if action == "crashed":
+            row["offer"] = crash_offer(iid, row["terminal"], run)
+        items[iid] = row
+        counts[action] = counts.get(action, 0) + 1
+    # Defence in depth for requirement 9: only a QUEUED item may ever be offered as new work.
+    eligible = [i for i in (slot_res or {}).get("eligible") or [] if items.get(i, {}).get("action") == "queued"]
+    gap = _age(g["now"], hist["run"]["lastVerdictAt"] or hist["run"]["startedAt"])
+    report = {"run": run, "release": ctx.release_id, "coordinator": coordinator or prev, "previousCoordinator": prev,
+              "reattached": reattached, "dryRun": bool(dry_run), "now": ro._ts(g["now"]),
+              "startedAt": hist["run"]["startedAt"], "lastVerdictAt": hist["run"]["lastVerdictAt"],
+              "coordinatorGapSeconds": gap, "resumes": hist["run"]["resumes"], "items": items,
+              "changes": [{"item": i, "from": a, "to": b} for i, a, b in r["changes"]],
+              "slotFree": bool(slot) and bool(eligible), "eligible": eligible}
+    detail = "%d item(s): %s; %s recorded while no coordinator watched" % (
+        len(items), " ".join("%s=%d" % kv for kv in sorted(counts.items())),
+        "%d change(s)" % len(r["changes"]) if r["changes"] else "no changes")
+    out = ["Resuming run %s (release %s), started %s; last coordinator verdict %s%s" % (
+        run, ctx.release_id, hist["run"]["startedAt"], hist["run"]["lastVerdictAt"] or "never",
+        " (%ss ago)" % gap if gap is not None else "")]
+    out.extend(lines)
+    for iid, row in items.items():
+        out.append("  %s  %-16s %-7s redispatch=%-8s terminal=%s  %s%s" % (
+            iid, row["state"], row["action"], row["redispatch"], row["terminal"], row["detail"],
+            "  [question %s pending]" % row["pendingQuestion"]["threadId"] if row["pendingQuestion"] else ""))
+        if row.get("offer"):
+            out.append("      %s" % row["offer"])
+    out.extend(lane_lines(orch))
+    out.append("next: %s; then loop on `kb-release-orchestrate watch %s --run %s`" % (
+        "dispatch %s (SLOT_FREE)" % ", ".join(eligible) if eligible else "no new dispatch is due", ctx.release_id, run))
+    if not dry_run:
+        try:
+            ro.ledger_append(r["kdir"], run, ro.KIND_VERDICT, now=g["now"], item="-", verdict=ro.VERDICT_RESUMED,
+                             signature="%s|-|%s" % (ro.VERDICT_RESUMED, ro._ts(g["now"])), detail=one_line(detail),
+                             coordinator=coordinator or prev, previousCoordinator=prev,
+                             actions={i: v["action"] for i, v in items.items()})
+        except ro.LedgerError as exc:
+            return Result("USAGE", run, None, "ledger/summary write refused: %s" % exc, out)
+    return Result("RESUMED", run, "-", detail, out, {"report": report})
 
 
 # ------------------------------------------------------------------ watch / status
@@ -1048,6 +1181,11 @@ def build_parser():
     common(s)
     s.add_argument("--json", action="store_true")
     s.add_argument("--tokens", action="store_true")
+    rs = sub.add_parser("resume", add_help=False)
+    common(rs)
+    rs.add_argument("--coordinator")
+    rs.add_argument("--json", action="store_true")
+    rs.add_argument("--dry-run", action="store_true")
     t = sub.add_parser("tokens", add_help=False)
     t.add_argument("run", nargs="?")
     t.add_argument("--item")
@@ -1063,6 +1201,8 @@ def build_parser():
 USAGE_TEXT = ("usage: kb-release-orchestrate watch <REL-ID> [--run RUN] [--once] [--interval S] [--timeout S] [--repeat-after S] "
               "[--stall-seconds N] [--dispatch-seconds N] [--board FILE] [--kanban-dir DIR] [--repo owner/repo]\n"
               "       kb-release-orchestrate status <REL-ID> [--json] [--tokens] [--run RUN] [same input flags]\n"
+              "       kb-release-orchestrate resume <REL-ID> [--coordinator team:terminal] [--json] [--dry-run] [same input flags]\n"
+              "         (resume exit: 0 RESUMED, 4 NO_ACTIVE_RUN, 2 usage / corrupt ledger)\n"
               "       kb-release-orchestrate tokens <RUN-ID> [--json] [--since ISO] [--board FILE] [--kanban-dir DIR] [--projects-dir DIR]\n"
               "       kb-release-orchestrate tokens --item <ID> [--json] [--since ISO] [--kanban-dir DIR] [--projects-dir DIR]\n"
               "       (watch also: [--tokens-interval S] [--projects-dir DIR] [--worktrees-root DIR]; tokens exit: 0 ok, 2 usage, 3 incomplete data)")
@@ -1088,7 +1228,7 @@ def main(argv=None, **overrides):
             print(verdict_line("HELP", None, None, "usage printed, no run was monitored"), file=out)
             return 0
         if not args.cmd:
-            raise UsageError("a subcommand (watch | status | tokens) is required")
+            raise UsageError("a subcommand (watch | status | resume | tokens) is required")
         if args.cmd == "tokens":
             args.release = None
             return tokens_cmd(args, out, overrides)
@@ -1116,6 +1256,16 @@ def main(argv=None, **overrides):
         if res.verdict == "USAGE":
             print("Error: %s" % res.detail, file=sys.stderr)
         return res.code
+    if args.cmd == "resume":
+        res = resume(ctx, coordinator=args.coordinator, dry_run=args.dry_run)
+        if args.json and res.verdict == "RESUMED":
+            print(json.dumps(res.extra["report"], sort_keys=True, indent=2), file=out)
+            print(verdict_line(res.verdict, res.run, res.item, res.detail), file=out)
+        else:
+            print(res.render(), file=out)
+        if res.verdict == "USAGE":
+            print("Error: %s" % res.detail, file=sys.stderr)
+        return res.code
     res, view = status(ctx, with_tokens=args.tokens)
     if view is None:
         print("Error: %s" % res.detail, file=sys.stderr)
@@ -1127,3 +1277,7 @@ def main(argv=None, **overrides):
         res.lines = format_status(view)
         print(res.render(), file=out)
     return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

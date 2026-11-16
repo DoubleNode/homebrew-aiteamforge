@@ -16,6 +16,9 @@ the ONLY part of this module that writes, and it is the shell-out boundary for b
   hook_append                               kb-ask / kb-answer / kb-dispatch hook: no-op unless the item carries
                                             orchestration.runId (a flat k=v `dispatch` event is nested for the caller)
   write_tokens                              release.orchestration.tokens (XACA-1808), under the board lock
+  active_run / rehydrate / reattach_coordinator
+                                            crash-safe resume (XACA-1547): find the open run, fold the ledger back into
+                                            per-item history, re-point the run (summary + items) at a new coordinator
 
 The planner functions below never call the ledger functions and the ledger functions never call plan().
 The layers stay separate and individually callable:
@@ -873,6 +876,150 @@ def hook_append(board_file, item_id, kind, kanban_dir=None, **fields):
         if "model" in nested:
             fields["model"] = nested["model"]
     return ledger_append(kdir, run_id, kind, **fields)
+
+# ---------------------------------------------------------------- resume (XACA-1547)
+# A coordinator that restarts mid-run (its pane died, the machine rebooted, the user re-ran `kb-run <REL-ID>`) must pick the
+# run back up WITHOUT re-dispatching work that is still running. The ledger is the resume source (plan "Two-layer ledger"):
+#   active_run           the release's active, open run from the board summary (None = nothing to resume, start fresh)
+#   rehydrate            folds the ledger into per-item history: last recorded state, DISPATCHED count + last dispatch
+#                        (terminal, resume flag), the open question (a `question` with no later `answer` on its thread), the
+#                        last verdict, and run-level facts (startedAt, coordinator, lastVerdictAt = when a coordinator last
+#                        looked). PURE: no I/O, never raises on an odd event (an unknown shape is ignored, not fatal; ledger_read
+#                        already refused anything torn).
+#   reattach_coordinator re-points the run at a NEW coordinator address in ONE board write: release.orchestration.coordinator
+#                        AND item.orchestration.coordinator of every non-terminal item of this run. kb-ask reads the ITEM's
+#                        coordinator (XACA-1545), so rewriting only the summary would send every later question to the dead
+#                        pane's mailbox. Questions already pending keep their own `pendingQuestion.coordinator`: they were
+#                        sent to the old address, and the resume report lists them so the new coordinator can kb-answer them.
+# The decisions about what to DO with each item live in orchestrator_monitor.resume (the `resume` subcommand).
+VERDICT_RESUMED = "RESUMED"
+ADDR_RE = re.compile(r"[a-z0-9][a-z0-9-]*:[a-z0-9][a-z0-9_-]*")   # == bash _kb_orch_addr_valid
+
+
+def addr_valid(addr):
+    return isinstance(addr, str) and ADDR_RE.fullmatch(addr) is not None
+
+
+def coordinator_address(value):
+    """release.orchestration.coordinator is "team:terminal" or {"address": "team:terminal", ...}; -> the string or None."""
+    if isinstance(value, dict):
+        value = value.get("address")
+    return value if isinstance(value, str) and value else None
+
+
+def active_run(board, release_id):
+    """-> (run_id, orchestration dict) for the release's active, OPEN run, or None (no release, no run, or closed)."""
+    for rel in (board or {}).get("releases") or []:
+        if isinstance(rel, dict) and rel.get("id") == release_id:
+            orch = rel.get("orchestration")
+            if isinstance(orch, dict) and orch.get("activeRunId") and not orch.get("closedAt"):
+                return orch["activeRunId"], orch
+            return None
+    return None
+
+
+def rehydrate(events):
+    """Fold a run's ledger events (ledger_read order) into {"run": {...}, "items": {ID: {...}}}. See the block above."""
+    run = {"startedAt": None, "coordinator": None, "lastEventAt": None, "lastVerdictAt": None, "lastVerdict": None,
+           "resumes": 0, "closed": False, "events": 0}
+    items = {}
+
+    def it(iid):
+        return items.setdefault(iid, {"ledgerState": None, "stateAt": None, "dispatches": 0, "resumeDispatches": 0,
+                                      "lastDispatch": None, "openQuestion": None, "lastVerdict": None})
+
+    for ev in events or []:
+        if not isinstance(ev, dict):
+            continue
+        run["events"] += 1
+        kind, ts, iid = ev.get("kind"), ev.get("ts"), ev.get("item")
+        iid = iid if isinstance(iid, str) and iid and iid != "-" else None
+        run["lastEventAt"] = ts
+        if kind == KIND_RUN_START:
+            run["startedAt"] = ts
+            run["coordinator"] = coordinator_address(ev.get("coordinator"))
+        elif kind == KIND_RUN_END:
+            run["closed"] = True
+        elif kind == KIND_VERDICT:
+            run["lastVerdictAt"], run["lastVerdict"] = ts, ev.get("verdict")
+            if ev.get("verdict") == VERDICT_RESUMED:
+                run["resumes"] += 1
+                if coordinator_address(ev.get("coordinator")):
+                    run["coordinator"] = coordinator_address(ev.get("coordinator"))
+            elif iid:
+                it(iid)["lastVerdict"] = {"verdict": ev.get("verdict"), "ts": ts}
+        elif kind == KIND_STATE and iid:
+            it(iid).update({"ledgerState": ev.get("to"), "stateAt": ts})
+        elif kind == KIND_DISPATCH and iid:
+            d = ev.get("dispatch") if isinstance(ev.get("dispatch"), dict) else {}
+            row = it(iid)
+            row["lastDispatch"] = {"ts": ts, "outcome": d.get("outcome"), "terminal": d.get("terminal"),
+                                   "reason": d.get("reason"), "resume": str(d.get("resume")).lower() in ("1", "true")}
+            if d.get("outcome") == "DISPATCHED":
+                row["dispatches"] += 1
+                if row["lastDispatch"]["resume"]:
+                    row["resumeDispatches"] += 1
+        elif kind == KIND_QUESTION and iid:
+            it(iid)["openQuestion"] = {"thread": ev.get("thread"), "ts": ts, "to": ev.get("to")}
+        elif kind == KIND_ANSWER and iid:
+            q = it(iid)["openQuestion"]
+            if q is not None and (q.get("thread") is None or ev.get("thread") in (None, q.get("thread"))):
+                it(iid)["openQuestion"] = None
+    return {"run": run, "items": items}
+
+
+def reattach_coordinator(board_file, release_id, run_id, coordinator, now=None):
+    """Re-point an active run at `coordinator` (see the block above). ONE locked board write. Returns
+    {"previous": old address|None, "items": [ids whose item.orchestration.coordinator was rewritten]}. Refuses (LedgerError)
+    a bad address, a missing release, or a run that is not the release's active open run. Same address = no write."""
+    if not addr_valid(coordinator):
+        raise LedgerError("coordinator %r is not a team:terminal address" % (coordinator,))
+    import kanban_utils
+    ts = _ts(now)
+    box = {}
+
+    def _upd(board):
+        try:
+            rel = _find_release_in(board, release_id)
+            orch = rel.get("orchestration")
+            if not isinstance(orch, dict):
+                raise LedgerError("release %s has no orchestration summary" % release_id)
+            _active_run_check(orch, release_id, run_id)
+            prev = coordinator_address(orch.get("coordinator"))
+            box["previous"], box["items"] = prev, []
+            changed = prev != coordinator
+            if isinstance(orch.get("coordinator"), dict):
+                orch["coordinator"] = dict(orch["coordinator"], address=coordinator)
+            else:
+                orch["coordinator"] = coordinator
+            for item in board.get("backlog") or []:
+                io = item.get("orchestration") if isinstance(item, dict) else None
+                if not isinstance(io, dict) or io.get("runId") != run_id:
+                    continue
+                if ostate.resolve_item_status(item) in ("completed", "cancelled"):
+                    continue
+                if io.get("coordinator") != coordinator:
+                    io["coordinator"] = coordinator
+                    item["updatedAt"] = ts
+                    box["items"].append(item.get("id"))
+                    changed = True
+            if not changed:
+                return None               # nothing to write
+            board["lastUpdated"] = ts
+            return board
+        except Exception as exc:  # noqa: BLE001 -- re-raised below; must not be swallowed by update_board_safely
+            box["exc"] = exc
+            return None
+
+    ok = kanban_utils.update_board_safely(board_file, _upd)
+    if "exc" in box:
+        if isinstance(box["exc"], LedgerError):
+            raise box["exc"]
+        # PR #1348 review: an odd board shape (TypeError, ...) must stay a LedgerError, so `resume` still ends on a VERDICT line.
+        raise LedgerError("could not re-attach %s: %s: %s" % (run_id, type(box["exc"]).__name__, box["exc"]))
+    if not ok or "previous" not in box:      # update_board_safely: False = unreadable/unwritable (None from _upd is True)
+        raise LedgerError("could not re-attach %s to %s (%s)" % (run_id, coordinator, board_file))
+    return {"previous": box["previous"], "items": sorted(box["items"])}
 # ================================================================ end LEDGER (XACA-1546-001)
 
 
