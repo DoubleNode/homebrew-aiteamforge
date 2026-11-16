@@ -181,3 +181,4 @@ test-xaca-1669-tmux-conf-upgrade-refresh.sh      plain-shell
 test-xaca-1669-tmux-theme-contrast.sh            plain-shell
 test-xaca-1740-upgrade-skill-links.sh           plain-shell
 test-xaca-1624-managed-policy-surfacing.sh      plain-shell
+test-xaca-1835-claude-md-historical-variants.sh  plain-shell

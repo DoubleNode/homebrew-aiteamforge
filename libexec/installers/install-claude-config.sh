@@ -342,6 +342,22 @@ _xaca1159_write_claude_md_receipt() {
 # GENERAL RULE for whoever edits this template next: before changing it,
 # register the OUTGOING render here, or you strand every receipt-less box
 # currently sitting on it.
+#
+# XACA-1835 -- that rule was missed four times after 75b6f33. Every template
+# blob that ever shipped in a tagged tap release was re-derived from tap git
+# history (`git rev-parse <tag>:share/templates/claude/claude-md-global.template`
+# for every tag, deduplicated) and compared against this list; four had
+# shipped and were never registered: cd5aafc (v0.20.9, 80,627 B), ab2af77
+# (v0.20.18, 49,809 B), 89fddb2 (v0.21.3, 49,916 B) and 6c3e4ce (v0.21.6 ..
+# v0.21.22, 50,035 B). XACA-1832's condensed render, 6e4f579 (v0.21.23,
+# 19,606 B), shipped while XACA-1835 was in review and is the render that
+# change replaces, so it is registered too. Each file is named after the tap
+# commit that introduced that blob. They are registered below. The rule is
+# now enforced in CI rather than by this comment: the
+# dev-team guard tests/test-xaca-1835-claude-md-outgoing-render-registered.sh
+# fails any PR that changes the template source without the outgoing render
+# being registered here, and tests/test-xaca-1835-claude-md-historical-variants.sh
+# (this repo) proves each row has its file and actually bootstraps.
 # {{ORG_NAME}}/{{ORG_SLUG}}/{{SHARED_DEV_ROOT}} have NEVER been substituted
 # by apply_template() in any of those commits (the template's own
 # TODO(plugins/...) comment documents this as deliberate, pending a future
@@ -355,6 +371,9 @@ _xaca1159_write_claude_md_receipt() {
 # runtime (the installed Cellar payload is a plain file copy, not a git
 # checkout: the formula does `libexec.install Dir["*"]`, which excludes
 # `.git`).
+# Since XACA-1835 those files are mirrored by the tap publisher from the
+# dev-team canonical scripts/templates/tap/claude-md-historical/ (share/ is
+# publisher staged). Add a new render THERE, and its row HERE.
 _xaca1159_claude_md_historical_variants() {
     cat <<'EOF'
 claude-md-global.b99bf32.template|DEV_TEAM_DIR
@@ -362,6 +381,11 @@ claude-md-global.d864622.template|AITEAMFORGE_DIR
 claude-md-global.322b99b.template|AITEAMFORGE_DIR
 claude-md-global.51f6af4.template|AITEAMFORGE_DIR
 claude-md-global.75b6f33.template|AITEAMFORGE_DIR
+claude-md-global.cd5aafc.template|AITEAMFORGE_DIR
+claude-md-global.ab2af77.template|AITEAMFORGE_DIR
+claude-md-global.89fddb2.template|AITEAMFORGE_DIR
+claude-md-global.6c3e4ce.template|AITEAMFORGE_DIR
+claude-md-global.6e4f579.template|AITEAMFORGE_DIR
 EOF
 }
 
