@@ -16,8 +16,12 @@
 # STAGED ROLLOUT. Stage A (this file as shipped) delivers ONLY the top-level
 # scalar skipDangerousModePermissionPrompt=true -- NOTE that key SUPPRESSES
 # Claude Code's dangerous-mode permission prompt. Stage B adds the nested
-# env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE="50" after the P=50 7-day gate. The
-# nested-key merge is proven NOW against a FIXTURE template + injected key
+# env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE after the P=50 7-day gate. XACA-1837
+# (2026-11-16) moved the SHIPPED value 50 -> 25 after the XACA-1832 context
+# audit. EXPECT_P below pins the shipped value, so a template regressing to
+# "50" fails G1/U1b/U1c/P1. The F*/N* cases use their OWN fixture template
+# (FIX_TMPL, still "50") -- they prove merge mechanics, not the shipped value.
+# The nested-key merge is proven NOW against a FIXTURE template + injected key
 # list (F* cases), so Stage B only has to flip XACA1283_STAGE below.
 #
 # Semantics asserted:
@@ -37,7 +41,7 @@
 
 # ── STAGE-A GUARD (XACA-1283) ────────────────────────────────────────────────
 # Stage B flips this ONE line to B, which flips the G1 guard (template + key
-# list must now CARRY env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE="50") and the U1/P1
+# list must now CARRY env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=$EXPECT_P) and the U1/P1
 # expectations. Until then G1 FAILS if P=50 leaks into the shipped tap early.
 XACA1283_STAGE=B
 
@@ -86,7 +90,7 @@ SKIP_PATH='["skipDangerousModePermissionPrompt"]'
 CLEANUP_PATH='["cleanupPeriodDays"]'
 
 if [ "$XACA1283_STAGE" = B ]; then
-    EXPECT_P='"50"'; EXPECT_ADDED=3
+    EXPECT_P='"25"'; EXPECT_ADDED=3   # XACA-1837: the shipped value (was "50")
 else
     EXPECT_P='null'; EXPECT_ADDED=2
 fi
@@ -245,8 +249,8 @@ fi
 
 # ═══ G1: STAGE-A GUARD — flipped by Stage B ═════════════════════════════════
 if [ "$XACA1283_STAGE" = B ]; then
-    test_start "G1 (Stage B): shipped template carries env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=\"50\" (string) AND the key list includes it"
-    if [ "$(tmpl_get '.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE')" = '"50"' ] \
+    test_start "G1 (Stage B): shipped template carries env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=${EXPECT_P} (string) AND the key list includes it"
+    if [ "$(tmpl_get '.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE')" = "$EXPECT_P" ] \
         && printf '%s' "$SHIPPED_KEYS" | jq -e --argjson p "$P_PATH" 'index([$p]) != null' >/dev/null 2>&1; then
         test_pass
     else

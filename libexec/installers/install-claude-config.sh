@@ -1384,6 +1384,14 @@ install_settings_json() {
 # adds exactly one line here -- ["env","CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] --
 # plus the matching template line, after the P=50 7-day gate on M3Pro.
 #
+# XACA-1837 (2026-11-16): the shipped VALUE is now "25" (was "50"), after the
+# XACA-1832 context audit. Listing a path here is FILL-ABSENT, never
+# force-sync: `aiteamforge upgrade` leaves any value a box already has
+# (including a hand-set "25" or "70") alone, so changing the template value
+# reaches only fresh installs and boxes that lack the key. A RE-RUN of
+# install_settings_json() is different: merge_settings_json() is template-wins
+# ($base * $ovl), so it overwrites the user's value with the template's.
+#
 # XACA-1300-004: cleanupPeriodDays pinned to 30 (the Claude Code documented
 # default -- see docs/en/data-usage#data-retention, "Local caching ... 30
 # days by default ... Adjust the period with cleanupPeriodDays"). Today the
