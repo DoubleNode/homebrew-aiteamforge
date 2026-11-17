@@ -7,13 +7,22 @@
 #
 # kb-msg inbox surfacing hook (XACA-0777).
 #
-# Fires on SessionStart and on Stop (after every assistant turn). Surfaces the
-# CURRENT session's unread kb-msg mail so a chat learns another chat pinged it
-# without manual polling.
+# Fires on SessionStart and on Stop (after every assistant turn). Tells the
+# CURRENT session it has unread kb-msg mail so a chat learns another chat
+# pinged it without manual polling.
 #
-# Two rules that keep it from becoming another ignored nag:
+# Rules that keep it from becoming another ignored nag, or a context hog:
 #   1. EMPTY INBOX PRINTS NOTHING — no "you have 0 messages" noise.
-#   2. Stop is THROTTLED (default 5 min per session); SessionStart always shows.
+#   2. ONE LINE, ever (XACA-1833). The live session only sees a count notice;
+#      the listing/reading/replying happens in a comms subagent (nahla on
+#      Academy; elsewhere a general-purpose agent handed `msg-store.py
+#      triage-brief`), so the inbox never lands in the live context.
+#   3. A per-TERMINAL 5-min timer (KB_MSG_THROTTLE_SECONDS, default 300)
+#      gates Stop AND SessionStart. Only a brand-new session (SessionStart
+#      source "startup") bypasses it, so "you have mail" shows on open.
+#   4. The count covers this terminal's directed mail AND team broadcasts,
+#      including broadcasts sent while this terminal had no live session
+#      (msg-store.py unread-count --sync-broadcasts claims those).
 #
 # Register in ~/.claude/settings.json under BOTH SessionStart and Stop, e.g.:
 #   "Stop":         [ { "hooks": [ { "type": "command",
@@ -43,17 +52,22 @@ THROTTLE_SECONDS="${KB_MSG_THROTTLE_SECONDS:-300}"
 [ -f "$STORE" ] || exit 0
 command -v python3 >/dev/null 2>&1 || exit 0
 
-# Read the hook event name from stdin JSON (best-effort; default to "Stop").
+# Read the hook event name (and SessionStart source) from stdin JSON
+# (best-effort; default to "Stop").
 INPUT="$(cat 2>/dev/null || true)"
 EVENT="Stop"
+SOURCE=""
 if [ -n "$INPUT" ]; then
-    EVENT=$(printf '%s' "$INPUT" | python3 -c "
+    _ev=$(printf '%s' "$INPUT" | python3 -c "
 import sys, json
 try:
-    print(json.load(sys.stdin).get('hook_event_name', 'Stop'))
+    d = json.load(sys.stdin)
+    print(d.get('hook_event_name') or 'Stop', d.get('source') or '')
 except Exception:
     print('Stop')
 " 2>/dev/null || echo "Stop")
+    EVENT="${_ev%% *}"
+    case "$_ev" in *" "*) SOURCE="${_ev#* }" ;; esac
 fi
 
 # Resolve current session identity via tmux (mirrors _kb_detect_context split).
@@ -75,31 +89,58 @@ else
     exit 0
 fi
 
-# Throttle Stop (but never SessionStart) to avoid nagging on every turn.
+# Per-terminal timer on Stop AND SessionStart (XACA-1833). Only a brand-new
+# session's SessionStart (source "startup") bypasses it; resume/clear/compact
+# are gated like Stop.
 TS_FILE="${THROTTLE_DIR}/.last_msg_inbox_check_${TEAM}_${TERMINAL}"
-if [ "$EVENT" != "SessionStart" ]; then
+if ! { [ "$EVENT" = "SessionStart" ] && [ "$SOURCE" = "startup" ]; }; then
     NOW=$(date +%s)
     LAST=$(cat "$TS_FILE" 2>/dev/null || echo 0)
+    case "$LAST" in ''|*[!0-9]*) LAST=0 ;; esac
     if [ $((NOW - LAST)) -lt "$THROTTLE_SECONDS" ]; then
         exit 0
     fi
 fi
 
-UNREAD=$(python3 "$STORE" unread-count --team "$TEAM" --terminal "$TERMINAL" 2>/dev/null || echo 0)
-
-# Record the check time regardless (so throttling advances even on empty).
-# mkdir -p first — THROTTLE_DIR is normally ~/.claude which exists, but on a
-# fresh box / sandboxed HOME it may not yet (parity with msg-store.py's
-# _ensure_mail_dir, which does the same before its first write).
+# Record the check time before checking (so throttling advances even on
+# empty). mkdir -p first: on a fresh box / sandboxed HOME ~/.claude may not
+# exist yet (parity with msg-store.py's _ensure_mail_dir).
 mkdir -p "$THROTTLE_DIR" 2>/dev/null || true
 date +%s > "$TS_FILE" 2>/dev/null || true
 
-# EMPTY INBOX PRINTS NOTHING.
-if [ -z "$UNREAD" ] || [ "$UNREAD" = "0" ]; then
-    exit 0
-fi
+# One JSON object: total/team/terminal/scope counts, after claiming any team
+# broadcasts this terminal missed while it had no live session.
+COUNTS=$(python3 "$STORE" unread-count --team "$TEAM" --terminal "$TERMINAL" \
+    --breakdown --sync-broadcasts 2>/dev/null || true)
+[ -n "$COUNTS" ] || exit 0
 
-echo "📨 kb-msg: you (${TEAM}:${TERMINAL}) have ${UNREAD} unread message(s):"
-python3 "$STORE" inbox --team "$TEAM" --terminal "$TERMINAL" 2>/dev/null
-echo "   Read one: kb-msg read <id>   Reply: kb-msg reply <id> \"...\"   List: kb-msg inbox"
+NOTICE=$(printf '%s' "$COUNTS" | python3 -c "
+import sys, json, shlex
+term, team, store = sys.argv[1], sys.argv[2].lower(), sys.argv[3]
+try:
+    c = json.load(sys.stdin)
+    total = int(c.get('total', 0))
+except Exception:
+    sys.exit(0)
+if total <= 0:
+    sys.exit(0)  # EMPTY INBOX PRINTS NOTHING
+line = ('\U0001F4E8 kb-msg: %d unread (%d team-wide, %d for %s)'
+        % (total, int(c.get('team', 0)), int(c.get('terminal', 0)), term))
+scope = int(c.get('scope', 0))
+if scope:
+    srcs = ', '.join(c.get('scope_sources') or []) or 'outside'
+    line += (' \u26a0 SCOPE (XACA-1296): %d from %s, escalate per rule 4'
+             % (scope, srcs))
+# Only Academy ships the nahla persona (XACA-1833 review): every other team
+# gets a general-purpose subagent plus the brief msg-store.py prints, so the
+# notice never names an agent the session cannot start.
+if team == 'academy':
+    line += ' \u2014 spawn the nahla comms subagent to triage (kb-msg inbox)'
+else:
+    line += (' \u2014 spawn a general-purpose subagent to triage; brief: python3 %s triage-brief'
+             % shlex.quote(store))
+print(line)
+" "$TERMINAL" "$TEAM" "$STORE" 2>/dev/null || true)
+
+[ -n "$NOTICE" ] && printf '%s\n' "$NOTICE"
 exit 0

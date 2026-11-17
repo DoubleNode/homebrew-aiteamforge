@@ -56,6 +56,7 @@ import datetime
 import fcntl
 import glob
 import json
+import math
 import os
 import re
 import stat
@@ -87,6 +88,20 @@ def _safe_token(token):
 def inbox_path(team, terminal):
     """Absolute path to the JSONL inbox for a given <team>:<terminal>."""
     return os.path.join(MAIL_DIR, f"{_safe_token(team)}__{_safe_token(terminal)}.jsonl")
+
+
+def broadcast_ledger_path(team):
+    """Team-wide broadcast ledger (XACA-1833). Deliberately NOT named
+    "<team>__<terminal>.jsonl" so no per-recipient inbox can collide with it.
+    Each record is a broadcast plus "delivered_to": [terminals]. A terminal
+    that had no live session when the broadcast went out picks it up later via
+    sync_broadcasts() (fan-out at send time reaches live sessions only)."""
+    return os.path.join(MAIL_DIR, f"{_safe_token(team)}.broadcasts.jsonl")
+
+
+# How long a missed broadcast stays claimable by a terminal that was not live
+# when it was sent. Older ledger rows are pruned on the next sync.
+BROADCAST_TTL_DAYS_DEFAULT = 7
 
 
 def _now_iso():
@@ -149,6 +164,143 @@ def _append_record(team, terminal, record):
         records.append(record)
         return records
     locked_update(inbox_path(team, terminal), updater)
+
+
+def _broadcast_ttl_seconds():
+    raw = os.environ.get("KB_MSG_BROADCAST_TTL_DAYS", "")
+    try:
+        days = float(raw) if raw else BROADCAST_TTL_DAYS_DEFAULT
+    except ValueError:
+        days = BROADCAST_TTL_DAYS_DEFAULT
+    if not math.isfinite(days) or days <= 0:
+        # nan/inf disable pruning; 0/negative wipe the ledger on every check.
+        days = BROADCAST_TTL_DAYS_DEFAULT
+    return days * 86400
+
+
+# The comms-triage brief (XACA-1833). The surfacing hook names this command in
+# its notice so ANY team's session can hand a generic subagent the brief; the
+# Academy `nahla` persona carries the same rules. Single source for non-Academy
+# teams: `python3 <msg-store.py> triage-brief`.
+TRIAGE_BRIEF = """kb-msg comms triage (XACA-1833). You share the parent session's terminal identity.
+1. source ~/aiteamforge/kanban-helpers.sh && kb-msg inbox, then kb-msg read <id> for each message.
+2. Classify each one: FYI, ACTION (for this terminal), DECISION (for the user) or ALL-CLEAR.
+3. FYI and ALL-CLEAR need nothing more. For DECISION, draft a reply but NEVER send it.
+   Send nothing without the parent's approval; never answer a cross-team request yourself.
+4. NEVER start work on any item. A 'SCOPE (XACA-1296)' banner means outside intake: report it only.
+5. Return a digest of 5 lines or fewer: one line per ACTION/DECISION
+   ('<id8> <from> <class>: <gist>'), then one line totalling FYI/ALL-CLEAR.
+6. Last step: run the LCARS avatar cleanup command from your prompt, if it gave one."""
+
+
+def cmd_triage_brief(args):
+    print(TRIAGE_BRIEF)
+
+
+_ISO_FULL_RE = re.compile(
+    r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.\d+)?(Z|[+-]\d{2}:?\d{2})?$")
+
+
+def _iso_age_seconds(iso):
+    """Seconds since an ISO-8601 timestamp; None if unparseable.
+
+    Accepts the strict "...SSZ" form every writer here emits, plus fractional
+    seconds (the relay's JS toISOString fallback) and +HH:MM offsets
+    (`send --created-at`). A missing zone means UTC."""
+    if not isinstance(iso, str):
+        return None
+    m = _ISO_FULL_RE.match(iso.strip())
+    if not m:
+        return None
+    zone = m.group(2)
+    offset = datetime.timedelta(0)
+    if zone and zone != "Z":
+        digits = zone[1:].replace(":", "")
+        hours, minutes = int(digits[:2]), int(digits[2:])
+        if hours > 23 or minutes > 59:
+            return None  # e.g. +99:99 is not an offset
+        offset = datetime.timedelta(hours=hours, minutes=minutes)
+        if zone[0] == "-":
+            offset = -offset
+    # Never raise: callers include send/ingest (a raise there drops the rest
+    # of a relay batch) and every inbox check. Boundary years overflow when
+    # the offset is applied, so OverflowError is caught alongside ValueError.
+    try:
+        then = datetime.datetime.strptime(m.group(1), "%Y-%m-%dT%H:%M:%S")
+        then = (then - offset).replace(tzinfo=datetime.timezone.utc)
+        return (datetime.datetime.now(datetime.timezone.utc) - then).total_seconds()
+    except (ValueError, OverflowError):
+        return None
+
+
+def _record_broadcast(team, base_record, delivered_terminals):
+    """Append one broadcast to the team ledger (XACA-1833), noting which
+    terminals already received a fan-out copy at send time."""
+    row = dict(base_record)
+    row["to_terminal"] = None
+    row["to"] = team
+    row["read_at"] = None
+    row["delivered_to"] = sorted(set(delivered_terminals))
+    if _iso_age_seconds(row.get("created_at")) is None:
+        # An unreadable timestamp would get the row pruned on its first sync,
+        # so offline terminals would never see it: stamp it with "now".
+        row["created_at"] = _now_iso()
+
+    def updater(records):
+        if any(r.get("id") == row["id"] for r in records):
+            return records
+        records.append(row)
+        return records
+    locked_update(broadcast_ledger_path(team), updater)
+
+
+def sync_broadcasts(team, terminal):
+    """Copy team broadcasts this terminal never received into its inbox.
+
+    Fan-out at send/ingest time only reaches LIVE sessions, so a terminal that
+    was closed missed them. Under the ledger lock: every row younger than the
+    TTL whose delivered_to lacks this terminal is copied into the terminal's
+    inbox (id "<ledger-id>:<terminal>", the shape ingest uses), and the
+    terminal is recorded ONLY after that copy landed: a failed copy leaves the
+    row unclaimed so the next check retries it, instead of marking a message
+    delivered that never arrived. Rows older than the TTL are pruned. Returns
+    the number of copies made.
+
+    Lock order: ledger lock, then the inbox lock inside it. Nothing takes them
+    in the opposite order (send/ingest release each inbox lock before taking
+    the ledger lock), so this cannot deadlock."""
+    path = broadcast_ledger_path(team)
+    if not os.path.exists(path):
+        return 0
+    ttl = _broadcast_ttl_seconds()
+    copied = [0]
+
+    def updater(records):
+        kept = []
+        for r in records:
+            age = _iso_age_seconds(r.get("created_at"))
+            if age is None or age > ttl:
+                continue  # expired, or no readable created_at (unbounded otherwise): prune
+            delivered = r.get("delivered_to")
+            if not isinstance(delivered, list):
+                delivered = []
+            if terminal not in delivered:
+                copy = {k: v for k, v in r.items() if k != "delivered_to"}
+                copy["id"] = f"{r.get('id') or uuid.uuid4().hex}:{terminal}"
+                copy["read_at"] = None
+                try:
+                    _append_record(team, terminal, copy)
+                except OSError as exc:
+                    print(f"msg-store: broadcast {copy['id']} not copied, will retry: {exc}",
+                          file=sys.stderr)
+                else:
+                    delivered = delivered + [terminal]
+                    copied[0] += 1
+            r["delivered_to"] = delivered
+            kept.append(r)
+        return kept
+    locked_update(path, updater)
+    return copied[0]
 
 
 # ---------------------------------------------------------------------------
@@ -346,13 +498,19 @@ def cmd_send(args):
     else:
         # Broadcast: fan out to live sessions only.
         thread_id = args.thread or uuid.uuid4().hex
-        for term in live_terminals_for_team(to_team):
+        live_terms = live_terminals_for_team(to_team)
+        for term in live_terms:
             rec = _build_record(args, to_team, term)
             rec["to_terminal"] = None      # preserve broadcast intent in the record
             rec["to"] = to_team
             rec["thread_id"] = thread_id
             _append_record(to_team, term, rec)
             delivered.append({"to": f"{to_team}:{term}", "live": True, "id": rec["id"]})
+        # XACA-1833: also keep it in the team ledger so terminals that were
+        # not live pick it up on their next inbox check (sync_broadcasts).
+        ledger = _build_record(args, to_team, None)
+        ledger["thread_id"] = thread_id
+        _record_broadcast(to_team, ledger, live_terms)
 
     print(json.dumps({
         "ok": True,
@@ -396,17 +554,24 @@ def cmd_ingest(args):
             _append_record(to_team, to_terminal, rec)
             delivered.append(f"{to_team}:{to_terminal}")
         else:
-            for term in live_terminals_for_team(to_team):
+            live_terms = live_terminals_for_team(to_team)
+            for term in live_terms:
                 copy = dict(rec)
                 copy["id"] = rec["id"] + ":" + term  # unique per-recipient id
                 _append_record(to_team, term, copy)
                 delivered.append(f"{to_team}:{term}")
+            _record_broadcast(to_team, rec, live_terms)  # XACA-1833
 
     print(json.dumps({"ok": True, "delivered": delivered, "count": len(delivered)}))
 
 
 def cmd_inbox(args):
-    """List messages for a recipient. Unread only unless --all."""
+    """List messages for a recipient. Unread only unless --all. Claims any
+    team broadcasts this terminal missed first (XACA-1833)."""
+    try:
+        sync_broadcasts(args.team, args.terminal)
+    except OSError:
+        pass
     records = _read_jsonl(inbox_path(args.team, args.terminal))
     if not args.all:
         records = [r for r in records if not r.get("read_at")]
@@ -436,9 +601,41 @@ def cmd_inbox(args):
 
 
 def cmd_unread_count(args):
-    """Print the number of unread messages for a recipient (0 if none)."""
-    records = _read_jsonl(inbox_path(args.team, args.terminal))
-    print(sum(1 for r in records if not r.get("read_at")))
+    """Print the number of unread messages for a recipient (0 if none).
+
+    --sync-broadcasts first claims team broadcasts this terminal missed
+    (XACA-1833). --breakdown prints JSON instead of a bare number, for the
+    one-line surfacing hook: {"total", "team" (broadcasts), "terminal"
+    (directed), "scope" (unread carrying a XACA-1296 scope banner),
+    "scope_sources"}."""
+    if args.sync_broadcasts:
+        try:
+            sync_broadcasts(args.team, args.terminal)
+        except OSError:
+            pass  # a ledger problem must never hide the directed count
+    records = [r for r in _read_jsonl(inbox_path(args.team, args.terminal))
+               if not r.get("read_at")]
+    if not args.breakdown:
+        print(len(records))
+        return
+    team_wide = sum(1 for r in records if r.get("to_terminal") is None)
+    sources = []
+    scope = 0
+    for r in records:
+        banner = _spacedock_scope_banner(r, args.team)
+        if banner:
+            scope += 1
+            m = re.search(r"came from (.+?)\. Space Dock", banner)
+            src = m.group(1) if m else "outside"
+            if src not in sources:
+                sources.append(src)
+    print(json.dumps({
+        "total": len(records),
+        "team": team_wide,
+        "terminal": len(records) - team_wide,
+        "scope": scope,
+        "scope_sources": sources,
+    }))
 
 
 def cmd_read(args):
@@ -617,7 +814,14 @@ def build_parser():
     s = sub.add_parser("unread-count", help="print unread count for a recipient")
     s.add_argument("--team", required=True)
     s.add_argument("--terminal", required=True)
+    s.add_argument("--breakdown", action="store_true",
+                   help="print JSON {total, team, terminal, scope, scope_sources}")
+    s.add_argument("--sync-broadcasts", dest="sync_broadcasts", action="store_true",
+                   help="first claim team broadcasts this terminal missed (XACA-1833)")
     s.set_defaults(func=cmd_unread_count)
+
+    s = sub.add_parser("triage-brief", help="print the comms-triage brief for a subagent")
+    s.set_defaults(func=cmd_triage_brief)
 
     s = sub.add_parser("read", help="mark a message read by id")
     s.add_argument("--team", required=True)
