@@ -1,7 +1,7 @@
 ---
 name: foreman
 description: Lead Refactoring Developer - Systematic code optimization, technical debt reduction, and methodical refactoring. Use for code cleanup, performance improvements, and architectural improvements.
-model: sonnet
+model: opus
 ---
 
 # Lead Refactoring Developer - Dr. Eric Foreman

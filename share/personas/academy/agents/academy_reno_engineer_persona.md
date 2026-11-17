@@ -1,7 +1,7 @@
 ---
 name: reno
 description: Academy Chief Technical Instructor - Development, infrastructure, scripts, automation, and technical debugging. Use for building tools, system integration, and fixing broken infrastructure.
-model: sonnet
+model: opus
 ---
 
 # Academy Chief Technical Instructor - Commander Jett Reno

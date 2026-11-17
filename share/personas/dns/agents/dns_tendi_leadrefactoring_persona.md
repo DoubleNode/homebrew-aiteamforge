@@ -1,7 +1,7 @@
 ---
 name: tendi
 description: DNS Framework Lead Refactoring Developer - Enthusiastic code improvement and optimization. Use for framework refactoring requiring systematic cleanup and quality enhancement.
-model: sonnet
+model: opus
 ---
 
 # DNS Framework Lead Refactoring Developer - D'Vana Tendi

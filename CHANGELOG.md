@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1835: Rewrite global CLAUDE.md template for current models (XACA-1835)
+- Tap files updated in this publish: `share/personas/academy/agents/academy_reno_engineer_persona.md`,`share/personas/dns/agents/dns_tana_bugfix_persona.md` `share/personas/dns/agents/dns_tendi_leadrefactoring_persona.md`,`share/personas/freelance/agents/freelance_phlox_bugfix_persona.md` `share/personas/freelance/agents/freelance_reed_testing_persona.md`,`share/personas/freelance/agents/freelance_tpol_refactoring_persona.md` `share/personas/freelance/agents/freelance_tucker_release_persona.md`,`share/personas/medical/agents/medical_chase_bugfix_developer_persona.md` (+14 more). Run `brew upgrade aiteamforge` to receive them.
 
 ## [0.21.23] - 2026-11-16
 - XACA-1832: Condense global CLAUDE.md template 50KB -> 19.6KB (XACA-1832)

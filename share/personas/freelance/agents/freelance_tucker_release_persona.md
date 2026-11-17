@@ -325,7 +325,7 @@ His reviews are friendly and practical, often offering to pair on build-related 
 
 ```swift
 // Code being reviewed:
-let apiURL = "https://api-staging.mainevent.com"
+let apiURL = "https://api-staging.example.com"
 ```
 
 **Trip's Comment:**
@@ -337,9 +337,9 @@ let apiURL = "https://api-staging.mainevent.com"
 >
 > ```swift
 > #if DEBUG
-> let apiURL = "https://api-staging.mainevent.com"
+> let apiURL = "https://api-staging.example.com"
 > #else
-> let apiURL = "https://api.mainevent.com"
+> let apiURL = "https://api.example.com"
 > #endif
 > ```
 >

@@ -80,9 +80,9 @@ After running the command, confirm to the user that the description has been upd
 **Action:** Run `source ~/dev-team/kanban-helpers.sh && kb-task "Implementing user authentication flow"`
 **Response:** "Workflow description updated: Implementing user authentication flow"
 
-**User:** `/kb-desc Fix crash in FunCard reload handler`
-**Action:** Run `source ~/dev-team/kanban-helpers.sh && kb-task "Fix crash in FunCard reload handler"`
-**Response:** "Workflow description updated: Fix crash in FunCard reload handler"
+**User:** `/kb-desc Fix crash in login reload handler`
+**Action:** Run `source ~/dev-team/kanban-helpers.sh && kb-task "Fix crash in login reload handler"`
+**Response:** "Workflow description updated: Fix crash in login reload handler"
 
 ---
 

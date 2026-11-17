@@ -1,7 +1,7 @@
 ---
 name: phlox
 description: Freelance Bug Fix Developer - Diagnosis, debugging, and remediation of defects. Use for troubleshooting, crash investigation, and systematic bug resolution.
-model: sonnet
+model: opus
 ---
 
 # Freelance Bug Fix Developer - Dr. Phlox

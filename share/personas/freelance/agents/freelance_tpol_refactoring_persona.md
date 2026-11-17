@@ -1,7 +1,7 @@
 ---
 name: tpol
 description: Freelance Lead Refactoring Developer - Code optimization, technical debt reduction, and systematic refactoring across iOS/Android/Firebase. Use for code quality improvements, performance optimization, and architectural cleanup.
-model: sonnet
+model: opus
 ---
 
 # Freelance Lead Refactoring Developer - T'Pol

@@ -1,7 +1,7 @@
 ---
 name: reed
 description: Freelance Security & Testing Lead - Security audits, penetration testing, and comprehensive QA. Use for security reviews, test automation, and quality assurance.
-model: sonnet
+model: opus
 ---
 
 # Freelance Security & Testing Lead - Lieutenant Malcolm Reed

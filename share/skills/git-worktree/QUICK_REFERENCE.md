@@ -8,7 +8,7 @@
 
 ```bash
 # 1. Navigate to project
-cd /Users/Shared/development/Main\ Event/MainEventApp-iOS/
+cd /Users/Shared/development/MyProject/MyApp-iOS/
 
 # 2. Create worktree (in Claude Code)
 "Create worktree for feature"
@@ -27,7 +27,7 @@ git checkout -b feature/my-feature
 ## 📁 Directory Structure
 
 ```
-MainEventApp-iOS/
+MyApp-iOS/
 ├── .git/                    # Shared Git metadata
 ├── [source files]           # Main branch
 └── worktrees/               # Worktrees here
@@ -48,9 +48,9 @@ MainEventApp-iOS/
 |---------|--------|
 | `"Create worktree for feature"` | Creates `worktrees/feature/` on the base branch (`kb-pr-base <ID>`; default `develop`) |
 | `"Create worktree for hotfix"` | Creates `worktrees/hotfix/` on the base branch (`kb-pr-base <ID>`; default `develop`) |
-| `"Create worktree for feature/funcard-reload"` | Creates `worktrees/feature-funcard-reload/` with new branch |
+| `"Create worktree for feature/login-reload"` | Creates `worktrees/feature-login-reload/` with new branch |
 | `"Create worktree for hotfix/crash-3455"` | Creates `worktrees/hotfix-crash-3455/` with new branch |
-| `"Create worktree from existing branch feature/MEM-445"` | Checks out existing branch |
+| `"Create worktree from existing branch feature/PROJ-445"` | Checks out existing branch |
 
 **After every worktree creation (container-layout teams):** personas must be deployed so Claude loads `spock`, `geordi`, etc. instead of falling back to built-in agent types. Two paths:
 
@@ -86,9 +86,9 @@ iOS/Android/Firebase/DNS gitignore `.claude/agents/` — new worktrees start wit
 
 | Command | Result |
 |---------|--------|
-| `"Create coordinated worktrees for Fun Card widget"` | Creates on iOS + Android + Firebase |
-| `"Status of Fun Card widget across all projects"` | Cross-project status check |
-| `"Clean up Fun Card widget worktrees across all projects"` | Cross-project cleanup |
+| `"Create coordinated worktrees for profile widget"` | Creates on iOS + Android + Firebase |
+| `"Status of profile widget across all projects"` | Cross-project status check |
+| `"Clean up profile widget worktrees across all projects"` | Cross-project cleanup |
 
 ### Navigation & Help
 
@@ -251,7 +251,7 @@ git commit -m "Ignore .DS_Store"
 ### Do's ✅
 
 - ✅ Create worktrees as needed (not preemptively)
-- ✅ Use descriptive names (`feature-funcard-reload`)
+- ✅ Use descriptive names (`feature-login-reload`)
 - ✅ Commit and push regularly
 - ✅ Keep 3-5 worktrees max per project
 - ✅ Clean up when task is complete
@@ -272,11 +272,11 @@ git commit -m "Ignore .DS_Store"
 ### Feature Development
 
 ```
-1. "Create worktree for feature/MEM-445-widget"
-2. cd worktrees/feature-MEM-445-widget/
+1. "Create worktree for feature/PROJ-445-widget"
+2. cd worktrees/feature-PROJ-445-widget/
 3. [Code, commit regularly, push]
 4. Create PR when ready
-5. After merge: "Remove worktree feature-MEM-445-widget"
+5. After merge: "Remove worktree feature-PROJ-445-widget"
 ```
 
 ### Emergency Hotfix
@@ -306,7 +306,7 @@ git commit -m "Ignore .DS_Store"
 The skill auto-detects your project using (in order):
 
 1. **Terminal name prefix** (`ios-*`, `android-*`, `firebase-*`)
-2. **Working directory** (contains `MainEventApp-iOS`, etc.)
+2. **Working directory** (contains `MyApp-iOS`, etc.)
 3. **Git remote URL** (checks origin for project name)
 4. **Project files** (`.xcodeproj`, `build.gradle.kts`, `firebase.json`)
 5. **Explicit override** (`"Create iOS worktree for feature"`)
@@ -317,15 +317,15 @@ The skill auto-detects your project using (in order):
 
 ```
 # iOS Feature (Terminal 1: ios-bridge)
-cd MainEventApp-iOS/worktrees/feature/
-# Working on iOS Fun Card widget
+cd MyApp-iOS/worktrees/feature/
+# Working on iOS profile widget
 
 # Android Feature (Terminal 2: android-bridge)
-cd MainEventApp-Android/worktrees/feature/
-# Working on Android Fun Card widget
+cd MyApp-Android/worktrees/feature/
+# Working on Android profile widget
 
 # Firebase Backend (Terminal 3: firebase-ops)
-cd MainEventApp-Functions/worktrees/feature/
+cd MyApp-Functions/worktrees/feature/
 # Working on sync endpoint
 
 All three work simultaneously without conflicts!
@@ -338,8 +338,8 @@ All three work simultaneously without conflicts!
 | Pattern | Example | Use Case |
 |---------|---------|----------|
 | `feature` | `worktrees/feature/` | General feature work |
-| `feature-[desc]` | `worktrees/feature-funcard-reload/` | Specific feature |
-| `feature-MEM-[ID]` | `worktrees/feature-MEM-445/` | Jira-tracked feature |
+| `feature-[desc]` | `worktrees/feature-login-reload/` | Specific feature |
+| `feature-PROJ-[ID]` | `worktrees/feature-PROJ-445/` | Jira-tracked feature |
 | `hotfix` | `worktrees/hotfix/` | General hotfix work |
 | `hotfix-crash-[ID]` | `worktrees/hotfix-crash-3455/` | Specific crash fix |
 | `refactor` | `worktrees/refactor/` | General refactoring |
@@ -354,12 +354,12 @@ All three work simultaneously without conflicts!
 
 | Type | Pattern | Example |
 |------|---------|---------|
-| Feature | `feature/[description]` | `feature/funcard-reload` |
-| Feature + Jira | `feature/MEM-[ID]-[description]` | `feature/MEM-445-widget` |
+| Feature | `feature/[description]` | `feature/login-reload` |
+| Feature + Jira | `feature/PROJ-[ID]-[description]` | `feature/PROJ-445-widget` |
 | Hotfix | `hotfix/[description]` | `hotfix/booking-crash` |
 | Hotfix + ID | `hotfix/crash-[ID]` | `hotfix/crash-3455` |
 | Bugfix | `bugfix/[description]` | `bugfix/leaderboard-sort` |
-| Bugfix + Jira | `bugfix/MEM-[ID]` | `bugfix/MEM-450` |
+| Bugfix + Jira | `bugfix/PROJ-[ID]` | `bugfix/PROJ-450` |
 | Refactor | `refactor/[description]` | `refactor/force-unwraps` |
 | Release | `release/[version]` | `release/2.9.0` |
 
@@ -449,7 +449,7 @@ man git-worktree
 1. **Weekly cleanup:** Review and remove old worktrees every Friday
 2. **Push often:** Protect your work by pushing to remote regularly
 3. **Use tmux:** Each worktree in its own tmux window
-4. **Name clearly:** Use descriptive names like `feature-funcard-reload`
+4. **Name clearly:** Use descriptive names like `feature-login-reload`
 5. **3-5 max:** Don't accumulate too many worktrees per project
 6. **Check status:** Run `"List worktrees"` regularly to see what's active
 
@@ -459,7 +459,7 @@ man git-worktree
 
 **Skill Version:** 1.0.0  
 **Last Updated:** November 2025  
-**Author:** Darren Ehlers (Dave & Buster's Entertainment, Inc.)
+**Author:** Darren Ehlers
 
 ---
 

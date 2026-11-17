@@ -221,17 +221,17 @@ kb-backlog add "Refactor auth module" high "Need to extract token validation and
 
 **With JIRA ID:**
 ```bash
-kb-backlog add "API integration" medium "" ME-123
+kb-backlog add "API integration" medium "" PROJ-123
 ```
 
 **Full specification:**
 ```bash
-kb-backlog add "Complete feature implementation" high "Detailed description here" ME-456
+kb-backlog add "Complete feature implementation" high "Detailed description here" PROJ-456
 ```
 
 **With OS platform (for platform-specific items):**
 ```bash
-kb-backlog add "Fix iOS payment crash" high "" ME-789 iOS
+kb-backlog add "Fix iOS payment crash" high "" PROJ-789 iOS
 kb-backlog add "Android notification bug" medium "" "" Android
 kb-backlog add "Firebase auth update" high "" FIR-456 Firebase
 ```
@@ -277,7 +277,7 @@ Break down complex tasks into trackable subitems:
 **Add subitems:**
 ```bash
 kb-backlog sub add 0 "Design API schema"
-kb-backlog sub add 0 "Implement endpoints" ME-124
+kb-backlog sub add 0 "Implement endpoints" PROJ-124
 kb-backlog sub add 0 "Write tests"
 kb-backlog sub add 0 "Update documentation"
 ```
@@ -294,8 +294,8 @@ Use `sub insert` to splice a new subitem into an existing list without appending
 
 ```bash
 # Current list: 001 "Design API schema", 002 "Write tests", 003 "Update docs"
-kb-backlog sub insert 0 1 "Implement endpoints" ME-124
-# Result: 001 "Design API schema", 004 "Implement endpoints" (ME-124), 002 "Write tests", 003 "Update docs"
+kb-backlog sub insert 0 1 "Implement endpoints" PROJ-124
+# Result: 001 "Design API schema", 004 "Implement endpoints" (PROJ-124), 002 "Write tests", 003 "Update docs"
 # Note: new ID is 004 (max was 003 + 1), inserted at array index 1
 ```
 
@@ -327,7 +327,7 @@ Output:
 ```
 Subitems for [0] "API Integration":
   [0.0] ○ Design API schema
-  [0.1] ○ Implement endpoints (ME-124)
+  [0.1] ○ Implement endpoints (PROJ-124)
   [0.2] ○ Write tests
   [0.3] ○ Update documentation
 ```
@@ -491,11 +491,11 @@ Location: Each team's board is in their own repository under `kanban/`:
   "backlog": [
     {
       "id": "IOS-001",
-      "title": "Fun Card Packages",
+      "title": "Subscription Packages",
       "priority": "high",
       "status": "in_progress",
-      "description": "Enable fun card purchases",
-      "jiraId": "ME-123",
+      "description": "Enable subscription purchases",
+      "jiraId": "PROJ-123",
       "addedAt": "2026-01-02T14:30:00Z",
       "collapsed": true,
       "tags": ["iOS", "feature", "payment"],
@@ -504,14 +504,14 @@ Location: Each team's board is in their own repository under `kanban/`:
           "id": "IOS-001-0",
           "title": "API Integration",
           "status": "completed",
-          "jiraKey": "ME-124",
+          "jiraKey": "PROJ-124",
           "tags": ["API", "backend"]
         },
         {
           "id": "IOS-001-1",
           "title": "UI Implementation",
           "status": "in_progress",
-          "jiraKey": "ME-125",
+          "jiraKey": "PROJ-125",
           "tags": ["UI", "SwiftUI"]
         }
       ]
@@ -760,13 +760,13 @@ Warning: Board file locked, retrying...
 
 ```bash
 # Add parent task (with estimate at creation, or set it after)
-kb-backlog add "User Authentication Refactor" high "Complete auth system overhaul" ME-200 --points 8
+kb-backlog add "User Authentication Refactor" high "Complete auth system overhaul" PROJ-200 --points 8
 
 # Add subitems
-kb-backlog sub add 0 "Extract token validation" ME-201
-kb-backlog sub add 0 "Add refresh token support" ME-202
-kb-backlog sub add 0 "Update error handling" ME-203
-kb-backlog sub add 0 "Write integration tests" ME-204
+kb-backlog sub add 0 "Extract token validation" PROJ-201
+kb-backlog sub add 0 "Add refresh token support" PROJ-202
+kb-backlog sub add 0 "Update error handling" PROJ-203
+kb-backlog sub add 0 "Write integration tests" PROJ-204
 kb-backlog sub add 0 "Update documentation"
 
 # Items must be estimated before starting — set after creation if not done above

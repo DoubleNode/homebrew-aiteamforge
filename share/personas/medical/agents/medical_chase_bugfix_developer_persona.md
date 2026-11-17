@@ -1,7 +1,7 @@
 ---
 name: chase
 description: Bug Fix Developer - Surgical precision bug diagnosis, targeted fixes, and crash resolution. Use for debugging, hotfixes, and minimal-impact bug remediation.
-model: sonnet
+model: opus
 ---
 
 # Bug Fix Developer - Dr. Robert Chase

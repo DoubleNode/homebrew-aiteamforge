@@ -19,7 +19,7 @@
 
 ### What is Git Worktree Manager?
 
-Git Worktree Manager is a Claude Code skill that automates the creation, management, and cleanup of Git worktrees across your Main Event mobile development projects (iOS, Android, and Firebase). It enables true parallel development by letting you work on features, hotfixes, refactoring, and releases simultaneously without branch switching or stashing.
+Git Worktree Manager is a Claude Code skill that automates the creation, management, and cleanup of Git worktrees across your mobile development projects (iOS, Android, and Firebase). It enables true parallel development by letting you work on features, hotfixes, refactoring, and releases simultaneously without branch switching or stashing.
 
 ### Why Use This Skill?
 
@@ -42,15 +42,15 @@ git stash pop
 **With Worktrees (via this skill):**
 ```bash
 # Working on feature in ios-bridge terminal
-cd MainEventApp-iOS/worktrees/feature/
+cd MyApp-iOS/worktrees/feature/
 
 # Critical bug reported! Switch to ios-sickbay terminal
 "Create worktree for hotfix/crash-3455"
-cd MainEventApp-iOS/worktrees/hotfix-crash-3455/
+cd MyApp-iOS/worktrees/hotfix-crash-3455/
 # Fix bug (feature work untouched)
 
 # Done! Switch back to ios-bridge
-cd MainEventApp-iOS/worktrees/feature/
+cd MyApp-iOS/worktrees/feature/
 # Continue exactly where you left off
 ```
 
@@ -72,17 +72,17 @@ cd MainEventApp-iOS/worktrees/feature/
 
 - Git 2.5+ installed
 - Claude Code configured
-- One or more Main Event projects:
-  - `/Users/Shared/development/Main Event/MainEventApp-iOS/`
-  - `/Users/Shared/development/Main Event/MainEventApp-Android/`
-  - `/Users/Shared/development/Main Event/MainEventApp-Functions/`
+- One or more projects:
+  - `/Users/Shared/development/MyProject/MyApp-iOS/`
+  - `/Users/Shared/development/MyProject/MyApp-Android/`
+  - `/Users/Shared/development/MyProject/MyApp-Functions/`
 
 ### 5-Minute Quickstart
 
 **1. Create your first worktree:**
 ```
 # In ios-bridge terminal (or any iOS terminal)
-cd /Users/Shared/development/Main Event/MainEventApp-iOS/
+cd /Users/Shared/development/MyProject/MyApp-iOS/
 
 "Create worktree for feature"
 ```
@@ -119,15 +119,15 @@ The skill automatically detects which project you're working on using these meth
    - `firebase-*` terminals → Firebase project
 
 2. **Working Directory**
-   - If `pwd` contains `MainEventApp-iOS` → iOS project
-   - If `pwd` contains `MainEventApp-Android` → Android project
-   - If `pwd` contains `MainEventApp-Functions` → Firebase project
+   - If `pwd` contains `MyApp-iOS` → iOS project
+   - If `pwd` contains `MyApp-Android` → Android project
+   - If `pwd` contains `MyApp-Functions` → Firebase project
 
 3. **Git Remote URL**
    - Checks `git remote get-url origin` for project identifier
 
 4. **Project Files**
-   - Finds `MainEventApp.xcodeproj` → iOS project
+   - Finds `MyApp.xcodeproj` → iOS project
    - Finds `build.gradle.kts` → Android project
    - Finds `firebase.json` → Firebase project
 
@@ -139,10 +139,10 @@ The skill automatically detects which project you're working on using these meth
 Each project stores its worktrees in a `worktrees/` subdirectory:
 
 ```
-MainEventApp-iOS/
+MyApp-iOS/
 ├── .git/                    # Git repository
 ├── Sources/                 # Source code (main branch)
-├── MainEventApp.xcodeproj   # Xcode project
+├── MyApp.xcodeproj   # Xcode project
 └── worktrees/               # Worktrees directory
     ├── feature/             # Feature development
     ├── hotfix/              # Bug fixes
@@ -195,16 +195,16 @@ The skill will create the `worktrees/` directory automatically, but you can pre-
 
 ```bash
 # For each project
-mkdir -p /Users/Shared/development/Main\ Event/MainEventApp-iOS/worktrees
-mkdir -p /Users/Shared/development/Main\ Event/MainEventApp-Android/worktrees
-mkdir -p /Users/Shared/development/Main\ Event/MainEventApp-Functions/worktrees
+mkdir -p /Users/Shared/development/MyProject/MyApp-iOS/worktrees
+mkdir -p /Users/Shared/development/MyProject/MyApp-Android/worktrees
+mkdir -p /Users/Shared/development/MyProject/MyApp-Functions/worktrees
 ```
 
 ### Step 4: Test Installation
 
 ```bash
 # Navigate to a project
-cd /Users/Shared/development/Main\ Event/MainEventApp-iOS/
+cd /Users/Shared/development/MyProject/MyApp-iOS/
 
 # In Claude Code, test the skill
 "List all worktrees"
@@ -242,15 +242,15 @@ cd /Users/Shared/development/Main\ Event/MainEventApp-iOS/
 
 **Examples:**
 ```
-"Create worktree for feature/funcard-reload"
+"Create worktree for feature/login-reload"
 "Create worktree for hotfix/crash-3455"
 "Create worktree for refactor/force-unwraps"
 "Create worktree for release/2.9.0"
 ```
 
 **Result:**
-- Creates `worktrees/feature-funcard-reload/` (descriptive name)
-- Creates new branch `feature/funcard-reload`
+- Creates `worktrees/feature-login-reload/` (descriptive name)
+- Creates new branch `feature/login-reload`
 - Based on the base branch (`kb-pr-base <ITEM-ID>`: release branch if recorded, else `develop`)
 - Ready to start work immediately
 
@@ -260,12 +260,12 @@ cd /Users/Shared/development/Main\ Event/MainEventApp-iOS/
 
 **Example:**
 ```
-"Create worktree from existing branch feature/MEM-445"
+"Create worktree from existing branch feature/PROJ-445"
 ```
 
 **Result:**
-- Creates `worktrees/feature-MEM-445/`
-- Checks out existing `feature/MEM-445` branch (doesn't create new branch)
+- Creates `worktrees/feature-PROJ-445/`
+- Checks out existing `feature/PROJ-445` branch (doesn't create new branch)
 - Useful for reviewing someone else's work or resuming old work
 
 #### Post-Creation: Deploy Personas
@@ -298,20 +298,20 @@ This is a safe no-op for git-tracked-persona teams (Academy, Command, Finance, L
 
 **Output:**
 ```
-📁 Git Worktrees for MainEventApp-iOS
+📁 Git Worktrees for MyApp-iOS
 
 Feature Development:
   🟢 feature
-     Branch: feature/funcard-reload
+     Branch: feature/login-reload
      Status: Clean
-     Path: .../MainEventApp-iOS/worktrees/feature/
+     Path: .../MyApp-iOS/worktrees/feature/
      Ahead of main: 3 commits
 
 Bug Fixes:
   🔴 hotfix-crash-3455
      Branch: hotfix/crash-3455
      Status: DIRTY (2 uncommitted files)
-     Path: .../MainEventApp-iOS/worktrees/hotfix-crash-3455/
+     Path: .../MyApp-iOS/worktrees/hotfix-crash-3455/
      Ahead of main: 1 commit
      ⚠️  Uncommitted changes - commit before cleanup!
 ```
@@ -406,14 +406,14 @@ git worktree prune
 
 **Example:**
 ```
-"Create coordinated worktrees for Fun Card widget feature"
+"Create coordinated worktrees for profile widget feature"
 ```
 
 **Result:**
 Creates matching worktrees across all three projects:
-- `MainEventApp-iOS/worktrees/feature-funcard-widget/`
-- `MainEventApp-Android/worktrees/feature-funcard-widget/`
-- `MainEventApp-Functions/worktrees/feature-funcard-sync/`
+- `MyApp-iOS/worktrees/feature-profile-widget/`
+- `MyApp-Android/worktrees/feature-profile-widget/`
+- `MyApp-Functions/worktrees/feature-data-sync/`
 
 All with appropriate branch names (same feature ID).
 
@@ -423,12 +423,12 @@ All with appropriate branch names (same feature ID).
 
 **Example:**
 ```
-"Status of Fun Card widget feature across all projects"
+"Status of profile widget feature across all projects"
 ```
 
 **Output:**
 ```
-📊 Cross-Project Feature Status: Fun Card Widget
+📊 Cross-Project Feature Status: Profile Widget
 
 iOS: Clean, 8 commits ahead
 Android: DIRTY (1 uncommitted file), 6 commits ahead
@@ -443,7 +443,7 @@ Overall: 🟡 iOS & Firebase ready, Android needs commit
 
 **Example:**
 ```
-"Clean up Fun Card widget worktrees across all projects"
+"Clean up profile widget worktrees across all projects"
 ```
 
 **Result:**
@@ -458,9 +458,9 @@ Safely removes worktrees from all three projects after checking each one.
 You: "Suggest worktree setup"
 
 Skill: "You're in ios-sickbay (Beverly - Bug Diagnosis)"
-       "Detected project: iOS (MainEventApp-iOS)"
-       "I recommend creating: .../MainEventApp-iOS/worktrees/hotfix"
-       "Branch pattern: hotfix/crash-[ID] or bugfix/MEM-[ID]"
+       "Detected project: iOS (MyApp-iOS)"
+       "I recommend creating: .../MyApp-iOS/worktrees/hotfix"
+       "Branch pattern: hotfix/crash-[ID] or bugfix/PROJ-[ID]"
        "Would you like me to create it?"
 ```
 
@@ -477,7 +477,7 @@ Skill: "You're in ios-sickbay (Beverly - Bug Diagnosis)"
 Provides the `cd` command to navigate there:
 ```
 To switch to feature worktree:
-  cd /Users/Shared/development/Main Event/MainEventApp-iOS/worktrees/feature/
+  cd /Users/Shared/development/MyProject/MyApp-iOS/worktrees/feature/
 ```
 
 ---
@@ -544,7 +544,7 @@ PS1='$(git_worktree_info) \w $ '
 
 **Result:**
 ```
-[feature](feature/funcard-reload) ~/MainEventApp-iOS/worktrees/feature $
+[feature](feature/login-reload) ~/MyApp-iOS/worktrees/feature $
 ```
 
 ---
@@ -580,7 +580,7 @@ Error: Worktree 'feature' already exists at .../worktrees/feature/
 
 **Error:**
 ```
-Error: Branch 'feature/funcard-reload' is already checked out in another worktree
+Error: Branch 'feature/login-reload' is already checked out in another worktree
 ```
 
 **Cause:** Git doesn't allow the same branch in multiple worktrees (safety feature).
@@ -588,13 +588,13 @@ Error: Branch 'feature/funcard-reload' is already checked out in another worktre
 **Solutions:**
 1. **Switch to that worktree:**
    ```
-   "Which worktree has branch feature/funcard-reload?"
+   "Which worktree has branch feature/login-reload?"
    cd [shown path]
    ```
 
 2. **Create new branch with different name:**
    ```
-   "Create worktree for feature/funcard-reload-v2"
+   "Create worktree for feature/login-reload-v2"
    ```
 
 #### Issue: "Cannot remove worktree - uncommitted changes"
@@ -672,7 +672,7 @@ This runs `git worktree prune` to clean up orphaned references.
 **Solution:**
 1. **Navigate to project first:**
    ```bash
-   cd /Users/Shared/development/Main\ Event/MainEventApp-iOS/
+   cd /Users/Shared/development/MyProject/MyApp-iOS/
    "Create worktree for feature"
    ```
 
@@ -708,12 +708,12 @@ This runs `git worktree prune` to clean up orphaned references.
 
 #### For Feature Development
 ```
-1. Create worktree: "Create worktree for feature/MEM-445-widget"
-2. Work in worktree: cd worktrees/feature-MEM-445-widget/
+1. Create worktree: "Create worktree for feature/PROJ-445-widget"
+2. Work in worktree: cd worktrees/feature-PROJ-445-widget/
 3. Commit regularly: git commit -m "Progress on widget"
-4. Push to remote: git push origin feature/MEM-445-widget
+4. Push to remote: git push origin feature/PROJ-445-widget
 5. Create PR when ready
-6. After merge: "Remove worktree feature-MEM-445-widget"
+6. After merge: "Remove worktree feature-PROJ-445-widget"
 ```
 
 #### For Hotfixes
@@ -742,17 +742,17 @@ This runs `git worktree prune` to clean up orphaned references.
 
 ```
 Terminal 1 (ios-bridge):
-  Working directory: ~/MainEventApp-iOS/worktrees/feature/
-  Branch: feature/funcard-reload
-  Task: Implementing Fun Card reload feature
+  Working directory: ~/MyApp-iOS/worktrees/feature/
+  Branch: feature/login-reload
+  Task: Implementing login reload feature
 
 Terminal 2 (ios-sickbay):
-  Working directory: ~/MainEventApp-iOS/worktrees/hotfix/
+  Working directory: ~/MyApp-iOS/worktrees/hotfix/
   Branch: hotfix/crash-3455
   Task: Fixing booking flow crash
 
 Terminal 3 (ios-stellar):
-  Working directory: ~/MainEventApp-iOS/worktrees/refactor/
+  Working directory: ~/MyApp-iOS/worktrees/refactor/
   Branch: refactor/force-unwraps
   Task: Systematic force unwrap elimination
 
@@ -813,7 +813,7 @@ No branch switching, no stashing, no conflicts.
 ### Q: Can I use worktrees with Xcode/Android Studio?
 
 **A:** Yes! Each worktree is a complete working directory. Just open the project from the worktree directory:
-- **Xcode:** Open `worktrees/feature/MainEventApp.xcodeproj`
+- **Xcode:** Open `worktrees/feature/MyApp.xcodeproj`
 - **Android Studio:** Open `worktrees/feature/` directory
 
 The IDE will index the worktree separately.
@@ -918,7 +918,7 @@ git worktree prune
 ### Additional Resources
 
 - **Git Worktree Docs:** https://git-scm.com/docs/git-worktree
-- **Skill Author:** Darren Ehlers (Dave & Buster's Entertainment)
+- **Skill Author:** Darren Ehlers
 - **Last Updated:** November 2025
 
 ---
@@ -928,11 +928,11 @@ git worktree prune
 ### Complete Example Structure
 
 ```
-/Users/Shared/development/Main Event/
+/Users/Shared/development/MyProject/
 │
-├── MainEventApp-iOS/                    # iOS Git repository
+├── MyApp-iOS/                    # iOS Git repository
 │   ├── .git/                            # Shared Git metadata
-│   ├── MainEventApp.xcodeproj
+│   ├── MyApp.xcodeproj
 │   ├── Sources/                         # Main branch source
 │   ├── Tests/
 │   ├── README_DEV.md
@@ -941,14 +941,14 @@ git worktree prune
 │       │   ├── Sources/                 # Separate working copy
 │       │   ├── Tests/
 │       │   └── [... full project ...]
-│       ├── feature-funcard-reload/
+│       ├── feature-login-reload/
 │       ├── hotfix/
 │       ├── hotfix-crash-3455/
 │       ├── refactor/
 │       ├── release/
 │       └── test/
 │
-├── MainEventApp-Android/                # Android Git repository
+├── MyApp-Android/                # Android Git repository
 │   ├── .git/
 │   ├── app/
 │   ├── build.gradle.kts
@@ -957,7 +957,7 @@ git worktree prune
 │       ├── hotfix/
 │       └── refactor/
 │
-└── MainEventApp-Functions/              # Firebase Git repository
+└── MyApp-Functions/              # Firebase Git repository
     ├── .git/
     ├── functions/
     ├── firebase.json

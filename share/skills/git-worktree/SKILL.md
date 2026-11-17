@@ -147,8 +147,8 @@ Since worktrees are stored within each project's `worktrees/` subdirectory, the 
 - `review` - Code review
 
 **With Descriptors (for multiple worktrees of same type):**
-- `feature-funcard-reload` - Specific feature
-- `feature-MEM-445-widget` - Feature with Jira ID
+- `feature-login-reload` - Specific feature
+- `feature-PROJ-445-widget` - Feature with Jira ID
 - `hotfix-crash-3455` - Specific hotfix
 - `refactor-force-unwraps` - Specific refactoring task
 
@@ -181,17 +181,17 @@ Since worktrees are stored within each project's `worktrees/` subdirectory, the 
 
 ### Branch Naming Patterns
 
-**Feature branches:** `feature/[description]` or `feature/MEM-[ID]-[description]`
-- `feature/funcard-reload`
-- `feature/MEM-445-home-screen-widget`
+**Feature branches:** `feature/[description]` or `feature/PROJ-[ID]-[description]`
+- `feature/login-reload`
+- `feature/PROJ-445-home-screen-widget`
 
 **Hotfix branches:** `hotfix/[description]` or `hotfix/crash-[ID]`
 - `hotfix/booking-crash`
 - `hotfix/crash-3455`
 
-**Bugfix branches:** `bugfix/[description]` or `bugfix/MEM-[ID]`
+**Bugfix branches:** `bugfix/[description]` or `bugfix/PROJ-[ID]`
 - `bugfix/leaderboard-sort`
-- `bugfix/MEM-450-reward-display`
+- `bugfix/PROJ-450-reward-display`
 
 **Refactor branches:** `refactor/[description]`
 - `refactor/force-unwraps`
@@ -579,7 +579,7 @@ To print the base an item resolves to: `kb-pr-base <ITEM-ID>` (non-zero exit = s
 
 **Find worktree by branch:**
 ```
-"Which worktree has branch feature/funcard-reload?"
+"Which worktree has branch feature/login-reload?"
 → Returns path to worktree with that branch
 ```
 
@@ -591,7 +591,7 @@ To print the base an item resolves to: `kb-pr-base <ITEM-ID>` (non-zero exit = s
 
 **Remove by directory name:**
 ```
-"Remove worktree main-event-hotfix-crash-3455"
+"Remove worktree myapp-hotfix-crash-3455"
 → Checks for uncommitted changes
 → Prompts for confirmation
 → Removes worktree
@@ -608,7 +608,7 @@ To print the base an item resolves to: `kb-pr-base <ITEM-ID>` (non-zero exit = s
 
 **Safe removal (checks for uncommitted work):**
 ```
-"Safely remove worktree main-event-feature"
+"Safely remove worktree myapp-feature"
 → Checks git status
 → If clean: removes immediately
 → If dirty: shows uncommitted changes and asks for confirmation
@@ -639,7 +639,7 @@ To print the base an item resolves to: `kb-pr-base <ITEM-ID>` (non-zero exit = s
 **Switch by context:**
 ```
 "Switch to feature worktree"
-→ Provides cd command: cd ~/dev-team/main-event-feature
+→ Provides cd command: cd ~/dev-team/myapp-feature
 → Or: directly changes directory if in tmux session
 ```
 
@@ -740,7 +740,7 @@ Overall: 🟡 iOS & Firebase ready, Android needs commit
 
 **Cleanup coordinated worktrees:**
 ```
-"Clean up Fun Card widget worktrees across all projects"
+"Clean up profile widget worktrees across all projects"
 
 Skill checks each project:
 ✅ iOS feature merged and pushed
@@ -755,7 +755,7 @@ Proceed with cleanup? (yes/no)
 ✅ Removed Android worktree
 ✅ Removed Firebase worktree
 
-All Fun Card widget worktrees cleaned up!
+All profile widget worktrees cleaned up!
 ```
 
 ---
@@ -789,7 +789,7 @@ All Fun Card widget worktrees cleaned up!
 1. **Determine worktree directory**
    ```bash
    # Pattern: ~/dev-team/[project]-[context]-[optional-descriptor]
-   WORKTREE_DIR=~/dev-team/main-event-feature
+   WORKTREE_DIR=~/dev-team/myapp-feature
    ```
 
 2. **Create worktree with Git command**
@@ -953,7 +953,7 @@ Main Repository:
 
 1. **Confirmation prompt**
    ```
-   About to remove worktree: ~/dev-team/main-event-hotfix-crash-3455
+   About to remove worktree: ~/dev-team/myapp-hotfix-crash-3455
    Branch: hotfix/crash-3455
    Status: Clean, 0 uncommitted changes
    
@@ -993,7 +993,7 @@ Main Repository:
 
 2. **Provide feedback**
    ```
-   ✅ Successfully removed worktree: main-event-hotfix-crash-3455
+   ✅ Successfully removed worktree: myapp-hotfix-crash-3455
    ✅ Deleted branch: hotfix/crash-3455
    ✅ Pruned administrative files
    
@@ -1025,7 +1025,7 @@ The skill detects the current terminal context to provide intelligent suggestion
 3. **Check working directory**
    ```bash
    pwd
-   # If in ~/dev-team/main-event-feature → feature context
+   # If in ~/dev-team/myapp-feature → feature context
    ```
 
 4. **Check current branch**
@@ -1039,7 +1039,7 @@ The skill detects the current terminal context to provide intelligent suggestion
 
 **Bridge/Command Center (Picard, Kirk, Sisko):**
 - Default: Feature development worktree
-- Suggested branches: `feature/MEM-[ID]-[description]`
+- Suggested branches: `feature/PROJ-[ID]-[description]`
 - Typical workflow: Strategic feature implementation
 
 **Sickbay (Beverly, Bones, Bashir):**
@@ -1128,11 +1128,11 @@ kb-unlink-worktree XFRE-0001
 **Benefits:**
 - See which worktree/branch each item is being worked on in the LCARS UI
 - Get warnings if trying to start work in a worktree already assigned to another item
-- Filter the mission queue by worktree or branch: `worktree:feature` or `branch:MEM-445`
+- Filter the mission queue by worktree or branch: `worktree:feature` or `branch:PROJ-445`
 
 **Example Workflow:**
 ```
-1. Create worktree: "Create worktree for feature/MEM-445-funcard"
+1. Create worktree: "Create worktree for feature/PROJ-445-login"
 2. Link to backlog: kb-link-worktree XFRE-0001
 3. Later, start work: kb-pick XFRE-0001
 4. The item now shows the worktree badge in LCARS
@@ -1223,9 +1223,9 @@ Keep worktrees in sync with their base branch (release or integration):
 Create safety backups before risky operations:
 
 ```
-"Backup worktree main-event-feature before major refactor"
+"Backup worktree myapp-feature before major refactor"
 → Creates:
-  - Git branch backup: feature/funcard-reload-backup-[timestamp]
+  - Git branch backup: feature/login-reload-backup-[timestamp]
   - Stashes any uncommitted work
   - Tags current commit
   - Provides rollback instructions
@@ -1236,7 +1236,7 @@ Create safety backups before risky operations:
 Move worktrees to different locations:
 
 ```
-"Move worktree main-event-feature to ~/dev-team/archives/"
+"Move worktree myapp-feature to ~/dev-team/archives/"
 → Uses git worktree move command
 → Updates any configuration references
 → Verifies integrity after move
@@ -1264,11 +1264,11 @@ Regular maintenance and diagnostics:
 
 **Error: Worktree already exists**
 ```
-Error: Worktree 'main-event-feature' already exists at ~/dev-team/main-event-feature
+Error: Worktree 'myapp-feature' already exists at ~/dev-team/myapp-feature
 
 Options:
-1. Switch to existing worktree: cd ~/dev-team/main-event-feature
-2. Create with different name: main-event-feature-funcard-reload
+1. Switch to existing worktree: cd ~/dev-team/myapp-feature
+2. Create with different name: myapp-feature-login-reload
 3. Remove existing and recreate (requires confirmation)
 
 What would you like to do?
@@ -1276,9 +1276,9 @@ What would you like to do?
 
 **Error: Branch already checked out**
 ```
-Error: Branch 'feature/funcard-reload' is already checked out in another worktree
+Error: Branch 'feature/login-reload' is already checked out in another worktree
 
-Currently checked out at: ~/dev-team/main-event-feature
+Currently checked out at: ~/dev-team/myapp-feature
 
 Options:
 1. Switch to that worktree instead
@@ -1292,7 +1292,7 @@ What would you like to do?
 ```
 Error: Cannot remove worktree - uncommitted changes detected
 
-Uncommitted files in ~/dev-team/main-event-hotfix:
+Uncommitted files in ~/dev-team/myapp-hotfix:
   M  Sources/Booking/BookingViewController.swift
   A  Sources/Booking/BookingViewModelTests.swift
   ?? Sources/Booking/BookingError.swift
@@ -1312,7 +1312,7 @@ Warning: Worktree has unpushed commits
 
 Commits not pushed to origin:
   abc1234 - Fix force unwrap in booking flow
-  def5678 - Add error handling to Fun Card reload
+  def5678 - Add error handling to login reload
 
 Options:
 1. Push commits first: git push origin hotfix/crash-3455
@@ -1515,7 +1515,7 @@ No branch switching, no stashing, no conflicts.
 
 ### Example 1: Feature Development in Parallel with Bug Fixes
 
-**Scenario:** You're building a new Fun Card feature when a critical crash is reported.
+**Scenario:** You're building a new profile feature when a critical crash is reported.
 
 **Initial State:**
 ```
@@ -1759,7 +1759,7 @@ Skill: [Pushes]
 You: yes
 
 Skill:
-✅ Removed worktree: ~/dev-team/main-event-release
+✅ Removed worktree: ~/dev-team/myapp-release
 ✅ Deleted local branch: release/2.9.0 (merged)
 
 🎉 Release v2.9.0 complete!
@@ -1833,10 +1833,10 @@ set -g status-right '#(cd #{pane_current_path}; git rev-parse --show-toplevel 2>
 **Solution:**
 ```bash
 # Check if directory exists
-ls -la ~/dev-team/main-event-feature
+ls -la ~/dev-team/myapp-feature
 
 # If exists and empty, remove it
-rm -rf ~/dev-team/main-event-feature
+rm -rf ~/dev-team/myapp-feature
 
 # If permission issue
 sudo chown -R $USER ~/dev-team
@@ -1866,7 +1866,7 @@ sudo chown -R $USER ~/dev-team
 **Solution:**
 ```bash
 # Check actual status
-cd ~/dev-team/main-event-feature
+cd ~/dev-team/myapp-feature
 git status
 
 # Often it's just .DS_Store on macOS

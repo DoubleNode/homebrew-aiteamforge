@@ -562,7 +562,6 @@ Any project that modifies a user-facing interface MUST include a dedicated **"[U
 │  • iOS: wesley (substitute: deanna)                                        │
 │  • Android: uhura (substitute: sulu)                                       │
 │  • Firebase: quark (API/DX focus, not UI graphics)                         │
-│  • MainEvent: paris-me                                                     │
 │  • Freelance: mayweather                                                   │
 │  • Academy: lal (substitute: emh)                                          │
 │  • Command: n/a (non-UI team — auto-cancel without user approval)         │
@@ -1439,7 +1438,7 @@ The skill auto-detects the target team from:
 3. Terminal name mapping
 4. Working directory context
 
-**Valid teams:** `ios`, `android`, `firebase`, `academy`, `command`, `dns`, `freelance`, `mainevent`
+**Valid teams:** `ios`, `android`, `firebase`, `academy`, `command`, `dns`, `freelance`
 
 ---
 
