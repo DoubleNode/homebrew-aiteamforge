@@ -9191,6 +9191,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             # this request (active/archived/all all flow through this loop).
             board_status_by_team = {}
             for release in releases_to_process:
+                # XACA-1834-011: an ad-hoc batch (kb-run A,B: kind "batch", REL-BATCH-*) is a coordinator's
+                # bookkeeping record, not a release anyone stages or promotes: never rendered as a release card.
+                if isinstance(release, dict) and release.get('kind') == 'batch':
+                    continue
                 release['progress'] = self._calculate_release_progress(
                     release['id'], board_status_by_team=board_status_by_team)
                 # XACA-1375: derived (never persisted): CR support is off but the release sits at CR.
@@ -10916,6 +10920,11 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 release = self._find_release_by_id(data, release_id)
                 if not release:
                     raise _DeferredResponse.json({"error": "Release not found: %s" % release_id}, 404)
+                if release.get('kind') == 'batch':
+                    # XACA-1834: a batch release (`kb-run A,B,...`) is coordinator bookkeeping, never a deployable release.
+                    raise _DeferredResponse.json({"error": "%s is a batch release; a batch is never promoted "
+                                                  "and is not shown in the release list. Close it from a terminal: "
+                                                  "kb-release handoff %s" % (release_id, release_id)}, 400)
                 board_raw = self._read_board_raw_locked()
                 rcfg = self._release_cfg(board_raw)
                 mode, gate_warning = self._gate_mode(rcfg)

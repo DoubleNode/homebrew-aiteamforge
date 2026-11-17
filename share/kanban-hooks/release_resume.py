@@ -335,6 +335,17 @@ def format_plan(plan):
 
 
 # ------------------------------------------------------------------ loading (the only I/O)
+def _is_member(item, rel, release_id):
+    """XACA-1834: a batch release (kind "batch") owns its batchItems; any other release owns its releaseAssignment items.
+    Same rule as release_orchestrator.is_member (kept local: this module does not import the orchestrator)."""
+    if not isinstance(item, dict):
+        return False
+    if isinstance(rel, dict) and rel.get("kind") == "batch":
+        return item.get("id") in [b for b in rel.get("batchItems") or [] if isinstance(b, str)]
+    ra = item.get("releaseAssignment")
+    return isinstance(ra, dict) and ra.get("releaseId") == release_id
+
+
 def find_release(kanban_dir, release_id):
     """-> (board_path, board, release). RunnerError when absent."""
     for path in sorted(glob.glob(os.path.join(kanban_dir, "*-board.json"))):
@@ -390,8 +401,7 @@ def load_plan(kanban_dir, release_id, repo_dir=None, now=None):
     cur = G.current_stage(rel)
     items = [{"id": it.get("id"), "title": it.get("title"), "status": it.get("status"), "prMerged": it.get("prMerged"),
               "prExempt": it.get("prExempt")}
-             for it in board.get("backlog") or []
-             if isinstance(it.get("releaseAssignment"), dict) and it["releaseAssignment"].get("releaseId") == release_id]
+             for it in board.get("backlog") or [] if _is_member(it, rel, release_id)]
     head = None
     if repo_dir and rel.get("branch"):
         head = release_branches.branch_tip(repo_dir, rel["branch"])   # remote tip; local refs lag/absent (XACA-1352-018)

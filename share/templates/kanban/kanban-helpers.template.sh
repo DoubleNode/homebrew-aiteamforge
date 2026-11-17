@@ -15231,9 +15231,236 @@ _kb_build_prior_knowledge_section() {
     _KB_PRIOR_KNOWLEDGE_SECTION="## Prior Knowledge\n_Auto-surfaced from the knowledge base for this task. Informational — verify before relying on any entry; it reflects what was true when written._\n\n${_entries_text}"
 }
 
+# ── XACA-1834: item lists for every kb-run* / kb-work* launcher ──────────────────────────────────────────────────────
+# `kb-run XACA-0001,XACA-0002`, `kb-run XACA-0001 XACA-0002`, or both spellings mixed. A single selector never reaches
+# any of this: _kb_item_list_args returns 1 and the launcher's own parser runs exactly as before.
+#   kb-run <list>                         -> _kb_batch_run: an ephemeral REL-BATCH-* release, orchestrated through kb-dispatch
+#   kb-run-test|-review|-ux|-debug <list> -> _kb_gate_fanout: one unattended session per item, in parallel, never in this one
+#   kb-work* <list>                       -> refused: kb-work* runs in the CURRENT session, so a list would put every ticket
+#                                            into one context, which is the accumulation this ticket removes
+
+# Batch membership (same rule as release_orchestrator.is_member): a kind:"batch" release owns exactly its batchItems; its
+# items keep their real releaseAssignment, so a worker still branches from its own release.
+_KB_BATCH_MEMBER_JQ_DEFS='
+def kb_batch_member($rel; $id):
+  [.releases[]? | select(.id == $rel and .kind == "batch") | ((.batchItems // []) | any(.[]?; . == $id))] | any;
+'
+
+# _kb_item_list_args <args...>
+# Splits a launcher's argv into _KB_LIST_SELECTORS (positional tokens) and _KB_LIST_FLAGS (everything else in order; a
+# value flag keeps its value). rc 0 = list form (2+ positional tokens, or one holding a comma or whitespace); rc 1 = not
+# a list. The value flags are the union of every launcher's (kb-run's and the gates'), so a flag VALUE is never read as
+# a selector.
+_kb_item_list_args() {
+    _KB_LIST_SELECTORS=()
+    _KB_LIST_FLAGS=()
+    local _a _n=0
+    while (( $# > 0 )); do
+        _a="$1"; shift
+        case "$_a" in
+            --delta|--round|--max-parallel|--exclude|--model|--worker-model|--effort|--orchestrated|--coordinator)
+                _KB_LIST_FLAGS+=("$_a")
+                if (( $# > 0 )); then _KB_LIST_FLAGS+=("$1"); shift; fi ;;
+            -*) _KB_LIST_FLAGS+=("$_a") ;;
+            *) _KB_LIST_SELECTORS+=("$_a"); _n=$((_n + 1)) ;;
+        esac
+    done
+    (( _n >= 2 )) && return 0
+    for _a in ${_KB_LIST_SELECTORS[@]+"${_KB_LIST_SELECTORS[@]}"}; do
+        case "$_a" in *,*|*" "*|*$'\t'*) return 0 ;; esac
+    done
+    return 1
+}
+
+# _kb_parse_item_list <token>...
+# The ONE item-list parser. Joins its tokens with spaces (so `A, B` typed as two words is `A,B`), splits on commas and
+# whitespace, trims, upper-cases, de-duplicates in order and publishes _KB_ITEMS. Each id must match ^[A-Z][A-Z0-9]*-[0-9]+$. rc 2 (message on stderr) for an empty element (`A,,B`, a
+# leading or trailing comma: never silently dropped), a malformed id, or a release id mixed with anything else.
+_kb_parse_item_list() {
+    _KB_ITEMS=()
+    local _tok="" _a _rest _part _w _seen=" " _rel="" _n=0
+    for _a in "$@"; do _tok+="${_tok:+ }${_a}"; done
+    if [[ -n "$_tok" ]]; then
+        _rest="${_tok},"
+        while [[ -n "$_rest" ]]; do
+            _part="${_rest%%,*}"; _rest="${_rest#*,}"
+            _part="${_part//$'\t'/ }"; _part="${_part//$'\n'/ }"
+            while [[ "$_part" == " "* ]]; do _part="${_part# }"; done
+            while [[ "$_part" == *" " ]]; do _part="${_part% }"; done
+            if [[ -z "$_part" ]]; then
+                echo "Error: empty element in the item list '${_tok}' (e.g. A,,B or a leading/trailing comma)" >&2
+                return 2
+            fi
+            _part="${_part} "
+            while [[ -n "$_part" ]]; do
+                _w="${_part%% *}"; _part="${_part#* }"
+                [[ -n "$_w" ]] || continue
+                _w=$(printf '%s' "$_w" | tr '[:lower:]' '[:upper:]')
+                if [[ "$_w" == REL-* ]]; then
+                    _rel="$_w"
+                elif [[ ! "$_w" =~ ^[A-Z][A-Z0-9]*-[0-9]+$ ]]; then
+                    echo "Error: '${_w}' is not an item id (expected e.g. XACA-0001)" >&2
+                    return 2
+                fi
+                [[ "$_seen" == *" ${_w} "* ]] && continue
+                _seen+="${_w} "
+                _KB_ITEMS+=("$_w")
+                _n=$((_n + 1))
+            done
+        done
+    fi
+    if [[ -n "$_rel" ]] && (( _n > 1 )); then
+        echo "Error: a release id (${_rel}) cannot be listed with other ids; run kb-run ${_rel} on its own" >&2
+        return 2
+    fi
+    if (( _n == 0 )); then
+        echo "Error: the item list is empty" >&2
+        return 2
+    fi
+    return 0
+}
+
+# _kb_work_list_refuse <kb-work-cmd>: a list for an in-session launcher is refused, with the kb-run* to use instead.
+_kb_work_list_refuse() {
+    local cmd="${1-kb-work}"
+    echo "✗ ${cmd}: refusing a list of items. ${cmd} works in THIS session, so a list would pile every ticket into one context." >&2
+    echo "  Use ${cmd/kb-work/kb-run} <ID>,<ID>,... instead: each ticket gets its own fresh session." >&2
+    return 2
+}
+
+# _kb_list_fanout_exec <cmd> <id> --yes: one fan-out member. A separate function so a test can stub the launch.
+_kb_list_fanout_exec() { "$@"; }
+
+# _kb_gate_fanout <cmd> <args...>   (kb-run-test / kb-run-review / kb-run-ux / kb-run-debug with a list)
+# One gate session per item, launched in parallel as separate background processes (never in the caller's context),
+# each `<cmd> <ID> --yes` with its own log. Waits for all of them and prints one line per item. --delta / --round are
+# per-item, so they are refused with a list. Unattended launches need --yes (or KB_ASSUME_YES=1), checked up front.
+# rc 0 every member exited 0 | 1 any member failed | 2 usage.
+_kb_gate_fanout() {
+    local cmd="${1-}" f yes=0 bad="" logdir id pid rc any=0 pairs=""
+    shift
+    _kb_item_list_args "$@"
+    _kb_parse_item_list ${_KB_LIST_SELECTORS[@]+"${_KB_LIST_SELECTORS[@]}"} || return 2
+    [[ "${KB_ASSUME_YES:-}" == "1" ]] && yes=1
+    set -- ${_KB_LIST_FLAGS[@]+"${_KB_LIST_FLAGS[@]}"}
+    while (( $# > 0 )); do
+        case "$1" in
+            --yes|-y) yes=1; shift ;;
+            --delta|--round) bad+=" $1"; shift; (( $# > 0 )) && shift ;;
+            *) echo "Error: ${cmd}: unknown flag '$1' with an item list" >&2; return 2 ;;
+        esac
+    done
+    if [[ -n "$bad" ]]; then
+        echo "Error: ${cmd}:${bad} applies to ONE item; run ${cmd} <ID>${bad} per item instead of a list" >&2
+        return 2
+    fi
+    local -a items=("${_KB_ITEMS[@]}")
+    if (( ${#items[@]} == 1 )); then
+        "$cmd" "${items[@]}" ${_KB_LIST_FLAGS[@]+"${_KB_LIST_FLAGS[@]}"}
+        return $?
+    fi
+    if (( ! yes )); then
+        echo "Error: ${cmd}: a list launches ${#items[@]} unattended sessions; pass --yes (or set KB_ASSUME_YES=1)" >&2
+        return 2
+    fi
+    logdir=$(mktemp -d "${TMPDIR:-/tmp}/kb-fanout.XXXXXX") || { echo "Error: ${cmd}: cannot create a log dir" >&2; return 1; }
+    [[ -n "${ZSH_VERSION-}" ]] && setopt localoptions nomonitor nonotify
+    for id in "${items[@]}"; do
+        ( _kb_list_fanout_exec "$cmd" "$id" --yes ) </dev/null >"$logdir/$id.log" 2>&1 &
+        pairs+="${id}:$!"$'\n'
+        echo "▶ ${cmd} ${id} --yes   (log: $logdir/$id.log)"
+    done
+    echo "Waiting for ${#items[@]} ${cmd} sessions..."
+    while IFS=: read -r id pid; do
+        [[ -n "$id" ]] || continue
+        wait "$pid"; rc=$?
+        if (( rc == 0 )); then echo "  ✓ ${id}: ${cmd} exited 0"
+        else echo "  ✗ ${id}: ${cmd} exited ${rc} (see $logdir/$id.log)"; any=1; fi
+    done <<<"$pairs"
+    return $any
+}
+
+# _kb_batch_run <kb-run args...>   (kb-run with 2+ items, XACA-1834)
+# A COORDINATOR for an ad-hoc batch: mint an ephemeral batch release (REL-BATCH-<UTC>, kind batch, stage DEV, no branch)
+# and hand it to the release coordinator (_kb_release_run --orchestrate), so the planner, contention, ledger, monitor,
+# resume and kb-dispatch are reused unchanged. Every refusal happens BEFORE the mint: coordinator mode available, a
+# terminal (the plan approval is a hard stop, XACA-1548), the coordinator pane, and readiness
+# (decision Q2: an unplanned ticket is never started; there is no --allow-unplanned). A batch whose run never started
+# (declined, refused) is closed as cancelled, so nothing is left open.
+_kb_batch_run() {
+    local yes=0 id team context bf csv="" rel rc refused hooks cli
+    local -a pass=()
+    _kb_item_list_args "$@"
+    _kb_parse_item_list ${_KB_LIST_SELECTORS[@]+"${_KB_LIST_SELECTORS[@]}"} || return 2
+    local -a items=("${_KB_ITEMS[@]}")
+    if (( ${#items[@]} == 1 )); then
+        kb-run "${items[@]}" ${_KB_LIST_FLAGS[@]+"${_KB_LIST_FLAGS[@]}"}
+        return $?
+    fi
+    set -- ${_KB_LIST_FLAGS[@]+"${_KB_LIST_FLAGS[@]}"}
+    while (( $# > 0 )); do
+        case "$1" in
+            --yes|-y) yes=1; shift ;;
+            --orchestrate|--force-coordinator-pane) pass+=("$1"); shift ;;
+            --max-parallel|--model|--worker-model|--effort)
+                if (( $# < 2 )) || [[ -z "${2-}" || "${2-}" == -* ]]; then echo "Error: kb-run $1 needs a value" >&2; return 2; fi
+                pass+=("$1" "$2"); shift 2 ;;
+            --max-parallel=*|--model=*|--worker-model=*|--effort=*)
+                if [[ -z "${1#*=}" ]]; then echo "Error: kb-run ${1%%=*} needs a value" >&2; return 2; fi
+                pass+=("${1%%=*}" "${1#*=}"); shift ;;
+            --no-orchestrate)
+                echo "Error: kb-run: a list always orchestrates; to work one ticket in this session use kb-run <ID>" >&2; return 2 ;;
+            --exclude|--exclude=*)
+                echo "Error: kb-run: --exclude does not apply to a list; leave the item out of the list" >&2; return 2 ;;
+            *) echo "Error: kb-run: $1 does not apply to a list of items" >&2; return 2 ;;
+        esac
+    done
+    if ! _kb_release_orch_available; then
+        echo "✗ kb-run: a list needs coordinator mode, which this install does not have (kanban-hooks/orchestrator_run_cli.py is dev-team only). Run kb-run <ID> per ticket." >&2
+        return 2
+    fi
+    # One board: the caller's. An id that is not on it is refused by the readiness check (NOT_FOUND) below.
+    context=$(_kb_detect_context 2>/dev/null); team="${context%%:*}"
+    for id in "${items[@]}"; do csv+="${csv:+,}${id}"; done
+    bf=$(_kb_get_board_file "$team") || return 1
+    [[ -f "$bf" ]] || { echo "✗ kb-run: no board for team '$team'" >&2; return 1; }
+    if [[ ! -t 0 ]]; then
+        echo "✗ kb-run: a batch ends at the plan approval, which needs a terminal (--yes and KB_ASSUME_YES do not skip it). Nothing was minted or dispatched." >&2
+        echo "  Run it from a terminal, or launch kb-run <ID> --yes once per ticket." >&2
+        return 2
+    fi
+    _kb_release_orch_precondition "$team" "$context" || return 1
+    _kb_release_stage_ctx || return 1
+    hooks="$(dirname "$_KB_RS_CLI")"
+    cli="$hooks/orchestrator_run_cli.py"
+    refused=$(python3 "$cli" batch-readiness --board "$bf" --kanban-dir "$_KB_RS_KDIR" --items "$csv" 2>&1)
+    rc=$?
+    if (( rc != 0 )); then
+        echo "✗ kb-run: the batch did not start; every ticket must be ready first (nothing was minted or dispatched):" >&2
+        printf '%s\n' "$refused" | sed 's/^/    /' >&2
+        echo "  Plan each NO_PLAN_DOC / NO_SUBITEMS ticket with /plan-project <ID> (plan doc + subitems), estimate any UNESTIMATED one, then re-run: kb-run ${csv}" >&2
+        echo "  A NOT_TODO or HELD_BY_RUN ticket is already being worked: leave it out of the list, or finish (or cancel) the run that holds it." >&2
+        echo "  NOT_FOUND: the ID is not on your team's board (check the spelling). ALREADY_TERMINAL: the ticket is done or cancelled, so drop it." >&2
+        echo "  BLOCKED_OUTSIDE_RELEASE: it waits on a ticket that is not in this list: add that ticket, or finish it first." >&2
+        return 1
+    fi
+    rel=$(python3 "$cli" batch-mint --board "$bf" --items "$csv" --team "$team") || {
+        echo "✗ kb-run: could not mint the batch release (see above); nothing dispatched" >&2; return 1; }
+    echo "✓ Batch release $rel minted for: ${csv//,/, }"
+    _kb_release_run "$rel" "$yes" --orchestrate ${pass[@]+"${pass[@]}"}
+    rc=$?
+    if [[ -z "$(_kb_jq_read "$bf" '[.releases[]? | select(.id == $rel) | .orchestration.activeRunId // empty] | first // ""' --arg rel "$rel" -r 2>/dev/null)" ]]; then
+        python3 "$cli" batch-close --board "$bf" --release "$rel" --status cancelled --reason "no run started (kb-run rc $rc)" >/dev/null \
+            && echo "ℹ $rel closed as cancelled: no run was started."
+    fi
+    return $rc
+}
+
 # Run a task from backlog - launch Claude Code with todo plan and worktree setup
 kb-run() {
     _kb_ensure_jq || return 1
+    # XACA-1834: a list (kb-run A,B or kb-run A B) is a batch coordinator; one selector runs below as before.
+    if _kb_item_list_args "$@"; then _kb_batch_run "$@"; return $?; fi
 
     # XACA-1284-003: accept --yes/-y in either position; first non-flag arg is the selector.
     # XACA-1544-001: --orchestrated <RUN-ID> / --coordinator <team:terminal> take a value, so this is a
@@ -15738,10 +15965,10 @@ _kb_orch_check() {
     local rel info item_rel item_status run_coord item_run
     rel=$(_kb_orch_run_release "$run")
     # item_run is LAST: an empty middle field would collapse under IFS=$'\t' (tab is IFS whitespace).
-    info=$(_kb_jq_read "$board_file" "${_KB_ITEM_STATUS_JQ_DEFS}"'
+    info=$(_kb_jq_read "$board_file" "${_KB_ITEM_STATUS_JQ_DEFS}${_KB_BATCH_MEMBER_JQ_DEFS}"'
         ([.backlog[]? | select(.id == $id)] | first) as $it
         | ([.releases[]? | select(.id == $rel) | .orchestration] | first) as $o
-        | [ ($it.releaseAssignment.releaseId // ""),
+        | [ (if kb_batch_member($rel; $id) then $rel else ($it.releaseAssignment.releaseId // "") end),
             (if $it == null then "missing" else ($it | kb_resolve_item_status) end),
             (if ($o | type) == "object" and ($o.activeRunId // "") == $run and ($o.closedAt // null) == null
              then ($o.coordinator // "" | if type == "object" then (.address // "") else . end
@@ -16305,10 +16532,11 @@ kb-dispatch() {
 
     # ── item ─────────────────────────────────────────────────────────────────
     local iteminfo
-    iteminfo=$(_kb_jq_read "$board_file" "${_KB_ITEM_STATUS_JQ_DEFS}"'
+    iteminfo=$(_kb_jq_read "$board_file" "${_KB_ITEM_STATUS_JQ_DEFS}${_KB_BATCH_MEMBER_JQ_DEFS}"'
         ([.backlog[]? | select(.id == $id)] | first) as $it
-        | if $it == null then "MISSING" else [($it | kb_resolve_item_status), ($it.releaseAssignment.releaseId // "")] | @tsv end' \
-        --arg id "$item" -r 2>/dev/null) || iteminfo="MISSING"
+        | if $it == null then "MISSING" else [($it | kb_resolve_item_status),
+            (if kb_batch_member($rel; $id) then $rel else ($it.releaseAssignment.releaseId // "") end)] | @tsv end' \
+        --arg id "$item" --arg rel "$rel" -r 2>/dev/null) || iteminfo="MISSING"
     if [[ "$iteminfo" == "MISSING" || -z "$iteminfo" ]]; then
         _kb_dispatch_refuse ITEM_NOT_FOUND "$item is not on the ${team} board"; return 3
     fi
@@ -16492,6 +16720,8 @@ kb-dispatch() {
 # Like kb-run but doesn't create worktree/branch - works in current directory
 kb-work() {
     _kb_ensure_jq || return 1
+    # XACA-1834: kb-work* runs in THIS session, so a list is refused (use kb-run).
+    if _kb_item_list_args "$@"; then _kb_work_list_refuse kb-work; return $?; fi
 
     # XACA-1284-003: accept --yes/-y in either position; first non-flag arg is the selector.
     local selector="" _kb_yes=0 _kb_arg
@@ -17881,6 +18111,8 @@ _kb_build_review_prompt() {
 # Like kb-run but launches Claude Code with a PR review prompt instead of an implementation prompt
 kb-run-review() {
     _kb_ensure_jq || return 1
+    # XACA-1834: a list fans out to one unattended session per item (_kb_gate_fanout).
+    if _kb_item_list_args "$@"; then _kb_gate_fanout kb-run-review "$@"; return $?; fi
 
     # XACA-1299-004/005: --delta <sha> / --round <N>, either order, either optional.
     _kb_parse_gate_run_flags "$@" || return 1
@@ -18028,6 +18260,8 @@ kb-run-review() {
 # Like kb-work but launches Claude Code with a PR review prompt instead of an implementation prompt
 kb-work-review() {
     _kb_ensure_jq || return 1
+    # XACA-1834: kb-work* runs in THIS session, so a list is refused (use kb-run-review).
+    if _kb_item_list_args "$@"; then _kb_work_list_refuse kb-work-review; return $?; fi
 
     # XACA-1299-004/005: --delta <sha> / --round <N>, either order, either optional.
     _kb_parse_gate_run_flags "$@" || return 1
@@ -18284,6 +18518,8 @@ _kb_build_test_prompt() {
 # Like kb-run-review but launches Claude Code with a QA test prompt instead of a review prompt
 kb-run-test() {
     _kb_ensure_jq || return 1
+    # XACA-1834: a list fans out to one unattended session per item (_kb_gate_fanout).
+    if _kb_item_list_args "$@"; then _kb_gate_fanout kb-run-test "$@"; return $?; fi
 
     # XACA-1299-004/005: --delta <sha> / --round <N>, either order, either optional.
     _kb_parse_gate_run_flags "$@" || return 1
@@ -18431,6 +18667,8 @@ kb-run-test() {
 # Like kb-work-review but launches Claude Code with a QA test prompt instead of a review prompt
 kb-work-test() {
     _kb_ensure_jq || return 1
+    # XACA-1834: kb-work* runs in THIS session, so a list is refused (use kb-run-test).
+    if _kb_item_list_args "$@"; then _kb_work_list_refuse kb-work-test; return $?; fi
 
     # XACA-1299-004/005: --delta <sha> / --round <N>, either order, either optional.
     _kb_parse_gate_run_flags "$@" || return 1
@@ -18692,6 +18930,8 @@ _kb_build_debug_prompt() {
 # Reopens the item, adds debug subitems, and launches Claude Code with a debug-focused prompt
 kb-run-debug() {
     _kb_ensure_jq || return 1
+    # XACA-1834: a list fans out to one unattended session per item (_kb_gate_fanout).
+    if _kb_item_list_args "$@"; then _kb_gate_fanout kb-run-debug "$@"; return $?; fi
 
     # XACA-1284-003: accept --yes/-y in either position; first non-flag arg is the selector.
     local selector="" _kb_yes=0 _kb_arg
@@ -18845,6 +19085,8 @@ kb-run-debug() {
 # Reopens the item, adds debug subitems, and launches Claude Code with a debug-focused prompt
 kb-work-debug() {
     _kb_ensure_jq || return 1
+    # XACA-1834: kb-work* runs in THIS session, so a list is refused (use kb-run-debug).
+    if _kb_item_list_args "$@"; then _kb_work_list_refuse kb-work-debug; return $?; fi
 
     # XACA-1284-003: accept --yes/-y in either position; first non-flag arg is the selector.
     local selector="" _kb_yes=0 _kb_arg
@@ -28887,7 +29129,8 @@ kb-release-list() {
     echo "Releases for ${team}:"
     echo "═════════════════════════════════════════════════════════════"
 
-    local releases=$(_kb_load_releases | jq -r '.releases[] | "\(.id)|\(.name)|\(.status)|\(.type)"')
+    # XACA-1834: ephemeral batch releases (kind "batch", REL-BATCH-*) are not releases anyone promotes: hidden here.
+    local releases=$(_kb_load_releases | jq -r '.releases[] | select(.kind != "batch") | "\(.id)|\(.name)|\(.status)|\(.type)"')
 
     if [[ -z "$releases" ]]; then
         echo "  (no active releases)"
@@ -29811,6 +30054,11 @@ kb-release-promote() {
     fi
     if [[ $opt_legacy -eq 1 ]]; then
         echo "Note: --platform/--all are deprecated — stage is release-level; platform ignored." >&2
+    fi
+    # XACA-1834: a batch release (kind "batch") is a coordinator's bookkeeping, never a deployable release.
+    if [[ "$(_kb_load_releases 2>/dev/null | jq -r --arg id "$release_id" '[.releases[] | select(.id == $id) | .kind // ""] | first // ""' 2>/dev/null)" == "batch" ]]; then
+        echo "Error: $release_id is a batch release (kb-run A,B,...); a batch is never promoted. Close it with: kb-release handoff $release_id" >&2
+        return 2
     fi
     [[ -z "$opt_actor" ]] && opt_actor=$(_kb_release_default_actor)
 
@@ -31633,7 +31881,9 @@ _kb_release_orch_active_run() {
 # _kb_release_orch_open_items <board_file> <REL-ID> -> count of assigned items that are not completed/cancelled.
 _kb_release_orch_open_items() {
     _kb_jq_read "${1-}" "${_KB_ITEM_STATUS_JQ_DEFS}"'
-        [.backlog[]? | select(.releaseAssignment.releaseId == $rel) | kb_resolve_item_status
+        ([.releases[]? | select(.id == $rel and .kind == "batch") | .batchItems // []] | first) as $b
+        | [.backlog[]? | select(if $b != null then (.id as $i | $b | any(.[]?; . == $i)) else .releaseAssignment.releaseId == $rel end)
+         | kb_resolve_item_status
          | select(. != "completed" and . != "cancelled" and . != "done")] | length' \
         --arg rel "${2-}" -r 2>/dev/null
 }
@@ -31746,10 +31996,18 @@ _kb_release_orch_entry() {
         [[ "$mode" == "orchestrate" ]] && { echo "✗ kb-run: no board for team '$team'" >&2; return 1; }
         return 10
     fi
-    # No tty and nobody asked for it: manual, silently (fail-safe: never auto-run unattended by accident).
-    # This MUST precede the open-run branch: --yes is not an orchestrate decision, so a no-tty `kb-run REL --yes` must
-    # never resume (and launch) a coordinator unattended (XACA-1548 gate round 1).
-    if [[ -z "$mode" && ! -t 0 ]]; then return 10; fi
+    # No tty and nobody asked for it. This MUST precede the open-run branch: --yes is not an orchestrate decision, so a
+    # no-tty `kb-run REL --yes` must never resume (and launch) a coordinator unattended (XACA-1548 gate round 1): an open
+    # run, or fewer than 2 open items, is today's flow, silently. XACA-1834 (decision Q1, user 2026-11-16): 2+ open items
+    # ORCHESTRATE by default. The plan approval still needs a terminal (XACA-1548), so this default ends in the clear
+    # "needs a terminal" refusal below, never in one session that works every ticket. --no-orchestrate opts out.
+    if [[ -z "$mode" && ! -t 0 ]]; then
+        [[ -n "$(_kb_release_orch_active_run "$bf" "$rel")" ]] && return 10
+        n_open=$(_kb_release_orch_open_items "$bf" "$rel")
+        if [[ ! "$n_open" =~ ^[0-9]+$ ]] || (( n_open < 2 )); then return 10; fi
+        mode=orchestrate
+        echo "ℹ kb-run: $rel has $n_open open items and no terminal: orchestrating by default. --no-orchestrate runs the tickets one at a time in this session."
+    fi
     active=$(_kb_release_orch_active_run "$bf" "$rel")
     if [[ -n "$active" ]]; then
         _kb_release_orch_precondition "$team" "$context" || return 1
@@ -31784,9 +32042,16 @@ _kb_release_orch_entry() {
         echo "How should the tickets run?"
         echo "  [a] Auto-run all tickets to completion (orchestrated)"
         echo "  [m] Run them yourself (today's flow)"
-        printf 'Choice [a/M]: '
-        read -r ans || ans=""
-        case "$ans" in a|A|auto|orchestrate|orchestrated) mode=orchestrate ;; *) mode=manual ;; esac
+        # XACA-1834: 2+ open items default to orchestrated; a single open item keeps today's default.
+        if (( n_open >= 2 )); then
+            printf 'Choice [A/m]: '
+            read -r ans || ans=""
+            case "$ans" in m|M|manual) mode=manual ;; *) mode=orchestrate ;; esac
+        else
+            printf 'Choice [a/M]: '
+            read -r ans || ans=""
+            case "$ans" in a|A|auto|orchestrate|orchestrated) mode=orchestrate ;; *) mode=manual ;; esac
+        fi
         [[ "$mode" == "manual" ]] && return 10
     fi
     # A NEW run always ends at the plan approval, which --yes / KB_ASSUME_YES never skip and which needs a terminal. Without
@@ -31998,19 +32263,25 @@ _kb_release_orch_coordinate() {
 # Usage: kb-release handoff <REL-ID> [--repo-dir <path>] [--json]
 # Exit: 0 closed (or already) and the plan printed | 1 error | 2 usage | 3 the run still has unfinished items
 kb-release-handoff() {
-    local release_id="" opt_repo="$PWD" opt_json=0 bf team context hooks rc
-    local usage="Usage: kb-release handoff <release-id> [--repo-dir <path>] [--json]"
+    local release_id="" opt_repo="$PWD" opt_json=0 opt_cancel=0 opt_reason="" bf team context hooks rc is_batch=0
+    local usage="Usage: kb-release handoff <release-id> [--repo-dir <path>] [--json] | <REL-BATCH-id> --cancel [--reason <text>]"
     while [[ $# -gt 0 ]]; do
         case "${1-}" in
             --repo-dir)
                 if [[ $# -lt 2 ]]; then echo "Error: --repo-dir needs a value" >&2; echo "$usage" >&2; return 2; fi
                 opt_repo="${2-}"; shift 2 ;;
             --json) opt_json=1; shift ;;
+            --cancel) opt_cancel=1; shift ;;
+            --reason)
+                if [[ $# -lt 2 || -z "${2-}" ]]; then echo "Error: --reason needs a value" >&2; echo "$usage" >&2; return 2; fi
+                opt_reason="${2-}"; shift 2 ;;
             --help|-h)
                 echo "$usage"
                 echo ""
                 echo "ALL_DONE hand-off of an orchestrated run: close the run (refused while any tracked item is unfinished),"
                 echo "then print the XACA-1350 resume plan (the 'DEV, items done' row). Changes no stage."
+                echo "A batch (kb-run A,B; XACA-1834) is closed as completed instead. --cancel abandons a batch: its open run is"
+                echo "closed even with unfinished items and the batch is marked cancelled (workers already running keep running)."
                 return 0 ;;
             -*) echo "Error: Unknown option: ${1-}" >&2; echo "$usage" >&2; return 2 ;;
             *)
@@ -32029,9 +32300,30 @@ kb-release-handoff() {
     context=$(_kb_detect_context 2>/dev/null); team="${context%%:*}"
     bf=$(_kb_get_board_file "$team") || { echo "Error: no board for team '$team'" >&2; return 1; }
     hooks="$(dirname "$_KB_RS_CLI")"
+    [[ "$(_kb_jq_read "$bf" '[.releases[]? | select(.id == $rel) | .kind // ""] | first // ""' --arg rel "$release_id" -r 2>/dev/null)" == "batch" ]] && is_batch=1
+    if (( opt_cancel )) || [[ -n "$opt_reason" ]]; then
+        if (( ! is_batch )); then
+            echo "Error: --cancel / --reason apply to a batch (REL-BATCH-*) only; $release_id is a release" >&2
+            return 2
+        fi
+        if (( ! opt_cancel )); then echo "Error: --reason needs --cancel" >&2; echo "$usage" >&2; return 2; fi
+        # XACA-1834-009: abandon the batch: close its open run even with unfinished items, then mark it cancelled.
+        local -a cargs=(batch-cancel --board "$bf" --kanban-dir "$_KB_RS_KDIR" --release "$release_id")
+        [[ -n "$opt_reason" ]] && cargs+=(--reason "$opt_reason")
+        python3 "$hooks/orchestrator_run_cli.py" "${cargs[@]}"
+        return $?
+    fi
     python3 "$hooks/orchestrator_run_cli.py" close --board "$bf" --kanban-dir "$_KB_RS_KDIR" --release "$release_id"
     rc=$?
-    (( rc == 0 )) || return $rc
+    if (( rc != 0 )); then
+        (( is_batch && rc == 3 )) && echo "  To abandon this batch instead: kb-release handoff $release_id --cancel [--reason <text>]" >&2
+        return $rc
+    fi
+    # XACA-1834: a batch has no stage to resume: close the batch record itself and stop (nothing to deploy or promote).
+    if (( is_batch )); then
+        python3 "$hooks/orchestrator_run_cli.py" batch-close --board "$bf" --release "$release_id" --status completed
+        return $?
+    fi
     local -a args=(plan --release "$release_id" --kanban-dir "$_KB_RS_KDIR" --repo-dir "$opt_repo")
     (( opt_json )) && args+=(--json)
     python3 "$hooks/release_resume.py" "${args[@]}"
@@ -32067,9 +32359,15 @@ _kb_release_orch_prompt_rules() {
     r+="| ALL_DONE (0) | Hand off (below). |\n"
     r+="| TIMEOUT (31) | Nothing needed attention: start the monitor again. |\n"
     r+="| USAGE (2) | The run or release is missing, closed or unreadable: report the detail to the user and stop. |\n\n"
+    if [[ "$rel" == REL-BATCH-* ]]; then
+        r+="### Hand-off on ALL_DONE (batch)\n"
+        r+="This is an ad-hoc BATCH (\`kb-run A,B,...\`, XACA-1834), not a release: it has no branch and is never deployed or promoted. Run \`kb-release handoff ${rel}\` (it closes the run and the batch), give the user the final status table, and stop. Ignore every DEV deploy / promote / chain step in the release rules below.\n\n"
+    else
     r+="### Hand-off on ALL_DONE\n"
     r+="The monitor has closed the run (\`run_end\`, \`closedAt\`). Run \`kb-release handoff ${rel}\` (idempotent: it closes the run if the monitor had not and REFUSES while any tracked item is unfinished), then read the resume plan it prints. After a finished run that is the \"DEV, items done\" row. Continue exactly as the Release Resume Plan rules below say: offer the DEV deploy and the tests, then \`kb-release chain ${rel}\`. Stop at the first human gate.\n\n"
+    fi
     r+="### Never\n"
+    r+="- Never read diffs, PR files, CI logs or test output yourself: ask the worker with \`kb-msg\` and keep only its answer. Your context must stay small for the whole run.\n"
     r+="- Never merge a PR, run \`kb-done\`, cancel a protected [Review]/[Test]/[UX] subitem, or edit anything inside a worker's worktree or pane. Workers own their tickets through merge.\n"
     r+="- Never promote past DEV: DEV->QA is the lead's deliberate call (the Release session rules below still apply).\n"
     r+="- Never dispatch into your own terminal, never exceed the cap, never ignore a freeze order, and never edit board or release JSON.\n"
@@ -32255,6 +32553,8 @@ _kb_release_run() {
         fi
         echo "✓ Release worktree ${wt_out%%$'\t'*}: ${wt_out#*$'\t'}  (branch $branch)"
         cd "${wt_out#*$'\t'}" || { echo "✗ kb-run: cannot cd into the release worktree" >&2; return 1; }
+    elif [[ "$release_id" == REL-BATCH-* ]]; then
+        echo "ℹ $release_id is a batch: no release branch and no worktree here; each worker gets its own."
     else
         # XACA-1524: the label comes from the planned-branch CLI (same _branch_spec the cut uses), so a custom
         # releasePrefix / hotfix / trunk mode is named correctly. Message path: any failure degrades to neutral text

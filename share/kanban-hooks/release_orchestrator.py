@@ -1024,6 +1024,25 @@ def reattach_coordinator(board_file, release_id, run_id, coordinator, now=None):
 
 
 # ---------------------------------------------------------------- entry point (the only I/O)
+BATCH_KIND = "batch"   # XACA-1834: an ephemeral REL-BATCH-* record minted by `kb-run A,B,...`
+
+
+def is_batch(rel):
+    return isinstance(rel, dict) and rel.get("kind") == BATCH_KIND
+
+
+def is_member(item, rel, release_id):
+    """XACA-1834: does `item` belong to the release? A batch release owns exactly the ids in its `batchItems` (its items
+    keep their real releaseAssignment, so a worker still branches from its own release); any other release owns the items
+    whose releaseAssignment.releaseId is its id. Same rule as bash _KB_ORCH_MEMBER_JQ (kb-dispatch, _kb_orch_check)."""
+    if not isinstance(item, dict):
+        return False
+    if is_batch(rel):
+        return item.get("id") in [b for b in rel.get("batchItems") or [] if isinstance(b, str)]
+    ra = item.get("releaseAssignment")
+    return isinstance(ra, dict) and ra.get("releaseId") == release_id
+
+
 def _load_board(kanban_dir, release_id):
     import release_resume
     try:
@@ -1061,8 +1080,7 @@ def plan(release_id, kanban_dir, repo_root=None, terminals=None, max_parallel=No
     orch = rel.get("orchestration") if isinstance(rel.get("orchestration"), dict) else {}
     if max_parallel is None:
         max_parallel = orch.get("maxParallel", DEFAULT_MAX_PARALLEL)
-    members = sorted((i for i in board.get("backlog") or []
-                      if isinstance(i.get("releaseAssignment"), dict) and i["releaseAssignment"].get("releaseId") == release_id),
+    members = sorted((i for i in board.get("backlog") or [] if is_member(i, rel, release_id)),
                      key=lambda i: i.get("id") or "")
     ids = [i["id"] for i in members]
     skipped, refused_reasons, candidates = [], {}, []
