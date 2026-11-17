@@ -45,6 +45,10 @@ the string or a `[...]` suffix), or `E[...]` (a `[1m]` context suffix). Any othe
 an empty model) = expected `unknown`: reported, no mismatch. MODEL_MISMATCH = a WORKER session observed a model that does not
 match. Only the worker's MAIN session is checked: a subagent (Explore, `model:` agents) picks its own model, so it never
 raises a mismatch (its tokens still count and its model is still listed). Aliases (`opus`) are not expanded: dispatch records resolved ids.
+COORDINATOR (XACA-1836-007): the same rule for the coordinator's MAIN session, against the run meta
+`orchestration.models.coordinator.model` that kb-run recorded and launched with. A mismatch is appended to modelMismatch as
+{"item": "coordinator", ...} (ticket ids are upper-case, so it cannot collide) and is warn-only like a worker's. Only the
+in-run part of a session that began before run_start is checked. Effort cannot be seen in a transcript: recorded, not checked.
 
 BUDGETS (005). `tokenBudget {perTicket, perRun}` (total tokens, positive ints), layered per key:
 release.orchestration.tokenBudget > releaseConfig.orchestration.tokenBudget. Absent = report only. An invalid value (bool, 0,
@@ -337,6 +341,25 @@ def check_models(observed, expected):
     return status, bad
 
 
+COORDINATOR_ITEM = "coordinator"   # modelMismatch[].item for the coordinator session (XACA-1836-007)
+
+
+def coordinator_expected(orch):
+    """-> the coordinator model kb-run recorded in run meta (models.coordinator.model), or None when unrecorded/empty."""
+    m = ((orch or {}).get("models") or {}) if isinstance(orch, dict) else {}
+    c = m.get("coordinator") if isinstance(m, dict) else None
+    v = c.get("model") if isinstance(c, dict) else None
+    return v.strip() if isinstance(v, str) and v.strip() else None
+
+
+def check_coordinator_model(observed, expected):
+    """Pure. observed set(models) of the coordinator MAIN session, expected model|None -> (status dict, mismatch|None).
+    Same statuses and rule as check_models: `inherit` and `unknown` (unrecorded) never mismatch."""
+    status, bad = check_models({COORDINATOR_ITEM: set(observed or ())},
+                               {COORDINATOR_ITEM: expected} if expected else {})
+    return status[COORDINATOR_ITEM], (bad[0] if bad else None)
+
+
 def resolve_budgets(release_orch=None, team_orch=None):
     """Pure. -> (budgets {perTicket?, perRun?}, sources {key: "release"|"team"}, warnings). Per key, the first layer that
     SETS it wins (release > team). An invalid value is refused with a warning and BLOCKS that key (no fall-through)."""
@@ -408,13 +431,17 @@ def run_start_ts(events):
 
 
 def assemble(per_item_blocks, coord_block, observed_models, expected, points, lanes, unattributed, problems, now,
-             undated=0):
-    """Pure. Build the full report from folded blocks. per_item_blocks {id: block (mutable form)}."""
+             undated=0, coord_observed=None, coord_expected=None):
+    """Pure. Build the full report from folded blocks. per_item_blocks {id: block (mutable form)}. coord_observed /
+    coord_expected (XACA-1836-007): the coordinator main session's models and its recorded model (None = not checked)."""
     run = new_block()
     for b in per_item_blocks.values():
         merge_blocks(run, b)
     merge_blocks(run, coord_block)
     model_status, mismatches = check_models(observed_models, expected)
+    coord_status, coord_bad = check_coordinator_model(coord_observed, coord_expected)
+    if coord_bad:
+        mismatches = mismatches + [coord_bad]
     items = {}
     lane_tot, lane_pts, lane_missing = {}, {}, {}
     for iid, b in sorted(per_item_blocks.items()):
@@ -442,7 +469,9 @@ def assemble(per_item_blocks, coord_block, observed_models, expected, points, la
              "coordinator": finish_block(coord_block), "updatedAt": now, "complete": complete,
              "unattributed": len(unattributed), "modelMismatch": mismatches}
     return {"tokens": block, "items": items, "lanes": per_lane,
-            "coordinator": dict(finish_block(coord_block), **derived(coord_block)),
+            "coordinator": dict(finish_block(coord_block), expectedModel=coord_status["expected"],
+                                modelStatus=coord_status["status"], observedModels=sorted(coord_observed or ()),
+                                **derived(coord_block)),
             "run": dict(finish_block(run), **derived(run, run_pts)),
             "unattributed": unattributed, "complete": complete, "problems": problems}
 
@@ -555,6 +584,7 @@ def collect_run(release_id, orch, backlog, events, run, projects_dir, kanban_dir
     problems, unattributed = [], []
     blocks = {iid: new_block() for iid in targets["items"]}
     coord, observed = new_block(), {iid: set() for iid in targets["items"]}
+    coord_observed = set()
     undated = 0
     if not os.path.isdir(projects_dir):
         problems.append("projects dir missing or unreadable: %s" % projects_dir)
@@ -601,12 +631,17 @@ def collect_run(release_id, orch, backlog, events, run, projects_dir, kanban_dir
                         continue
                     merge_block(coord, part)
                     undated += part_undated
+                    main_part = new_block()          # files[0] is the main session: only its in-run models are checked
+                    add_scan(main_part, files[0], floor)
+                    coord_observed |= main_part["models"]
                     continue
                 blk = blocks[iid] if role == "worker" else coord
                 for n, x in enumerate(files):
                     undated += add_scan(blk, x, since)
                     if role == "worker" and n == 0:     # files[0] is the main session: a subagent picks its own model
                         observed[iid] |= _models_of(x)
+                    elif role == "coordinator" and n == 0:
+                        coord_observed |= _models_of(x)
             for sid, sfiles in sorted(subs.items()):
                 if sid not in seen_parents and exact_dir:
                     for sf in sfiles:
@@ -614,7 +649,7 @@ def collect_run(release_id, orch, backlog, events, run, projects_dir, kanban_dir
                                              "reason": "subagent whose parent session transcript is absent: attribution unknown"})
     points = {iid: t["points"] for iid, t in targets["items"].items()}
     rep = assemble(blocks, coord, observed, expected_models(events), points, lane_map(events, orch), unattributed,
-                   problems, now, undated)
+                   problems, now, undated, coord_observed=coord_observed, coord_expected=coordinator_expected(orch))
     rep["worktreeRules"] = {iid: {"rule": t["rule"], "worktree": t["worktree"] or "worktrees/%s" % t["name"]}
                             for iid, t in targets["items"].items()}
     rep["releaseWorktree"] = targets["release"]["worktree"]
@@ -726,6 +761,10 @@ def format_table(rep):
         if d["modelStatus"] != "match":
             out.append("model %s: expected %s, status %s, observed %s" % (
                 iid, d["expectedModel"], d["modelStatus"], ",".join(d["models"]) or "-"))
+    c = rep.get("coordinator") or {}
+    if rep.get("run_id") and c.get("modelStatus") not in (None, "match"):
+        out.append("model coordinator: expected %s, status %s, observed %s" % (
+            c["expectedModel"], c["modelStatus"], ",".join(c.get("observedModels") or []) or "-"))
     g = rep.get("gates")
     if g and g["turns"]:
         out.append("gates (review/test/ux sessions, not in the numbers above): %s tokens over %d turn(s)" % (_fmt(g["total"]), g["turns"]))

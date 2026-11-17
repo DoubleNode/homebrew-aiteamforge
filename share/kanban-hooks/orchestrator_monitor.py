@@ -44,6 +44,7 @@ EXIT CODES / VERDICTS (stdout's LAST line is ALWAYS `VERDICT: <NAME> run=<RUN|->
                         stops or nudges a worker because of it; the pause itself is the coordinator prompt's job (XACA-1548).
   17  MODEL_MISMATCH    WARN-ONLY (XACA-1808): a worker session observed a model that does not match the model its dispatch
                         recorded (the live proof that the model setting took effect). Detail names item, expected, observed.
+                        XACA-1836: also the COORDINATOR session vs run meta models.coordinator.model, as item=coordinator.
   31  TIMEOUT           watch: --timeout elapsed with nothing actionable
 
 RESUME (XACA-1547; a coordinator that starts on a release with an active run calls this BEFORE anything else)
@@ -610,10 +611,15 @@ def token_conditions(tokens, budgets, orch):
         return conds
     for m in tokens.get("modelMismatch") or []:
         obs = ",".join(m.get("observed") or [])
+        if m["item"] == otok.COORDINATOR_ITEM:     # XACA-1836-007: the role is the item, so it is in the signature
+            detail = ("coordinator: launched with model %s but the coordinator session used %s: the configured coordinator "
+                      "model did not take effect (warn-only; nothing was touched)" % (m.get("expected"), obs))
+        else:
+            detail = ("%s: dispatched with model %s but a worker session used %s: the configured model did "
+                      "not take effect (warn-only; no worker was touched)" % (m["item"], m.get("expected"), obs))
         conds.append({"verdict": "MODEL_MISMATCH", "item": m["item"], "wave": waves.get(m["item"], 10 ** 6),
                       "signature": "MODEL_MISMATCH|%s|expected=%s|observed=%s" % (m["item"], m.get("expected"), obs),
-                      "detail": one_line("%s: dispatched with model %s but a worker session used %s: the configured model did "
-                                         "not take effect (warn-only; no worker was touched)" % (m["item"], m.get("expected"), obs)),
+                      "detail": one_line(detail),
                       "event": {"kind": ro.KIND_MODEL_MISMATCH, "fields": {"item": m["item"], "expected": m.get("expected"),
                                                                            "observed": m.get("observed")}}})
     if isinstance(tokens.get("run"), dict):

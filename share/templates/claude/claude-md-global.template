@@ -240,7 +240,7 @@ Subagents were 62.7% of measured token spend (XACA-1832 context audit); each one
 - **Haiku 5.5** (`claude-haiku-5-5`): search and log reading, as an ad-hoc subagent or model override only. Persona frontmatter stays on opus or sonnet.
 - Before switching a session's model, compact or start a fresh session: prompt caches are model-scoped, so a mid-session switch re-pays the whole context.
 
-The orchestrator's worker default moves from Fable to Opus in XACA-1836, with the lead set via `releaseConfig.orchestration.leadModel` / `leadEffort`; until that ships, check the release config rather than assuming the default.
+The orchestrator's built-in is Opus for workers and the coordinator (the lead). A board opts its coordinator into Fable via `releaseConfig.orchestration.coordinatorModel` / `coordinatorEffort` (XACA-1836).
 
 ---
 

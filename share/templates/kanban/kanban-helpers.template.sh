@@ -15249,14 +15249,14 @@ kb-run() {
             --yes|-y) _kb_yes=1; shift ;;
             --resume) _KB_ORCH_RESUME=1; shift ;;
             --orchestrate|--no-orchestrate|--force-coordinator-pane) _kb_rel_flags+=("$1"); shift ;;
-            --max-parallel=*|--exclude=*|--model=*|--worker-model=*)
+            --max-parallel=*|--exclude=*|--model=*|--worker-model=*|--effort=*)
                 # The `=` spelling must never fall into the selector catch-all below: that silently dropped the cap or the exclusion.
                 if [[ -z "${1#*=}" || "${1#*=}" == -* ]]; then
                     echo "Error: kb-run ${1%%=*} needs a value" >&2
                     return 1
                 fi
                 _kb_rel_flags+=("${1%%=*}" "${1#*=}"); shift ;;
-            --max-parallel|--exclude|--model|--worker-model)
+            --max-parallel|--exclude|--model|--worker-model|--effort)
                 if (( $# < 2 )) || [[ -z "${2-}" || "${2-}" == -* ]]; then
                     echo "Error: kb-run $1 needs a value" >&2
                     return 1
@@ -15301,6 +15301,7 @@ kb-run() {
         echo "Usage: kb-run <id> [--yes] [--orchestrated <RUN-ID> [--coordinator <team:terminal>]]"
         echo "       kb-run <REL-ID> [--yes]   release session: attach/create the release worktree, resume from the record (XACA-1350)"
         echo "         [--orchestrate | --no-orchestrate] [--max-parallel N] [--exclude ITEM]... [--model M] [--worker-model M]"
+        echo "         [--effort low|medium|high|xhigh|max|inherit]   the coordinator session's effort (XACA-1836)"
         echo "         [--force-coordinator-pane]   coordinator mode (XACA-1548); KB_RELEASE_AUTORUN=1|0 answers the DEV question"
         echo "  --yes, -y   skip the confirmation prompt (required without a tty; or set KB_ASSUME_YES=1)"
         echo "  --orchestrated <RUN-ID>   worker mode for a release-orchestrator run (XACA-1544): stamps"
@@ -15670,10 +15671,17 @@ kb-run() {
 #   release.orchestration.activeRunId / closedAt / coordinator ("team:terminal" or {address})
 #   release.orchestration.maxParallel (default 2) / lanes[] ({current: <item>|null})
 #   release.orchestration.workerModel|model, releaseConfig.orchestration.{workerModel|model, allowedModels}
+#   release.orchestration.coordinatorEffort, releaseConfig.orchestration.coordinatorEffort (XACA-1836)
 #   item.orchestration.model (per-item override)
 # ═════════════════════════════════════════════════════════════════════════════
 
-_KB_ORCH_DEFAULT_MODEL="claude-fable-5-2"
+# Per-role built-in models (XACA-1836): Opus 5.5 builds. Fable 5.2 costs about 2x Opus per token, so it is never a built-in;
+# a board opts its coordinator in with releaseConfig.orchestration.coordinatorModel (the XACA-1835 model routing policy).
+_KB_ORCH_DEFAULT_WORKER_MODEL="claude-opus-5-5"
+_KB_ORCH_DEFAULT_COORDINATOR_MODEL="claude-opus-5-5"
+# Coordinator effort (XACA-1836): built-in, and the allowed levels (the set scripts/lint-model-frontmatter.sh uses).
+_KB_ORCH_DEFAULT_COORDINATOR_EFFORT="high"
+_KB_ORCH_EFFORTS=(low medium high xhigh max)
 # Built-in allow-list, used only when the team sets no releaseConfig.orchestration.allowedModels.
 _KB_ORCH_BUILTIN_MODELS=(claude-fable-5-2 claude-opus-5-5 claude-sonnet-5-5 claude-haiku-5-5)
 # Shells a fresh pane may report before we type into it (XACA-1380, scripts/kb-host-ready.sh SHELLS).
@@ -15854,10 +15862,31 @@ _kb_orchestrated_worker_rules() {
     printf '%s' "$r"
 }
 
+# _kb_orch_lead_key <board> <release>   (XACA-1836 review)
+# The XACA-1835 policy draft named releaseConfig.orchestration.leadModel / leadEffort, keys the resolvers never read. A
+# board set that way would silently get the built-ins, so a present lead* key is a refusal naming the key to use.
+# rc 1 with $_KB_ORCH_LEAD_KEY_REASON when one is present (release layer first), rc 0 otherwise.
+_kb_orch_lead_key() {
+    local board_file="${1-}" rel="${2-}" hit
+    _KB_ORCH_LEAD_KEY_REASON=""
+    hit=$(_kb_jq_read "$board_file" '
+        [ [(([.releases[]? | select(.id == $rel)] | first | .orchestration)), "release.orchestration"],
+          [.releaseConfig.orchestration, "releaseConfig.orchestration"] ]
+        | [ .[] | select((.[0] | type) == "object") | . as [$o, $src]
+            | ("leadModel", "leadEffort") as $k | select($o | has($k)) | $src + "." + $k ]
+        | first // empty' --arg rel "$rel" -r 2>/dev/null) || hit=""
+    [[ -z "$hit" ]] && return 0
+    local want="coordinatorModel"
+    [[ "$hit" == *.leadEffort ]] && want="coordinatorEffort"
+    _KB_ORCH_LEAD_KEY_REASON="${hit} is not read: the coordinator is configured with ${hit%.*}.${want}"
+    return 1
+}
+
 # _kb_orch_resolve_model <board> <item> <release> [cli_model]   (XACA-1544-012)
 # Per-dispatch worker model, highest precedence first:
 #   --model > item.orchestration.model > $KB_ORCH_WORKER_MODEL > $KB_ORCH_MODEL
-#   > release.orchestration.{workerModel|model} > releaseConfig.orchestration.{workerModel|model} > claude-fable-5-2
+#   > release.orchestration.{workerModel|model} > releaseConfig.orchestration.{workerModel|model}
+#   > built-in _KB_ORCH_DEFAULT_WORKER_MODEL / _KB_ORCH_DEFAULT_COORDINATOR_MODEL (both claude-opus-5-5, XACA-1836)
 # 5th arg role (XACA-1548-013): "worker" (default, the order above) or "coordinator": the same layers with coordinatorModel in
 # place of workerModel, $KB_ORCH_COORDINATOR_MODEL in place of $KB_ORCH_WORKER_MODEL, and no item layer.
 # The FIRST layer that is present decides; a present-but-empty or non-string value is a refusal, never a fall-through
@@ -15868,6 +15897,10 @@ _kb_orch_resolve_model() {
     local board_file="${1-}" item="${2-}" rel="${3-}" cli="${4-}" role="${5:-worker}" rolekey="workerModel"
     _KB_ORCH_MODEL="" _KB_ORCH_MODEL_SOURCE="" _KB_ORCH_MODEL_REASON=""
     [[ "$role" == "coordinator" ]] && rolekey="coordinatorModel"
+    if [[ "$role" == "coordinator" ]] && ! _kb_orch_lead_key "$board_file" "$rel"; then
+        _KB_ORCH_MODEL_REASON="$_KB_ORCH_LEAD_KEY_REASON"
+        return 1
+    fi
     local layers vtype val src
     # One read: each present layer as "<source>\t<json type>\t<string value or empty>".
     layers=$(_kb_jq_read "$board_file" '
@@ -15901,7 +15934,8 @@ _kb_orch_resolve_model() {
     elif [[ -n "$rest_layers" ]]; then
         IFS=$'\t' read -r src vtype val <<<"${rest_layers%%$'\n'*}"
     else
-        src="built-in default" vtype="string" val="$_KB_ORCH_DEFAULT_MODEL"
+        src="built-in default" vtype="string" val="$_KB_ORCH_DEFAULT_WORKER_MODEL"
+        [[ "$role" == "coordinator" ]] && val="$_KB_ORCH_DEFAULT_COORDINATOR_MODEL"
     fi
     if [[ "$vtype" != "string" || -z "$val" ]]; then
         _KB_ORCH_MODEL_REASON="model from ${src} is empty or not a string (${vtype})"
@@ -15937,6 +15971,54 @@ _kb_orch_resolve_model() {
         return 1
     fi
     _KB_ORCH_MODEL="$val" _KB_ORCH_MODEL_SOURCE="$src"
+    return 0
+}
+
+# _kb_orch_resolve_effort <board> <release> [cli_effort]   (XACA-1836-005)
+# The coordinator session's effort, highest precedence first:
+#   kb-run <REL-ID> --effort > $KB_ORCH_COORDINATOR_EFFORT > release.orchestration.coordinatorEffort
+#   > releaseConfig.orchestration.coordinatorEffort > built-in _KB_ORCH_DEFAULT_COORDINATOR_EFFORT (high)
+# Same rules as the model: the FIRST present layer decides, a present-but-empty, non-string or unknown value is a refusal
+# (never a fall-through), "inherit" = apply nothing. Allowed: _KB_ORCH_EFFORTS. Workers are out of scope: they keep their
+# persona/session effort. Publishes $_KB_ORCH_EFFORT / $_KB_ORCH_EFFORT_SOURCE; rc 1 with $_KB_ORCH_EFFORT_REASON.
+_kb_orch_resolve_effort() {
+    local board_file="${1-}" rel="${2-}" cli="${3-}" layer vtype val src e ok=0
+    _KB_ORCH_EFFORT="" _KB_ORCH_EFFORT_SOURCE="" _KB_ORCH_EFFORT_REASON=""
+    if ! _kb_orch_lead_key "$board_file" "$rel"; then
+        _KB_ORCH_EFFORT_REASON="$_KB_ORCH_LEAD_KEY_REASON"
+        return 1
+    fi
+    if [[ -n "$cli" ]]; then
+        src="--effort" vtype="string" val="$cli"
+    elif [[ -n "${KB_ORCH_COORDINATOR_EFFORT+x}" ]]; then
+        src="env KB_ORCH_COORDINATOR_EFFORT" vtype="string" val="$KB_ORCH_COORDINATOR_EFFORT"
+    else
+        # The first present layer as "<source>\t<json type>\t<string value or empty>".
+        layer=$(_kb_jq_read "$board_file" '
+            def lay($o; $src): if ($o | type) == "object" and ($o | has("coordinatorEffort"))
+                then [$src + ".coordinatorEffort", $o.coordinatorEffort] else empty end;
+            [ (([.releases[]? | select(.id == $rel)] | first | .orchestration) | lay(.; "release.orchestration")),
+              (.releaseConfig.orchestration | lay(.; "releaseConfig.orchestration")) ]
+            | first // empty | [.[0], (.[1] | type), (if (.[1] | type) == "string" then .[1] else "" end)] | @tsv' \
+            --arg rel "$rel" -r 2>/dev/null) || layer=""
+        if [[ -n "$layer" ]]; then
+            IFS=$'\t' read -r src vtype val <<<"$layer"
+        else
+            src="built-in default" vtype="string" val="$_KB_ORCH_DEFAULT_COORDINATOR_EFFORT"
+        fi
+    fi
+    if [[ "$vtype" != "string" || -z "$val" ]]; then
+        _KB_ORCH_EFFORT_REASON="effort from ${src} is empty or not a string (${vtype})"
+        return 1
+    fi
+    if [[ "$val" != "inherit" ]]; then
+        for e in "${_KB_ORCH_EFFORTS[@]}"; do [[ "$e" == "$val" ]] && ok=1; done
+        if (( ! ok )); then
+            _KB_ORCH_EFFORT_REASON="effort '${val}' from ${src} is not one of: ${_KB_ORCH_EFFORTS[*]} inherit"
+            return 1
+        fi
+    fi
+    _KB_ORCH_EFFORT="$val" _KB_ORCH_EFFORT_SOURCE="$src"
     return 0
 }
 
@@ -31559,18 +31641,24 @@ _kb_release_orch_open_items() {
 # _kb_release_orch_settings <board_file> <REL-ID>
 # Resolves the coordinator model, the worker model and maxParallel. Models REUSE kb-dispatch's resolver
 # (_kb_orch_resolve_model, XACA-1544-012): flags > env > release.orchestration > releaseConfig.orchestration > built-in
-# claude-fable-5-2, "inherit" = no override, validated against releaseConfig.orchestration.allowedModels, an empty or unknown
+# claude-opus-5-5 for both roles (XACA-1836), "inherit" = no override, validated against releaseConfig.orchestration.allowedModels, an empty or unknown
 # value REFUSED (never defaulted). The coordinator takes --model; the worker takes --worker-model, else --model.
+# Coordinator effort (XACA-1836): _kb_orch_resolve_effort with --effort; publishes _KB_O_CEFFORT/_KB_O_CESRC.
 # maxParallel: --max-parallel > release.orchestration.maxParallel > releaseConfig.orchestration.maxParallel > 2; a present
 # but invalid value is refused, not skipped. Publishes _KB_O_CMODEL/_CSRC, _KB_O_WMODEL_R/_WSRC, _KB_O_MAXPAR_R/_MAXSRC;
 # rc 1 with _KB_O_REASON on a refusal.
 _kb_release_orch_settings() {
     local bf="${1-}" rel="${2-}" wcli
     _KB_O_REASON="" _KB_O_CMODEL="" _KB_O_CSRC="" _KB_O_WMODEL_R="" _KB_O_WSRC="" _KB_O_MAXPAR_R="" _KB_O_MAXSRC=""
+    _KB_O_CEFFORT="" _KB_O_CESRC=""
     if ! _kb_orch_resolve_model "$bf" "" "$rel" "${_KB_O_MODEL-}" coordinator; then
         _KB_O_REASON="coordinator: $_KB_ORCH_MODEL_REASON"; return 1
     fi
     _KB_O_CMODEL="$_KB_ORCH_MODEL" _KB_O_CSRC="$_KB_ORCH_MODEL_SOURCE"
+    if ! _kb_orch_resolve_effort "$bf" "$rel" "${_KB_O_EFFORT-}"; then
+        _KB_O_REASON="coordinator effort: $_KB_ORCH_EFFORT_REASON"; return 1
+    fi
+    _KB_O_CEFFORT="$_KB_ORCH_EFFORT" _KB_O_CESRC="$_KB_ORCH_EFFORT_SOURCE"
     wcli="${_KB_O_WMODEL-}"; [[ -z "$wcli" ]] && wcli="${_KB_O_MODEL-}"
     if ! _kb_orch_resolve_model "$bf" "" "$rel" "$wcli" worker; then
         _KB_O_REASON="worker: $_KB_ORCH_MODEL_REASON"; return 1
@@ -31672,6 +31760,9 @@ _kb_release_orch_entry() {
         if [[ -n "${_KB_O_MODEL-}" || -n "${_KB_O_WMODEL-}" ]]; then
             echo "⚠ kb-run: --model / --worker-model are ignored on resume: the run keeps the models recorded when it started" >&2
         fi
+        if [[ -n "${_KB_O_EFFORT-}" ]]; then
+            echo "⚠ kb-run: --effort is ignored on resume: the run keeps the coordinator effort recorded when it started" >&2
+        fi
         return 12
     fi
     n_open=$(_kb_release_orch_open_items "$bf" "$rel")
@@ -31685,6 +31776,7 @@ _kb_release_orch_entry() {
     fi
     echo "Release $rel: $n_open open item(s). Orchestration settings:"
     echo "  coordinator model: ${_KB_O_CMODEL}   (source: ${_KB_O_CSRC})"
+    echo "  coordinator effort: ${_KB_O_CEFFORT}   (source: ${_KB_O_CESRC})"
     echo "  worker model:      ${_KB_O_WMODEL_R}   (source: ${_KB_O_WSRC})"
     echo "  max parallel:      ${_KB_O_MAXPAR_R}   (source: ${_KB_O_MAXSRC})"
     if [[ -z "$mode" ]]; then
@@ -31782,7 +31874,8 @@ _kb_release_orch_start() {
     # ── approved: from here on we write ───────────────────────────────────────────────────────────────
     local meta run iid term out drc
     meta=$(jq -cn --arg cm "$_KB_O_CMODEL" --arg cs "$_KB_O_CSRC" --arg wm "$_KB_O_WMODEL_R" --arg ws "$_KB_O_WSRC" \
-        --arg ms "$_KB_O_MAXSRC" '{models: {coordinator: {model: $cm, source: $cs}, worker: {model: $wm, source: $ws}}, maxParallelSource: $ms}') || {
+        --arg ce "$_KB_O_CEFFORT" --arg ces "$_KB_O_CESRC" --arg ms "$_KB_O_MAXSRC" \
+        '{models: {coordinator: {model: $cm, source: $cs, effort: $ce, effortSource: $ces}, worker: {model: $wm, source: $ws}}, maxParallelSource: $ms}') || {
         rm -r -f "$tmpd"; return 1; }
     run=$(python3 "$cli" start --board "$bf" --kanban-dir "$_KB_RS_KDIR" --release "$rel" --plan-file "$plan_file" \
         --coordinator "$coord" --max-parallel "$maxpar" --meta-json "$meta") || {
@@ -31828,6 +31921,7 @@ _kb_release_orch_prompt_ctx() {
             "- Coordinator address (workers kb-ask / kb-msg you here): " + $coord,
             "- Max parallel (a FIRM cap, enforced again by kb-dispatch): " + (($o.maxParallel // 2) | tostring) + "   (source: " + ($o.maxParallelSource // "unrecorded") + ")",
             "- Coordinator model (this session): " + ($m.coordinator.model // "unrecorded") + "   (source: " + ($m.coordinator.source // "unrecorded") + ")",
+            "- Coordinator effort (this session): " + ($m.coordinator.effort // "unrecorded") + "   (source: " + ($m.coordinator.effortSource // "unrecorded") + ")",
             "- Worker model: " + ($m.worker.model // "unrecorded") + "   (source: " + ($ws | if . == "" then "unrecorded" else . end) + ")",
             "- kb-dispatch model flag: " + (if ($ws | startswith("--")) then "--model " + $m.worker.model else "none; kb-dispatch resolves the worker model itself" end),
             "- Waves: " + ([($o.waves // []) | to_entries[] | "wave " + ((.key + 1) | tostring) + " = " + (.value | map(. as $i | $i + "(" + (($o.items[$i].terminal) // "-") + ")") | join(", "))] | join("; ")),
@@ -31836,8 +31930,9 @@ _kb_release_orch_prompt_ctx() {
 }
 
 # _kb_release_orch_coordinate <REL-ID> <team> <name> <stage> <plan_text> <assume_yes> <resume 0|1> <context>
-# Starts the run (or re-attaches to the open one) and launches the coordinator session. The model rides ANTHROPIC_MODEL for
-# this one launch (cc() forwards no extra arguments on its persona path); "inherit" sets nothing.
+# Starts the run (or re-attaches to the open one) and launches the coordinator session. The model rides ANTHROPIC_MODEL and the
+# effort rides CLAUDE_CODE_EFFORT_LEVEL for this one launch (cc() forwards no extra arguments on its persona path, but it does
+# pass the environment; XACA-1836-004 measured the env var reaching the request's output_config.effort). "inherit" sets nothing.
 _kb_release_orch_coordinate() {
     local rel="${1-}" team="${2-}" name="${3-}" stage="${4-}" plan_text="${5-}" yes="${6:-0}" resume="${7:-0}" context="${8-}"
     local bf term coord run rc
@@ -31857,7 +31952,7 @@ _kb_release_orch_coordinate() {
         if (( rc == 11 )); then return 0; elif (( rc != 0 )); then return $rc; fi
         run="$_KB_O_RUN"
     fi
-    local ctx cmodel
+    local ctx cmodel ceffort
     if ! ctx=$(_kb_release_orch_prompt_ctx "$bf" "$rel" "$run" "$team" "$coord") || [[ -z "$ctx" ]]; then
         echo "✗ kb-run: cannot build the run context for $run; coordinator not launched (the run and any wave-1 dispatches already made are kept: re-run kb-run to resume it)" >&2
         return 1
@@ -31870,15 +31965,23 @@ _kb_release_orch_coordinate() {
         echo "✗ kb-run: the recorded coordinator model is not usable (${_KB_ORCH_MODEL_REASON:-empty or unreadable}); coordinator not launched" >&2
         return 2
     fi
+    # Effort follows the same rule (XACA-1836): a MISSING record (a run started before effort was recorded) or "inherit"
+    # applies nothing; anything else recorded is re-validated and an unusable value is refused.
+    ceffort=$(_kb_jq_read "$bf" '[.releases[]? | select(.id == $rel) | .orchestration.models.coordinator.effort] | first // "inherit"' --arg rel "$rel" -r 2>/dev/null) || ceffort=""
+    if [[ "$ceffort" != "inherit" ]] && ! { [[ -n "$ceffort" ]] && _kb_orch_resolve_effort "$bf" "$rel" "$ceffort"; }; then
+        echo "✗ kb-run: the recorded coordinator effort is not usable (${_KB_ORCH_EFFORT_REASON:-empty or unreadable}); coordinator not launched" >&2
+        return 2
+    fi
     _kb_build_launch_prompt "$rel" "Release coordinator: ${name:-$rel} (stage $stage)" "" "" "" 0 "{}" "$team" release-orchestrate "$plan_text" "$ctx"
     local prompt="$_KB_LAUNCH_PROMPT"
     export CC_SESSION_NAME="${rel}: ${name:-release} (coordinator)"
     if ! _kb_ensure_cc_function "kb-run"; then unset CC_SESSION_NAME; return 1; fi
-    if [[ "$cmodel" == "inherit" ]]; then
+    # A subshell scopes the exports to this one launch; "inherit" exports nothing for that setting.
+    (
+        [[ "$cmodel" != "inherit" ]] && export ANTHROPIC_MODEL="$cmodel"
+        [[ "$ceffort" != "inherit" ]] && export CLAUDE_CODE_EFFORT_LEVEL="$ceffort"
         echo -e "$prompt" | \cc
-    else
-        echo -e "$prompt" | ANTHROPIC_MODEL="$cmodel" \cc
-    fi
+    )
     local _kb_cc_rc=$?
     unset CC_SESSION_NAME
     if (( _kb_cc_rc != 0 )); then
@@ -32025,7 +32128,7 @@ _kb_release_run() {
     local release_id="${1-}" assume_yes="${2:-0}"
     if ! _kb_release_valid_token "$release_id"; then echo "Error: invalid release id: $release_id" >&2; return 2; fi
     # XACA-1548: coordinator-mode flags (kb-run passes them through after the two positionals).
-    _KB_O_MODE="" _KB_O_MAXPAR="" _KB_O_MODEL="" _KB_O_WMODEL="" _KB_O_FORCE=0 _KB_O_RUN=""
+    _KB_O_MODE="" _KB_O_MAXPAR="" _KB_O_MODEL="" _KB_O_WMODEL="" _KB_O_EFFORT="" _KB_O_FORCE=0 _KB_O_RUN=""
     _KB_O_EXCL=()
     if (( $# > 2 )); then
         shift 2
@@ -32048,6 +32151,10 @@ _kb_release_run() {
                     if [[ -z "${2-}" ]]; then echo "Error: kb-run: $1 needs a model id (an empty value is refused, never defaulted)" >&2; return 2; fi
                     if [[ "$1" == "--model" ]]; then _KB_O_MODEL="$2"; else _KB_O_WMODEL="$2"; fi
                     shift 2 ;;
+                --effort)
+                    # Validated by _kb_orch_resolve_effort with every other layer; only an empty value is refused here.
+                    if [[ -z "${2-}" ]]; then echo "Error: kb-run: --effort needs a level (an empty value is refused, never defaulted)" >&2; return 2; fi
+                    _KB_O_EFFORT="$2"; shift 2 ;;
                 *) echo "Error: kb-run: unknown release option: $1" >&2; return 2 ;;
             esac
         done

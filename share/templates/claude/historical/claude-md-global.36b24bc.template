@@ -1,0 +1,283 @@
+# Default Claude Code Guidelines
+# This file is a template. {{AITEAMFORGE_DIR}} is substituted at install time by the
+# AITeamForge installer. Do not edit the rendered copy directly.
+#
+# SIZE (XACA-1832): this file is re-sent on EVERY turn of EVERY session and subagent.
+# Keep rules here; put rationale, provenance and long procedures in the script or doc they describe.
+
+## 🔐 Git Workflow Rules
+
+### **Protected Branches**
+- `develop` — active development; **ALL PRs target `develop`**.
+- `master` — production (App Store) releases ONLY. Never open a PR to `master` except for a production release.
+
+**Direct commits to `develop`** are allowed only when ALL hold: you are on `develop`, you are NOT in a worktree (`git rev-parse --git-dir` prints `.git`), and the change is minor (docs, config, RELNOTES, small fix). Otherwise use a branch + PR.
+
+### **🌳 Git Worktree Rules**
+In a worktree (created by `kb-run` or `git worktree add`; `git rev-parse --git-common-dir` is not `.git`, or the path contains `worktrees/`):
+- The worktree's branch (e.g. `feature/xaca-0015`) IS the working branch. Commit there. Never create a "more descriptive" branch.
+- 🚨 **Do not switch branches, `git checkout develop`/`master`, or create, edit or commit files on `develop`.** A worktree that touches `develop` corrupts every other worktree and the main repo, so no change is minor enough to justify it.
+- **Run this before the first file operation of every task:**
+```bash
+B=$(git branch --show-current); if [ "$(git rev-parse --git-common-dir)" != ".git" ] && { [ "$B" = develop ] || [ "$B" = master ]; }; then echo "🚨 STOP: on $B inside a worktree"; else echo "✅ $B"; fi
+```
+- If it prints STOP, stop all work. Don't try to fix it (no checkout, no stash). Report to the user and wait.
+
+### **🤖 Subagents (Agent tool)**
+Every subagent prompt needs:
+1. **Worktree anchoring** (when you are in one): the exact directory, the branch name, and "Do NOT switch branches, do NOT checkout develop, all changes stay in this directory". Subagents inherit no git context.
+2. **Crew-tracking cleanup as the LAST instruction.** Background subagents fire no completion hook, so their LCARS avatar otherwise persists forever:
+```
+MANDATORY FINAL STEP: Before completing, you MUST run this Bash command to remove your crew avatar from the LCARS tracking panel. This is required infrastructure cleanup, not a team-boundary violation:
+python3 {{AITEAMFORGE_DIR}}/kanban-hooks/subagent-track.py remove <AGENT_TYPE> < /dev/null
+```
+`<AGENT_TYPE>` = the exact `subagent_type` you passed.
+
+### **🎛️ Multi-Ticket Work: Orchestrate, Never Accumulate**
+Context is re-sent every turn, so a session that works ticket after ticket pays for every earlier ticket on every later turn.
+- **When asked to run more than one ticket, your session is a COORDINATOR only.** Launch each ticket's full run cycle in its own fresh session: `kb-run <REL-ID> --orchestrate` for a release, which dispatches each item with `kb-dispatch`; otherwise `kb-run <ITEM-ID> --yes` per ticket. Do not implement, gate or merge the tickets in the coordinator's own context.
+- The coordinator tracks status, answers `kb-ask` questions and escalates user decisions. Workers own their ticket through merge and `kb-done`.
+
+### **Standard Development Workflow**
+
+#### 1. Start New Feature/Fix
+Main repo only (in a worktree you are already on your branch): `git checkout develop && git pull`, then `git checkout -b <prefix>/descriptive-name`.
+Prefixes: `feature/`, `bugfix/`, `refactor/`, `hotfix/` (urgent production), `chore/`.
+
+#### 2. Make Changes & Commit
+Stage specific files and commit with a descriptive message (see Commit Message Guidelines).
+
+#### 3. Push Branch
+`git push -u <remote> <branch>`
+
+#### 4. Create Pull Request
+```bash
+gh pr create --base develop --title "Feature: Clear descriptive title" --body "<description>" --assignee ehlersd
+```
+Then run `kb-pr` (moves the item to In Review), launch the gates and run the monitor (step 5).
+
+#### 5. PR Review Handoff & Monitoring
+
+All agents share one GitHub account, so `gh pr review` cannot approve. Two **different** GitHub Apps submit the formal reviews:
+
+| Gate | Bot login | Submitted via | Covers |
+|---|---|---|---|
+| Test | `ds9-tester-bot[bot]` | `gh-bot-test` | Build / lint / test |
+| Review | `ai-security-review-bot[bot]` | `gh-bot-review` | Security, architecture, quality |
+
+- **Filter reviews by exact `.user.login`, never `.user.type`.** Both are Bots, so a type filter lets one gate's APPROVE satisfy the other.
+- Pass `--repo owner/repo` to both bot commands whenever your remote is not named `origin`. Without it they exit 1 with "Could not auto-detect repository".
+- Capture a command's own exit code before piping it. `cmd | tail` reports the pipe's status, so a failed submission can read as success.
+
+Every PR passes **Test**, **Review**, the **protected-subitem sweep** (`kb-sweep` shows no `PROTECTED SUBITEMS UNRESOLVED`) and **branch freshness / mergeability**. The shipped script enforces all four. Run it; never hand-roll a polling loop.
+
+**A. Launch the gates YOURSELF — never hand the user paste-in prompts**
+```bash
+kb-run-test <ITEM-ID> --yes      # TEST gate session (posts via gh-bot-test)
+kb-run-review <ITEM-ID> --yes    # REVIEW gate session (posts via gh-bot-review)
+```
+If the diff touches UI, also run a UX gate: `kb-run-ux <ITEM-ID> --yes` where your install ships it, otherwise spawn the `lal` UX `Agent` gate and say so.
+Launch them in parallel, in one message. They carry the context, checklist, finding budget and the DO-NOT-MERGE rule. Never also spawn `Agent` gates (double-spawn). Without `--yes`, a non-tty launch refuses with rc 2. Spawn `Agent` gates (thok tester / reed reviewer) ONLY if a launcher refuses, and say so.
+
+**B. Run the monitor**
+```
+{{AITEAMFORGE_DIR}}/scripts/kb-pr-monitor --pr <N> --item <ITEM-ID> [--repo <owner>/<repo>] [--once] [--no-merge] [--merge-method squash|merge|rebase]
+  sync PR (integration<->release): --merge-method merge, never squash
+  0 GATES_PASSED (merged via kb-merge; caller still runs kb-done) — 0 is ALSO HELP (--help): read the NAME, not just $?
+ 10 RESPAWN_TESTER   11 RESPAWN_REVIEWER   12 RESPAWN_BOTH (update-branch ran)
+ 20 CONFLICT   21 UX_REOPEN   22 BLOCKED   30 PR_CLOSED   31 TIMEOUT   2 usage/env
+final stdout line: VERDICT: <NAME> pr=<N> item=<ID> detail=<...>
+```
+- **0** — already merged; run `kb-done`.
+- **10 / 11** — push fixes, re-launch only that gate (`kb-run-test` / `kb-run-review <ITEM-ID> --yes`), re-run the monitor.
+- **12** — `gh pr update-branch` ran, so both approvals are stale: re-launch BOTH gates, re-run.
+- **20** — resolve by hand (merge the base in, fix, push); `update-branch` does not fix content conflicts. `CHANGELOG.md`: **union-resolve, keep BOTH blocks**, then count occurrences and drop genuine duplicates. Re-launch BOTH gates, re-run.
+- **21** — the diff touches UI but `[UX]` was cancelled: re-open it, get a UX evaluation, re-run.
+- **22** — a gate is red or unclassifiable: read `detail=` and investigate. Never `--admin` past it.
+- **30 / 31 / 2** — stop and report to the user.
+
+**Invariants**
+- **Whoever runs a gate must NOT merge.** The creating agent merges after the monitor returns 0.
+- **Finding budget: MAX 3** non-blocking `[Review]`/`[Test]`/`[UX]` subitems per round, highest severity first; the rest go in the review body under `### Additional observations (not filed)`. Blocking findings (security, data loss, breaking change without migration, missing error handling) are never capped.
+- **Never read `reviewDecision`.** The Team plan ignores bot reviews, so it always says `REVIEW_REQUIRED`, and `BLOCKED` is the normal steady state; that is why merges use `--admin`. Measure staleness by counting commits, never by `mergeStateStatus`.
+- A rebase or force-push can re-point an old review's `commit_id` onto the new head. Treat any rewrite as a fresh round and re-launch BOTH gates. The monitor's guards and their known gaps are documented in `kb-pr-monitor`'s own comments.
+- The monitor's `sync-tap-drift` / `tap-changelog-completeness` arms are dev-team-only; in a `BLOCKED` verdict they mean you are in the framework's own repo.
+
+---
+
+## 🔒 Git Repository Boundaries
+
+Modify only your own team's repository and directories; unrequested cross-team edits cause conflicts the owning team never sees. **Reading** other repos for context is always allowed.
+
+| Team | May modify |
+|------|-----------|
+| `Freelance` | The full stack (iOS, Android, Firebase) of its assigned project, never another freelance project |
+| `Academy` | `{{AITEAMFORGE_DIR}}/` (scripts, kanban, LCARS); **the only team allowed to create or modify files in other teams' directories** |
+| `Command` | The dev-team repository: planning documents only, no code |
+| `DNS` | `${HOME}/dns-framework/` |
+
+This covers every file type: source, config, and plan docs (`docs/kanban/*.md`). Example: an iOS agent writes its `XIOS-0001_plan.md` in the iOS repo, never under `{{AITEAMFORGE_DIR}}/`.
+
+### **⛔ STOP Protocol (repository OR kanban boundary)**
+If asked to modify another team's repository, or to work an item from another team's board:
+1. **STOP**. Do not begin.
+2. Tell the user: "This belongs to the [OTHER] team, but I'm assigned to [MINE]. Please assign it to a [OTHER] agent, transfer the item to our board, or give explicit cross-team authorization for this specific change."
+3. Wait for direction.
+
+---
+
+## 🚨 Kanban Team Boundaries
+
+Work only on your own team's board items. Freelance agents work any platform item on their project's board. Before starting an item, confirm its team matches yours; if not, use the STOP Protocol above.
+
+### **🚫 Kanban Data Modification Rules**
+- All kanban operations go through the API: `kb-*` functions, the kanban MCP server, or the `/kanban` skill. Never edit `kanban-board.json`, board state files or kanban scripts directly (Academy excepted).
+- ❌ **Do not delete items or subitems.** Cancel with a reason instead: `kb-cancel <ITEM-ID>` or `kb-backlog sub cancel <subitem-id> --reason "..."`. The history is institutional knowledge.
+
+### **🔧 Academy Exception**
+Academy develops and maintains the kanban system: it may change kanban infrastructure and diagnose or fix any team's board. It may NOT implement other teams' items or use oversight to bypass boundaries for non-kanban work. ("The iOS board isn't displaying" → Academy. "Fix this iOS crash" → iOS.)
+
+---
+
+## 📝 Commit Message Guidelines
+
+```
+<type>: <short summary> (max 72 characters)
+
+- What changed
+- Why it changed
+- Side effects or considerations
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+```
+Types: `feat` `fix` `refactor` (no behaviour change) `perf` `test` `docs` `chore` `style`. Never "fixed stuff" / "updates".
+
+---
+
+## 🎯 Pull Request Guidelines
+
+Title: `<Type>: <Clear descriptive title>` (e.g. `Bugfix: Fix crash in data reload when no item selected`).
+Description sections: Summary, Changes Made (per file), Impact (files/lines), Risk Assessment (HIGH/MEDIUM/LOW), Testing Recommendations (manual + regression), Breaking Changes, Checklist (compiles, no lint warnings, follows standards, self-reviewed).
+
+---
+
+## 🚫 What NOT to Do
+
+**Don't:** push to `master` (or to `develop` from a worktree) · open PRs to `master` outside a production release · commit without a descriptive message · open a PR without a proper description · merge your own PR without the gates passing · force-push shared branches · commit secrets · skip testing before a PR · ignore SwiftLint warnings · leave commented-out code · open massive PRs (>500 lines) · switch branches inside a worktree.
+
+**Do:** branch from `develop` and target `develop` · run the worktree check at the start of every task · write clear commit messages and PR descriptions · wait for the gates before merging · test locally and run lint · keep PRs focused · update docs when needed · follow existing patterns · track multi-step work with the todo tool.
+
+---
+
+## 🎨 Code Quality Standards
+
+### **Swift Safety Rules**
+- No force unwraps (`!`): use `guard let` / `if let` / `??` with error reporting.
+- No force casts (`as!`): `guard let x = obj as? Type` with error handling.
+- No unsafe array access (`array[0]`): `array.first` with optional handling.
+- No `try!`: `do/catch` with error reporting.
+- Error pattern: `guard let` → create error → report error → `return`.
+
+### **⚠️ XcodeGen**
+**Don't run `xcodegen generate`** unless creating a new project or the user explicitly asks. It overwrites the `.xcodeproj` and loses manual build settings, schemes, file references, frameworks and capabilities. If you think regeneration is needed, ask, warn about the overwrite, and proceed only on explicit confirmation.
+
+---
+
+## 🧪 Testing Guidelines
+
+**No PR opens until:** it builds, lint passes with zero NEW warnings, unit tests pass (when appropriate), the app launches, affected features are tested manually, and the console is checked.
+
+| Platform | Lint | Tests |
+|---|---|---|
+| iOS/Swift | `swiftlint` | Cmd+U in Xcode |
+| Android/Kotlin | `./gradlew ktlintCheck` · `./gradlew lint` | `./gradlew test` |
+| Firebase/TS · JS/Node | `npm run lint` (or `npx eslint .`) | `npm test` |
+
+**Write unit tests for:** new business logic or utilities, bug fixes (regression tests), data processing and validation, API/service changes, complex conditionals. **May skip for:** pure UI/layout, config, docs, simple copy changes.
+
+---
+
+## 👀 PR Review Workflow (Reviewer's Guide)
+
+Use `gh-bot-review` (never `gh pr review`, which cannot approve same-account PRs). Always pass `--repo <owner>/<repo>`.
+
+1. **Triage:** `gh pr view <N>`, `gh pr diff <N> --stat`. Check title format, description, size (<500 lines) and target (`develop`).
+2. **Checkout:** `gh pr checkout <N>`.
+3. **Checklist:** security (no secrets, no injection) · architecture (follows patterns, DRY) · quality (no force unwraps, proper error handling) · performance (`[weak self]`, no main-thread blocking) · testing (edge cases, error paths).
+4. **Submit:** `gh-bot-review --pr <N> --repo <owner>/<repo> --event APPROVE|REQUEST_CHANGES --body "..."`. For a long review, write `/tmp/review-<N>.md` and pass `--body-file`.
+
+**Approve when:** CI passes, there are no security issues and no unjustified force unwraps, the code follows patterns, and the description is adequate. **Request changes for:** security vulnerabilities, data-loss potential, breaking changes without migration, missing error handling. **⚠️ DO NOT MERGE.** The creating agent's monitor merges.
+
+**After REQUEST_CHANGES (or APPROVE), report the verdict and stop.** Don't start a polling loop: when the author pushes fixes, `kb-pr-monitor` re-launches the gate with `--delta <sha>`, and that session re-reviews. First verify each requested change was made, then check the new fix code, skipping code already reviewed.
+
+**Non-blocking suggestions become kanban subitems, not PR comments**, one per suggestion (within the finding budget):
+`source {{AITEAMFORGE_DIR}}/kanban-helpers.sh && kb-backlog sub add <ITEM-ID> "[Review] <actionable description> (PR #<N>)"`
+Find the item ID from the launch prompt (`Kanban Item:`), else the branch name (`grep -oE '[A-Z]+-[0-9]+'`), else the PR body. Fall back to a PR comment only if none is found. These don't block the merge.
+
+**Merge** (creating agent only, after all four gates): `gh pr merge <N> --squash --delete-branch --admin`. `--admin` is required because bot reviews don't count toward branch protection. Afterwards, verify `develop` builds and update the kanban.
+
+---
+
+## 🤖 Claude-Specific Guidelines
+
+- **Plans** must include lint and unit-test steps before PR creation. Failures are never ignored without explicit user approval.
+- **PLANNING ≠ EXECUTION. Plan approval is not permission to execute.** For work needing kanban items, use `/plan-project`: research → item → subitems → plan doc → **STOP** with handoff options (DELEGATE / START NOW / TRACK ONLY / MODIFY PLAN) → wait. STOP signals: "plan this", "create kanban items for", "break this down", "delegate". GO signals: "plan AND implement", the user choosing START NOW, "go ahead" after seeing the plan, a trivial single-file fix.
+- **Todo tool:** use it for multi-step work. Mark items in progress before starting and completed immediately after.
+- **PRs:** batch related fixes. A single large feature or a critical fix can stand alone.
+- **Communication:** summarize changes, explain architectural reasoning, flag risks, suggest testing.
+- **User-only flags:** `--force` on `kb-done` and `--allow-red` on `kb-merge`. Agents never use them.
+- **Context:** warn about remaining context before starting a new task; if it is insufficient, ask the user to compact.
+
+### **💸 Subagents Cost Tokens**
+Subagents were 62.7% of measured token spend (XACA-1832 context audit); each one restarts cold and re-reads its context. Spawn one only for work that can run in parallel or would flood your own context with reading. Do sequential work and quick lookups yourself.
+
+### **🧭 Model Routing Policy**
+- **Opus 5.5** (`claude-opus-5-5`): the default for sessions, builders and release-orchestration worker lanes.
+- **Fable 5.2** (`claude-fable-5-2`): only the lead/planner/judge of multi-lane release orchestration and the hardest problems, at effort `high`. Don't go above `high` without a measured gain: gains above `high` are uneven, and Fable costs 2x Opus per token.
+- **Sonnet 5.5** (`claude-sonnet-5-5`): simple, clearly specified tasks.
+- **Haiku 5.5** (`claude-haiku-5-5`): search and log reading, as an ad-hoc subagent or model override only. Persona frontmatter stays on opus or sonnet.
+- Before switching a session's model, compact or start a fresh session: prompt caches are model-scoped, so a mid-session switch re-pays the whole context.
+
+The orchestrator's worker default moves from Fable to Opus in XACA-1836, with the lead set via `releaseConfig.orchestration.leadModel` / `leadEffort`; until that ships, check the release config rather than assuming the default.
+
+---
+
+## 🆘 Troubleshooting
+
+- **Forgot the feature branch:** `git checkout -b feature/my-work` from the current state. **Committed to develop by accident:** `git reset --soft HEAD~1`, then branch and recommit. **Conflicts:** merge `develop` into your branch, resolve, push.
+- **Bot review "not detected":** query per login and WITH `--paginate` (the endpoint pages at 30):
+  `gh api --paginate repos/{owner}/{repo}/pulls/<N>/reviews --jq '.[] | select(.user.login == "ds9-tester-bot[bot]")'` (same for `ai-security-review-bot[bot]`).
+- **Never** store `gh api` JSON in a shell variable and `echo | jq` it; control characters break parsing. Use `gh api --jq`.
+- **Manual merge:** verify APPROVED reviews from BOTH bot logins and that `kb-sweep <ITEM-ID>` shows no `PROTECTED SUBITEMS UNRESOLVED`, then `gh pr merge <N> --squash --delete-branch --admin && kb-done`.
+- **`--delete-branch` fails locally from a worktree** (the branch is checked out elsewhere), but the API merge succeeded. Check `gh pr view <N> --json state`, then `git push <remote> --delete <branch>` if needed.
+- **Bot command not loaded:** run `bash ~/.config/gh-review-bot/gh-bot-review.sh ...` or `bash ~/.config/gh-tester-bot/gh-bot-test.sh ...` directly. Both need org-specific GitHub App setup (key + config in those directories) that this tap does not provision.
+
+---
+
+## 📝 Release Notes Workflow
+
+`RELNOTES_DEV.md` is updated as work merges to develop. Copy it to `RELNOTES_QA.md` for a test build (header DEV → QA), and QA to `RELNOTES_PROD.md` for a production release (QA → PROD). **Never modify previous release entries**; add new releases at the top.
+
+```markdown
+## DEV - 1.0.0
+
+**Release Type**
+-   FEATURE | BUGFIX | HOTFIX | MAINTENANCE
+
+**Issues Resolved**
+-   Issue descriptions or NONE
+
+**New Features**
+-   Feature descriptions or NONE
+
+**Technical Improvements**
+-   Technical changes or NONE
+
+**Known Problems**
+-   Problems or "None identified in this release"
+```
+
+---
+**Maintained By:** Claude Code. Change history: `git log -- scripts/templates/tap/claude-md-global.template`.

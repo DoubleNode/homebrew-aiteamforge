@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1836: Opus 5.5 orchestrator default, coordinator effort, coordinator MODEL_MISMATCH (XACA-1836)
+- Tap files updated in this publish: `share/kanban-hooks/orchestrator_monitor.py`,`share/kanban-hooks/orchestrator_tokens.py` `share/templates/claude/claude-md-global.template`,`share/templates/claude/historical/claude-md-global.36b24bc.template` `share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 
 ## [0.21.24] - 2026-11-16
 - XACA-1835: Rewrite global CLAUDE.md template for current models (XACA-1835)
