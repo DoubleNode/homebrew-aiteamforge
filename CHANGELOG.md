@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+
+## [0.21.24] - 2026-11-16
 - XACA-1835: Rewrite global CLAUDE.md template for current models (XACA-1835)
 - Tap files updated in this publish: `share/personas/academy/agents/academy_reno_engineer_persona.md`,`share/personas/dns/agents/dns_tana_bugfix_persona.md` `share/personas/dns/agents/dns_tendi_leadrefactoring_persona.md`,`share/personas/freelance/agents/freelance_phlox_bugfix_persona.md` `share/personas/freelance/agents/freelance_reed_testing_persona.md`,`share/personas/freelance/agents/freelance_tpol_refactoring_persona.md` `share/personas/freelance/agents/freelance_tucker_release_persona.md`,`share/personas/medical/agents/medical_chase_bugfix_developer_persona.md` (+14 more). Run `brew upgrade aiteamforge` to receive them.
 
@@ -8243,7 +8245,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.23...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.24...HEAD
+[0.21.24]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.23...v0.21.24
 [0.21.23]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.22...v0.21.23
 [0.21.22]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.21...v0.21.22
 [0.21.21]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.20...v0.21.21
