@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+
+## [0.21.25] - 2026-11-17
 - XACA-1834: Batch coordinator for kb-run A,B and orchestrate-by-default (XACA-1834)
 - Tap files updated in this publish: `share/kanban-hooks/orchestrator_run_cli.py`,`share/kanban-hooks/release_orchestrator.py` `share/kanban-hooks/release_resume.py`,`share/lcars-ui/server.py` `share/templates/claude/claude-md-global.template`,`share/templates/claude/historical/claude-md-global.cc9296c.template` `share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1833: One-line kb-msg inbox notice + nahla comms triage (XACA-1833)
@@ -8251,7 +8253,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.24...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.25...HEAD
+[0.21.25]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.24...v0.21.25
 [0.21.24]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.23...v0.21.24
 [0.21.23]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.22...v0.21.23
 [0.21.22]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.21...v0.21.22
