@@ -33929,6 +33929,39 @@ _kb_msg_store() {
     echo "${AITEAMFORGE_DIR:-$HOME/dev-team}/kanban-hooks/msg-store.py"
 }
 
+# _kb_msg_host_also_args — print this machine's extra names, one per line, for
+# team_routing.py's --also (the router already slugs socket.gethostname()).
+# Never fails; prints nothing it cannot resolve.
+_kb_msg_host_also_args() {
+    local n
+    n=$(hostname -s 2>/dev/null) && [[ -n "$n" ]] && printf '%s\n' "$n"
+    if command -v scutil >/dev/null 2>&1; then
+        n=$(scutil --get ComputerName 2>/dev/null) && [[ -n "$n" ]] && printf '%s\n' "$n"
+        n=$(scutil --get LocalHostName 2>/dev/null) && [[ -n "$n" ]] && printf '%s\n' "$n"
+    fi
+    return 0
+}
+
+# _kb_msg_owner_elsewhere <team> — XACA-1857. Print the owning machine slug and
+# return 0 ONLY when ~/.aiteamforge/team-machines.json positively places <team>
+# on a machine other than this one. Every other state (no router, no map, no
+# entry, an entry naming this machine) returns 1 and prints nothing. The rules
+# live in kanban-hooks/team_routing.py, shared with lcars-health-check.sh and
+# ensure_lcars_tmux_session so the three cannot disagree.
+_kb_msg_owner_elsewhere() {
+    local team="${1:-}"
+    [[ -z "$team" ]] && return 1
+    local router
+    router="$(dirname "$(_kb_msg_store)")/team_routing.py"
+    [[ -f "$router" ]] || return 1
+    local -a also=()
+    local n
+    while IFS= read -r n; do
+        [[ -n "$n" ]] && also+=(--also "$n")
+    done < <(_kb_msg_host_also_args)
+    python3 "$router" owner-elsewhere "$team" "${also[@]}" 2>/dev/null
+}
+
 # Resolve the Tier-2 sealed client wrapper.
 #
 # XACA-1113 follow-up: the dev tree ships this at fleet-monitor/client/, but
@@ -35121,6 +35154,82 @@ print(len(d) if isinstance(d, dict) else "notdict")' "$map_path" 2>/dev/null)
         gaps=$((gaps + 1))
     fi
 
+    # ── 4b. Routing-map consistency (XACA-1857) ─────────────────────────────
+    # On 2026-11-17 M4Mini held 12KB of academy mail that had never left the box
+    # (a stray academy-lcars session made kb-msg deliver locally), and this doctor
+    # said "No gaps" on BOTH machines. kanban-hooks/team_routing.py `hygiene`
+    # cross-checks what is stored and registered HERE against team-machines.json.
+    # It is report-only: nothing is moved, re-sent or deleted.
+    #   stranded mail            -> [GAP]: undelivered mail is the channel failing.
+    #   stranded broadcasts      -> [!]:   a ledger has no read state, so it cannot be cleared.
+    #   registry entries         -> [!]:   advisory; the health gate already refuses
+    #                                      to act on them (XACA-1857 fix A).
+    # No msg-store.py at all means no Tier-1 mail can be stored here, so there
+    # is nothing to strand and the row is skipped. A store WITHOUT its sibling
+    # router is a partial install, which is a broken check ([??]).
+    local hy_router hy_out hy_kind hy_team hy_detail hy_n=0 hy_n_line hy_errf hy_registry
+    hy_registry="${AITEAMFORGE_CONFIG:-$HOME/.aiteamforge/team-paths.json}"
+    hy_router="$(dirname "$(_kb_msg_store)")/team_routing.py"
+    if [[ ! -f "$(_kb_msg_store)" ]]; then
+        :
+    elif [[ -f "$hy_router" ]] && command -v python3 >/dev/null 2>&1; then
+        local -a hy_also=()
+        while IFS= read -r hy_n_line; do
+            [[ -n "$hy_n_line" ]] && hy_also+=(--also "$hy_n_line")
+        done < <(_kb_msg_host_also_args)
+        hy_errf=$(mktemp "${TMPDIR:-/tmp}/kb-msg-hygiene.XXXXXX" 2>/dev/null) || hy_errf=/dev/null
+        if hy_out=$(python3 "$hy_router" hygiene "${hy_also[@]}" 2>"$hy_errf"); then
+            while IFS=$'\t' read -r hy_kind hy_team hy_detail; do
+                [[ -z "$hy_kind" ]] && continue
+                hy_n=$((hy_n + 1))
+                case "$hy_kind" in
+                    stranded-broadcasts)
+                        # Advisory, not a [GAP]: a broadcast ledger has no read
+                        # state, so no fix the operator runs could clear the
+                        # row, and a permanent [GAP] would teach people to
+                        # ignore the doctor (XACA-1857 review).
+                        _kb_msg_row "[!]" "broadcast ledger" "$hy_detail"
+                        _kb_msg_cont "these broadcasts may never have reached '$hy_team'; re-broadcast anything still relevant"
+                        _kb_msg_cont "the ledger has no read state, so this row stays until the file is archived by hand"
+                        ;;
+                    stranded-mail)
+                        _kb_msg_row "[GAP]" "stranded mail" "$hy_detail"
+                        _kb_msg_cont "fix: 1. read it:    python3 $(_kb_msg_store) inbox --team $hy_team --terminal <terminal>"
+                        _kb_msg_cont "     2. re-send it: kb-msg send $hy_team:<terminal> \"...\"  (this now relays to the owning machine)"
+                        _kb_msg_cont "        a re-sent message comes from YOU, so name the original sender in the text"
+                        _kb_msg_cont "     3. mark the local copy read: python3 $(_kb_msg_store) read --team $hy_team --terminal <terminal> --id <id>"
+                        gaps=$((gaps + 1))
+                        ;;
+                    registry-no-owner)
+                        _kb_msg_row "[!]" "team registry" "$hy_team: $hy_detail"
+                        _kb_msg_cont "fix: in $hy_registry, set teams.$hy_team.primary_host to the machine named above,"
+                        _kb_msg_cont "     or delete the teams.$hy_team entry if '$hy_team' does not run on this machine"
+                        ;;
+                    registry-no-board)
+                        _kb_msg_row "[!]" "team registry" "$hy_team: $hy_detail"
+                        _kb_msg_cont "fix: in $hy_registry, correct teams.$hy_team.kanban_dir, or delete the entry if '$hy_team' does not run here"
+                        ;;
+                    *)
+                        _kb_msg_row "[!]" "routing map" "$hy_team: $hy_detail"
+                        _kb_msg_cont "fix: check the '$hy_team' entry in team-machines.json against where the team really runs"
+                        ;;
+                esac
+            done <<< "$hy_out"
+            (( hy_n == 0 )) && _kb_msg_row "[ok]" "routing check" "no mail or registry entry here contradicts team-machines.json"
+        else
+            _kb_msg_row "[??]" "routing check" "team_routing.py hygiene failed to run"
+            [[ -s "$hy_errf" ]] && _kb_msg_cont "error: $(tail -n 1 "$hy_errf")"
+            _kb_msg_cont "fix: re-run it to see the full error:  python3 $hy_router hygiene"
+            _kb_msg_cont "     if the file is damaged or out of date, run  aiteamforge upgrade"
+            unknown=$((unknown + 1))
+        fi
+        [[ "$hy_errf" != /dev/null ]] && command rm -f -- "$hy_errf"
+    else
+        _kb_msg_row "[??]" "routing check" "cannot check (team_routing.py or python3 missing)"
+        _kb_msg_cont "fix: install python3, or run  aiteamforge upgrade  to restore $hy_router"
+        unknown=$((unknown + 1))
+    fi
+
     # ── 5. What is actually sitting in the mailbox right now ────────────────
     # The point of the whole channel. Reported even when everything above is
     # green, because a healthy pipeline with 30 unread messages is still a
@@ -35308,12 +35417,31 @@ _kb_msg_send() {
     local to_team="${addr%%:*}"
     local store; store=$(_kb_msg_store)
 
-    # Tier decision: same team OR target live on THIS machine => Tier 1 (local).
-    local local_ok="no"
+    # Tier decision: same team OR target live on THIS machine => Tier 1 (local),
+    # UNLESS the routing map places the target team on ANOTHER machine
+    # (XACA-1857). A live session is not proof that a team lives here: a stray
+    # `academy-lcars` on M4Mini swallowed academy mail meant for ai-sol, and the
+    # sender saw "Tier 1, local". Registration beats liveness. The map check
+    # fails open (no map, no entry, an entry naming this machine => the
+    # pre-XACA-1857 liveness gate decides), so it can only turn a local delivery
+    # into a relay, never the reverse.
+    local local_ok="no" owner_elsewhere=""
     if [[ "$to_team" == "$from_team" ]]; then
         local_ok="yes"
     else
+        owner_elsewhere=$(_kb_msg_owner_elsewhere "$to_team" 2>/dev/null || true)
         local_ok=$(python3 "$store" is-local --to "$addr" 2>/dev/null || echo "no")
+        if [[ -n "$owner_elsewhere" ]]; then
+            if [[ "$local_ok" == "yes" ]]; then
+                cat >&2 <<EOF
+kb-msg: note: a live '$to_team' session exists on THIS machine, but
+  ~/.aiteamforge/team-machines.json places '$to_team' on '$owner_elsewhere'.
+  Relaying there instead of delivering locally (XACA-1857). The local session
+  is probably stray: check it with  kb-msg who  and  tmux ls.
+EOF
+            fi
+            local_ok="no"
+        fi
     fi
 
     if [[ "$local_ok" == "yes" ]]; then

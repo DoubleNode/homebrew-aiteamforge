@@ -1050,7 +1050,58 @@ _lcars_spawn_detached() {
 }
 
 # ---------------------------------------------------------------------------
+# lcars_team_routing_py — path to kanban-hooks/team_routing.py (XACA-1857).
+# $LCARS_TEAM_ROUTING_PY wins (lcars-health-check.sh sets it from its own
+# resolved kanban-hooks dir); otherwise the portable base. Prints the path and
+# returns 0 only if the file exists.
+lcars_team_routing_py() {
+    local _ltr="${LCARS_TEAM_ROUTING_PY:-${AITEAMFORGE_DIR:-$HOME/dev-team}/kanban-hooks/team_routing.py}"
+    [[ -f "$_ltr" ]] || return 1
+    printf '%s\n' "$_ltr"
+}
+
+# lcars_host_also_names — this machine's extra names (hostname -s, scutil
+# ComputerName, scutil LocalHostName), one per line, for team_routing.py
+# --also. The router slugs socket.gethostname() itself. Never fails.
+lcars_host_also_names() {
+    local _lhn
+    _lhn=$(hostname -s 2>/dev/null) && [[ -n "$_lhn" ]] && printf '%s\n' "$_lhn"
+    if command -v scutil >/dev/null 2>&1; then
+        _lhn=$(scutil --get ComputerName 2>/dev/null) && [[ -n "$_lhn" ]] && printf '%s\n' "$_lhn"
+        _lhn=$(scutil --get LocalHostName 2>/dev/null) && [[ -n "$_lhn" ]] && printf '%s\n' "$_lhn"
+    fi
+    return 0
+}
+
+# lcars_team_owner_elsewhere <team> — XACA-1857. Print the owning machine slug
+# and return 0 ONLY when ~/.aiteamforge/team-machines.json positively places
+# <team> on another machine. Any other state (no python3, no router, no map,
+# no entry, an entry naming this machine) returns 1 and prints nothing: fail
+# open, so a caller keeps its pre-XACA-1857 behaviour. bash 3.2 safe.
+lcars_team_owner_elsewhere() {
+    local _loe_team="${1-}"
+    [[ -z "$_loe_team" ]] && return 1
+    command -v python3 >/dev/null 2>&1 || return 1
+    local _loe_router
+    _loe_router="$(lcars_team_routing_py)" || return 1
+    local _loe_args=() _loe_n
+    while IFS= read -r _loe_n; do
+        [[ -n "$_loe_n" ]] && _loe_args+=(--also "$_loe_n")
+    done <<EOF
+$(lcars_host_also_names)
+EOF
+    if [[ ${#_loe_args[@]} -gt 0 ]]; then
+        python3 "$_loe_router" owner-elsewhere "$_loe_team" "${_loe_args[@]}" 2>/dev/null
+    else
+        python3 "$_loe_router" owner-elsewhere "$_loe_team" 2>/dev/null
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # ensure_lcars_tmux_session <session_name> <tmux_socket> [working_dir]
+#
+# XACA-1857: refuses (rc 3) to create a session for a team team-machines.json
+# places on another machine. See lcars_team_owner_elsewhere.
 #
 # XACA-0983: idempotently guarantee a `<session_name>` tmux session exists on
 # `<tmux_socket>`, creating a BARE window if it does not. Does nothing else —
@@ -1107,6 +1158,26 @@ ensure_lcars_tmux_session() {
     local _ets_session="${1:?ensure_lcars_tmux_session: session_name required}"
     local _ets_socket="${2:?ensure_lcars_tmux_session: tmux_socket required}"
     local _ets_dir="${3:-${AITEAMFORGE_DIR:-$HOME/dev-team}}"
+
+    # XACA-1857: never CREATE a `<team>-lcars` session for a team the routing
+    # map (team-machines.json) places on another machine. That is how M4Mini
+    # grew a stray `academy-lcars`, which then made kb-msg deliver academy mail
+    # locally instead of relaying it to ai-sol. Team = session name minus the
+    # "-lcars" suffix. Fail open: an unresolvable router or map lets the create
+    # proceed exactly as before. Returns 3 (distinct from tmux failure's 1) so
+    # the caller can log the refusal for what it is.
+    # A caller that already resolved a declared primary_host naming THIS host
+    # passes LCARS_REGISTRY_CONFIRMS_LOCAL=<team>: the registry outranks the
+    # map (the health gate's precedence), so the map check is skipped.
+    local _ets_team="${_ets_session%-lcars}"
+    local _ets_owner=""
+    if [[ "$_ets_team" != "$_ets_session" && "${LCARS_REGISTRY_CONFIRMS_LOCAL:-}" != "$_ets_team" ]]; then
+        _ets_owner="$(lcars_team_owner_elsewhere "$_ets_team")" || _ets_owner=""
+    fi
+    if [[ -n "$_ets_owner" ]]; then
+        echo "ensure_lcars_tmux_session: refusing to create '$_ets_session': team-machines.json places '$_ets_team' on '$_ets_owner', not this machine (XACA-1857)" >&2
+        return 3
+    fi
 
     # XACA-1241-002: absolute tmux path (bare `tmux` is not on launchd's PATH).
     # Honors the caller's resolved LCARS_TMUX_BIN (health-check resolves once

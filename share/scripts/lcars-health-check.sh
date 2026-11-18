@@ -132,6 +132,11 @@ while [[ $# -gt 0 ]]; do
             echo "failing to resolve) restarts exactly as before this change — the gate can"
             echo "only ever subtract a restart, never add one. Applies identically in"
             echo "--status mode: a suppressed team shows as suppressed, not unhealthy."
+            echo ""
+            echo "Routing-map gate (XACA-1857): when primary_host is absent or malformed,"
+            echo "a ~/.aiteamforge/team-machines.json entry naming ANOTHER machine also"
+            echo "suppresses the team (positive evidence, so the gate still fails open). A"
+            echo "declared primary_host always wins over the map."
             exit 0
             ;;
         *)
@@ -337,6 +342,14 @@ if [[ -z "$_KANBAN_HOOKS_DIR" ]]; then
     done
 fi
 unset _cand _HC_CAND1 _HC_CAND2
+
+# XACA-1857: the routing-map router lives beside the other hooks. Set it from
+# the dir resolved above so the health gate and ensure_lcars_tmux_session
+# (scripts/lcars-launch-helpers.sh) consult the SAME team_routing.py. A caller
+# that already set LCARS_TEAM_ROUTING_PY (tests) wins.
+if [[ -n "$_KANBAN_HOOKS_DIR" && -z "${LCARS_TEAM_ROUTING_PY:-}" ]]; then
+    LCARS_TEAM_ROUTING_PY="${_KANBAN_HOOKS_DIR}/team_routing.py"
+fi
 
 # XACA-1254-003: NEITHER candidate contained EITHER helper file — a true
 # resolution failure, distinct from "resolved, but one helper is
@@ -1335,8 +1348,21 @@ _hc_start_lcars_server() {
     # matching this function's existing soft-fail contract.
     if [[ -n "$tmux_socket" ]]; then
         if typeset -f ensure_lcars_tmux_session >/dev/null 2>&1; then
-            if ! ensure_lcars_tmux_session "$session_name" "$tmux_socket"; then
+            local _hc_ets_rc=0 _hc_ets_confirm="" _hc_ets_err
+            # A declared primary_host naming THIS host wins over the routing
+            # map, exactly as in the sweep gate (XACA-1857 test gate, row P4).
+            [[ "${_hc_owner_state[$team]:-}" == "local" ]] && _hc_ets_confirm="$team"
+            # Keep stderr: on a genuine tmux failure it is the only diagnostic.
+            _hc_ets_err=$(LCARS_REGISTRY_CONFIRMS_LOCAL="$_hc_ets_confirm" \
+                ensure_lcars_tmux_session "$session_name" "$tmux_socket" 2>&1 >/dev/null) || _hc_ets_rc=$?
+            if [[ $_hc_ets_rc -eq 3 ]]; then
+                # XACA-1857: the routing map places this team on another
+                # machine. Normally the sweep gate already skipped it; this
+                # is the defense-in-depth refusal.
+                log "  🚫 ensure_lcars_tmux_session refused $session_name: team-machines.json places it on another machine (XACA-1857) — no tmux session created"
+            elif [[ $_hc_ets_rc -ne 0 ]]; then
                 log "  ⚠️  ensure_lcars_tmux_session failed for $session_name (socket $tmux_socket) — continuing without a tmux session"
+                [[ -n "$_hc_ets_err" ]] && log "     ${_hc_ets_err//$'\n'/ | }"
             fi
         else
             log "  ⚠️  ensure_lcars_tmux_session is not available (failed to source ${_helpers}) — tmux session will not be recreated"
@@ -2437,6 +2463,43 @@ run_health_check() {
     fi
     _hc_short_name=$(hostname -s 2>/dev/null)
 
+    # XACA-1857: routing-map ownership, resolved ONCE per sweep (one python
+    # fork for the whole roster, not one per team). The XACA-1063 gate fails
+    # open on an absent primary_host, which is how M4Mini restarted academy and
+    # created a stray `academy-lcars` although its team-machines.json said
+    # academy -> ai-sol. A map entry naming ANOTHER machine is positive
+    # foreign-host evidence, so honouring it keeps the fail-open ruling: every
+    # unreadable/absent/self-naming state leaves _hc_map_owner empty for that
+    # team. Skipped when this host's own identity is unknown (row 6): a host
+    # that cannot say who it is cannot call anything foreign.
+    typeset -A _hc_map_owner
+    _hc_map_owner=()
+    # XACA-1857: this sweep's registry verdict per team. zsh scoping is
+    # dynamic, so _hc_start_lcars_server (called from this function) reads it
+    # to tell ensure_lcars_tmux_session that a declared primary_host already
+    # claims the team for THIS host, which outranks the routing map.
+    typeset -A _hc_owner_state
+    _hc_owner_state=()
+    local _hc_mf_entry _hc_mf_t _hc_mf_o _hc_mf_x1 _hc_mf_x2 _hc_mf_x3 _hc_mf_x4 _hc_mf_lhn=""
+    local -a _hc_mf_teams _hc_mf_also
+    _hc_mf_teams=()
+    _hc_mf_also=()
+    if [[ -n "$_hc_actual_host" && -f "${LCARS_TEAM_ROUTING_PY:-}" ]] && command -v python3 &>/dev/null; then
+        for _hc_mf_entry in "${LCARS_SERVERS[@]}"; do
+            IFS=':' read -r _hc_mf_x1 _hc_mf_x2 _hc_mf_t _hc_mf_x3 _hc_mf_x4 <<< "$_hc_mf_entry"
+            [[ -n "$_hc_mf_t" ]] && _hc_mf_teams+=("$_hc_mf_t")
+        done
+        command -v scutil &>/dev/null && _hc_mf_lhn=$(scutil --get LocalHostName 2>/dev/null)
+        [[ -n "$_hc_short_name" ]] && _hc_mf_also+=(--also "$_hc_short_name")
+        [[ -n "$_hc_scutil_name" ]] && _hc_mf_also+=(--also "$_hc_scutil_name")
+        [[ -n "$_hc_mf_lhn" ]] && _hc_mf_also+=(--also "$_hc_mf_lhn")
+        if [[ ${#_hc_mf_teams[@]} -gt 0 ]]; then
+            while read -r _hc_mf_t _hc_mf_o; do
+                [[ -n "$_hc_mf_t" && -n "$_hc_mf_o" ]] && _hc_map_owner[$_hc_mf_t]="$_hc_mf_o"
+            done < <(python3 "$LCARS_TEAM_ROUTING_PY" owners-elsewhere "${_hc_mf_teams[@]}" "${_hc_mf_also[@]}" 2>/dev/null)
+        fi
+    fi
+
     # XACA-0706: one ps sweep up front — map every live LCARS server's actual
     # bound port by team, so the loop can catch a server bound to the wrong port
     # (the XACA-0613 refresh-gap) before the registry-port health check masks it.
@@ -2481,6 +2544,16 @@ run_health_check() {
         # SUBTRACT a restart — every branch except "foreign" falls straight
         # through to the unchanged pre-XACA-1063 sweep below.
         _hc_ownership=$(_hc_team_ownership_state "$team" "$_hc_actual_host" "$_hc_scutil_name" "$_hc_short_name")
+        _hc_owner_state[$team]="$_hc_ownership"
+        # XACA-1857: a registry with NO positive owner claim (absent or
+        # malformed primary_host) defers to the routing map when the map names
+        # another machine. A declared primary_host (local or foreign) still
+        # wins: the map only fills the gap the registry left open.
+        if [[ ( "$_hc_ownership" == "absent" || "$_hc_ownership" == "malformed" ) && -n "${_hc_map_owner[$team]:-}" ]]; then
+            log "🚫 $team:$local_port - primary_host is ${_hc_ownership}, but team-machines.json places '$team' on '${_hc_map_owner[$team]}', this host is '$_hc_actual_host' — SUPPRESSING restart (not this host's team, XACA-1857 routing-map gate)"
+            ((foreign++))
+            continue
+        fi
         case "$_hc_ownership" in
             foreign)
                 # Row 3: positive foreign-host claim — suppress. Do not
