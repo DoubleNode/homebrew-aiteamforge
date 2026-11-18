@@ -16453,19 +16453,70 @@ _kb_orch_resolve_effort() {
     return 0
 }
 
+# _kb_orch_parametric_family <team> -> the shared script family of a PARAMETRIC team (XACA-1877), rc 1 otherwise.
+# A freelance team id is freelance-<group>-<project>, but no per-team scripts exist: every project's terminals are
+# built by the ONE shared set freelance/scripts/freelance-<terminal>-startup.sh, driven by freelance-startup.sh
+# <GROUP> <PROJECT>. Bare "freelance" is not parametric (it has no project). Main Event is not parametric either:
+# it has its own mainevent-<terminal>-startup.sh, whose USE_WORKTREE block still refuses (follow-up, see CHANGELOG).
+_kb_orch_parametric_family() {
+    [[ "${1-}" =~ ^freelance-[a-z0-9][a-z0-9_-]*$ ]] && { echo freelance; return 0; }
+    return 1
+}
+
 # _kb_orch_startup_script <team> <terminal> -> path of that terminal's startup script (rc 1 if none).
 # KB_STARTUP_SCRIPTS_DIR (tests) is exclusive when set; otherwise the installed copy wins over the repo copy,
-# because the installed one is what actually built the terminal's windows.
+# because the installed one is what actually built the terminal's windows. A team-specific script always wins;
+# a parametric team (XACA-1877) then falls back to its family's shared <family>-<terminal>-startup.sh.
 _kb_orch_startup_script() {
-    local team="${1-}" term="${2-}" d f="${1-}-${2-}-startup.sh"
-    if [[ -n "${KB_STARTUP_SCRIPTS_DIR-}" ]]; then
-        [[ -f "$KB_STARTUP_SCRIPTS_DIR/$f" ]] && { echo "$KB_STARTUP_SCRIPTS_DIR/$f"; return 0; }
-        return 1
-    fi
-    for d in "${AITEAMFORGE_DIR:+$AITEAMFORGE_DIR/$team/scripts}" "$HOME/dev-team/$team/scripts"; do
-        [[ -n "$d" && -f "$d/$f" ]] && { echo "$d/$f"; return 0; }
+    local team="${1-}" term="${2-}" d n fam="" f
+    fam=$(_kb_orch_parametric_family "$team") || fam=""
+    for n in "$team" ${fam:+"$fam"}; do
+        f="${n}-${term}-startup.sh"
+        if [[ -n "${KB_STARTUP_SCRIPTS_DIR-}" ]]; then
+            [[ -f "$KB_STARTUP_SCRIPTS_DIR/$f" ]] && { echo "$KB_STARTUP_SCRIPTS_DIR/$f"; return 0; }
+            continue
+        fi
+        for d in "${AITEAMFORGE_DIR:+$AITEAMFORGE_DIR/$n/scripts}" "$HOME/dev-team/$n/scripts"; do
+            [[ -n "$d" && -f "$d/$f" ]] && { echo "$d/$f"; return 0; }
+        done
     done
     return 1
+}
+
+# _kb_orch_parametric_values <family> <team>   (XACA-1877)
+# A shared family script cannot say where ITS project lives: its SESSION_DIRECTORY is $FREELANCE_PROJECT_DIR, set
+# by the launcher. The team registry can: teams[<team>].working_dir is the project container. freelance-startup.sh
+# opens /Users/Shared/Development/<G>/<P>/develop, which equals <working_dir>/develop only BY CONVENTION (kb-freelance
+# --working-dir accepts any path; every live fleet entry measured 2026-11-18 follows it). The lane therefore uses
+# the registry, the one source keyed by team id, and refuses when <working_dir>/develop is missing. Read the registry
+# (never split the team id: project ids carry '-'), require a plain absolute path, and pick the INSTALLED
+# kanban-helpers.sh (the family script names none).
+# Publishes $_KB_ORCH_PARAM_DIR / _HELPERS; rc 1 + $_KB_ORCH_BOOT_REASON on refusal.
+_kb_orch_parametric_values() {
+    local fam="${1-}" team="${2-}" wd h
+    _KB_ORCH_PARAM_DIR="" _KB_ORCH_PARAM_HELPERS=""
+    if ! wd=$(_kb_overlay_lookup "$team" working_dir) || [[ -z "$wd" ]]; then
+        _KB_ORCH_BOOT_REASON="${fam} team ${team} has no working_dir in the team registry ($(_kb_overlay_config_path))"
+        return 1
+    fi
+    if [[ "$wd" != /* || "$wd" == *[\'\"\$\`\\]* || "$wd" == *$'\n'* ]]; then
+        _KB_ORCH_BOOT_REASON="registry working_dir ${wd} is not a plain absolute path (unsupported characters)"
+        return 1
+    fi
+    if [[ ! -d "$wd/develop" ]]; then
+        _KB_ORCH_BOOT_REASON="${wd}/develop (the ${fam} project worktree) is not a directory"
+        return 1
+    fi
+    for h in "${AITEAMFORGE_DIR:+$AITEAMFORGE_DIR/kanban-helpers.sh}" "$HOME/dev-team/kanban-helpers.sh"; do
+        [[ -n "$h" && -f "$h" ]] && break
+        h=""
+    done
+    if [[ -z "$h" ]]; then
+        _KB_ORCH_BOOT_REASON="no installed kanban-helpers.sh (\$AITEAMFORGE_DIR or ~/dev-team)"
+        return 1
+    fi
+    _KB_ORCH_PARAM_DIR="$wd/develop" _KB_ORCH_PARAM_HELPERS="$h"
+    return 0
 }
 
 # _kb_orch_assignment <script> <VAR> -> the last top-level VAR="..." value, with $HOME / $AITEAMFORGE_DIR expanded.
@@ -16491,15 +16542,25 @@ _kb_orch_assignment() {
 #   . ~/.zshrc_${SESSION_TYPE}_${SESSION_NAME}
 #   . $KANBAN_HELPERS
 #   . <...>-banner.sh <args>          (decorative; NOT replayed; must not chain anything)
-# Anything else (the freelance/mainevent wt-project/wt-dev block, a missing step, an altered step) refuses.
+# Anything else (the mainevent wt-project/wt-dev block, a missing step, an altered step) refuses.
+# PARAMETRIC teams (XACA-1877, _kb_orch_parametric_family) run the shared family script, whose form is:
+#   cd "$SESSION_DIRECTORY" ; . ~/.zshrc_${SESSION_TYPE}_${SESSION_NAME} ; [. $KANBAN_HELPERS] ; . <banner>
+#   if [ -n "$GROUPID" ] && [ -n "$PROJECTID" ]; then  wt-project freelance ; wt-dev ; onscreen  fi
+# The guarded block must be EXACTLY those three steps and is NOT replayed: wt-project + wt-dev only export the WT_*
+# worktree context and cd to the project's develop/ worktree (the lane cds there directly), and onscreen is display
+# only; kb-run derives its repo and team itself. Identity is <family>-<terminal>; DIR/helpers come from the registry.
 # On success publishes $_KB_ORCH_BOOT_DIR / _TYPE / _NAME / _HELPERS; on refusal rc 1 + $_KB_ORCH_BOOT_REASON.
 _kb_orch_startup_core() {
-    local script="${1-}" team="${2-}" term="${3-}"
+    local script="${1-}" team="${2-}" term="${3-}" fam=""
     _KB_ORCH_BOOT_DIR="" _KB_ORCH_BOOT_TYPE="" _KB_ORCH_BOOT_NAME="" _KB_ORCH_BOOT_HELPERS="" _KB_ORCH_BOOT_REASON=""
+    fam=$(_kb_orch_parametric_family "$team") || fam=""
     if [[ ! -f "$script" ]]; then
-        _KB_ORCH_BOOT_REASON="no startup script ${team}-${term}-startup.sh"
+        _KB_ORCH_BOOT_REASON="no startup script ${team}-${term}-startup.sh${fam:+ (nor shared ${fam}-${term}-startup.sh)}"
         return 1
     fi
+    # Family rules never apply to a parametric team's OWN <team>-<term>-startup.sh (which _kb_orch_startup_script
+    # prefers): that script is judged by the core rules and its own values, exactly as on develop (XACA-1877-015).
+    [[ "${script##*/}" == "${team}-${term}-startup.sh" ]] && fam=""
     if ! grep -qE '^setup_window\(\)[[:space:]]*\{' "$script"; then
         _KB_ORCH_BOOT_REASON="$(basename "$script") defines no setup_window()"
         return 1
@@ -16510,8 +16571,10 @@ _kb_orch_startup_core() {
     local re_sleep='^sleep [0-9.]+$' re_local='^local [A-Za-z_][A-Za-z0-9_ ]*$'
     local re_q='^_[A-Z_]+_Q=[$][(]_xaca1229_q "[$][A-Z_]+"[)]$'
     local re_banner='^[.] [^;&|]*-banner[.]sh( [^;&|]*)?$'
-    local -a payloads
-    payloads=()
+    local -a payloads guarded
+    payloads=() guarded=()
+    # The family guard, matched as an exact string (never a pattern). in_g: inside it; seen_g: it appeared.
+    local g_open='if [ -n "$GROUPID" ] && [ -n "$PROJECTID" ]; then' in_g=0 seen_g=0
     body=$(awk '/^setup_window\(\)[[:space:]]*\{/ { f = 1; next } f && /^}/ { exit } f { print }' "$script")
     while IFS= read -r line; do
         line="${line#"${line%%[![:space:]]*}"}"
@@ -16520,20 +16583,50 @@ _kb_orch_startup_core() {
         [[ "$line" =~ $re_sleep ]] && continue
         [[ "$line" =~ $re_local ]] && continue
         [[ "$line" =~ $re_q ]] && continue
+        if [[ -n "$fam" ]] && (( ! in_g && ! seen_g )) && [[ "$line" == "$g_open" ]]; then
+            in_g=1 seen_g=1
+            continue
+        fi
+        if (( in_g )) && [[ "$line" == "fi" ]]; then
+            in_g=0
+            continue
+        fi
         if [[ "$line" == "$pre"*"$suf" ]]; then
             line="${line#"$pre"}"
-            payloads+=("${line%"$suf"}")
+            if (( in_g )); then guarded+=("${line%"$suf"}"); else payloads+=("${line%"$suf"}"); fi
             continue
         fi
         _KB_ORCH_BOOT_REASON="setup_window has a step beyond the core form: ${line}"
         return 1
     done <<<"$body"
-    if (( ${#payloads[@]} != 4 )); then
-        _KB_ORCH_BOOT_REASON="setup_window has ${#payloads[@]} send-keys steps, the core form has 4"
+    if (( in_g )); then
+        _KB_ORCH_BOOT_REASON="setup_window has an unterminated ${fam} guarded block"
         return 1
     fi
-    local p1 p2 p3 p4
-    p1="${payloads[@]:0:1}" p2="${payloads[@]:1:1}" p3="${payloads[@]:2:1}" p4="${payloads[@]:3:1}"
+    # Element-wise (never a joined string), so re-tokenised steps like "wt-project" / "freelance wt-dev" cannot match.
+    if (( seen_g )) && { (( ${#guarded[@]} != 3 )) || [[ "${guarded[@]:0:1}" != "wt-project ${fam}" ||
+            "${guarded[@]:1:1}" != "wt-dev" || "${guarded[@]:2:1}" != "onscreen" ]]; }; then
+        _KB_ORCH_BOOT_REASON="the ${fam} guarded block is not exactly wt-project ${fam} / wt-dev / onscreen: ${guarded[*]-}"
+        return 1
+    fi
+    local p1 p2 p3 p4 bstep=4
+    if [[ -n "$fam" ]]; then
+        # The family form has no kanban-helpers step; one is tolerated in the core position (3 of 4).
+        if (( ${#payloads[@]} == 4 )) && [[ "${payloads[@]:2:1}" == '. $KANBAN_HELPERS' ]]; then
+            payloads=("${payloads[@]:0:2}" "${payloads[@]:3:1}")
+        fi
+        if (( ${#payloads[@]} != 3 )); then
+            _KB_ORCH_BOOT_REASON="setup_window has ${#payloads[@]} send-keys steps, the ${fam} form has 3 (4 with . \$KANBAN_HELPERS)"
+            return 1
+        fi
+        p1="${payloads[@]:0:1}" p2="${payloads[@]:1:1}" p3='. $KANBAN_HELPERS' p4="${payloads[@]:2:1}" bstep=3
+    else
+        if (( ${#payloads[@]} != 4 )); then
+            _KB_ORCH_BOOT_REASON="setup_window has ${#payloads[@]} send-keys steps, the core form has 4"
+            return 1
+        fi
+        p1="${payloads[@]:0:1}" p2="${payloads[@]:1:1}" p3="${payloads[@]:2:1}" p4="${payloads[@]:3:1}"
+    fi
     case "$p1" in
         'cd $SESSION_DIRECTORY'|'cd \"$SESSION_DIRECTORY\"'|'cd $_SESSION_DIRECTORY_Q') ;;
         *) _KB_ORCH_BOOT_REASON="step 1 is not the core cd: ${p1}"; return 1 ;;
@@ -16545,19 +16638,32 @@ _kb_orch_startup_core() {
         _KB_ORCH_BOOT_REASON="step 3 is not kanban-helpers: ${p3}"; return 1
     fi
     if [[ ! "$p4" =~ $re_banner || "$p4" == *'$('* || "$p4" == *'`'* ]]; then
-        _KB_ORCH_BOOT_REASON="step 4 is not a plain banner line: ${p4}"; return 1
+        _KB_ORCH_BOOT_REASON="step ${bstep} is not a plain banner line: ${p4}"; return 1
     fi
     local dir stype sname helpers
-    dir=$(_kb_orch_assignment "$script" SESSION_DIRECTORY) &&
-        stype=$(_kb_orch_assignment "$script" SESSION_TYPE) &&
-        sname=$(_kb_orch_assignment "$script" SESSION_NAME) &&
-        helpers=$(_kb_orch_assignment "$script" KANBAN_HELPERS) || {
-        _KB_ORCH_BOOT_REASON="cannot read SESSION_DIRECTORY/SESSION_TYPE/SESSION_NAME/KANBAN_HELPERS as plain values"
-        return 1
-    }
-    if [[ "$stype" != "$team" || "$sname" != "$term" ]]; then
-        _KB_ORCH_BOOT_REASON="script identity ${stype}-${sname} is not ${team}-${term}"
-        return 1
+    if [[ -n "$fam" ]]; then
+        if ! stype=$(_kb_orch_assignment "$script" SESSION_TYPE) || ! sname=$(_kb_orch_assignment "$script" SESSION_NAME); then
+            _KB_ORCH_BOOT_REASON="cannot read SESSION_TYPE/SESSION_NAME as plain values"
+            return 1
+        fi
+        if [[ "$stype" != "$fam" || "$sname" != "$term" ]]; then
+            _KB_ORCH_BOOT_REASON="script identity ${stype}-${sname} is not ${fam}-${term} (shared script of ${team})"
+            return 1
+        fi
+        _kb_orch_parametric_values "$fam" "$team" || return 1
+        dir="$_KB_ORCH_PARAM_DIR" helpers="$_KB_ORCH_PARAM_HELPERS"
+    else
+        dir=$(_kb_orch_assignment "$script" SESSION_DIRECTORY) &&
+            stype=$(_kb_orch_assignment "$script" SESSION_TYPE) &&
+            sname=$(_kb_orch_assignment "$script" SESSION_NAME) &&
+            helpers=$(_kb_orch_assignment "$script" KANBAN_HELPERS) || {
+            _KB_ORCH_BOOT_REASON="cannot read SESSION_DIRECTORY/SESSION_TYPE/SESSION_NAME/KANBAN_HELPERS as plain values"
+            return 1
+        }
+        if [[ "$stype" != "$team" || "$sname" != "$term" ]]; then
+            _KB_ORCH_BOOT_REASON="script identity ${stype}-${sname} is not ${team}-${term}"
+            return 1
+        fi
     fi
     if [[ ! "$stype" =~ ^[A-Za-z0-9_-]+$ || ! "$sname" =~ ^[A-Za-z0-9_-]+$ ]]; then
         _KB_ORCH_BOOT_REASON="SESSION_TYPE/SESSION_NAME contain unsupported characters"
