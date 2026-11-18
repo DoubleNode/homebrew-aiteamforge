@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1806: Self-bootstrap kb-* helpers in Claude Code snapshot shells (XACA-1806)
+- Tap files updated in this publish: `share/scripts/kb-cr.sh`,`share/scripts/kb-release-config-validate.sh` `share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1814: Guard rendered CLAUDE.md gate launchers; fix planner handoff (XACA-1814)
 - Tap files updated in this publish: `share/skills/Project Planner/SKILL.md`,`share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1845: Headless kb-run --yes drives the ticket instead of stopping at approval (XACA-1845)

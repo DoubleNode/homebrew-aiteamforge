@@ -22,6 +22,100 @@
 # ─────────────────────────────────────────────────────────────────────────────
 AITEAMFORGE_DIR="${AITEAMFORGE_DIR:-}"
 
+# ─────────────────────────────────────────────────────────────────────────────
+# XACA-1806: self-bootstrap guard for snapshot-shaped shells
+#
+# PROBLEM: Claude Code's `!` commands (and its Bash tool) run in a shell built
+# from a SNAPSHOT of the user's interactive shell. That snapshot keeps every
+# function whose name does NOT start with `_` and drops every one that does,
+# plus every non-exported variable. So kb-merge, kb-sweep, ... arrive intact
+# but the _kb_* helpers they call do not, and the first private call dies with
+# "command not found: _kb_detect_context" (or _kb_ensure_jq, ...).
+#
+# FIX: every public kb-* entry point starts with
+#     if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then
+#         kb_ensure_helpers_loaded || return $?; fi
+# (the presence test keeps harnesses that eval ONE extracted kb-* body working;
+# in a snapshot shell the guard is always there, because it is public too)
+# The guard's name has no leading underscore, so it survives the snapshot. It
+# finds this file through kb_helpers_path, a public one-line printer generated
+# at source time with THIS file's absolute path baked in as a literal, because a
+# variable holding the path would be dropped with the rest.
+#
+#   * Fast path: the sentinel _kb_helpers_loaded_sentinel (defined at the very
+#     END of this file) exists -> return 0. One builtin, no fork.
+#   * Otherwise: source the baked path ONCE, quietly, with
+#     _KB_HELPERS_RELOADING set function-locally so the kb-cr /
+#     kb-release-config-validate function-presence guards re-source too (their
+#     PUBLIC functions survived the snapshot, their _kb_cr_* helpers did not).
+#   * No recursion: _KB_HELPERS_BOOTSTRAPPING is set (plain, never exported)
+#     for the whole duration of ANY source of this file — set right below,
+#     cleared at the end — so a kb-* call made while the file is still loading
+#     never tries to load it again.
+#   * Re-sourcing from inside the running kb-* function is safe: zsh and bash
+#     both execute a private copy of a function body, so redefining it mid-call
+#     does not disturb the caller.
+#
+# GOTCHAS: the path capture MUST stay at the top level of this file (zsh's
+# ${(%):-%x} only names the sourced file there). The guard must never call a
+# _-prefixed function — those are exactly what is missing when it runs.
+# Ratchet: tests/test-xaca-1806-snapshot-bootstrap.sh fails if any public
+# kb-* definition does not call the guard first.
+# ─────────────────────────────────────────────────────────────────────────────
+_KB_HELPERS_BOOTSTRAPPING=1
+
+# _kb_bs_define <absolute path>
+# Source-time only. Generates the public one-line path printer kb_helpers_path
+# with <path> baked in as a quoted literal. The eval lives INSIDE this function
+# so the file's top level stays plain for the XACA-1207 top-level scanner (the
+# tap co-change guard), and kb_ensure_helpers_loaded below stays an ordinary,
+# parity-checked definition; only this printer is dynamic.
+_kb_bs_define() {
+    local _kb_bs_q
+    _kb_bs_q="$(printf '%q' "${1-}")"
+    eval "kb_helpers_path() { printf '%s\\n' ${_kb_bs_q}; }"
+}
+
+# kb_ensure_helpers_loaded — see the XACA-1806 header above. Must never call a
+# _-prefixed function: those are exactly what is missing when it runs.
+kb_ensure_helpers_loaded() {
+    if typeset -f _kb_helpers_loaded_sentinel >/dev/null 2>&1; then
+        return 0
+    fi
+    if [[ -n "${_KB_HELPERS_BOOTSTRAPPING-}" ]]; then
+        return 0
+    fi
+    local _kb_eh_path=""
+    if typeset -f kb_helpers_path >/dev/null 2>&1; then
+        _kb_eh_path="$(kb_helpers_path)"
+    fi
+    if [[ -z "$_kb_eh_path" || ! -r "$_kb_eh_path" ]]; then
+        printf '%s\n' "kb: kanban helpers are not fully loaded in this shell and ${_kb_eh_path:-their path} is missing or unreadable - source kanban-helpers.sh" >&2
+        return 1
+    fi
+    local _KB_HELPERS_RELOADING=1
+    local _KB_HELPERS_BOOTSTRAPPING=1
+    unset _AITEAMFORGE_PATHS_LOADED
+    source "$_kb_eh_path" >/dev/null 2>&1
+    if ! typeset -f _kb_helpers_loaded_sentinel >/dev/null 2>&1; then
+        printf '%s\n' "kb: re-sourcing $_kb_eh_path did not finish loading the kanban helpers - source it manually to see the error" >&2
+        return 1
+    fi
+    return 0
+}
+
+if [[ -n "${ZSH_VERSION-}" ]]; then
+    _kb_bs_self="${${(%):-%x}:a}"
+else
+    _kb_bs_self="${BASH_SOURCE[0]-}"
+    case "$_kb_bs_self" in
+        ''|/*) ;;
+        *) _kb_bs_self="${PWD%/}/${_kb_bs_self}" ;;
+    esac
+fi
+_kb_bs_define "$_kb_bs_self"
+unset _kb_bs_self
+
 # Configuration
 # Legacy centralized path (kept for reference, no longer used)
 # KANBAN_DIR="${AITEAMFORGE_DIR}/kanban"
@@ -726,6 +820,7 @@ _kb_detect_context() {
 # template had no way to set context without tmux other than exporting
 # KB_TEAM/KB_TERMINAL by hand.
 kb-context-set() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     if [[ -z "${1-}" ]]; then
         cat <<'USAGE'
 Usage: kb-context-set <team> [<terminal>]
@@ -759,6 +854,7 @@ USAGE
 # entirely absent from the template — a tmux-less shell that failed context
 # resolution had no diagnostic surfaced to it beyond a raw "ERROR:ERROR" tuple.
 kb-context-show() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local context source
 
     # Re-walk the chain to identify the producing layer (subshell calls below
@@ -911,6 +1007,7 @@ _kb_terminals_board_file() {
 }
 
 kb-terminals() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local sub="${1-}"
     [[ $# -gt 0 ]] && shift
 
@@ -5244,6 +5341,7 @@ _kb_log_activity() {
 #   awaiting-answer is set by kb-ask while it blocks on the coordinator (XACA-1545).
 # Note: For paused status, prefer kb-pause "reason" which stores the reason and previous status
 kb-status() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local task_status="$1"
     local valid_statuses=("paused" "ready" "planning" "coding" "testing" "commit" "pr_review" "awaiting-answer")
 
@@ -5290,6 +5388,7 @@ kb-status() {
 # Set current task description
 # Usage: kb-task "description"
 kb-task() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local task="$1"
 
     if [[ -z "$task" ]]; then
@@ -5318,6 +5417,7 @@ kb-task() {
 # Clear window from board (removes it entirely)
 # Usage: kb-clear
 kb-clear() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     _kb_remove_window
     echo "Window cleared from board"
 }
@@ -5325,6 +5425,7 @@ kb-clear() {
 # Shortcut: Start planning a task
 # Usage: kb-plan "task description"
 kb-plan() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local task="$1"
     if [[ -z "$task" ]]; then
         echo "Usage: kb-plan \"task description\""
@@ -5338,24 +5439,28 @@ kb-plan() {
 # Shortcut: Move to coding (keeps current task)
 # Usage: kb-code
 kb-code() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     kb-status "coding"
 }
 
 # Shortcut: Move to testing
 # Usage: kb-test
 kb-test() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     kb-status "testing"
 }
 
 # Shortcut: Move to commit
 # Usage: kb-commit
 kb-commit() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     kb-status "commit"
 }
 
 # Shortcut: Move to PR review
 # Usage: kb-pr
 kb-pr() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local _kb_pr_rc=0
     kb-status "pr_review" || _kb_pr_rc=$?
     # XACA-1479-003: apply a recorded manual CI priority to the (now existing) PR.
@@ -5799,6 +5904,7 @@ _kb_ci_priority_pr_hook() {
 # Records ciPriority on the local item and sets/clears the ci-priority:* label on the
 # ticket's open PR. `normal` clears. Never derived from the kanban `priority` field.
 kb-ci-priority() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local value="${1-}" explicit="${2-}" show=false
     case "$value" in
         -h|--help)
@@ -6500,6 +6606,7 @@ if bad:
 #   0 — PR merged (and branch cleanup completed or was already done)
 #   1 — merge refused (required-checks guard, bad flags) or failed (gh's stderr is preserved)
 kb-merge() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local pr="" strategy="" item="" _npos=0 allow_red="" allow_red_set=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -6679,6 +6786,7 @@ kb-merge() {
 # Backward-compatibility alias - calls kb-pause
 # Note: "blocked" is being renamed to "paused" to free up "blocked" for dependency system
 kb-block() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     echo "⚠️  DEPRECATED: kb-block is now kb-pause (blocked → paused)"
     echo "   The command still works, but please update your muscle memory!"
     echo ""
@@ -6690,6 +6798,7 @@ kb-block() {
 # Backward-compatibility alias - calls kb-resume
 # Note: "blocked/unblock" is being renamed to "paused/resume"
 kb-unblock() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     echo "⚠️  DEPRECATED: kb-unblock is now kb-resume (unblock → resume)"
     echo "   The command still works, but please update your muscle memory!"
     echo ""
@@ -6702,6 +6811,7 @@ kb-unblock() {
 # Also persists paused state to backlog item for survival across terminal restarts
 # Note: PAUSED = external wait (manual resume). Different from future dependency-based blocking.
 kb-pause() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local reason="${1-}"
 
     if [[ -z "$reason" ]]; then
@@ -8223,6 +8333,7 @@ _kb_reconcile_inprogress() {
 #   --all-teams    scan every team registered in team-paths.json
 #   --json         emit the raw JSON array (or {team: [...]} map for --all-teams)
 kb-reconcile-inprogress() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     _kb_ensure_jq || return 1
 
     local target_team="" all_teams=0 emit_json=0
@@ -8338,6 +8449,7 @@ USAGE
 #   --json         emit the raw resume-manifest JSON: a flat array for the
 #                  single-team case, a {team: [...]} map for --all-teams
 kb-recover() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     _kb_ensure_jq || return 1
 
     local target_team="" all_teams=0 emit_json=0
@@ -8616,6 +8728,7 @@ _kb_resume_rebind() {
 # With an ID (XACA-0778-004): re-binds an ORPHANED in_progress item/subitem
 #   to THIS live window instead -- see _kb_resume_rebind above.
 kb-resume() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     if [[ $# -gt 0 ]]; then
         _kb_resume_rebind "$@"
         return $?
@@ -8931,6 +9044,7 @@ _kb_finding_severity_of() {
 # Returns 0 if all subitems are completed or cancelled (ready to close)
 # Returns 1 if any subitems are still todo or in_progress (not ready)
 kb-sweep() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     _kb_ensure_jq || return 1
 
     local context team terminal window_name board_file window_id
@@ -9705,6 +9819,7 @@ kb-sweep() {
 # If item-id is provided, marks that item as completed
 # Otherwise, marks the item currently being worked on as completed
 kb-done() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local context team terminal window_name board_file window_id
     context=$(_kb_detect_context)
     team="${context%%:*}"
@@ -10153,6 +10268,7 @@ _kb_protected_cancel_guard() {
 # the target from activeWindows the way kb-done still does (that behaviour
 # change for kb-done is a separate ticket, XACA-0933; do not touch it here).
 kb-cancel() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     # XACA-0886-032 (round-3 review, defense-in-depth): reset the audit flag
     # unconditionally at entry. Every guard call in this function already
     # runs unconditionally (so the guard's own first line resets it before
@@ -10572,6 +10688,7 @@ kb-cancel() {
 # Stop working on the current item/subitem without completing it
 # Usage: kb-stop-working
 kb-stop-working() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local context team terminal window_name board_file window_id
     context=$(_kb_detect_context)
     team="${context%%:*}"
@@ -10653,6 +10770,7 @@ kb-stop-working() {
 # Unified backlog management
 # Usage: kb-backlog <command> [args...]
 kb-backlog() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     _kb_ensure_jq || return 1
 
     local cmd="$1"
@@ -13831,6 +13949,7 @@ alias kb-backlog-remove='kb-backlog remove'
 
 # Import external issues from JIRA, GitHub, Monday.com
 kb-import() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local external_id="$1"
     shift
 
@@ -14303,6 +14422,7 @@ _kb_require_release() {
 
 # Pick a task from backlog and mark it as active (simple assignment)
 kb-pick() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     _kb_ensure_jq || return 1
 
     local selector="$1"
@@ -15468,6 +15588,7 @@ _kb_batch_run() {
 
 # Run a task from backlog - launch Claude Code with todo plan and worktree setup
 kb-run() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     _kb_ensure_jq || return 1
     # XACA-1834: a list (kb-run A,B or kb-run A B) is a batch coordinator; one selector runs below as before.
     if _kb_item_list_args "$@"; then _kb_batch_run "$@"; return $?; fi
@@ -16509,6 +16630,7 @@ _kb_dispatch_refuse() {
 # --json prints exactly one object (the XACA-1546 ledger contract):
 #   {item, terminal, session, window, model, run, outcome, reason, observed, ts}
 kb-dispatch() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local item="" terminal="" run="" team="" cli_model="" coord="" deadline="${KB_DISPATCH_DEADLINE:-90}" want_json=0 resume=0
     if [[ "${1-}" == "-h" || "${1-}" == "--help" || $# -eq 0 ]]; then
         echo "Usage: kb-dispatch <ITEM> --terminal <name> --run <RUN-ID> [--team T] [--model M|inherit]"
@@ -16771,6 +16893,7 @@ kb-dispatch() {
 # Usage: kb-work <id>
 # Like kb-run but doesn't create worktree/branch - works in current directory
 kb-work() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     _kb_ensure_jq || return 1
     # XACA-1834: kb-work* runs in THIS session, so a list is refused (use kb-run).
     if _kb_item_list_args "$@"; then _kb_work_list_refuse kb-work; return $?; fi
@@ -18162,6 +18285,7 @@ _kb_build_review_prompt() {
 # Usage: kb-run-review <id>
 # Like kb-run but launches Claude Code with a PR review prompt instead of an implementation prompt
 kb-run-review() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     _kb_ensure_jq || return 1
     # XACA-1834: a list fans out to one unattended session per item (_kb_gate_fanout).
     if _kb_item_list_args "$@"; then _kb_gate_fanout kb-run-review "$@"; return $?; fi
@@ -18311,6 +18435,7 @@ kb-run-review() {
 # Usage: kb-work-review <id>
 # Like kb-work but launches Claude Code with a PR review prompt instead of an implementation prompt
 kb-work-review() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     _kb_ensure_jq || return 1
     # XACA-1834: kb-work* runs in THIS session, so a list is refused (use kb-run-review).
     if _kb_item_list_args "$@"; then _kb_work_list_refuse kb-work-review; return $?; fi
@@ -18569,6 +18694,7 @@ _kb_build_test_prompt() {
 # Usage: kb-run-test <id>
 # Like kb-run-review but launches Claude Code with a QA test prompt instead of a review prompt
 kb-run-test() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     _kb_ensure_jq || return 1
     # XACA-1834: a list fans out to one unattended session per item (_kb_gate_fanout).
     if _kb_item_list_args "$@"; then _kb_gate_fanout kb-run-test "$@"; return $?; fi
@@ -18718,6 +18844,7 @@ kb-run-test() {
 # Usage: kb-work-test <id>
 # Like kb-work-review but launches Claude Code with a QA test prompt instead of a review prompt
 kb-work-test() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     _kb_ensure_jq || return 1
     # XACA-1834: kb-work* runs in THIS session, so a list is refused (use kb-run-test).
     if _kb_item_list_args "$@"; then _kb_work_list_refuse kb-work-test; return $?; fi
@@ -18982,6 +19109,7 @@ _kb_build_debug_prompt() {
 # Usage: kb-run-debug <id>
 # Reopens the item, adds debug subitems, and launches Claude Code with a debug-focused prompt
 kb-run-debug() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     _kb_ensure_jq || return 1
     # XACA-1834: a list fans out to one unattended session per item (_kb_gate_fanout).
     if _kb_item_list_args "$@"; then _kb_gate_fanout kb-run-debug "$@"; return $?; fi
@@ -19137,6 +19265,7 @@ kb-run-debug() {
 # Usage: kb-work-debug <id>
 # Reopens the item, adds debug subitems, and launches Claude Code with a debug-focused prompt
 kb-work-debug() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     _kb_ensure_jq || return 1
     # XACA-1834: kb-work* runs in THIS session, so a list is refused (use kb-run-debug).
     if _kb_item_list_args "$@"; then _kb_work_list_refuse kb-work-debug; return $?; fi
@@ -19273,6 +19402,7 @@ kb-work-debug() {
 # retrospective or knowledge entry exists for each one. Outputs a table
 # and a summary so you can see where the knowledge capture gaps are.
 kb-retro-check() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     _kb_ensure_jq || return 1
 
     # Parse optional --team flag
@@ -19747,6 +19877,7 @@ _kb_retro_failure_lines() {
 # When multiple marked docs exist, sort+head-1 is used among them as a
 # deterministic tie-break.
 kb-retro-path() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local item_id="${1-}"
     local in_team="${2-}"
     local in_kanban_dir="${3-}"
@@ -19860,6 +19991,7 @@ kb-retro-path() {
 # repo. The plans/<ID>/ subdirectory does not need to exist yet (it is a target
 # path to be created by callers).
 kb-plan-doc-path() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local item_id="${1-}"
 
     if [[ -z "$item_id" ]]; then
@@ -22965,6 +23097,7 @@ _kb_knowledge_project_path_local_redirect() {
 # It does NOT re-implement precedence; the label and the path can now only
 # ever agree, because both come from the one real call.
 kb-knowledge-where() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     if [[ "${1-}" == "--help" ]] || [[ "${1-}" == "-h" ]]; then
         echo "Usage: kb-knowledge-where"
         echo "Shows the project-knowledge path _kb_knowledge_project_path would resolve"
@@ -23122,6 +23255,7 @@ _kb_knowledge_project_display_name() {
 # Backward-compatible: the old --team flag is accepted as an alias for --agent.
 # Discovery precedence when multiple tiers match: project > team > subject > agent.
 kb-knowledge-search() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     # NO_NOMATCH: empty globs expand to nothing instead of erroring (XACA-0255).
     # BARE_GLOB_QUAL: force-on so the team-tier `(/DN)` qualifier at the team
     # glob below parses even when the user's interactive shell opted out via
@@ -24259,6 +24393,7 @@ _kb_knowledge_reindex_one() {
 # this function does NOT run automatically anywhere — it is an explicit,
 # one-time provisioning step for a machine that will host these teams.
 kb-knowledge-local-scaffold() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     setopt LOCAL_OPTIONS NO_NOMATCH
     local local_root
     local_root=$(_kb_knowledge_local_root)
@@ -24491,6 +24626,7 @@ _kb_alloc_slot() {
 #   kb-knowledge-add project "viper wizard wiring"
 #   kb-knowledge-add team mobile-platform "release coordination"
 kb-knowledge-add() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     setopt LOCAL_OPTIONS NO_NOMATCH
     local tier="${1:-}"
     local show_help=false
@@ -25159,6 +25295,7 @@ FRONTMATTER
 # available ID in the target directory is assigned.
 # Pass --confirm to actually execute (cross-repo moves print plan and require --confirm).
 kb-knowledge-promote() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     setopt LOCAL_OPTIONS NO_NOMATCH
     local source_ref="${1:-}" target_ref="${2:-}" flag_confirm=false
     # XACA-0883-021/024: independent of --confirm in both directions, same
@@ -25955,6 +26092,7 @@ _kb_knowledge_merge_rewrite_failed() {
 #   kb-knowledge-merge jett-reno reno --dry-run    # explicit plan
 #   kb-knowledge-merge jett-reno reno --confirm    # execute
 kb-knowledge-merge() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     setopt LOCAL_OPTIONS NO_NOMATCH
     local source_persona="${1:-}" target_persona="${2:-}"
     local flag_confirm=false flag_dryrun=false
@@ -26616,6 +26754,7 @@ _kb_knowledge_persona_dup_pairs() {
 #   - Duplicate ID slots within one tier dir (XACA-0802)
 #   - Duplicate persona directories under agents/ (XACA-0842) — FAILS, not warns
 kb-knowledge-validate() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     setopt LOCAL_OPTIONS NO_NOMATCH
     local flag_quiet=false flag_fix=false flag_changed=false
     local flag_file=""
@@ -27708,6 +27847,7 @@ kb-knowledge-validate() {
 # If --dir is given: regenerate that one INDEX.md.
 # If no flag: regenerate ALL INDEXes under ~/knowledge/ (agents, teams, subjects, project).
 kb-knowledge-reindex() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     setopt LOCAL_OPTIONS NO_NOMATCH
     local target_dir=""
 
@@ -27840,6 +27980,7 @@ kb-knowledge-reindex() {
 
 # Show current window's status
 kb-my-status() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     _kb_ensure_jq || return 1
 
     local context team terminal window_index window_name board_file window_id
@@ -27929,6 +28070,7 @@ kb-my-status() {
 
 # Show the full kanban board
 kb-show() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     _kb_ensure_jq || return 1
 
     local context team board_file
@@ -27970,6 +28112,7 @@ kb-show() {
 
 # Watch the kanban board with auto-refresh
 kb-watch() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local interval="${1:-5}"
     echo "Watching kanban board (refresh every ${interval}s)"
     echo "Press Ctrl+C to stop"
@@ -27985,6 +28128,7 @@ kb-watch() {
 # Usage: kb-link-worktree <item-id>
 # This is useful for git-worktree skill integration
 kb-link-worktree() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     _kb_ensure_jq || return 1
 
     local selector="$1"
@@ -28063,6 +28207,7 @@ kb-link-worktree() {
 # Unlink worktree from a backlog item
 # Usage: kb-unlink-worktree <item-id>
 kb-unlink-worktree() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     _kb_ensure_jq || return 1
 
     local selector="$1"
@@ -28114,6 +28259,7 @@ kb-unlink-worktree() {
 
 # Launch the LCARS graphical web interface
 kb-ui() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local _default_port="8080"
     [[ -f "${AITEAMFORGE_DIR}/lcars-ui/.lcars-port" ]] && _default_port="$(cat "${AITEAMFORGE_DIR}/lcars-ui/.lcars-port" 2>/dev/null || echo "8080")"
     local port="${1:-$_default_port}"
@@ -28132,6 +28278,7 @@ kb-ui() {
 
 # Open LCARS in browser
 kb-browser() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local _default_port="8080"
     [[ -f "${AITEAMFORGE_DIR}/lcars-ui/.lcars-port" ]] && _default_port="$(cat "${AITEAMFORGE_DIR}/lcars-ui/.lcars-port" 2>/dev/null || echo "8080")"
     local port="${1:-$_default_port}"
@@ -28152,6 +28299,7 @@ kb-browser() {
 
 # Check LCARS server health (status only, no restart)
 lcars-status() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local script="${AITEAMFORGE_DIR}/lcars-health-check.sh"
     if [[ -x "$script" ]]; then
         "$script" --status
@@ -28163,6 +28311,7 @@ lcars-status() {
 
 # Check and auto-restart unhealthy LCARS servers
 lcars-health() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local script="${AITEAMFORGE_DIR}/lcars-health-check.sh"
     if [[ -x "$script" ]]; then
         "$script"
@@ -28174,6 +28323,7 @@ lcars-health() {
 
 # Start LCARS health daemon (continuous monitoring)
 lcars-daemon() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local script="${AITEAMFORGE_DIR}/lcars-health-check.sh"
     if [[ -x "$script" ]]; then
         echo "Starting LCARS health daemon..."
@@ -28192,6 +28342,7 @@ lcars-daemon() {
 # still write /tmp/lcars-health.log. Show whichever existing candidate was
 # written most recently — that is the live sink on this machine.
 lcars-logs() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local lines="${1:-50}"
     local log_file="" _lh_cand
     for _lh_cand in ${AITEAMFORGE_DIR:+"${AITEAMFORGE_DIR}/lcars-health.log"} "/tmp/lcars-health.log"; do
@@ -28276,6 +28427,7 @@ _kb_lcars_record_restart_kill() {
 }
 
 lcars-restart() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local DEV_TEAM_DIR="${AITEAMFORGE_DIR}"
     local LCARS_UI_DIR="${DEV_TEAM_DIR}/lcars-ui"
 
@@ -28738,6 +28890,7 @@ _kb_team_lcars_port() {
 
 # Restart LCARS kanban server for the current team
 kb-restart() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local DEV_TEAM_DIR="${AITEAMFORGE_DIR}"
     local LCARS_UI_DIR="${DEV_TEAM_DIR}/lcars-ui"
 
@@ -28895,6 +29048,7 @@ _kb_release_name() {
 # Create a new release
 # Usage: kb-release-create <name> [--type feature|bugfix|hotfix|maintenance] [--platforms ios,android,firebase] [--project name] [--target-date YYYY-MM-DD] [--short-title title] [--platform-version <plt>=<v>] [--allow-version-regression]
 kb-release-create() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local name=""
     local rel_type="feature"
     local platforms="ios,android"
@@ -29169,6 +29323,7 @@ kb-release-create() {
 
 # List all releases
 kb-release-list() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local context team board_file
     context=$(_kb_detect_context)
     team="${context%%:*}"
@@ -29208,6 +29363,7 @@ kb-release-list() {
 # Usage: kb-release-assign <item-id> <release-id> [platform]
 # NOTE: assign/unassign write JSON only and never move code; see docs/release-workflow/moving-a-ticket.md
 kb-release-assign() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local item_id="${1-}"
     local release_id="${2-}"
     local platform="${3-}"
@@ -29345,6 +29501,7 @@ kb-release-assign() {
 # Unassign a kanban item from its release
 # Usage: kb-release-unassign <item-id>
 kb-release-unassign() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local item_id="${1-}"
 
     if [[ -z "$item_id" ]]; then
@@ -29408,6 +29565,7 @@ _kb_item_release_history() {
 # Show release assignment for an item
 # Usage: kb-release-show <item-id|REL-ID>
 kb-release-show() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local item_id="${1-}"
 
     if [[ -z "$item_id" ]]; then
@@ -29494,6 +29652,7 @@ kb-release-show() {
 #                                      [--project <s>] [--tags <a,b,c>]
 #                                      [--platform-version <plat>=<ver>] (repeatable)
 kb-release-edit() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local release_id=""
 
     # Track which fields were set by the caller (absent = do not include in payload)
@@ -29780,6 +29939,7 @@ kb-release-edit() {
 # PR #1036 round 1: an override that disagrees with a resolvable production tag refuses GAMMA entry
 # (ROLLBACK_OVERRIDE_CONFLICT); --clear removes a stale/mistaken override. A used override is consumed.
 kb-release-rollback-override() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local release_id="" sha="" opt_reason="" opt_by="" opt_clear=0
     local usage="Usage: kb-release rollback-override <release-id> <40-hex-sha> --reason <text> --by <lead>
        kb-release rollback-override <release-id> --clear --by <lead>"
@@ -29873,6 +30033,7 @@ kb-release-rollback-override() {
 # Date-only shorthand for rescheduling a release
 # Usage: kb-release reschedule <release-id> <YYYY-MM-DD>
 kb-release-reschedule() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local release_id="${1-}"
     local date="${2-}"
 
@@ -30046,6 +30207,7 @@ _kb_release_fail() {
 # Usage: kb-release promote <REL-ID> [--to STAGE] [--confirm-deploy] [--actor NAME]
 # Stage is release-level: --platform/--all are accepted but ignored.
 kb-release-promote() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local release_id="" opt_to="" opt_actor="" opt_confirm=0 opt_legacy=0
     local usage="Usage: kb-release promote <release-id> [--to <STAGE>] [--confirm-deploy] [--actor <name>]"
 
@@ -30203,6 +30365,7 @@ _kb_release_verify_platform_stage() {
 # Move a release BACK to an earlier stage (server-audited).
 # Usage: kb-release regress <REL-ID> --to STAGE --reason "..." [--actor NAME]
 kb-release-regress() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local release_id="" opt_to="" opt_reason="" opt_actor=""
     local usage="Usage: kb-release regress <release-id> --to <STAGE> --reason \"<why>\" [--actor <name>]"
 
@@ -30279,6 +30442,7 @@ kb-release-regress() {
 # Record a lead-approved waiver for a stage's gate.
 # Usage: kb-release waive <REL-ID> --stage STAGE --reason "..." --tests t1,t2 [--by NAME]
 kb-release-waive() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local release_id="" opt_stage="" opt_reason="" opt_tests="" opt_by=""
     local usage="Usage: kb-release waive <release-id> --stage <STAGE> --reason \"<why>\" --tests <t1,t2> [--by <name>]"
 
@@ -30428,6 +30592,7 @@ _kb_release_enf_request() {
 
 # kb-release enforcement <team> [enforce|report] [--actor <lead>]
 kb-release-enforcement() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local team="" mode="" opt_actor=""
     local usage="Usage: kb-release enforcement <team> [enforce|report] [--actor <lead>]"
 
@@ -30531,6 +30696,7 @@ kb-release-enforcement() {
 # Same shape and exit codes as `kb-release enforcement`; the SERVER validates (the very
 # release_branches.effective_branches that kb-pr-base uses) and checks the lead. No offline fallback.
 kb-release-branches() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local team="" opt_actor="" opt_int="" opt_prod="" have_int=0 have_prod=0
     local usage="Usage: kb-release branches <team> [--integration <ref>] [--production <ref>] [--actor <lead>]"
 
@@ -30651,6 +30817,7 @@ kb-release-branches() {
 # validates and checks the lead (an empty roster may be bootstrapped by anyone). No offline fallback.
 # --actor defaults to $USER (_kb_release_default_actor); the server ignores it for the bootstrap add.
 kb-release-leads() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local team="" op="" name="" opt_actor="" have_name=0
     local usage="Usage: kb-release leads <team> [add|remove <name>] [--actor <lead>]"
 
@@ -30808,6 +30975,7 @@ _kb_release_stage_ctx() {
 # Run the CURRENT stage's automated test providers and record the results.
 # Usage: kb-release test <REL-ID> [--repo-dir <path>] [--include-scheduled] [--dry-run] [--only-missing] [--provider <name>]...
 kb-release-test() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local release_id="" opt_repo="" opt_sched=0 opt_dry=0 opt_missing=0
     local -a opt_providers=()
     local usage="Usage: kb-release test <release-id> [--repo-dir <path>] [--include-scheduled] [--dry-run] [--only-missing] [--provider <name>]..."
@@ -30882,6 +31050,7 @@ kb-release-test() {
 # Interactive manual walkthrough for the CURRENT stage's manual provider.
 # Usage: kb-release walkthrough <REL-ID> [--provider <name>] [--lead <name>]
 kb-release-walkthrough() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local release_id="" opt_provider="" opt_lead="" opt_json=0
     local usage="Usage: kb-release walkthrough <release-id> [--provider <name>] [--lead <name>] [--json]"
 
@@ -30936,6 +31105,7 @@ kb-release-walkthrough() {
 # Tell the gate a new commit landed on the release branch (supersedes stale results).
 # Usage: kb-release new-sha <REL-ID> <sha> [--reason <text>]
 kb-release-new-sha() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local release_id="" sha="" opt_reason="" opt_actor=""
     local usage="Usage: kb-release new-sha <release-id> <sha> [--reason <text>] [--actor <name>]"
 
@@ -31010,6 +31180,7 @@ kb-release-new-sha() {
 # reason (400 without one), so --reason is required here too (rc 2 before
 # any HTTP call).  Shares _kb_release_api_post with promote/regress/waive.
 kb-release-plan() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local release_id="" opt_reason="" opt_actor=""
     local usage="Usage: kb-release plan <release-id> --reason \"<why>\" [--actor <name>]"
 
@@ -31362,6 +31533,7 @@ _kb_cr_release_link() {
 # Entry point from the release side. Same effect as kb-cr assign-release.
 # Thin wrapper over _kb_cr_release_link — does NOT duplicate the write logic.
 kb-release-link-cr() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local rel_id="${1-}"
     local cr_id="${2-}"
 
@@ -31394,6 +31566,7 @@ kb-release-link-cr() {
 # Entry point from the release side. Same effect as kb-cr unassign-release.
 # Thin wrapper over _kb_cr_release_unlink — does NOT duplicate the write logic.
 kb-release-unlink-cr() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local rel_id="${1-}"
     local cr_id="${2-}"
 
@@ -31449,6 +31622,7 @@ kb-release-unlink-cr() {
 # that team (useful for cross-team recovery from academy — requires the
 # target team's LCARS server to be running).
 kb-release-sync-board() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local team_override="${1-}"
 
     local context team port=""
@@ -31542,6 +31716,7 @@ kb-release-sync-board() {
 #                                      [--skip-notify REASON --by LEAD] [--json]
 # Exit: 0 submitted | 1 tool failed (re-run) | 2 usage/config | 3 refused | 5 waiting for draft approval | 6 draft invalid
 kb-release-cr-stage() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local release_id=""
     local usage="Usage: kb-release cr-stage <release-id> [--content-file <json>] [--step <step>] [--status] [--repo-dir <path>] [--skip-notify <reason> --by <lead>] [--json]"
     local -a pass=()
@@ -31617,6 +31792,7 @@ kb-release-cr-stage() {
 #                                      [--smoke-result PASS|FAIL [--smoke-notes ..]] [--step S] [--status] [--json]
 # Exit: 0 complete | 1 a tool failed or the rollback FAILED (re-run) | 2 usage/config | 3 refused | 5 waiting for the lead
 kb-release-gamma-fail() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local release_id=""
     local usage="Usage: kb-release gamma-fail <release-id> --by <lead> [--summary <text>] [--rollback-result PASS|FAIL] [--rollback-notes <text>] [--smoke-result PASS|FAIL] [--smoke-notes <text>] [--step <step>] [--status] [--json]"
     local -a pass=()
@@ -31683,6 +31859,7 @@ kb-release-gamma-fail() {
 # XACA-1350-004: print the resume plan for a release (spec 5.2). Read-only; all logic is kanban-hooks/release_resume.py.
 # Usage: kb-release resume <REL-ID> [--repo-dir <path>] [--json]
 kb-release-resume() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local release_id="" opt_repo="" opt_json=0
     local usage="Usage: kb-release resume <release-id> [--repo-dir <path>] [--json]"
     while [[ $# -gt 0 ]]; do
@@ -31721,6 +31898,7 @@ kb-release-resume() {
 # Usage: kb-release plan-run <REL-ID> [--repo-dir <path>] [--max-parallel N] [--terminals-json FILE] [--json]
 # Exit: 0 plan computed | 1 error (unknown release, kb-terminals unavailable) | 2 usage
 kb-release-plan-run() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local release_id="" opt_repo="" opt_json=0 opt_max="" opt_terms=""
     local usage="Usage: kb-release plan-run <release-id> [--repo-dir <path>] [--max-parallel N] [--terminals-json FILE] [--json]"
     while [[ $# -gt 0 ]]; do
@@ -31776,6 +31954,7 @@ kb-release-plan-run() {
 # Exit: 0 stopped at a human gate / GAMMA-ready / CR entered | 1 error or no progress | 2 usage | 3 gate or test run
 #       refused | 5 manual case needs the lead | 6 stage failed | 7 stageSha not recorded
 kb-release-chain() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local release_id="" opt_repo="$PWD" opt_actor="" opt_dry=0 opt_json=0
     local usage="Usage: kb-release chain <release-id> [--repo-dir <path>] [--actor <name>] [--dry-run] [--json]"
     while [[ $# -gt 0 ]]; do
@@ -31826,6 +32005,7 @@ kb-release-chain() {
 # stage before PROD in a flow without GAMMA: XACA-1446).
 # Exit: 0 complete (release at PROD) or ALREADY closed out (XACA-1726-012: reported, nothing run) | 1 a step failed or was refused | 2 usage | 3 at PROD but the final status page refresh did not land
 kb-release-close-out() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local release_id="" opt_repo="$PWD" opt_dry=0 bf rj ctx team dry codes
     # XACA-1703-013: the --dry-run plan state is FUNCTION-scoped (zsh dynamic scope: the callees below read and write
     # these locals), so an interrupted dry-run cannot leak it into kb-run's resume or the belt preflight. The consumers
@@ -32316,6 +32496,7 @@ _kb_release_orch_coordinate() {
 # Usage: kb-release handoff <REL-ID> [--repo-dir <path>] [--json]
 # Exit: 0 closed (or already) and the plan printed | 1 error | 2 usage | 3 the run still has unfinished items
 kb-release-handoff() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local release_id="" opt_repo="$PWD" opt_json=0 opt_cancel=0 opt_reason="" bf team context hooks rc is_batch=0
     local usage="Usage: kb-release handoff <release-id> [--repo-dir <path>] [--json] | <REL-BATCH-id> --cancel [--reason <text>]"
     while [[ $# -gt 0 ]]; do
@@ -32658,6 +32839,7 @@ _kb_release_run() {
 }
 
 kb-release() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local subcmd="${1-}"
     shift
 
@@ -32873,6 +33055,7 @@ kb-release() {
 # rc 0 = dry-run done / applied / already reconciled; rc 1 = not eligible or the write failed; rc 2 = usage.
 # Team = the usual kb-release context (KB_TEAM=firebase kb-release reconcile-closeout REL-...).
 kb-release-reconcile-closeout() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local rel_id="" apply=0 actor="" arg
     while [[ $# -gt 0 ]]; do
         arg="$1"; shift
@@ -33080,6 +33263,7 @@ _kb_epic_progress() {
 
 # Main Epic command with subcommands
 kb-epic() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     _kb_ensure_jq || return 1
 
     local cmd="$1"
@@ -35027,6 +35211,7 @@ _kb_msg_relay_url() {
 
 # kb-msg — top-level dispatcher.
 kb-msg() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local sub="${1:-}"
     shift 2>/dev/null || true
     local store; store=$(_kb_msg_store)
@@ -35623,6 +35808,7 @@ _kb_ask_clear_pending() {
 # kb-ask "<question>" [--options a|b|c] [--timeout SECS] [--interval SECS]   (worker)
 # kb-ask list [--release REL-ID | --all] [--json]                             (coordinator)
 kb-ask() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     if [[ "${1-}" == "list" ]]; then
         shift
         _kb_ask_list "$@"
@@ -36011,6 +36197,7 @@ _kb_ask_list() {
 # item's activity history. Refuses: no answer text, no matching question (rc 9), an
 # ambiguous prefix (rc 10, candidates listed). A thread prefix needs >= 4 characters.
 kb-answer() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local clear_only=0
     if [[ "${1-}" == "--clear" ]]; then
         clear_only=1
@@ -36390,6 +36577,7 @@ _kb_push_board() {
 # startup call in _kb_register_team (unchanged: still backgrounded/disowned,
 # still silent) still happens too; this is only the manual, interactive path.
 kb-register() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     _kb_register_team --verify
 }
 
@@ -36414,6 +36602,7 @@ fi
 #   priority defaults to "medium"
 #   required-by-date is optional ISO date string (e.g. 2026-03-01)
 kb-todo-add() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     _kb_ensure_jq || return 1
 
     local text="$1"
@@ -36484,6 +36673,7 @@ kb-todo-add() {
 #   todo -> completed (sets completedAt)
 #   completed -> todo (clears completedAt)
 kb-todo-complete() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     _kb_ensure_jq || return 1
 
     local todo_id="$1"
@@ -36540,6 +36730,7 @@ kb-todo-complete() {
 # Update fields on an existing todo item
 # Usage: kb-todo-update <todo-id> [--text "new text"] [--priority low|medium|high|critical] [--required-by date]
 kb-todo-update() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     _kb_ensure_jq || return 1
 
     local todo_id="$1"
@@ -36655,6 +36846,7 @@ kb-todo-update() {
 # Delete a todo item entirely
 # Usage: kb-todo-delete <todo-id>
 kb-todo-delete() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     _kb_ensure_jq || return 1
 
     local todo_id="$1"
@@ -36702,6 +36894,7 @@ kb-todo-delete() {
 #   --completed: shows completed items
 #   --all: shows everything
 kb-todo-list() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     _kb_ensure_jq || return 1
 
     local filter_mode="todo"
@@ -36779,6 +36972,7 @@ kb-todo-list() {
 
 # Show help
 kb-help() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     echo "Kanban Board Commands (Window-Based Tracking)"
     echo "═════════════════════════════════════════════════════════════"
     echo ""
@@ -37001,6 +37195,7 @@ _kb_realpath() {
 }
 
 kb-quarantine-stub() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     # ── Argument parsing ──────────────────────────────────────────────────────
     local team=""
     local flag_yes=0
@@ -37367,6 +37562,7 @@ with open(sys.argv[10], "w") as f:
 }
 
 kb-variance() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     _kb_ensure_jq || return 1
 
     # Parse arguments — declare all locals before any loop (zsh local-in-loop
@@ -37696,6 +37892,7 @@ USAGE
 }
 
 kb-merged() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     kb-done "$@"
 }
 
@@ -37916,6 +38113,7 @@ _kb_helpers_stale_check() {
 # `source` would leave them. Local names are _kb_rl_* so the sourced file's
 # top-level assignments can never land in one of them by dynamic scoping.
 kb-reload() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local _kb_rl_path="${_KB_HELPERS_LOADED_PATH-}"
     local _kb_rl_old="${_KB_HELPERS_LOADED_MTIME-}"
     local _kb_rl_old_notified="${_KB_HELPERS_NOTIFIED_MTIME-}"
@@ -37988,4 +38186,11 @@ else
         *) PROMPT_COMMAND="${PROMPT_COMMAND}"$'\n'"_kb_helpers_stale_check" ;;
     esac
 fi
+# XACA-1806: load-complete sentinel for kb_ensure_helpers_loaded (top of file).
+# MUST stay the last definition in this file: its presence means "every helper
+# above is defined in this shell".
+_kb_helpers_loaded_sentinel() {
+    :
+}
+unset _KB_HELPERS_BOOTSTRAPPING
 :

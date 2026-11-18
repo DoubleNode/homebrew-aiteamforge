@@ -3947,6 +3947,8 @@ _kb_cr_dispatch_item_revert() {
 # ─────────────────────────────────────────────────────────────────────────────
 
 kb-cr() {
+    # XACA-1806: snapshot-shell bootstrap (guard lives in kanban-helpers.sh; absent when this file is sourced alone)
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi
     _kb_ensure_jq || return 1
 
     local subcmd="${1:-help}"

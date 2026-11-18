@@ -30,6 +30,8 @@
 typeset -g _KB_RELEASE_CONFIG_VALIDATE_DIR="${${(%):-%x}:A:h}"
 
 kb-release-config-validate() {
+    # XACA-1806: snapshot-shell bootstrap (guard lives in kanban-helpers.sh; absent when this file is sourced alone)
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi
     local script_dir="$_KB_RELEASE_CONFIG_VALIDATE_DIR"
     local py_script="${script_dir}/release_config_validate.py"
 
