@@ -14991,29 +14991,60 @@ _kb_build_launch_prompt() {
 # Returns 0 once cc is confirmed to be a function. Returns 1 and prints a
 # loud error otherwise; every call site below must check the return and
 # abort the launch rather than fall through.
+# XACA-1846: `type cc` saying "function" is NOT proof cc() can run. Claude Code's
+# Bash-tool shells start from a shell SNAPSHOT that keeps public functions (cc,
+# kb-run-test, ...) but drops every underscore-prefixed one -- so cc() is present
+# while the private helpers it calls (_cc_launch, _cc_route_prepare, ...) are
+# not. The old cc-only check passed, `\cc` then hit "command not found" inside
+# cc(), and kb-run-test/kb-run-review returned rc 1 from any plain agent shell
+# (only `zsh -ic`, which re-reads the rc files, worked). _cc_launch is the
+# sentinel: both aliases files (dev claude_code_cc_aliases.sh, consumer
+# share/aliases/cc-aliases.sh) define it directly, AFTER the routing core they
+# source, so its presence proves the whole file was sourced in THIS shell.
+# _kb_cc_missing_helper prints the first missing name (cc or a helper), rc 0 if
+# one is missing, rc 1 when cc and every sentinel are real functions.
+_kb_cc_missing_helper() {
+    local _kb_cc_fn
+    for _kb_cc_fn in cc _cc_launch; do
+        case "$(type "$_kb_cc_fn" 2>/dev/null)" in
+            *function*) ;;
+            *) printf '%s\n' "$_kb_cc_fn"; return 0 ;;
+        esac
+    done
+    return 1
+}
+
 _kb_ensure_cc_function() {
     local _kb_caller="${1:-kb-run}"
-    case "$(type cc 2>/dev/null)" in
-        *function*) return 0 ;;
-    esac
-    # Not a function yet -- try to source the aliases file. XACA-1284-005: two
-    # locations, tried in order, re-checking `type cc` after each source:
+    local _kb_cc_missing
+    _kb_cc_missing=$(_kb_cc_missing_helper) || return 0
+    # Not usable yet (cc absent, or a snapshot cc without its _cc_* helpers) --
+    # source the aliases file, which (re)defines cc() AND its helpers.
+    # XACA-1284-005: two locations, tried in order, re-checking after each source:
     #   1. dev-team:  ${AITEAMFORGE_DIR:-$HOME/dev-team}/claude_code_cc_aliases.sh
     #   2. consumer:  ${AITEAMFORGE_DIR:-$HOME/dev-team}/share/aliases/cc-aliases.sh
     #      (a tap install ships cc() there; aiteamforge-env.sh sources it)
     # Same body ships to the tap template, so keep it shell-neutral.
     local _kb_cc_dev="${AITEAMFORGE_DIR:-$HOME/dev-team}/claude_code_cc_aliases.sh"
     local _kb_cc_consumer="${AITEAMFORGE_DIR:-$HOME/dev-team}/share/aliases/cc-aliases.sh"
-    local _kb_cc_candidate
+    local _kb_cc_candidate _kb_cc_sourced=""
     for _kb_cc_candidate in "$_kb_cc_dev" "$_kb_cc_consumer"; do
         if [[ -f "$_kb_cc_candidate" ]]; then
             source "$_kb_cc_candidate" >/dev/null 2>&1
+            _kb_cc_sourced="${_kb_cc_sourced:+${_kb_cc_sourced} and }${_kb_cc_candidate}"
         fi
-        case "$(type cc 2>/dev/null)" in
-            *function*) return 0 ;;
-        esac
+        _kb_cc_missing=$(_kb_cc_missing_helper) || return 0
     done
-    echo "✗ ${_kb_caller}: the cc() function is not defined and neither ${_kb_cc_dev} nor ${_kb_cc_consumer} could be sourced (or exist) — refusing to launch. A bare 'cc' here could silently resolve to the C compiler and do nothing. Source your cc aliases file (claude_code_cc_aliases.sh on dev, share/aliases/cc-aliases.sh on a tap install; a team overlay .zshrc_<team>_<role> does this automatically) in this shell and retry." >&2
+    if [[ "$_kb_cc_missing" == "cc" ]]; then
+        echo "✗ ${_kb_caller}: the cc() function is not defined and neither ${_kb_cc_dev} nor ${_kb_cc_consumer} could be sourced (or exist) — refusing to launch. A bare 'cc' here could silently resolve to the C compiler and do nothing. Source your cc aliases file (claude_code_cc_aliases.sh on dev, share/aliases/cc-aliases.sh on a tap install; a team overlay .zshrc_<team>_<role> does this automatically) in this shell and retry." >&2
+    else
+        # XACA-1846 UX: say what actually happened -- no file found vs sourced but still missing.
+        if [[ -z "$_kb_cc_sourced" ]]; then
+            echo "✗ ${_kb_caller}: cc() is defined but its private helper ${_kb_cc_missing}() is not (a Claude Code shell snapshot keeps cc but drops _-prefixed functions), and no cc aliases file exists to restore it (looked for ${_kb_cc_dev} and ${_kb_cc_consumer}) — refusing to launch. Check AITEAMFORGE_DIR, or run it from an interactive shell: zsh -ic '${_kb_caller} <args>'" >&2
+        else
+            echo "✗ ${_kb_caller}: cc() is defined but its private helper ${_kb_cc_missing}() is not (a Claude Code shell snapshot keeps cc but drops _-prefixed functions), and sourcing ${_kb_cc_sourced} did not define it — refusing to launch. That aliases file is incomplete or failed to load; run it from an interactive shell instead: zsh -ic '${_kb_caller} <args>'" >&2
+        fi
+    fi
     return 1
 }
 

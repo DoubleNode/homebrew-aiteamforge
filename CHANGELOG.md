@@ -6,6 +6,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1846: Gate launchers fail rc 1 in snapshot shells missing _cc_* helpers (XACA-1846)
+- XACA-1840: Re-derive premise-check A0 anchor for Claude Code 2.1.323+ (XACA-1840)
+- Tap files updated in this publish: `share/scripts/kb-compaction-premise-check.sh`,`share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1857: Route kb-msg and LCARS health by team-machines.json, not tmux liveness (XACA-1857)
 - Tap files updated in this publish: `share/kanban-hooks/team_routing.py`,`share/scripts/lcars-health-check.sh` `share/scripts/lcars-launch-helpers.sh`,`share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1806: Self-bootstrap kb-* helpers in Claude Code snapshot shells (XACA-1806)

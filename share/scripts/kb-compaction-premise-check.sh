@@ -561,7 +561,14 @@ fi
 #     which is the acceptable way to be wrong here.
 # If it ever does, the result is rc=2 (could-not-verify) -- a human looks, which
 # is the correct failure direction.
-BASE_BIN_BYTES="${BASE_BIN_BYTES:-215643408}"   # 2.1.275, measured 2026-09-17
+# XACA-1840 (2026-11-18): re-baselined from 215643408 (2.1.275, 2026-09-17) per
+# the SMALLEST-across-the-fleet rule below, measured read-only on every live
+# machine: ai-sol has 2.1.323=344369984, 2.1.325=347406976, 2.1.326=353037664,
+# 2.1.327=354515104; M4Mini and M1Mini each have 2.1.327=354515104 (npm-pkg
+# layout). M1Pro/M3Pro are retired. The smallest complete size is 2.1.323. A
+# machine still on a <=2.1.286 build (~200-237MB) would now fail closed (rc=2);
+# none is left in the fleet. Re-measure the fleet before ever raising this again.
+BASE_BIN_BYTES="${BASE_BIN_BYTES:-344369984}"   # 2.1.323, smallest fleet-wide, measured 2026-11-18
 case "$BASE_BIN_BYTES" in ''|*[!0-9]*)
   echo "kb-compaction-premise-check: BASE_BIN_BYTES must be an integer, got '$BASE_BIN_BYTES'" >&2; exit 2 ;;
 esac
@@ -639,7 +646,7 @@ if [ "$BIN_SIZE" -gt $(( BASE_BIN_BYTES + BASE_BIN_BYTES / 10 )) ]; then
   warn "A. BASE_BIN_BYTES ($BASE_BIN_BYTES) is >10% below the installed bundle ($BIN_SIZE) — the recorded"
   note "baseline is STALE. The size floor still works but its coverage has degraded;"
   note "do NOT refresh BASE_BIN_BYTES to $BIN_SIZE (this machine's size) -- binary size is"
-  note "NOT monotonic with version across the fleet (measured 200489184-237437968 bytes),"
+  note "NOT monotonic with version across the fleet (measured 200489184-237437968 bytes in 2026-09),"
   note "and setting the floor to one machine's local reading can fail-close a smaller,"
   note "complete binary on another machine. If it genuinely needs refreshing, set it to"
   note "the SMALLEST known-complete size measured across the WHOLE fleet, never to just"
@@ -703,14 +710,32 @@ IDENT='[A-Za-z0-9_$]+'
 # removed or changed (K=20000, one definition site); only the call's argument
 # became `e.model`. The old pattern `IDENT\(IDENT\)` could not match the dot, so
 # A0 reported "GONE" and A5/B/C cascaded to could-not-verify.
+#   2.1.323..2.1.327 (XACA-1840): let o=Math.min(e.maxOutputTokens,PUr),u=Wp()?n:void 0,...
+#                                                                     arg = BARE MEMBER expr, no call
+# Derived against 2.1.323/325/326/327 (2026-11-18; all four on disk match the
+# extended anchor EXACTLY ONCE, and K has one definition = 20000 in each). Drift
+# first REPORTED on 2.1.325 (XACA-1837); 2.1.323 is the earliest build on disk
+# and already has it, so the first-drift version is somewhere in 2.1.287-2.1.323
+# and was never measured. Again the clamp was NOT removed or changed: it is still
+# min(maxOutputTokens, K=20000); the minifier inlined the max-output lookup into a
+# property read. The same file also holds two OTHER `Math.min(<x>.maxOutputTokens,
+# K)` sites (`WTt`: `...;return NT(e)-n`, and in 2.1.327 `ZFn`: `...)+Math.min(..)`
+# for the new raisedTo/loadTokens window). Neither is followed by `,IDENT=IDENT()?`,
+# so the trailing ternary is what keeps the cardinality at exactly one -- do NOT
+# loosen it away.
 #
-# The optional `(\.IDENT)?` accepts BOTH shapes. It is a real ERE group
-# quantifier (portable under BSD and GNU grep -E); the trailing `\(\)\?` is
+# The first argument is an alternation of the accepted shapes:
+#   `IDENT\(IDENT(\.IDENT)?\)`  call on a plain ident or a member expr (<=2.1.286)
+#   `IDENT\.IDENT`               bare member expr                      (2.1.323+)
+# A bare plain ident (`Math.min(e,K)`) is deliberately NOT accepted -- no build has
+# ever shipped it, and accepting it would widen the anchor for no measured reason.
+# The optional `(\.IDENT)?` is a real ERE group quantifier and `|` a real ERE
+# alternation (both portable under BSD and GNU grep -E). The trailing `\(\)\?` is
 # deliberately LITERAL `()?` -- in ERE a backslash before a special char makes it
 # literal, so it matches the ternary `s=f()?x:y`, NOT an optional group.
 # Cardinality is asserted EXACTLY ONCE (0 = cannot locate, >1 = ambiguous), and
 # the pattern embeds no expected value -- K is wildcarded and read, then compared.
-A0_ANCHOR="Math\.min\(${IDENT}\(${IDENT}(\.${IDENT})?\),${IDENT}\),${IDENT}=${IDENT}\(\)\?"
+A0_ANCHOR="Math\.min\((${IDENT}\(${IDENT}(\.${IDENT})?\)|${IDENT}\.${IDENT}),${IDENT}\),${IDENT}=${IDENT}\(\)\?"
 
 bin_has() { LC_ALL=C grep -a -q -E "$1" "$BIN"; }
 
@@ -817,6 +842,8 @@ fi
 # and (XACA-1359-003, derived against 2.1.286; drift first seen <= 2.1.282) the
 # current shape moved the argument to a member expression:
 #   function rV(e,n){let r=Math.min(jit(e.model),Xmt),s=Zf()?n:void 0,{window:g}=Ww(e,s);return g-r}
+# and (XACA-1840, 2.1.323+) dropped the call for a bare property read:
+#   function vte(e,n){let o=Math.min(e.maxOutputTokens,PUr),u=Wp()?n:void 0,{window:h}=iy(e,u);return h-o}
 # See A0_ANCHOR above for the accepted-shape history.
 # A check keyed on `function W6\(` therefore reports "PREMISE DRIFTED" on EVERY
 # release regardless of whether the formula changed -- and a ratchet that cries
