@@ -1,9 +1,5 @@
 # Default Claude Code Guidelines
-# This file is a template. {{AITEAMFORGE_DIR}} is substituted at install time by the
-# AITeamForge installer. Do not edit the rendered copy directly.
-#
-# SIZE (XACA-1832): this file is re-sent on EVERY turn of EVERY session and subagent.
-# Keep rules here; put rationale, provenance and long procedures in the script or doc they describe.
+<!-- Rendered by the AITeamForge installer; do not edit this copy. Re-sent every turn: rules only, rationale lives in the scripts/docs (XACA-1832). -->
 
 ## 🔐 Git Workflow Rules
 
@@ -247,13 +243,8 @@ The orchestrator's built-in is Opus for workers and the coordinator (the lead). 
 
 ## 🆘 Troubleshooting
 
-- **Forgot the feature branch:** `git checkout -b feature/my-work` from the current state. **Committed to develop by accident:** `git reset --soft HEAD~1`, then branch and recommit. **Conflicts:** merge `develop` into your branch, resolve, push.
-- **Bot review "not detected":** query per login and WITH `--paginate` (the endpoint pages at 30):
-  `gh api --paginate repos/{owner}/{repo}/pulls/<N>/reviews --jq '.[] | select(.user.login == "ds9-tester-bot[bot]")'` (same for `ai-security-review-bot[bot]`).
+- Recovery recipes (wrong branch, bot review "not detected", manual merge, `--delete-branch` from a worktree, bot command not loaded): run `cat "$(brew --prefix aiteamforge)/libexec/docs/CLAUDE_MD_REFERENCE.md"`.
 - **Never** store `gh api` JSON in a shell variable and `echo | jq` it; control characters break parsing. Use `gh api --jq`.
-- **Manual merge:** verify APPROVED reviews from BOTH bot logins and that `kb-sweep <ITEM-ID>` shows no `PROTECTED SUBITEMS UNRESOLVED`, then `gh pr merge <N> --squash --delete-branch --admin && kb-done`.
-- **`--delete-branch` fails locally from a worktree** (the branch is checked out elsewhere), but the API merge succeeded. Check `gh pr view <N> --json state`, then `git push <remote> --delete <branch>` if needed.
-- **Bot command not loaded:** run `bash ~/.config/gh-review-bot/gh-bot-review.sh ...` or `bash ~/.config/gh-tester-bot/gh-bot-test.sh ...` directly. Both need org-specific GitHub App setup (key + config in those directories) that this tap does not provision.
 
 ---
 

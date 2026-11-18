@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1850: Restore 1 KiB headroom in global CLAUDE.md template (XACA-1850)
+- Tap files updated in this publish: `docs/CLAUDE_MD_REFERENCE.md`,`share/templates/claude/claude-md-global.template` `share/templates/claude/historical/claude-md-global.93ec9a0.template`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1846: Gate launchers fail rc 1 in snapshot shells missing _cc_* helpers (XACA-1846)
 - XACA-1840: Re-derive premise-check A0 anchor for Claude Code 2.1.323+ (XACA-1840)
 - Tap files updated in this publish: `share/scripts/kb-compaction-premise-check.sh`,`share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
