@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1845: Headless kb-run --yes drives the ticket instead of stopping at approval (XACA-1845)
+- Tap files updated in this publish: `share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 
 ## [0.21.25] - 2026-11-17
 - XACA-1834: Batch coordinator for kb-run A,B and orchestrate-by-default (XACA-1834)

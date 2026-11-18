@@ -14619,6 +14619,9 @@ _kb_build_planning_gate_section() {
 #                   normal item prompt (subitems, delegation) plus the worker-rules block, and an autonomous tail
 #                   instead of "wait for approval". launch_extra = the RUN-ID; launch_extra2 (11th) = the
 #                   coordinator's team:terminal kb-msg address.
+#                   launch_mode "headless" (XACA-1845): an unattended `kb-run <ID>` (--yes, KB_ASSUME_YES=1 or no
+#                   tty; see _kb_run_is_headless). The normal item prompt plus _kb_headless_worker_rules, and no
+#                   "wait for approval" tail: nobody can approve, so that tail made the session exit 0 mid-ticket.
 #
 # Output: published in the GLOBAL $_KB_LAUNCH_PROMPT (NOT stdout). The result is meant for
 # `echo -e "$_KB_LAUNCH_PROMPT" | cc`, so it contains literal \n sequences.
@@ -14781,6 +14784,13 @@ _kb_build_launch_prompt() {
     # byte-identical (tests/test-xaca-1350-001-launch-prompt-parity.sh).
     if [[ "$launch_mode" == "orchestrated" ]]; then
         prompt+="$(_kb_orchestrated_worker_rules "$_kb_prompt_item_id" "${launch_extra//\\/\\\\}" "${launch_extra2//\\/\\\\}")"
+        _KB_LAUNCH_PROMPT="$prompt"
+        return 0
+    fi
+    # XACA-1845: unattended kb-run. Same reason as above: the approval tail below cannot be answered headless.
+    # $_kb_prompt_item_id is already backslash-escaped (XACA-1128).
+    if [[ "$launch_mode" == "headless" ]]; then
+        prompt+="$(_kb_headless_worker_rules "$_kb_prompt_item_id")"
         _KB_LAUNCH_PROMPT="$prompt"
         return 0
     fi
@@ -15633,6 +15643,21 @@ kb-run() {
 
     echo ""
 
+    # XACA-1845: an unattended session cannot pass the Planning Gate (plan approval is a human decision), so a
+    # headless launch of a zero-subitem item used to exit 0 mid-ticket. Refuse here, rc 3 (rc 2 = no tty, no --yes),
+    # before any worktree, board or session write. Orchestrated workers keep their own rules (XACA-1544).
+    # KB_PLAN_GATE_DISABLED does NOT lift this: with the gate section off, the zero-subitem tail still says "once
+    # subitems exist and are approved", which is the same unanswerable stop (PR #1361 review advisory).
+    local _kb_headless=0
+    if [[ "$_kb_orch_flag" != "1" ]] && _kb_run_is_headless "$_kb_yes"; then
+        _kb_headless=1
+        if [[ "$(printf '%s\n' "$item_json" | jq '.subitems // [] | length')" == "0" ]]; then
+            echo "✗ kb-run: [$item_id] has no subitems, and an unattended launch (--yes, KB_ASSUME_YES=1 or no tty) cannot pass the Planning Gate. Nothing was started." >&2
+            echo "  Plan it first: /plan-project $item_id (or run kb-run $item_id from a terminal without --yes)." >&2
+            return 3
+        fi
+    fi
+
     # INVARIANT: no top-level item may hold status == "in_progress" while UNESTIMATED.
     # Precondition check — does NOT write status; kb-pick is the write site. (XACA-0624)
     _kb_require_points "$board_file" "$index" "$item_id" || return 1
@@ -15728,6 +15753,10 @@ kb-run() {
         # XACA-1544-002: orchestrated worker rules; the coordinator is the one _kb_orch_check resolved.
         _kb_build_launch_prompt "$item_id" "$title" "$description" "$jira_id" "$github_issue" \
             "$subitem_count" "$item_json" "$team" "orchestrated" "$_kb_orch_run" "$_KB_ORCH_COORDINATOR"
+    elif [[ "$_kb_headless" == "1" ]]; then
+        # XACA-1845: unattended launch: autonomous tail instead of "wait for approval".
+        _kb_build_launch_prompt "$item_id" "$title" "$description" "$jira_id" "$github_issue" \
+            "$subitem_count" "$item_json" "$team" "headless"
     else
         _kb_build_launch_prompt "$item_id" "$title" "$description" "$jira_id" "$github_issue" \
             "$subitem_count" "$item_json" "$team"
@@ -16070,6 +16099,29 @@ _kb_set_item_orchestration() {
         echo "✓ Orchestrated worker: run $run, coordinator $coord"
     fi
     return 0
+}
+
+# _kb_run_is_headless <yes>   (XACA-1845)
+# rc 0 when a `kb-run <ID>` session cannot be supervised: --yes (arg "1"), KB_ASSUME_YES=1, or stdin is not a tty.
+_kb_run_is_headless() {
+    [[ "${1-0}" == "1" || "${KB_ASSUME_YES:-}" == "1" || ! -t 0 ]]
+}
+
+# _kb_headless_worker_rules <item_id>   (XACA-1845)
+# The autonomous tail of an unattended kb-run: the orchestrated worker rules minus the coordinator (no kb-msg pings,
+# no freeze check; kb-ask needs a coordinator and returns rc 4). Prints literal \n sequences for `echo -e`; the caller
+# passes an already backslash-escaped item id (XACA-1128).
+_kb_headless_worker_rules() {
+    local id="${1-}" r=""
+    r+="\n\n## Headless run rules (unattended kb-run)\n"
+    r+="This session was launched unattended (\`kb-run ${id} --yes\`, KB_ASSUME_YES=1 or no terminal). Nobody is watching this window and nobody can approve: do NOT wait for approval, and do not end your turn at a plan. Work the ticket all the way through.\n"
+    r+="- **Full normal flow.** Stay on this worktree branch. Work the subitems (\`kb-backlog sub start/done\`). Run lint and tests. Open the PR against the branch this worktree was cut from (\`develop\`, or the item's release branch when it has one), then \`kb-pr\`. Launch BOTH gates yourself, each in its OWN background Bash call: \`kb-run-test ${id} --yes\` and \`kb-run-review ${id} --yes\` (add \`kb-run-ux ${id} --yes\` if the diff touches UI). Then run \`kb-pr-monitor --pr <N> --item ${id}\`. On GATES_PASSED: \`kb-sweep ${id}\`, then \`kb-done\`.\n"
+    r+="- **Order.** This flow overrides step 6 of the delegation workflow above: \`kb-done\` comes only after GATES_PASSED and \`kb-sweep\`, never as soon as the subitems are complete.\n"
+    r+="- **Questions: stop, never guess.** There is no coordinator, so \`kb-ask\` is not available (rc 4). For a user-owned decision (scope, product behaviour, anything destructive or outward-facing), or anything you cannot resolve with confidence, stop and end your turn with the question as your final message.\n"
+    r+="- **Monitor verdicts.** 10/11/12 are retried per the normal rules. 21 UX_REOPEN is self-serve: re-open the \`[UX]\` subitem, run \`kb-run-ux ${id} --yes\` (or the \`lal\` UX Agent gate if that launcher is absent), then re-run the monitor. If it ends 20 CONFLICT, 22 BLOCKED, 30 PR_CLOSED or 31 TIMEOUT, stop and report the VERDICT line; do not retry.\n"
+    r+="- **Never** run \`kb-release promote\`, change a release stage, or touch another ticket's PR.\n"
+    r+="\nStart now: build the todo list, delegate the subitems, and carry the ticket through merge and \`kb-done\`."
+    printf '%s' "$r"
 }
 
 # _kb_orchestrated_worker_rules <item_id> <run_id> <coordinator>   (XACA-1544-002)
