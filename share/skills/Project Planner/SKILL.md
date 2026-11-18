@@ -450,10 +450,11 @@ Any project that involves code changes MUST also include a dedicated **"PR Creat
 │  This subitem should include:                                               │
 │  • Create feature branch and push to remote                                │
 │  • Create PR targeting `kb-pr-base <ID>` (NEVER master), full description  │
-│  • Auto-spawn test agent (background Agent, subagent_type for QA)          │
-│  • Auto-spawn review agent (background Agent, subagent_type for reviewer)  │
-│  • Both agents fire in PARALLEL (not sequential)                           │
-│  • Enter parallel monitoring loop (check both gates each cycle)            │
+│  • Launch the TEST gate yourself: kb-run-test <ID> --yes                   │
+│  • Launch the REVIEW gate yourself: kb-run-review <ID> --yes               │
+│  • UI diff: also kb-run-ux <ID> --yes (else spawn the lal UX Agent gate)   │
+│  • Launch them in PARALLEL; NEVER print paste-in handoff prompts           │
+│  • Run kb-pr-monitor --pr <N> --item <ID> (never a hand-rolled loop)       │
 │  • Address any requested changes from QA tester or reviewer                │
 │  • Merge PR after both approvals (squash merge, delete branch)             │
 │  • Update kanban status (kb-done)                                          │
@@ -465,12 +466,12 @@ Any project that involves code changes MUST also include a dedicated **"PR Creat
 │  ⛔ DO NOT combine PR creation with testing or implementation subitems     │
 │  ⛔ DO NOT merge without both QA and reviewer approval                     │
 │                                                                             │
-│  Follows the Auto-Spawn PR Test & Review workflow in CLAUDE.md:            │
+│  Follows the PR Review Handoff & Monitoring workflow in CLAUDE.md:         │
 │  • PR targets the branch printed by `kb-pr-base <ID>`                      │
-│  • Test + review agents auto-spawned via Agent tool (run_in_background)    │
-│  • Both run in parallel — no sequential dependency                         │
+│  • Gates launched via kb-run-test / kb-run-review <ID> --yes               │
+│  • Agent-tool gates ONLY if a launcher refuses (and say so)                │
 │  • gh-bot-test/gh-bot-review used for formal approval (bot identity)       │
-│  • Creating agent enters parallel monitoring loop                          │
+│  • Creating agent runs kb-pr-monitor (exit-code verdicts)                  │
 │  • --admin flag required (GitHub Team plan limitation)                     │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
