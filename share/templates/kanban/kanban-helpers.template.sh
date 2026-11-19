@@ -16092,6 +16092,10 @@ _KB_ORCH_DEFAULT_COORDINATOR_EFFORT="high"
 _KB_ORCH_EFFORTS=(low medium high xhigh max)
 # Built-in allow-list, used only when the team sets no releaseConfig.orchestration.allowedModels.
 _KB_ORCH_BUILTIN_MODELS=(claude-fable-5-2 claude-opus-5-5 claude-sonnet-5-5 claude-haiku-5-5)
+# maxParallel (XACA-1844-023): an integer 1..9999 everywhere it is read or written. Bounded on purpose: an unbounded
+# digit run overflows zsh arithmetic (the lane-cap comparison) and jq (stored as a float).
+_KB_ORCH_MAXPAR_MAX=9999
+_kb_orch_maxpar_valid() { [[ "${1-}" =~ ^[1-9][0-9]{0,3}$ ]]; }
 # Shells a fresh pane may report before we type into it (XACA-1380, scripts/kb-host-ready.sh SHELLS).
 _KB_ORCH_SHELLS=(zsh bash -zsh -bash)
 
@@ -16293,10 +16297,11 @@ _kb_orchestrated_worker_rules() {
     printf '%s' "$r"
 }
 
-# _kb_orch_lead_key <board> <release>   (XACA-1836 review)
-# The XACA-1835 policy draft named releaseConfig.orchestration.leadModel / leadEffort, keys the resolvers never read. A
-# board set that way would silently get the built-ins, so a present lead* key is a refusal naming the key to use.
-# rc 1 with $_KB_ORCH_LEAD_KEY_REASON when one is present (release layer first), rc 0 otherwise.
+# _kb_orch_lead_key <board> <release>   (XACA-1836 review; XACA-1844 aliases)
+# leadModel / leadEffort (the XACA-1835 policy draft's names; "lead" is the coordinator) are ALIASES of coordinatorModel /
+# coordinatorEffort in the same layer (user decision 2026-11-17). The canonical key wins when both are set with EQUAL
+# values; both set with DIFFERENT values in one layer is a config error naming both spellings, never a silent pick.
+# rc 1 with $_KB_ORCH_LEAD_KEY_REASON on such a conflict (release layer first), rc 0 otherwise.
 _kb_orch_lead_key() {
     local board_file="${1-}" rel="${2-}" hit
     _KB_ORCH_LEAD_KEY_REASON=""
@@ -16304,12 +16309,11 @@ _kb_orch_lead_key() {
         [ [(([.releases[]? | select(.id == $rel)] | first | .orchestration)), "release.orchestration"],
           [.releaseConfig.orchestration, "releaseConfig.orchestration"] ]
         | [ .[] | select((.[0] | type) == "object") | . as [$o, $src]
-            | ("leadModel", "leadEffort") as $k | select($o | has($k)) | $src + "." + $k ]
+            | (["leadModel", "coordinatorModel"], ["leadEffort", "coordinatorEffort"]) as [$a, $c]
+            | select(($o | has($a)) and ($o | has($c)) and $o[$a] != $o[$c]) | $src + "." + $a + "\t" + $src + "." + $c ]
         | first // empty' --arg rel "$rel" -r 2>/dev/null) || hit=""
     [[ -z "$hit" ]] && return 0
-    local want="coordinatorModel"
-    [[ "$hit" == *.leadEffort ]] && want="coordinatorEffort"
-    _KB_ORCH_LEAD_KEY_REASON="${hit} is not read: the coordinator is configured with ${hit%.*}.${want}"
+    _KB_ORCH_LEAD_KEY_REASON="${hit%%$'\t'*} and ${hit#*$'\t'} are both set, with different values (the lead* key is an alias): unset one"
     return 1
 }
 
@@ -16319,15 +16323,16 @@ _kb_orch_lead_key() {
 #   > release.orchestration.{workerModel|model} > releaseConfig.orchestration.{workerModel|model}
 #   > built-in _KB_ORCH_DEFAULT_WORKER_MODEL / _KB_ORCH_DEFAULT_COORDINATOR_MODEL (both claude-opus-5-5, XACA-1836)
 # 5th arg role (XACA-1548-013): "worker" (default, the order above) or "coordinator": the same layers with coordinatorModel in
-# place of workerModel, $KB_ORCH_COORDINATOR_MODEL in place of $KB_ORCH_WORKER_MODEL, and no item layer.
+# place of workerModel, $KB_ORCH_COORDINATOR_MODEL in place of $KB_ORCH_WORKER_MODEL, and no item layer. In each board layer
+# the coordinator also reads leadModel, an alias of coordinatorModel (XACA-1844, see _kb_orch_lead_key).
 # The FIRST layer that is present decides; a present-but-empty or non-string value is a refusal, never a fall-through
 # (an empty or unknown id must never silently become the default). "inherit" = no override (export nothing).
 # Allowed: releaseConfig.orchestration.allowedModels (non-empty string array) else _KB_ORCH_BUILTIN_MODELS.
 # Publishes $_KB_ORCH_MODEL / $_KB_ORCH_MODEL_SOURCE; rc 1 with $_KB_ORCH_MODEL_REASON on refusal.
 _kb_orch_resolve_model() {
-    local board_file="${1-}" item="${2-}" rel="${3-}" cli="${4-}" role="${5:-worker}" rolekey="workerModel"
+    local board_file="${1-}" item="${2-}" rel="${3-}" cli="${4-}" role="${5:-worker}" rolekey="workerModel" aliaskey=""
     _KB_ORCH_MODEL="" _KB_ORCH_MODEL_SOURCE="" _KB_ORCH_MODEL_REASON=""
-    [[ "$role" == "coordinator" ]] && rolekey="coordinatorModel"
+    [[ "$role" == "coordinator" ]] && rolekey="coordinatorModel" aliaskey="leadModel"
     if [[ "$role" == "coordinator" ]] && ! _kb_orch_lead_key "$board_file" "$rel"; then
         _KB_ORCH_MODEL_REASON="$_KB_ORCH_LEAD_KEY_REASON"
         return 1
@@ -16337,6 +16342,7 @@ _kb_orch_resolve_model() {
     layers=$(_kb_jq_read "$board_file" '
         def lay($o; $src): if ($o | type) == "object" then
               (if $o[$rk] != null then [$src + "." + $rk, $o[$rk]]
+               elif $ak != "" and $o[$ak] != null then [$src + "." + $ak, $o[$ak]]
                elif $o.model != null then [$src + ".model", $o.model] else empty end)
             else empty end;
         [ ((.backlog[]? | select(.id == $id) | .orchestration) as $io
@@ -16344,7 +16350,7 @@ _kb_orch_resolve_model() {
           ((.releases[]? | select(.id == $rel) | .orchestration) | lay(.; "release.orchestration")),
           (.releaseConfig.orchestration | lay(.; "releaseConfig.orchestration")) ]
         | .[] | [.[0], (.[1] | type), (if (.[1] | type) == "string" then .[1] else "" end)] | @tsv' \
-        --arg id "$item" --arg rel "$rel" --arg rk "$rolekey" -r 2>/dev/null) || layers=""
+        --arg id "$item" --arg rel "$rel" --arg rk "$rolekey" --arg ak "$aliaskey" -r 2>/dev/null) || layers=""
     local item_layer="" rest_layers=""
     if [[ "$layers" == item.orchestration.model$'\t'* ]]; then
         item_layer="${layers%%$'\n'*}"
@@ -16409,7 +16415,7 @@ _kb_orch_resolve_model() {
 # The coordinator session's effort, highest precedence first:
 #   kb-run <REL-ID> --effort > $KB_ORCH_COORDINATOR_EFFORT > release.orchestration.coordinatorEffort
 #   > releaseConfig.orchestration.coordinatorEffort > built-in _KB_ORCH_DEFAULT_COORDINATOR_EFFORT (high)
-# Same rules as the model: the FIRST present layer decides, a present-but-empty, non-string or unknown value is a refusal
+# leadEffort is an alias of coordinatorEffort in each board layer (XACA-1844). Same rules as the model: the FIRST present layer decides, a present-but-empty, non-string or unknown value is a refusal
 # (never a fall-through), "inherit" = apply nothing. Allowed: _KB_ORCH_EFFORTS. Workers are out of scope: they keep their
 # persona/session effort. Publishes $_KB_ORCH_EFFORT / $_KB_ORCH_EFFORT_SOURCE; rc 1 with $_KB_ORCH_EFFORT_REASON.
 _kb_orch_resolve_effort() {
@@ -16426,8 +16432,9 @@ _kb_orch_resolve_effort() {
     else
         # The first present layer as "<source>\t<json type>\t<string value or empty>".
         layer=$(_kb_jq_read "$board_file" '
-            def lay($o; $src): if ($o | type) == "object" and ($o | has("coordinatorEffort"))
-                then [$src + ".coordinatorEffort", $o.coordinatorEffort] else empty end;
+            def lay($o; $src): if ($o | type) != "object" then empty
+                elif ($o | has("coordinatorEffort")) then [$src + ".coordinatorEffort", $o.coordinatorEffort]
+                elif ($o | has("leadEffort")) then [$src + ".leadEffort", $o.leadEffort] else empty end;
             [ (([.releases[]? | select(.id == $rel)] | first | .orchestration) | lay(.; "release.orchestration")),
               (.releaseConfig.orchestration | lay(.; "releaseConfig.orchestration")) ]
             | first // empty | [.[0], (.[1] | type), (if (.[1] | type) == "string" then .[1] else "" end)] | @tsv' \
@@ -16824,9 +16831,9 @@ kb-dispatch() {
           else ($r.orchestration // {}) as $o
           | if ($o | type) != "object" or ($o.activeRunId // "") != $run or ($o.closedAt // null) != null then "NOT_ACTIVE"
             else [ ((if $o.maxParallel == null then 2 else $o.maxParallel end)
-                    | if type == "number" and . >= 1 and . == floor then tostring else "BAD" end),
+                    | if type == "number" and . >= 1 and . <= $maxpar and . == floor then tostring else "BAD" end),
                    ($o.coordinator // "" | if type == "object" then (.address // "") else . end | if type == "string" then . else "" end)
-                 ] | @tsv end end' --arg rel "$rel" --arg run "$run" -r 2>/dev/null) || runinfo="NO_RELEASE"
+                 ] | @tsv end end' --arg rel "$rel" --arg run "$run" --argjson maxpar "$_KB_ORCH_MAXPAR_MAX" -r 2>/dev/null) || runinfo="NO_RELEASE"
     case "$runinfo" in
         NO_RELEASE) _kb_dispatch_refuse RUN_NOT_ACTIVE "release $rel is not on the ${team} board"; return 3 ;;
         NOT_ACTIVE) _kb_dispatch_refuse RUN_NOT_ACTIVE "$run is not the active, open run of $rel (release.orchestration.activeRunId)"; return 3 ;;
@@ -16834,7 +16841,7 @@ kb-dispatch() {
     local max_par run_coord
     IFS=$'\t' read -r max_par run_coord <<<"$runinfo"
     if [[ "$max_par" == "BAD" ]]; then
-        _kb_dispatch_refuse CONFIG_INVALID "release.orchestration.maxParallel must be a positive integer"; return 3
+        _kb_dispatch_refuse CONFIG_INVALID "release.orchestration.maxParallel must be an integer from 1 to ${_KB_ORCH_MAXPAR_MAX}"; return 3
     fi
     [[ -z "$coord" ]] && coord="$run_coord"
     if ! _kb_orch_addr_valid "$coord"; then
@@ -32067,8 +32074,8 @@ kb-release-plan-run() {
     done
     if [[ -z "$release_id" ]]; then echo "Error: Release ID is required" >&2; echo "$usage" >&2; return 2; fi
     if ! _kb_release_valid_token "$release_id"; then echo "Error: invalid release id: $release_id" >&2; return 2; fi
-    if [[ -n "$opt_max" && ! "$opt_max" =~ ^[1-9][0-9]*$ ]]; then
-        echo "Error: --max-parallel must be a positive integer: $opt_max" >&2; return 2
+    if [[ -n "$opt_max" ]] && ! _kb_orch_maxpar_valid "$opt_max"; then
+        echo "Error: --max-parallel must be an integer from 1 to ${_KB_ORCH_MAXPAR_MAX}: $opt_max" >&2; return 2
     fi
     _kb_release_stage_ctx || return 1
     local hooks_dir; hooks_dir="$(dirname "$_KB_RS_CLI")"
@@ -32299,8 +32306,8 @@ _kb_release_orch_settings() {
     else
         mp=2 src="built-in default"
     fi
-    if [[ ! "$mp" =~ ^[1-9][0-9]*$ ]]; then
-        _KB_O_REASON="maxParallel from ${src} is not a positive integer (${mp})"; return 1
+    if ! _kb_orch_maxpar_valid "$mp"; then
+        _KB_O_REASON="maxParallel from ${src} is not an integer from 1 to ${_KB_ORCH_MAXPAR_MAX} (${mp})"; return 1
     fi
     _KB_O_MAXPAR_R="$mp" _KB_O_MAXSRC="$src"
     return 0
@@ -32499,8 +32506,8 @@ _kb_release_orch_start() {
         case "$ans" in
             y|Y|yes|YES) break ;;
             p|P)
-                if [[ "$arg" =~ ^[1-9][0-9]*$ ]]; then maxpar="$arg"; _KB_O_MAXPAR_R="$arg"; _KB_O_MAXSRC="--max-parallel (edited at approval)"
-                else echo "  'p' needs a positive integer"; fi ;;
+                if _kb_orch_maxpar_valid "$arg"; then maxpar="$arg"; _KB_O_MAXPAR_R="$arg"; _KB_O_MAXSRC="--max-parallel (edited at approval)"
+                else echo "  'p' needs an integer from 1 to ${_KB_ORCH_MAXPAR_MAX}"; fi ;;
             x|X)
                 if [[ "$arg" =~ ^[A-Z][A-Z0-9]*-[0-9]+$ ]]; then excl+=("$arg"); else echo "  'x' needs an item id"; fi ;;
             *) echo "Not approved. Nothing started, nothing dispatched ($rel stays as it is)."; rm -r -f "$tmpd"; return 11 ;;
@@ -32811,7 +32818,7 @@ _kb_release_run() {
                     _KB_O_MODE="$_o_want"; shift ;;
                 --force-coordinator-pane) _KB_O_FORCE=1; shift ;;
                 --max-parallel)
-                    if [[ ! "${2-}" =~ ^[1-9][0-9]*$ ]]; then echo "Error: kb-run: --max-parallel must be a positive integer: '${2-}'" >&2; return 2; fi
+                    if ! _kb_orch_maxpar_valid "${2-}"; then echo "Error: kb-run: --max-parallel must be an integer from 1 to ${_KB_ORCH_MAXPAR_MAX}: '${2-}'" >&2; return 2; fi
                     _KB_O_MAXPAR="$2"; shift 2 ;;
                 --exclude)
                     if [[ ! "${2-}" =~ ^[A-Z][A-Z0-9]*-[0-9]+$ ]]; then echo "Error: kb-run: --exclude needs an item id: '${2-}'" >&2; return 2; fi
@@ -32975,6 +32982,299 @@ _kb_release_run() {
     return 0
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# XACA-1844: kb-release orchestration [show | set <key> <value> | unset <key>] [--team T] [--release REL-ID]
+# The one writer of the orchestration routing keys the resolvers above read (XACA-1544-012, XACA-1836), so nobody
+# hand-edits board JSON. Writes go through the locked _kb_jq_update. Board layer (default): releaseConfig.orchestration.
+# --release: release.orchestration of that release (refused while it has an open run; allowedModels is board-only).
+# A candidate board is resolved BEFORE the write; a value the resolvers would refuse is never written.
+# leadModel / leadEffort are accepted and written as coordinatorModel / coordinatorEffort (the alias is then removed
+# from that layer, so a write can never create an alias conflict). Exit: 0 ok, 1 board/write error, 2 usage or
+# invalid value, 3 refused (open run, non-object layer, or the resulting routing would not resolve).
+_KB_ORCH_SETTER_KEYS=(coordinatorModel coordinatorEffort workerModel model allowedModels maxParallel)
+
+# _kb_release_orch_routing_print <board> <REL-ID|""> : the effective routing, each value with its source. rc 1 = refused.
+_kb_release_orch_routing_print() {
+    local bf="${1-}" rel="${2-}" allowed
+    local _KB_O_MODEL="" _KB_O_WMODEL="" _KB_O_EFFORT="" _KB_O_MAXPAR=""
+    # (Not the "if ! _kb_release_orch_settings" form: the 1548 suite anchors a mutation sentinel on that exact line.)
+    _kb_release_orch_settings "$bf" "$rel" || { echo "  REFUSED: $_KB_O_REASON"; return 1; }
+    local asrc="releaseConfig.orchestration.allowedModels"
+    allowed=$(_kb_jq_read "$bf" '.releaseConfig.orchestration.allowedModels // null
+        | if . == null then "built-in" else (if type == "array" then join(" ") else tojson end) end' -r 2>/dev/null)
+    [[ "$allowed" == "built-in" ]] && allowed="${_KB_ORCH_BUILTIN_MODELS[*]}" asrc="built-in default"
+    echo "  coordinator model:  ${_KB_O_CMODEL}   (source: ${_KB_O_CSRC})"
+    echo "  coordinator effort: ${_KB_O_CEFFORT}   (source: ${_KB_O_CESRC})"
+    echo "  worker model:       ${_KB_O_WMODEL_R}   (source: ${_KB_O_WSRC})"
+    echo "  maxParallel:        ${_KB_O_MAXPAR_R}   (source: ${_KB_O_MAXSRC})"
+    echo "  allowed models:     ${allowed}   (source: ${asrc})"
+    return 0
+}
+
+# _kb_release_orch_board_routing <board> <REL-ID|""> : the routing from the BOARD alone (KB_ORCH_* env ignored), as
+# _kb_release_orch_routing_print. Used for the dry run and the post-write summary, so the exit code describes the board.
+_kb_release_orch_board_routing() {
+    ( unset KB_ORCH_COORDINATOR_MODEL KB_ORCH_WORKER_MODEL KB_ORCH_MODEL KB_ORCH_COORDINATOR_EFFORT
+      _kb_release_orch_routing_print "$@" )
+}
+
+# Appended to every rc-2 key/value error, so it names the fix path (XACA-1844-014).
+_kb_release_orch_help_hint() { echo "See: kb-release orchestration --help" >&2; }
+
+# A KB_ORCH_* override in this shell beats the board at run time; say so after a write (show prints it resolved).
+_kb_release_orch_env_note() {
+    local v set=""
+    for v in KB_ORCH_COORDINATOR_MODEL KB_ORCH_WORKER_MODEL KB_ORCH_MODEL KB_ORCH_COORDINATOR_EFFORT; do
+        typeset -p "$v" >/dev/null 2>&1 && set+=" $v"
+    done
+    [[ -z "$set" ]] || echo "Note: this shell sets${set}, which override the board here; 'kb-release orchestration show' gives the effective routing."
+}
+
+# _kb_release_orch_override_rels <board> : live releases (not released/cancelled) whose release.orchestration carries a
+# routing key of its own. A team-layer write is dry-run against each of them too (XACA-1844 review/test 016/017).
+_kb_release_orch_override_rels() {
+    _kb_jq_read "${1-}" '.releases[]? | select((.status // "") as $s | $s != "released" and $s != "cancelled")
+        | select((.orchestration | type) == "object" and (.orchestration | (has("coordinatorModel") or has("coordinatorEffort")
+            or has("leadModel") or has("leadEffort") or has("workerModel") or has("model") or has("maxParallel"))))
+        | .id' -r 2>/dev/null
+}
+
+kb-release-orchestration() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
+    local usage="Usage: kb-release orchestration [show | set <key> <value> | unset <key>] [--team T] [--release REL-ID]"
+    local op="" key="" val="" team="" rel="" nargs=0 a
+    while [[ $# -gt 0 ]]; do
+        case "${1-}" in
+            --team|--release)
+                if [[ $# -lt 2 || -z "${2-}" ]]; then echo "Error: ${1-} needs a value" >&2; echo "$usage" >&2; return 2; fi
+                [[ "${1-}" == "--team" ]] && team="${2-}" || rel="${2-}"
+                shift 2 ;;
+            --help|-h)
+                echo "$usage"
+                echo ""
+                echo "Show or edit the release orchestrator's routing (docs/release-orchestration.md section 6)."
+                echo "  show (default)       the stored keys and the EFFECTIVE routing, each value with its source"
+                echo "  set <key> <value>    write one key, then print the effective routing"
+                echo "  unset <key>          remove one key, then print the effective routing"
+                echo "Keys: coordinatorModel, coordinatorEffort, workerModel, model (both roles' fallback),"
+                echo "      allowedModels (comma-separated, board layer only), maxParallel (1-9999)."
+                echo "      leadModel / leadEffort are aliases, written as coordinatorModel / coordinatorEffort."
+                echo "Models: an id in allowedModels (else: ${_KB_ORCH_BUILTIN_MODELS[*]}), or inherit."
+                echo "Effort: ${_KB_ORCH_EFFORTS[*]} inherit."
+                echo "Layer: releaseConfig.orchestration (the team default), or with --release that release's"
+                echo "       release.orchestration (refused while the release has an open run)."
+                echo "--team defaults to this session's team. Environment overrides (KB_ORCH_*) show in the"
+                echo "effective routing but are never written."
+                echo ""
+                echo "Examples:"
+                echo "  kb-release orchestration show --team academy"
+                echo "  kb-release orchestration set coordinatorModel claude-fable-5-2 --team academy"
+                echo "  kb-release orchestration set coordinatorEffort high --team academy"
+                echo "  kb-release orchestration show --team academy --release REL-2026-Q4-072"
+                echo "  kb-release orchestration unset workerModel --team academy"
+                echo ""
+                echo "Exit codes: 0 ok, 1 board/write error, 2 usage or invalid value,"
+                echo "            3 refused (show: the routing does not resolve; set/unset: not written)"
+                return 0 ;;
+            -*)
+                echo "Error: Unknown option: ${1-}" >&2; echo "$usage" >&2; return 2 ;;
+            *)
+                nargs=$((nargs + 1))
+                case "$nargs" in
+                    1) op="${1-}" ;;
+                    2) key="${1-}" ;;
+                    3) val="${1-}" ;;
+                    *) echo "Error: Unexpected argument: ${1-}" >&2; echo "$usage" >&2; return 2 ;;
+                esac
+                shift ;;
+        esac
+    done
+    [[ -z "$op" ]] && op="show"
+    case "$op" in
+        show)  (( nargs <= 1 )) || { echo "Error: show takes no arguments" >&2; echo "$usage" >&2; return 2; } ;;
+        set)   (( nargs == 3 )) || { echo "Error: set needs <key> <value>" >&2; echo "$usage" >&2; return 2; } ;;
+        unset) (( nargs == 2 )) || { echo "Error: unset needs <key>" >&2; echo "$usage" >&2; return 2; } ;;
+        *) echo "Error: unknown operation: $op (show|set|unset)" >&2; echo "$usage" >&2; return 2 ;;
+    esac
+
+    # Aliases (XACA-1844-001): the lead* spellings write the canonical key.
+    case "$key" in
+        leadModel) key="coordinatorModel" ;;
+        leadEffort) key="coordinatorEffort" ;;
+    esac
+    if [[ "$op" != "show" ]]; then
+        local known=0
+        for a in "${_KB_ORCH_SETTER_KEYS[@]}"; do [[ "$a" == "$key" ]] && known=1; done
+        if (( ! known )); then
+            echo "Error: unknown key: $key (want one of: ${_KB_ORCH_SETTER_KEYS[*]}, or leadModel/leadEffort)" >&2; _kb_release_orch_help_hint; return 2
+        fi
+        if [[ -n "$rel" && "$key" == "allowedModels" ]]; then
+            echo "Error: allowedModels is read from releaseConfig.orchestration only: drop --release" >&2; _kb_release_orch_help_hint; return 2
+        fi
+    fi
+
+    if [[ -z "$team" ]]; then
+        local ctx
+        ctx=$(_kb_detect_context 2>/dev/null); team="${ctx%%:*}"
+    fi
+    if [[ -z "$team" ]] || ! _kb_release_valid_token "$team"; then
+        echo "Error: no valid team (got '${team}'): pass --team" >&2; return 2
+    fi
+    if [[ -n "$rel" ]] && ! _kb_release_valid_token "$rel"; then
+        echo "Error: invalid release id: $rel" >&2; return 2
+    fi
+    local bf where="team default (no release layer)"
+    [[ -n "$rel" ]] && where="release $rel"
+    # _kb_terminals_board_file honors the KB_BOARD_FILE scratch override in both helper copies (the tap's
+    # _kb_get_board_file does not).
+    bf=$(_kb_terminals_board_file "$team") || { echo "Error: no board for team '$team'" >&2; return 1; }
+    [[ -n "$bf" && -f "$bf" ]] || { echo "Error: board not found: $bf" >&2; return 1; }
+
+    # The layer: its jq path, its label, and its current type.
+    local lpath="releaseConfig.orchestration" ltype
+    if [[ -n "$rel" ]]; then
+        if [[ "$(_kb_jq_read "$bf" '[.releases[]? | select(.id == $rel)] | length' --arg rel "$rel" -r 2>/dev/null)" != "1" ]]; then
+            echo "Error: release $rel not found (or not unique) on the $team board" >&2; return 1
+        fi
+        lpath="release.orchestration"
+    fi
+    ltype=$(_kb_jq_read "$bf" '(if $rel == "" then ((.releaseConfig // {}) | if type == "object" then .orchestration else ("bad:releaseConfig " + type) end)
+        else ([.releases[] | select(.id == $rel)] | first | .orchestration) end)
+        | if type == "string" and startswith("bad:") then . else type end' --arg rel "$rel" -r 2>/dev/null) || ltype="unreadable"
+
+    if [[ "$op" == "show" ]]; then
+        echo "Orchestration routing: team $team${rel:+, release $rel}"
+        echo "Stored releaseConfig.orchestration routing keys:"
+        _kb_jq_read "$bf" '(.releaseConfig.orchestration // {}) | if type == "object" then . else {} end
+            | to_entries[] | select(.key | IN("coordinatorModel", "coordinatorEffort", "leadModel", "leadEffort",
+              "workerModel", "model", "allowedModels", "maxParallel")) | "  \(.key) = \(.value | tojson)"' -r 2>/dev/null \
+            | grep . || echo "  (none)"
+        if [[ -n "$rel" ]]; then
+            echo "Stored release.orchestration routing keys ($rel):"
+            _kb_jq_read "$bf" '([.releases[] | select(.id == $rel)] | first | .orchestration // {}) | if type == "object" then . else {} end
+                | to_entries[] | select(.key | IN("coordinatorModel", "coordinatorEffort", "leadModel", "leadEffort",
+                  "workerModel", "model", "maxParallel")) | "  \(.key) = \(.value | tojson)"' --arg rel "$rel" -r 2>/dev/null \
+                | grep . || echo "  (none)"
+        fi
+        echo "Effective routing: ${where}"
+        _kb_release_orch_routing_print "$bf" "$rel" || return 3
+        return 0
+    fi
+
+    if [[ "$ltype" != "object" && "$ltype" != "null" ]]; then
+        echo "Error: refused: ${lpath} (or its parent) is ${ltype#bad:}, not an object: review the board by hand first" >&2; return 3
+    fi
+    if [[ -n "$rel" ]]; then
+        local run
+        run=$(_kb_release_orch_active_run "$bf" "$rel")
+        if [[ -n "$run" ]]; then
+            echo "Error: refused: $rel has an open run ($run). Change the release layer after it closes, or set the team layer" >&2
+            return 3
+        fi
+    fi
+
+    # Validate the value and build it as JSON.
+    local vjson="" alias=""
+    case "$key" in coordinatorModel) alias="leadModel" ;; coordinatorEffort) alias="leadEffort" ;; esac
+    if [[ "$op" == "set" ]]; then
+        case "$key" in
+            coordinatorModel|workerModel|model)
+                if [[ "$val" != "inherit" ]]; then
+                    if [[ ! "$val" =~ ^[a-z0-9][a-z0-9.-]*$ ]]; then echo "Error: '$val' is not a model id" >&2; _kb_release_orch_help_hint; return 2; fi
+                    local allowed ok=0 m
+                    allowed=$(_kb_jq_read "$bf" '(.releaseConfig.orchestration.allowedModels // null)
+                        | if . == null then empty elif type == "array" then .[] | strings else empty end' -r 2>/dev/null)
+                    if [[ -z "$allowed" ]]; then
+                        for m in "${_KB_ORCH_BUILTIN_MODELS[@]}"; do [[ "$m" == "$val" ]] && ok=1; done
+                        allowed="${_KB_ORCH_BUILTIN_MODELS[*]}"
+                    else
+                        while IFS= read -r m; do [[ "$m" == "$val" ]] && ok=1; done <<<"$allowed"
+                        allowed="$(printf '%s' "$allowed" | tr '\n' ' ')"
+                    fi
+                    if (( ! ok )); then echo "Error: model '$val' is not allowed (allowed: ${allowed} inherit)" >&2; _kb_release_orch_help_hint; return 2; fi
+                fi
+                vjson=$(jq -n --arg v "$val" '$v') ;;
+            coordinatorEffort)
+                local e ok=0
+                for e in "${_KB_ORCH_EFFORTS[@]}" inherit; do [[ "$e" == "$val" ]] && ok=1; done
+                if (( ! ok )); then echo "Error: effort '$val' is not one of: ${_KB_ORCH_EFFORTS[*]} inherit" >&2; _kb_release_orch_help_hint; return 2; fi
+                vjson=$(jq -n --arg v "$val" '$v') ;;
+            maxParallel)
+                if ! _kb_orch_maxpar_valid "$val"; then echo "Error: maxParallel '$val' is not an integer from 1 to ${_KB_ORCH_MAXPAR_MAX}" >&2; _kb_release_orch_help_hint; return 2; fi
+                vjson="$val" ;;
+            allowedModels)
+                vjson=$(printf '%s' "$val" | jq -R -c 'split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != ""))') || vjson=""
+                if [[ -z "$vjson" || "$vjson" == "[]" ]]; then echo "Error: allowedModels needs at least one model id" >&2; _kb_release_orch_help_hint; return 2; fi
+                local bad
+                bad=$(printf '%s' "$vjson" | jq -r '.[] | select(test("^[a-z0-9][a-z0-9.-]*$") | not)')
+                if [[ -n "$bad" ]]; then echo "Error: not a model id: $(printf '%s' "$bad" | tr '\n' ' ')" >&2; _kb_release_orch_help_hint; return 2; fi ;;
+        esac
+    else
+        local present
+        present=$(_kb_jq_read "$bf" '(if $rel == "" then .releaseConfig.orchestration else ([.releases[] | select(.id == $rel)] | first | .orchestration) end)
+            | if type == "object" and (has($k) or ($a != "" and has($a))) then "yes" else "no" end' \
+            --arg rel "$rel" --arg k "$key" --arg a "$alias" -r 2>/dev/null)
+        if [[ "$present" != "yes" ]]; then
+            echo "${lpath}.${key} is not set: no change"
+            echo "Board routing: ${where}"
+            _kb_release_orch_board_routing "$bf" "$rel"
+            _kb_release_orch_env_note
+            return 0
+        fi
+    fi
+
+    # One filter for the dry run and the write: set (or delete) the key, and always drop its alias in that layer.
+    local filter='
+        def edit: (if type == "object" then . else {} end)
+            | (if $a != "" then del(.[$a]) else . end)
+            | (if $op == "set" then .[$k] = ($v | fromjson) else del(.[$k]) end);
+        if $rel == "" then .releaseConfig = ((.releaseConfig // {}) | .orchestration = (.orchestration | edit))
+        else .releases |= map(if .id == $rel then .orchestration = (.orchestration | edit) else . end) end'
+    local cand
+    cand=$(mktemp "${TMPDIR:-/tmp}/kb-orch-cand.XXXXXX") || { echo "Error: mktemp failed" >&2; return 1; }
+    if ! jq --arg rel "$rel" --arg k "$key" --arg a "$alias" --arg op "$op" --arg v "${vjson:-null}" "$filter" "$bf" > "$cand" 2>/dev/null \
+        || [[ ! -s "$cand" ]]; then
+        rm "$cand" 2>/dev/null; echo "Error: could not build the new board" >&2; return 1
+    fi
+    local dry drc r
+    dry=$(_kb_release_orch_board_routing "$cand" "$rel"); drc=$?
+    if (( drc != 0 )); then
+        rm "$cand" 2>/dev/null
+        echo "Error: refused: with this change the routing would not resolve:" >&2
+        printf '%s\n' "$dry" >&2
+        return 3
+    fi
+    # A team-layer write can break a release that overrides only part of the routing. Refuse only when THIS change
+    # breaks it (it resolves today); one that is already broken is reported, not used to block an unrelated write.
+    if [[ -z "$rel" ]]; then
+        while IFS= read -r r; do
+            [[ -z "$r" ]] && continue
+            dry=$(_kb_release_orch_board_routing "$cand" "$r") && continue
+            if _kb_release_orch_board_routing "$bf" "$r" >/dev/null; then
+                rm "$cand" 2>/dev/null
+                echo "Error: refused: with this change release $r (it has its own release.orchestration keys) would not resolve:" >&2
+                printf '%s\n' "$dry" >&2
+                return 3
+            fi
+            echo "Warning: release $r does not resolve before or after this change:" >&2
+            printf '%s\n' "$dry" >&2
+        done <<<"$(_kb_release_orch_override_rels "$cand")"
+    fi
+    rm "$cand" 2>/dev/null
+    if ! _kb_jq_update "$bf" "$filter" --arg rel "$rel" --arg k "$key" --arg a "$alias" --arg op "$op" --arg v "${vjson:-null}"; then
+        echo "Error: board write failed: $bf" >&2; return 1
+    fi
+    if [[ "$op" == "set" ]]; then
+        echo "Set ${lpath}.${key} = ${vjson}${rel:+ (release $rel)}"
+    else
+        echo "Unset ${lpath}.${key}${alias:+ (and its alias ${alias})}${rel:+ (release $rel)}"
+    fi
+    echo "Board routing: ${where}"
+    _kb_release_orch_board_routing "$bf" "$rel"
+    _kb_release_orch_env_note
+    return 0
+}
+
 kb-release() {
     if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local subcmd="${1-}"
@@ -33024,6 +33324,10 @@ kb-release() {
         leads)
             # XACA-1485-002: show/edit releaseConfig.leads (server decides)
             kb-release-leads "$@"
+            ;;
+        orchestration|orch)
+            # XACA-1844: show/set/unset the orchestrator routing (releaseConfig.orchestration / release.orchestration)
+            kb-release-orchestration "$@"
             ;;
         test)
             # XACA-1347-007: run the current stage's automated providers
@@ -33107,6 +33411,8 @@ kb-release() {
             echo "                                              Show/set the integration/production branches via the server (XACA-1484)"
             echo "  kb-release leads <team> [add|remove <name>] [--actor <lead>]"
             echo "                                              Show/edit the release-lead roster via the server (XACA-1485)"
+            echo "  kb-release orchestration [show|set <key> <value>|unset <key>] [--team T] [--release REL-ID]"
+            echo "                                              Show/set the orchestrator's coordinator/worker model + effort (XACA-1844)"
             echo "  kb-release test <id> [--repo-dir PATH] [--include-scheduled] [--dry-run] [--only-missing] [--provider NAME]..."
             echo "                                              Run the current stage's automated test providers (XACA-1347)"
             echo "  kb-release walkthrough <id> [--provider NAME] [--lead NAME]"
