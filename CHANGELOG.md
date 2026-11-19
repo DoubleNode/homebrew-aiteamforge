@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1881: Port kb-run-ux UX gate launcher to tap consumers (XACA-1881)
+- Tap files updated in this publish: `share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1885: Recast Richmond pressroom from Keeley Jones to Rebecca Welton (XACA-1885)
 - Tap files updated in this publish: `fleet-monitor/server/public/avatars/richmond_rebecca_avatar.png`,`fleet-monitor/server/public/avatars/richmond_rebecca_avatar_panel.png` `fleet-monitor/server/public/avatars/richmond_rebecca_avatar_thumb.png`,`share/lcars-ui/tests/test_xaca1675_richmond_images.py` `share/personas/richmond/agents/richmond_beard_research_planning_persona.md`,`share/personas/richmond/agents/richmond_higgins_calendar_admin_persona.md` `share/personas/richmond/agents/richmond_rebecca_communications_persona.md`,`share/personas/richmond/agents/richmond_roy_tasks_accountability_persona.md` (+16 more). Run `brew upgrade aiteamforge` to receive them.
 - XACA-1878: Ship kb-release-orchestrate to tap consumers and resolve its kanban dir (XACA-1878)

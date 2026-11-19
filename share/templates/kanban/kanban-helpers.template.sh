@@ -16321,10 +16321,10 @@ _kb_headless_worker_rules() {
     local id="${1-}" r=""
     r+="\n\n## Headless run rules (unattended kb-run)\n"
     r+="This session was launched unattended (\`kb-run ${id} --yes\`, KB_ASSUME_YES=1 or no terminal). Nobody is watching this window and nobody can approve: do NOT wait for approval, and do not end your turn at a plan. Work the ticket all the way through.\n"
-    r+="- **Full normal flow.** Stay on this worktree branch. Work the subitems (\`kb-backlog sub start/done\`). Run lint and tests. Open the PR against the branch this worktree was cut from (\`develop\`, or the item's release branch when it has one), then \`kb-pr\`. Launch BOTH gates yourself, each in its OWN background Bash call: \`kb-run-test ${id} --yes\` and \`kb-run-review ${id} --yes\` (if the diff touches UI, add \`kb-run-ux ${id} --yes\`, or the \`lal\` UX Agent gate if that launcher is absent). Then run \`kb-pr-monitor --pr <N> --item ${id}\`. On GATES_PASSED: \`kb-sweep ${id}\`, then \`kb-done\`.\n"
+    r+="- **Full normal flow.** Stay on this worktree branch. Work the subitems (\`kb-backlog sub start/done\`). Run lint and tests. Open the PR against the branch this worktree was cut from (\`develop\`, or the item's release branch when it has one), then \`kb-pr\`. Launch BOTH gates yourself, each in its OWN background Bash call: \`kb-run-test ${id} --yes\` and \`kb-run-review ${id} --yes\` (add \`kb-run-ux ${id} --yes\` if the diff touches UI). Then run \`kb-pr-monitor --pr <N> --item ${id}\`. On GATES_PASSED: \`kb-sweep ${id}\`, then \`kb-done\`.\n"
     r+="- **Order.** This flow overrides step 6 of the delegation workflow above: \`kb-done\` comes only after GATES_PASSED and \`kb-sweep\`, never as soon as the subitems are complete.\n"
     r+="- **Questions: stop, never guess.** There is no coordinator, so \`kb-ask\` is not available (rc 4). For a user-owned decision (scope, product behaviour, anything destructive or outward-facing), or anything you cannot resolve with confidence, stop and end your turn with the question as your final message.\n"
-    r+="- **Monitor verdicts.** 10/11/12 are retried per the normal rules. 21 UX_REOPEN is self-serve: re-open the \`[UX]\` subitem, run \`kb-run-ux ${id} --yes\` (or the \`lal\` UX Agent gate if that launcher is absent), then re-run the monitor. If it ends 20 CONFLICT, 22 BLOCKED, 30 PR_CLOSED or 31 TIMEOUT, stop and report the VERDICT line; do not retry.\n"
+    r+="- **Monitor verdicts.** 10/11/12 are retried per the normal rules. 21 UX_REOPEN is self-serve: re-open the \`[UX]\` subitem, run \`kb-run-ux ${id} --yes\`, then re-run the monitor. If it ends 20 CONFLICT, 22 BLOCKED, 30 PR_CLOSED or 31 TIMEOUT, stop and report the VERDICT line; do not retry.\n"
     r+="- **Never** run \`kb-release promote\`, change a release stage, or touch another ticket's PR.\n"
     r+="\nStart now: build the todo list, delegate the subitems, and carry the ticket through merge and \`kb-done\`."
     printf '%s' "$r"
@@ -16337,7 +16337,7 @@ _kb_orchestrated_worker_rules() {
     local id="${1-}" run="${2-}" coord="${3-}" r=""
     r+="\n\n## Orchestrated worker rules (run ${run}, coordinator ${coord})\n"
     r+="You were dispatched by the release coordinator. Nobody is watching this window: do NOT wait for approval. Work the ticket all the way through.\n"
-    r+="- **Full normal flow.** Stay on this worktree branch. Work the subitems (\`kb-backlog sub start/done\`). Run lint and tests. Open the PR against the release branch, then \`kb-pr\`. Launch BOTH gates yourself, each in its OWN background Bash call: \`kb-run-test ${id} --yes\` and \`kb-run-review ${id} --yes\` (if the diff touches UI, add \`kb-run-ux ${id} --yes\`, or the \`lal\` UX Agent gate if that launcher is absent). Then run \`kb-pr-monitor --pr <N> --item ${id}\`. On GATES_PASSED: \`kb-sweep ${id}\`, then \`kb-done\`.\n"
+    r+="- **Full normal flow.** Stay on this worktree branch. Work the subitems (\`kb-backlog sub start/done\`). Run lint and tests. Open the PR against the release branch, then \`kb-pr\`. Launch BOTH gates yourself, each in its OWN background Bash call: \`kb-run-test ${id} --yes\` and \`kb-run-review ${id} --yes\` (add \`kb-run-ux ${id} --yes\` if the diff touches UI). Then run \`kb-pr-monitor --pr <N> --item ${id}\`. On GATES_PASSED: \`kb-sweep ${id}\`, then \`kb-done\`.\n"
     r+="- **Questions: ask, never guess.** For anything you cannot resolve with confidence, and ALWAYS for a user-owned decision (scope, product behaviour, anything destructive or outward-facing), run \`kb-ask \"<question>\" [--options a|b]\`. Run kb-ask as a BACKGROUND Bash command (run_in_background): the Bash tool kills a foreground command after 600s and kb-ask waits up to 1800s. Act on its exit code: 0 = the answer is on stdout; 3 or 130 = no answer yet, so PARK (stop and end your turn; the question stays pending for the coordinator); 4/5/6/7/8 = you cannot ask, so stop and report.\n"
     r+="- **Milestone pings.** \`kb-msg send ${coord} \"${id}: <milestone>\"\` when the PR is opened (include the number), on each gate verdict, when merged, and when done.\n"
     r+="- **Freeze orders.** Right before merging, run \`kb-msg inbox --all\`. If the coordinator or the lead has ordered a freeze or hold, do not merge: park and say so.\n"
@@ -19146,6 +19146,536 @@ kb-work-test() {
     # session that backgrounds a job and ends its turn exits 0 with no verdict. Verify it landed,
     # fail closed. Last command, so its rc is the launcher's rc (if-form rule, XACA-1284).
     _kb_gate_postcondition kb-work-test test "$item_id" "$item_worktree_branch" "$_kb_launch_epoch" "$board_file" "$index"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UX/UI Evaluation Spawn-Prompt Builder (XACA-0703)
+# Mirrors the review/test builder pattern.
+# WHEN to spawn: only for UI-touching tickets (diff-path heuristic backstop
+# and initial [UX] subitem intent are both managed in CLAUDE.md's PR auto-merge
+# loop — enforced by scripts/kb-pr-monitor (XACA-1275) — and the Project Planner
+# SKILL.md. Do NOT duplicate that WHEN logic here; this builder just assembles
+# the prompt when the caller has already decided a UX evaluation is needed).
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Internal helper: Build the standard UX/UI evaluation prompt text.
+# Selects the team's UX expert persona from the routing table below and
+# assembles a prompt instructing that expert to
+# evaluate the PR's UI surface and file non-blocking findings as [UX]-tagged
+# kanban subitems (one per suggestion), mirroring the [Review] filing pattern.
+#
+# Usage: _kb_build_ux_prompt <item_id> <title> <description> <item_worktree_branch>
+# Echoes the complete UX evaluation prompt to stdout.
+_kb_build_ux_prompt() {
+    local item_id="${1-}"
+    local title="${2-}"
+    local description="${3-}"
+    local item_worktree_branch="${4-}"
+    local delta_sha="${5-}"
+    local round="${6-}"
+
+    # XACA-1128: this prompt is emitted via `echo -e`, which expands backslash
+    # escapes in ANY text it's given — including user-authored ticket text
+    # interpolated below. A literal `\bword\b` or `C:\dev\team` gets mangled,
+    # and `\c` specifically TRUNCATES everything after it. Double every
+    # backslash here so echo -e's expansion collapses each pair back to one
+    # literal backslash. Escape uniformly (not per-field) — a backslash-free
+    # value is unaffected. This builder's own `\n` separators are appended
+    # below, AFTER this point, so they are untouched and still expand.
+    item_id="${item_id//\\/\\\\}"
+    title="${title//\\/\\\\}"
+    description="${description//\\/\\\\}"
+    item_worktree_branch="${item_worktree_branch//\\/\\\\}"
+
+    # Team-detection — same mechanism as review/test builders
+    local context team
+    context=$(_kb_detect_context)
+    team="${context%%:*}"
+
+    # UX expert routing table
+    # Teams with no UX expert (command, dns, finance, legal, medical) are listed
+    # for completeness; callers should not reach this builder for those teams.
+    local ux_persona ux_substitute ux_role
+    case "$team" in
+        ios)
+            ux_persona="wesley"
+            ux_substitute="deanna"
+            ux_role="SwiftUI interface design, accessibility, animations, and design systems"
+            ;;
+        android)
+            ux_persona="uhura"
+            ux_substitute="sulu"
+            ux_role="Jetpack Compose, Material Design 3, accessibility, and user experience"
+            ;;
+        firebase)
+            ux_persona="quark"
+            ux_substitute=""
+            ux_role="API design, developer experience, client SDK integration, and Firebase usability"
+            ;;
+        mainevent)
+            ux_persona="paris-me"
+            ux_substitute=""
+            ux_role="user experience and interface design, cross-platform coordination, and interaction optimization"
+            ;;
+        freelance|freelance-*)
+            # XACA-1881: real freelance teams are slugged freelance-<client>-<project>
+            # (_kb_detect_context / .kb-team), so a bare `freelance` arm never matched them.
+            ux_persona="mayweather"
+            ux_substitute=""
+            ux_role="UX/UI development, accessibility, interaction optimization, and user delight"
+            ;;
+        academy)
+            ux_persona="lal"
+            ux_substitute="emh"
+            ux_role="UX/UI design evaluation, design systems, and Academy infrastructure interfaces (LCARS, kanban UI)"
+            ;;
+        command|dns|finance|legal|medical|finance-*|legal-*|medical-*)
+            # XACA-1881: registered slugs are finance-personal, legal-coparenting, medical-general.
+            # Non-UI teams: caller should have auto-cancelled [UX]; emit a warning prompt
+            ux_persona="general-purpose"
+            ux_substitute=""
+            ux_role="general evaluation (WARNING: this team does not have a designated UX expert — [UX] subitem should have been auto-cancelled)"
+            ;;
+        *)
+            ux_persona="general-purpose"
+            ux_substitute=""
+            ux_role="general UX/UI evaluation (unrecognized team '$team' — check the _kb_build_ux_prompt routing table)"
+            ;;
+    esac
+
+    local prompt="You are the UX expert conducting a UX/UI evaluation of a Pull Request for kanban item [$item_id].\n\n"
+
+    if [[ "$ux_persona" != "general-purpose" ]]; then
+        prompt+="**Your persona:** ${ux_persona}"
+        if [[ -n "$ux_substitute" ]]; then
+            prompt+=" (substitute: ${ux_substitute})"
+        fi
+        prompt+="\n"
+        prompt+="**Your UX specialization:** ${ux_role}\n"
+    else
+        prompt+="**WARNING:** ${ux_role}\n"
+    fi
+
+    prompt+="\n## Task Being Evaluated\n"
+    prompt+="**Kanban Item:** $item_id\n"
+    prompt+="**Title:** $title\n"
+
+    if [[ -n "$description" ]]; then
+        prompt+="\n**Description:** $description\n"
+    fi
+
+    if [[ -n "$item_worktree_branch" ]]; then
+        prompt+="\n**Branch:** $item_worktree_branch\n"
+    fi
+
+    # XACA-1299-005: delta-scoped re-evaluation. $delta_sha is the head at which
+    # the UX evaluation last PASSED -- evaluate only UI-surface changes since then.
+    if [[ -n "$delta_sha" ]]; then
+        prompt+="\n## XACA-1299: Delta-Scoped Re-Evaluation\n"
+        prompt+="Your UX evaluation last PASSED at \`$delta_sha\`. Re-evaluate ONLY the UI-surface\n"
+        prompt+="changes since then:\n"
+        prompt+="\`\`\`bash\n"
+        prompt+="git diff $delta_sha..HEAD --name-only\n"
+        prompt+="git diff $delta_sha..HEAD\n"
+        prompt+="\`\`\`\n"
+        prompt+="Do NOT re-evaluate UI untouched by this range. EXCEPTION: if a delta change alters a\n"
+        prompt+="shared component, style token, or layout contract such that previously-passed UI is now\n"
+        prompt+="affected, widen to that affected area and say so explicitly in your findings. The\n"
+        prompt+="class-exhaustive requirement below still applies to anything you find in this delta.\n"
+        prompt+="**Fail-safe — fall back to a FULL evaluation of the whole PR, and state why**, if either holds:\n"
+        prompt+="- \`git merge-base --is-ancestor $delta_sha HEAD\` fails (not an ancestor of HEAD)\n"
+        prompt+="- \`git log $delta_sha..HEAD --merges\` is non-empty (range contains a merge commit)\n"
+    fi
+
+    # XACA-1299-004: round-4+ circuit breaker. Compact by design — loaded every round.
+    if [[ -n "$round" ]] && [[ "$round" -ge 4 ]]; then
+        prompt+="\n## XACA-1299: Round ${round} Circuit-Breaker\n"
+        prompt+="This is UX round ${round} (circuit-breaker territory). A NEW [Blocking] finding at this\n"
+        prompt+="round must demonstrate a regression from the latest push, or name a concrete harm (a\n"
+        prompt+="control unreachable/unusable for a class of users). Anything else must be filed as\n"
+        prompt+="[UX][Advisory] with a proposed spin-out ticket in the findings.\n"
+    fi
+
+    prompt+="\n## Your Mission\n"
+    prompt+="1. **Find the open PR** for this item. Try these approaches:\n"
+    prompt+="   - Run: \`gh pr list --head $item_worktree_branch\` (if branch is known)\n"
+    prompt+="   - Run: \`gh pr list --search \"$item_id\" --state open\`\n"
+    prompt+="   - Run: \`gh pr list --state open\` and look for a matching PR\n"
+    prompt+="\n2. **Identify the UI surface** by inspecting the diff paths:\n"
+    prompt+="   \`\`\`bash\n"
+    prompt+="   gh pr diff <number> --name-only\n"
+    prompt+="   \`\`\`\n"
+    prompt+="   Focus your evaluation on files that touch user-facing interfaces (views, layouts,\n"
+    prompt+="   stylesheets, assets, design tokens, component files). Backend-only changes are\n"
+    prompt+="   out of scope unless they affect API/developer-experience surfaces (Firebase team).\n"
+    prompt+="\n3. **Evaluate the UI surface** against these dimensions:\n"
+    prompt+="   - **Design consistency**: Follows the team design system (LCARS for Academy,\n"
+    prompt+="     Material 3 for Android, SwiftUI patterns for iOS, Firebase UX guidelines for\n"
+    prompt+="     Firebase, MainEvent cross-platform standards for MainEvent). No one-off deviations\n"
+    prompt+="     without documented rationale.\n"
+    prompt+="   - **Usability**: Interaction flows are intuitive. Affordances are clear. Labels and\n"
+    prompt+="     copy communicate intent without ambiguity. User tasks complete in minimal steps.\n"
+    prompt+="   - **Accessibility**: Color contrast meets WCAG AA (or AAA where required). Interactive\n"
+    prompt+="     targets meet minimum touch/click size. Screen-reader labels present on meaningful\n"
+    prompt+="     elements. Keyboard/switch navigation supported where applicable.\n"
+    prompt+="   - **Visual polish**: Animations and transitions are appropriate in duration and\n"
+    prompt+="     easing. Spacing and alignment follow grid/layout conventions. Typography is\n"
+    prompt+="     consistent with the design system.\n"
+    prompt+="   - **Responsive behavior**: UI adapts gracefully across viewport sizes, orientations,\n"
+    prompt+="     and dynamic-type/font-size settings. No overflow, truncation, or overlap at edge\n"
+    prompt+="     sizes.\n"
+    prompt+="   - **Error and empty states**: Error messages are user-friendly and actionable.\n"
+    prompt+="     Empty states provide meaningful guidance. Loading states are communicated.\n"
+    prompt+="   - **Information architecture**: Content hierarchy supports scanning. Navigation is\n"
+    prompt+="     predictable. Destructive actions are guarded. Confirmation flows are proportionate\n"
+    prompt+="     to the risk of the action.\n"
+    prompt+="\n4. **Check the full diff** for context on implementation details:\n"
+    prompt+="   \`\`\`bash\n"
+    prompt+="   gh pr diff <number>\n"
+    prompt+="   \`\`\`\n"
+    prompt+="\n5. **Classify severity, then file as a [UX]-tagged kanban subitem** (one per finding):\n"
+    prompt+="   Append the severity tag directly after [UX], no space: [UX][Blocking] or [UX][Advisory].\n"
+    prompt+="   **[Blocking]** (or no tag — same effect): the control is unreachable/unusable for a class of\n"
+    prompt+="   users (e.g. missing keyboard/screen-reader access) — a correctness failure, not polish.\n"
+    prompt+="   **[Advisory]**: layout balance, label clarity, visual polish, animation timing.\n"
+    prompt+="   Tiebreak: can the user complete the task? If not, it blocks. If you are unsure whether the\n"
+    prompt+="   issue blocks task completion, it blocks. [Advisory] is the ONLY token that de-gates the\n"
+    prompt+="   merge — a malformed SEVERITY tag (wrong case, a typo, a detached space) still resolves\n"
+    prompt+="   BLOCKING; a malformed CLASS tag (reordered, lowercase, leading space) isn't a finding at all\n"
+    prompt+="   here and gates nothing on merge — it still blocks kb-done via the open-subitem count.\n"
+    prompt+="   **Class-exhaustive findings (XACA-1299, required for every [Blocking] finding):** don't\n"
+    prompt+="   stop at the first failing element — enumerate the whole defect class (e.g. every control\n"
+    prompt+="   of that kind on the touched surface) and file ALL failing variants in THIS round\n"
+    prompt+="   (not one per round). In the subitem description, report:\n"
+    prompt+="   \`\`\`\n"
+    prompt+="   Class: <defect class name>\n"
+    prompt+="   Variants checked: <elements/states you inspected>\n"
+    prompt+="   Variants found: <which fail, with location>\n"
+    prompt+="   \`\`\`\n"
+    prompt+="   Also tell the implementer the fix must ship with a table-driven adversarial-input test\n"
+    prompt+="   (or equivalent per-element check) covering every enumerated variant — not just the\n"
+    prompt+="   reported instance.\n"
+    prompt+="   \`\`\`bash\n"
+    prompt+="   source ${AITEAMFORGE_DIR}/kanban-helpers.sh\n"
+    prompt+="   kb-backlog sub add $item_id \"[UX][Blocking] <finding> (PR #<number>)\"\n"
+    prompt+="   kb-backlog sub add $item_id \"[UX][Advisory] <finding> (PR #<number>)\"\n"
+    prompt+="   \`\`\`\n"
+    prompt+="   [Blocking] subitems BLOCK MERGE — the creating agent must address or explicitly decline\n"
+    prompt+="   (documented reason, user-approved) before merge. [Advisory] subitems do NOT block merge but\n"
+    prompt+="   still block kb-done until disposed (fold in / spin out / user-approved decline).\n"
+    prompt+="\n6. **Verdict:** After evaluating, mark the [UX] subitem as done. If this is a RE-evaluation\n"
+    prompt+="   after a fix push for a prior [UX][Blocking] finding, first confirm a table-driven test\n"
+    prompt+="   (or equivalent per-element check) now covers every variant you enumerated — a fix of only\n"
+    prompt+="   the reported instance is ITSELF a blocking finding (the class recurs next round):\n"
+    prompt+="   \`\`\`bash\n"
+    prompt+="   source ${AITEAMFORGE_DIR}/kanban-helpers.sh\n"
+    prompt+="   # Find the [UX] subitem index and mark it done\n"
+    prompt+="   kb-backlog sub list <parent-board-index>\n"
+    prompt+="   kb-backlog sub done <parent-board-index> <ux-subitem-0based-index>\n"
+    prompt+="   \`\`\`\n"
+    prompt+="   Mark done when evaluation is complete — even if you filed [UX] findings.\n"
+    prompt+="   The [UX] subitems you filed are the blocking items, not the evaluation subitem itself.\n"
+    prompt+="\n## CRITICAL Rules\n"
+    prompt+="- **DO NOT MERGE** the PR — the creating agent's \`scripts/kb-pr-monitor\` handles merge after the gates pass\n"
+    prompt+="- **DO NOT push commits**, checkout branches other than the PR branch, or modify develop/master\n"
+    prompt+="- **[UX][Blocking] subitems BLOCK MERGE** — [UX][Advisory] ones do not, but still gate kb-done;\n"
+    prompt+="  add as kanban subitems (NOT PR comments)\n"
+    prompt+="- **All findings are non-blocking suggestions** unless they represent accessibility violations\n"
+    prompt+="  or design-system deviations that would cause regressions or brand damage\n"
+    prompt+="- Be specific: name the exact element, describe the deviation, suggest the correct behavior\n"
+    prompt+="- Reference the design system or accessibility standard when citing a rule\n"
+    prompt+="\n## Worktree Guardrails\n"
+    prompt+="- You may be operating inside a git worktree. Do NOT run \`git checkout\`, \`git switch\`,\n"
+    prompt+="  or any command that changes branches. Do NOT run \`git worktree remove\`.\n"
+    prompt+="- Do NOT write files under \`<worktree>/kanban/\` — that directory is gitignored and\n"
+    prompt+="  vanishes with the worktree. Use \`kb-backlog sub add\` via the kanban API instead.\n"
+    prompt+="- Do NOT touch develop or master.\n"
+    prompt+="\n## Mandatory Final Step\n"
+    prompt+="Before completing, run this command to remove your crew avatar from LCARS tracking\n"
+    prompt+="(required infrastructure cleanup, not a team-boundary violation):\n"
+    prompt+="\`\`\`bash\n"
+    # XACA-1068 review finding: this is LIVE PROMPT TEXT, not a docstring — the path
+    # below is emitted into every UX-evaluator prompt and then run. It was hardcoded to
+    # the author's home, so on any other machine the subagent's mandatory cleanup step
+    # would fail. Resolved the same way the rest of this file does (cf. the kb-api-key
+    # lookup): prefer $AITEAMFORGE_DIR for tap consumers, fall back to ${HOME}/dev-team.
+    # Expanded at prompt-BUILD time, which is correct: the subagent runs on this machine.
+    prompt+="python3 ${AITEAMFORGE_DIR:-${HOME}/dev-team}/kanban-hooks/subagent-track.py remove \${AGENT_TYPE:-general-purpose} < /dev/null\n"
+    prompt+="\`\`\`\n"
+    prompt+="Replace \${AGENT_TYPE} with the subagent_type you were spawned as (e.g. \`lal\`, \`wesley\`, \`uhura\`).\n"
+
+    prompt+="\n## Headless Session Rule (XACA-1423)\n"
+    prompt+="You are a one-shot headless session: the process exits when you end your turn. Never end your turn while a background job is pending — poll it to completion (Bash calls may be auto-backgrounded past their timeout; check their output files). You MUST submit your verdict before your final message.\n"
+
+    echo -e "$prompt"
+}
+
+# UX/UI evaluate a PR for a kanban item by switching to its worktree.
+# Usage: kb-run-ux <id>
+# Like kb-run-review but launches Claude Code with a UX evaluation prompt.
+# NOTE: Only invoke for UI-touching tickets. The WHEN-to-spawn decision
+# (diff-path heuristic backstop + Project Planner intent) lives in CLAUDE.md
+# and Project Planner SKILL.md — not here.
+kb-run-ux() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
+    _kb_ensure_jq || return 1
+    # XACA-1834: a list fans out to one unattended session per item (_kb_gate_fanout).
+    if _kb_item_list_args "$@"; then _kb_gate_fanout kb-run-ux "$@"; return $?; fi
+
+    # XACA-1299-004/005: --delta <sha> / --round <N>, either order, either optional.
+    _kb_parse_gate_run_flags "$@" || return 1
+    local selector="$_KB_GATE_SELECTOR"
+    local delta_sha="$_KB_GATE_DELTA_SHA"
+    local round="$_KB_GATE_ROUND"
+
+    if [[ -z "$selector" ]]; then
+        echo "Usage: kb-run-ux <id> [--delta <sha>] [--round <N>] [--yes]"
+        echo "Switches to item's worktree and launches Claude Code to perform a UX/UI evaluation of the related PR."
+        echo "Use 'kb-backlog list' to see available items"
+        echo "Example: kb-run-ux XACA-0703"
+        echo "  --delta <sha>   re-evaluate only the changes since this previously-passed commit"
+        echo "  --round <N>     current gate round (N>=4 adds the circuit-breaker prompt language)"
+        echo ""
+        echo "NOTE: Only invoke for UI-touching tickets."
+        echo "To evaluate without switching worktree, use: kb-work-ux <id>"
+        return 1
+    fi
+
+    local team board_file
+    team=$(_kb_resolve_run_team "$selector")
+    # If board resolution fails outright, _kb_get_board_file already printed a
+    # specific reason to stderr — an "unknown team" refusal, or a board-less
+    # alias's "use <x> instead" guidance (e.g. mainevent → command, XACA-0727).
+    # Return without piling a generic "no board" line on top of it. (XACA-0759 review #2)
+    if ! board_file=$(_kb_get_board_file "$team"); then
+        return 1
+    fi
+
+    if [[ ! -f "$board_file" ]]; then
+        echo "Error: No kanban board found for team '$team'"
+        return 1
+    fi
+
+    # Resolve selector to index
+    local index
+    index=$(_kb_resolve_selector "$board_file" "$selector")
+
+    if [[ "$index" == "-1" ]]; then
+        echo "Error: Item not found: $selector"
+        return 1
+    fi
+
+    # Read the full backlog item
+    local item_json
+    item_json=$(_kb_jq_read "$board_file" ".backlog[$index] // empty")
+
+    if [[ -z "$item_json" ]] || [[ "$item_json" == "null" ]]; then
+        echo "Error: Item not found: $selector"
+        return 1
+    fi
+
+    # Extract and display item details for UX evaluation confirmation
+    local item_id title description jira_id github_issue priority item_status due_date tags
+    local subitem_count item_worktree item_worktree_branch
+    # XACA-0598: session-scope flag — set to 1 by _kb_switch_to_item_worktree if it creates
+    local kb_wt_session_created=0 kb_wt_session_path=""
+    _kb_display_item_box "$item_json" "PR UX/UI EVALUATION REQUEST" "worktree,branch"
+
+    # Confirmation prompt
+    local confirm
+    _kb_confirm_launch kb-run-ux "Start UX/UI evaluation of this item's PR? [Y/n]: " "$_KB_GATE_ASSUME_YES"
+    local _kb_confirm_rc=$?
+    if [[ $_kb_confirm_rc -eq 2 ]]; then
+        return 2
+    elif [[ $_kb_confirm_rc -ne 0 ]]; then
+        echo "Cancelled. UX evaluation not started."
+        return 0
+    fi
+
+    echo ""
+
+    # Switch to the item's worktree if we're not already in it
+    if ! _kb_is_correct_worktree "$item_worktree" "$item_worktree_branch"; then
+        # XACA-1151-068: honour the switch's contract -- rc 2 is a HARD refusal (never
+        # launch); rc 1 is the soft "staying in current directory" path (continue).
+        local _kb_switch_rc=0
+        _kb_switch_to_item_worktree "$board_file" "$index" "$item_id" "kb-run-ux" || _kb_switch_rc=$?
+        if [[ $_kb_switch_rc -eq 2 ]]; then
+            return 1
+        fi
+    else
+        # XACA-1372-022: already in the item's worktree -- ff-sync it before the PR-head check
+        # (a RESPAWN_BOTH `gh pr update-branch` moves the remote branch under us). rc 2 = refuse.
+        _kb_sync_current_worktree || return 1
+    fi
+
+    # XACA-1372: gates judge a PR HEAD. Resolve this item's PR and refuse (rc 2) unless this
+    # worktree is AT that head. Runs after the worktree switch, before any session spawn;
+    # --yes only skips the confirmation prompt, never this check.
+    local _kb_prh_rp="" _kb_prh_rc=0
+    _kb_prh_rp=$(_kb_gate_resolve_pr "$item_id" "$item_worktree_branch") || _kb_prh_rc=$?
+    if (( _kb_prh_rc != 0 )) || [[ "$_kb_prh_rp" != */* ]]; then
+        echo "⛔ kb-run-ux: no PR linked to $item_id; gates run against a PR head. Open the PR first (kb-pr)." >&2
+        return 2
+    fi
+    _kb_require_pr_head "${_kb_prh_rp##* }" "${_kb_prh_rp%% *}" || return 2
+
+    # Build the UX evaluation prompt using shared helper
+    local prompt
+    prompt=$(_kb_build_ux_prompt "$item_id" "$title" "$description" "$item_worktree_branch" "$delta_sha" "$round")
+
+    echo "Launching Claude Code for PR UX/UI evaluation of [$item_id]: $title"
+    echo "─────────────────────────────────────"
+
+    # Update window status
+    kb-plan "UX: $title"
+    _kb_set_working_on "$item_id" "UX"
+
+    # Launch cc with the UX evaluation prompt
+    export CC_SESSION_NAME="[UX] ${item_id}: ${title}"
+    if ! _kb_ensure_cc_function "kb-run-ux"; then
+        unset CC_SESSION_NAME
+        return 1
+    fi
+    local _kb_launch_epoch; _kb_launch_epoch=$(date +%s)   # XACA-1423: verdict must land AFTER this
+    printf '%s\n' "$prompt" | \cc
+    local _kb_cc_rc=$?   # XACA-1284-016: capture before anything else runs
+    unset CC_SESSION_NAME
+
+    # XACA-0598: offer wt-finish cleanup only when THIS invocation created the worktree
+    # XACA-1284: if-form, not `[[ ]] &&` -- as a function's LAST command a false test made a
+    # successful launch exit 1 whenever no worktree was created (an --yes caller would read failure).
+    if [[ "${kb_wt_session_created:-0}" == "1" ]]; then
+        _kb_offer_worktree_cleanup "$kb_wt_session_path" "$(git -C "$kb_wt_session_path" branch --show-current 2>/dev/null)"
+    fi
+
+    # XACA-1284-016: a launch that did not happen must never read as success. cc() returns
+    # non-zero when it launched nothing (routing/credential refusal rc 1, missing claude rc 127),
+    # and a gate session that died is not a completed gate either -- propagate it, loudly.
+    if (( _kb_cc_rc != 0 )); then
+        echo "✗ kb-run-ux: cc exited $_kb_cc_rc -- the session may not have launched (see the error above); do not treat this as a completed launch." >&2
+        return $_kb_cc_rc
+    fi
+
+    # XACA-1423: cc exiting 0 means the SESSION ended, not that the gate submitted -- a headless
+    # session that backgrounds a job and ends its turn exits 0 with no verdict. Verify it landed,
+    # fail closed. Last command, so its rc is the launcher's rc (if-form rule, XACA-1284).
+    _kb_gate_postcondition kb-run-ux ux "$item_id" "$item_worktree_branch" "$_kb_launch_epoch" "$board_file" "$index"
+}
+
+# UX/UI evaluate a PR for a kanban item in the current directory (no worktree switch).
+# Usage: kb-work-ux <id>
+# Like kb-work-review but launches Claude Code with a UX evaluation prompt.
+# NOTE: Only invoke for UI-touching tickets.
+kb-work-ux() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
+    _kb_ensure_jq || return 1
+    # XACA-1834: kb-work* runs in THIS session, so a list is refused (use kb-run-ux).
+    if _kb_item_list_args "$@"; then _kb_work_list_refuse kb-work-ux; return $?; fi
+
+    # XACA-1299-004/005: --delta <sha> / --round <N>, either order, either optional.
+    _kb_parse_gate_run_flags "$@" || return 1
+    local selector="$_KB_GATE_SELECTOR"
+    local delta_sha="$_KB_GATE_DELTA_SHA"
+    local round="$_KB_GATE_ROUND"
+
+    if [[ -z "$selector" ]]; then
+        echo "Usage: kb-work-ux <id> [--delta <sha>] [--round <N>] [--yes]"
+        echo "Launches Claude Code to perform a UX/UI evaluation of the related PR WITHOUT switching worktree."
+        echo "Use when you're already in the correct directory/worktree."
+        echo "Use 'kb-backlog list' to see available items"
+        echo "Example: kb-work-ux XACA-0703"
+        echo "  --delta <sha>   re-evaluate only the changes since this previously-passed commit"
+        echo "  --round <N>     current gate round (N>=4 adds the circuit-breaker prompt language)"
+        echo ""
+        echo "NOTE: Only invoke for UI-touching tickets."
+        echo "For automatic worktree switch, use: kb-run-ux <id>"
+        return 1
+    fi
+
+    local context team board_file
+    context=$(_kb_detect_context)
+    team="${context%%:*}"
+    board_file=$(_kb_get_board_file "$team")
+
+    if [[ ! -f "$board_file" ]]; then
+        echo "Error: No kanban board found for team '$team'"
+        return 1
+    fi
+
+    # Resolve selector to index
+    local index
+    index=$(_kb_resolve_selector "$board_file" "$selector")
+
+    if [[ "$index" == "-1" ]]; then
+        echo "Error: Item not found: $selector"
+        return 1
+    fi
+
+    # Read the full backlog item
+    local item_json
+    item_json=$(_kb_jq_read "$board_file" ".backlog[$index] // empty")
+
+    if [[ -z "$item_json" ]] || [[ "$item_json" == "null" ]]; then
+        echo "Error: Item not found: $selector"
+        return 1
+    fi
+
+    # Extract and display item details for UX evaluation confirmation
+    local item_id title description jira_id github_issue priority item_status due_date tags
+    local subitem_count item_worktree item_worktree_branch
+    _kb_display_item_box "$item_json" "PR UX/UI EVALUATION REQUEST" "branch"
+
+    # Confirmation prompt
+    local confirm
+    echo "Evaluating in current directory: $(pwd)"
+    echo "   (No worktree switch will be made)"
+    echo ""
+    _kb_confirm_launch kb-work-ux "Start UX/UI evaluation of this item's PR? [Y/n]: " "$_KB_GATE_ASSUME_YES"
+    local _kb_confirm_rc=$?
+    if [[ $_kb_confirm_rc -eq 2 ]]; then
+        return 2
+    elif [[ $_kb_confirm_rc -ne 0 ]]; then
+        echo "Cancelled. UX evaluation not started."
+        return 0
+    fi
+
+    echo ""
+
+    # Build the UX evaluation prompt using shared helper
+    local prompt
+    prompt=$(_kb_build_ux_prompt "$item_id" "$title" "$description" "$item_worktree_branch" "$delta_sha" "$round")
+
+    echo "Launching Claude Code for PR UX/UI evaluation of [$item_id]: $title"
+    echo "─────────────────────────────────────"
+
+    # Update window status
+    kb-plan "UX: $title"
+    _kb_set_working_on "$item_id" "UX"
+
+    # Launch cc with the UX evaluation prompt
+    export CC_SESSION_NAME="[UX] ${item_id}: ${title}"
+    if ! _kb_ensure_cc_function "kb-work-ux"; then
+        unset CC_SESSION_NAME
+        return 1
+    fi
+    local _kb_launch_epoch; _kb_launch_epoch=$(date +%s)   # XACA-1423: verdict must land AFTER this
+    printf '%s\n' "$prompt" | \cc
+    local _kb_cc_rc=$?   # XACA-1284-016: capture before anything else runs
+    unset CC_SESSION_NAME
+
+    # XACA-1284-016: a launch that did not happen must never read as success. cc() returns
+    # non-zero when it launched nothing (routing/credential refusal rc 1, missing claude rc 127),
+    # and a gate session that died is not a completed gate either -- propagate it, loudly.
+    if (( _kb_cc_rc != 0 )); then
+        echo "✗ kb-work-ux: cc exited $_kb_cc_rc -- the session may not have launched (see the error above); do not treat this as a completed launch." >&2
+        return $_kb_cc_rc
+    fi
+
+    # XACA-1423: cc exiting 0 means the SESSION ended, not that the gate submitted -- a headless
+    # session that backgrounds a job and ends its turn exits 0 with no verdict. Verify it landed,
+    # fail closed. Last command, so its rc is the launcher's rc (if-form rule, XACA-1284).
+    _kb_gate_postcondition kb-work-ux ux "$item_id" "$item_worktree_branch" "$_kb_launch_epoch" "$board_file" "$index"
 }
 
 # Internal helper: Build the debug/investigation prompt text
