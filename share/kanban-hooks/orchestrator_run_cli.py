@@ -20,6 +20,8 @@ four things the shell cannot do with jq alone:
            error (a typo must not silently exclude nothing), and so is excluding an item that a non-excluded scheduled item
            is blockedBy (its dependant would wait on a ticket nobody will run).
   render   the human plan text (release_orchestrator.format_plan) plus the exclusion list.
+  cancel   (XACA-1882) abandon a RELEASE run: close the open run with outcome "cancelled" even with unfinished or
+           never-dispatched items. The release and its items are untouched. Idempotent; refuses a batch (batch-cancel).
 
 XACA-1834 -- ad-hoc batches (`kb-run A,B,...`). A batch is an ephemeral release record (kind "batch", REL-BATCH-<UTC
 yyyymmddThhmmss>, stage DEV, no branch, `batchItems` = the ids) so the whole planner / run / monitor / resume stack is
@@ -449,6 +451,33 @@ def cmd_batch_cancel(a, now=None):
     return cmd_batch_close(SimpleNamespace(board=a.board, release=a.release, status="cancelled", reason=reason), now=now)
 
 
+def cmd_cancel(a, now=None):
+    """Abandon a RELEASE run (XACA-1882): close its open run with outcome "cancelled" even with unfinished or
+    never-dispatched items. The release (status, stage, every other field), its orchestration items rows and lanes, and
+    every backlog item are left as they are: the run summary keeps the last known per-item state as history. Workers
+    already dispatched keep running in their own windows; the closed run only stops new dispatches and the monitor.
+    Idempotent: no run, or a run already closed with ANY outcome, is rc 0 and writes nothing (a closed run's outcome is
+    never rewritten). Refuses a batch: abandoning a batch also closes the batch record, which is batch-cancel's job."""
+    board = _read_json(a.board)
+    rel = ro._find_release_in(board, a.release)
+    if ro.is_batch(rel):
+        raise ro.LedgerError("%s is a batch release; abandon it with batch-cancel (kb-release handoff %s --cancel)"
+                             % (a.release, a.release))
+    orch = rel.get("orchestration") if isinstance(rel.get("orchestration"), dict) else {}
+    run_id = orch.get("activeRunId")
+    if not run_id:
+        print("no orchestrated run recorded for %s: nothing to cancel" % a.release)
+        return 0
+    if orch.get("closedAt"):
+        print("run %s already closed at %s; nothing to cancel" % (run_id, orch["closedAt"]))
+        return 0
+    ro.close_run(a.board, os.path.abspath(a.kanban_dir), a.release, run_id, outcome="cancelled",
+                 detail=a.reason or "abandoned by the lead", now=now)
+    print("run %s closed (cancelled); %s and its items are unchanged" % (run_id, a.release))
+    print("start a new run with: kb-run %s" % a.release)
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="orchestrator_run_cli.py")
     sub = ap.add_subparsers(dest="cmd")
@@ -490,6 +519,11 @@ def main(argv=None):
     bx.add_argument("--kanban-dir", required=True)
     bx.add_argument("--release", required=True)
     bx.add_argument("--reason")
+    cx = sub.add_parser("cancel")
+    cx.add_argument("--board", required=True)
+    cx.add_argument("--kanban-dir", required=True)
+    cx.add_argument("--release", required=True)
+    cx.add_argument("--reason")
     ph = sub.add_parser("plan-hash")
     ph.add_argument("--plan-file", required=True)
     ph.add_argument("--board")
@@ -513,7 +547,7 @@ def main(argv=None):
         return 0 if exc.code in (0, None) else 2
     fn = {"start": cmd_start, "close": cmd_close, "exclude": cmd_exclude, "render": cmd_render,
           "batch-readiness": cmd_batch_readiness, "batch-mint": cmd_batch_mint,
-          "batch-close": cmd_batch_close, "batch-cancel": cmd_batch_cancel,
+          "batch-close": cmd_batch_close, "batch-cancel": cmd_batch_cancel, "cancel": cmd_cancel,
           "plan-hash": cmd_plan_hash, "batch-plan": cmd_batch_plan}.get(args.cmd)
     if fn is None:
         ap.print_usage(sys.stderr)

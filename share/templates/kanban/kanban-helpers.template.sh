@@ -32858,12 +32858,14 @@ _kb_release_orch_coordinate() {
 # already; this is idempotent and refuses unfinished items), then prints the XACA-1350 resume plan: after a finished run
 # that is the "DEV, items done" row (dev-deploy-pending), from which the coordinator continues with the existing flow and
 # `kb-release chain`. It changes no stage.
-# Usage: kb-release handoff <REL-ID> [--repo-dir <path>] [--json]
+# XACA-1882: --cancel abandons the open run instead (outcome "cancelled", unfinished or never-dispatched items allowed):
+# a release keeps its status, stage and items, so only the run closes; a batch (XACA-1834-009) is also marked cancelled.
+# Usage: kb-release handoff <REL-ID> [--repo-dir <path>] [--json] | <REL-ID> --cancel [--reason <text>]
 # Exit: 0 closed (or already) and the plan printed | 1 error | 2 usage | 3 the run still has unfinished items
 kb-release-handoff() {
     if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local release_id="" opt_repo="$PWD" opt_json=0 opt_cancel=0 opt_reason="" bf team context hooks rc is_batch=0
-    local usage="Usage: kb-release handoff <release-id> [--repo-dir <path>] [--json] | <REL-BATCH-id> --cancel [--reason <text>]"
+    local usage="Usage: kb-release handoff <release-id> [--repo-dir <path>] [--json] | <release-id> --cancel [--reason <text>]"
     while [[ $# -gt 0 ]]; do
         case "${1-}" in
             --repo-dir)
@@ -32879,8 +32881,10 @@ kb-release-handoff() {
                 echo ""
                 echo "ALL_DONE hand-off of an orchestrated run: close the run (refused while any tracked item is unfinished),"
                 echo "then print the XACA-1350 resume plan (the 'DEV, items done' row). Changes no stage."
-                echo "A batch (kb-run A,B; XACA-1834) is closed as completed instead. --cancel abandons a batch: its open run is"
-                echo "closed even with unfinished items and the batch is marked cancelled (workers already running keep running)."
+                echo "A batch (kb-run A,B; XACA-1834) is closed as completed instead."
+                echo "--cancel abandons the open run: it is closed as cancelled even with unfinished or never-dispatched items,"
+                echo "and workers already running keep running. A release keeps its status, stage and items (start a new run"
+                echo "with kb-run <release-id>); a batch is also marked cancelled. --reason is recorded on the run_end event."
                 return 0 ;;
             -*) echo "Error: Unknown option: ${1-}" >&2; echo "$usage" >&2; return 2 ;;
             *)
@@ -32901,13 +32905,12 @@ kb-release-handoff() {
     hooks="$(dirname "$_KB_RS_CLI")"
     [[ "$(_kb_jq_read "$bf" '[.releases[]? | select(.id == $rel) | .kind // ""] | first // ""' --arg rel "$release_id" -r 2>/dev/null)" == "batch" ]] && is_batch=1
     if (( opt_cancel )) || [[ -n "$opt_reason" ]]; then
-        if (( ! is_batch )); then
-            echo "Error: --cancel / --reason apply to a batch (REL-BATCH-*) only; $release_id is a release" >&2
-            return 2
-        fi
         if (( ! opt_cancel )); then echo "Error: --reason needs --cancel" >&2; echo "$usage" >&2; return 2; fi
-        # XACA-1834-009: abandon the batch: close its open run even with unfinished items, then mark it cancelled.
-        local -a cargs=(batch-cancel --board "$bf" --kanban-dir "$_KB_RS_KDIR" --release "$release_id")
+        # XACA-1834-009: abandon a batch: close its open run even with unfinished items, then mark it cancelled.
+        # XACA-1882: abandon a release run: close the run only (release status/stage and items untouched).
+        local csub=cancel
+        (( is_batch )) && csub=batch-cancel
+        local -a cargs=("$csub" --board "$bf" --kanban-dir "$_KB_RS_KDIR" --release "$release_id")
         [[ -n "$opt_reason" ]] && cargs+=(--reason "$opt_reason")
         python3 "$hooks/orchestrator_run_cli.py" "${cargs[@]}"
         return $?
@@ -32915,7 +32918,13 @@ kb-release-handoff() {
     python3 "$hooks/orchestrator_run_cli.py" close --board "$bf" --kanban-dir "$_KB_RS_KDIR" --release "$release_id"
     rc=$?
     if (( rc != 0 )); then
-        (( is_batch && rc == 3 )) && echo "  To abandon this batch instead: kb-release handoff $release_id --cancel [--reason <text>]" >&2
+        if (( rc == 3 )); then
+            if (( is_batch )); then
+                echo "  To abandon this batch instead: kb-release handoff $release_id --cancel [--reason <text>]" >&2
+            else
+                echo "  To abandon this run instead: kb-release handoff $release_id --cancel [--reason <text>]" >&2
+            fi
+        fi
         return $rc
     fi
     # XACA-1834: a batch has no stage to resume: close the batch record itself and stop (nothing to deploy or promote).
@@ -32963,13 +32972,15 @@ _kb_release_orch_prompt_rules() {
         r+="This is an ad-hoc BATCH (\`kb-run A,B,...\`, XACA-1834), not a release: it has no branch and is never deployed or promoted. Run \`kb-release handoff ${rel}\` (it closes the run and the batch), give the user the final status table, and stop. Ignore every DEV deploy / promote / chain step in the release rules below.\n\n"
     else
     r+="### Hand-off on ALL_DONE\n"
-    r+="The monitor has closed the run (\`run_end\`, \`closedAt\`). Run \`kb-release handoff ${rel}\` (idempotent: it closes the run if the monitor had not and REFUSES while any tracked item is unfinished), then read the resume plan it prints. After a finished run that is the \"DEV, items done\" row. Continue exactly as the Release Resume Plan rules below say: offer the DEV deploy and the tests, then \`kb-release chain ${rel}\`. Stop at the first human gate.\n\n"
+    r+="The monitor has closed the run (\`run_end\`, \`closedAt\`). Run \`kb-release handoff ${rel}\` (idempotent: it closes the run if the monitor had not and REFUSES while any tracked item is unfinished), then read the resume plan it prints. After a finished run that is the \"DEV, items done\" row. Continue exactly as the Release Resume Plan rules below say: offer the DEV deploy and the tests, then \`kb-release chain ${rel}\`. Stop at the first human gate.\n"
+    r+="To ABANDON the run instead (only on the USER's decision, e.g. nothing can dispatch): \`kb-release handoff ${rel} --cancel --reason \"<why>\"\`. It closes the run as cancelled and leaves the release and its items as they are; workers already running keep running.\n\n"
     fi
     r+="### Never\n"
     r+="- Never read diffs, PR files, CI logs or test output yourself: ask the worker with \`kb-msg\` and keep only its answer. Your context must stay small for the whole run.\n"
     r+="- Never merge a PR, run \`kb-done\`, cancel a protected [Review]/[Test]/[UX] subitem, or edit anything inside a worker's worktree or pane. Workers own their tickets through merge.\n"
     r+="- Never promote past DEV: DEV->QA is the lead's deliberate call (the Release session rules below still apply).\n"
     r+="- Never dispatch into your own terminal, never exceed the cap, never ignore a freeze order, and never edit board or release JSON.\n"
+    r+="- Never call \`close_run\` (or any release_orchestrator function) by hand: abandon a run only with \`kb-release handoff ${rel} --cancel --reason \"<why>\"\`, on the user's decision.\n"
     printf '%s' "$r"
 }
 
@@ -32999,8 +33010,8 @@ _kb_release_orch_resume() {
     rc=$?
     if (( rc == 4 )); then return 1; fi
     if (( rc != 0 )); then
-        printf '⛔ ACTIVE ORCHESTRATED RUN %s could not be resumed (rc %s). Do NOT dispatch anything until\n   kb-release-orchestrate resume %s succeeds:\n%s\n' \
-            "$active" "$rc" "$release_id" "$out"
+        printf '⛔ ACTIVE ORCHESTRATED RUN %s could not be resumed (rc %s). Do NOT dispatch anything until\n   kb-release-orchestrate resume %s succeeds.\n   To abandon the run instead (USER decision only): kb-release handoff %s --cancel --reason "<why>"\n%s\n' \
+            "$active" "$rc" "$release_id" "$release_id" "$out"
         echo "⛔ kb-run: active run $active of $release_id could not be resumed (rc $rc); see the plan below" >&2
         return 0
     fi
