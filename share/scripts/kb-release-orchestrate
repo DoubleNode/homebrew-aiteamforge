@@ -1,0 +1,27 @@
+#!/usr/bin/env python3
+"""kb-release-orchestrate watch|status|resume|tokens: the release orchestrator monitor (XACA-1546-003, EPIC-0072).
+
+Thin entry point; ALL logic, the exit-code table, the verdict priority and the repeat-suppression rule are documented in
+kanban-hooks/orchestrator_monitor.py. Shipped to tap consumers (XACA-1878: sync-tap.sh mirrors it to share/scripts/, and
+`aiteamforge upgrade` materializes it into $AITEAMFORGE_DIR/scripts/). It finds kanban-hooks/ as a sibling of its own
+realpath'd dir, so it runs from the dev checkout, share/scripts + share/kanban-hooks, and $AITEAMFORGE_DIR/{scripts,
+kanban-hooks}. Kanban dir: --board / --kanban-dir / KB_KANBAN_DIR, else the checkout's kanban/ (dev), else (consumer) the
+current tmux team's registry kanban dir, else the one registered board holding the release, else exit 2 naming --kanban-dir.
+
+  kb-release-orchestrate watch  <REL-ID> [--run RUN] [--once] [--interval S] [--timeout S] [--repeat-after S] ...
+  kb-release-orchestrate status <REL-ID> [--json] ...
+  kb-release-orchestrate resume <REL-ID> [--coordinator team:terminal] [--json] [--dry-run]   (XACA-1547: 0 RESUMED,
+                                4 NO_ACTIVE_RUN, 2 USAGE; a restarted coordinator runs this first)
+Exit: 0 ALL_DONE | 2 USAGE | 3 PENDING (--once) | 10 SLOT_FREE | 11 QUESTION_PENDING | 12 ITEM_STALLED | 13 ITEM_CRASHED
+      | 14 ITEM_FAILED | 15 DISPATCH_FAILED | 31 TIMEOUT. The LAST stdout line is always `VERDICT: <NAME> run=.. item=.. detail=..`.
+"""
+import os
+import sys
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "kanban-hooks"))
+
+import orchestrator_monitor  # noqa: E402
+
+if __name__ == "__main__":
+    sys.exit(orchestrator_monitor.main())

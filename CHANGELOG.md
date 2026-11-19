@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1878: Ship kb-release-orchestrate to tap consumers and resolve its kanban dir (XACA-1878)
+- Tap files updated in this publish: `share/kanban-hooks/orchestrator_monitor.py`,`share/scripts/kb-release-orchestrate` `share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1882: kb-release handoff --cancel abandons a release run (XACA-1882)
 - Tap files updated in this publish: `share/kanban-hooks/orchestrator_run_cli.py`,`share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1853: plan-hash approval for orchestrated runs (kb-run --plan-only / --approve-plan) (XACA-1853)

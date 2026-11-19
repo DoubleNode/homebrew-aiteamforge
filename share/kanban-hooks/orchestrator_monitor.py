@@ -110,7 +110,9 @@ TERMINAL used to find the window row / tmux window: the terminal of the item's l
 (the dispatcher may pick a terminal other than the plan's), else summary items[ID].terminal. Team = release.team, else board.team,
 else the `<team>-board.json` file name. Env: KB_ORCH_TMUX (default tmux), KB_ORCH_GH (default gh), KB_KANBAN_DIR (default
 <checkout>/kanban, or the MAIN checkout's kanban/ from a linked worktree with no board, when neither --board
-nor --kanban-dir is given). Multiple panes in one window: a non-shell pane wins.
+nor --kanban-dir is given; on a TAP CONSUMER, where neither holds a board, resolve_kanban_dir() falls back to the current
+tmux team's registry kanban dir, then the ONE registered board holding the release, else exit 2 naming --kanban-dir:
+XACA-1878). Multiple panes in one window: a non-shell pane wins.
 """
 from __future__ import annotations
 
@@ -307,6 +309,99 @@ def default_kanban_dir(repo_root):
     return own
 
 
+def _has_board(kdir):
+    import glob
+    return bool(kdir) and bool(glob.glob(os.path.join(kdir, "*-board.json")))
+
+
+def _board_holds(kdir, release_id=None, item_id=None):
+    """True when a *-board.json under kdir carries the release (or, with item_id, the backlog item). Never raises."""
+    import glob
+    want = item_id or release_id
+    for path in sorted(glob.glob(os.path.join(kdir, "*-board.json"))):
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                board = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(board, dict):
+            continue
+        rows = board.get("backlog") if item_id else board.get("releases")
+        if any(isinstance(r, dict) and r.get("id") == want for r in rows or []):
+            return True
+    return False
+
+
+def _tmux_team(ctx):
+    """The team of the tmux session this process runs in (kanban_utils.parse_session_name), else None. Never raises."""
+    if not ctx.env.get("TMUX"):
+        return None
+    base = shlex.split(ctx.env.get("KB_ORCH_TMUX") or "tmux")
+    try:
+        rc, out, _err = _run(base + ["display-message", "-p", "#S"], timeout=10)
+    except RuntimeError:
+        return None
+    if rc != 0 or not out.strip():
+        return None
+    try:
+        from kanban_utils import parse_session_name
+    except Exception:  # noqa: BLE001 -- an unimportable helper only loses this step
+        return None
+    team, _term = parse_session_name(out.strip().splitlines()[0])
+    return team
+
+
+def _registry_kanban_dirs():
+    """-> [(team, kanban_dir)] for every team in the per-machine registry (aiteamforge_registry, the reader LCARS uses).
+    Board-less aliases and unreadable entries are skipped; an unreadable registry yields []. Never raises."""
+    try:
+        import aiteamforge_paths as apaths
+        import aiteamforge_registry as reg
+        view = apaths.read_config_view()   # ONE read-only peek, passed through (an unhealthy file pays the retry once)
+        teams = reg.registered_teams(config=view)
+    except Exception:  # noqa: BLE001
+        return []
+    out = []
+    for team in teams:
+        try:
+            out.append((team, os.path.realpath(str(reg.kanban_dir(team, config=view)))))
+        except Exception:  # noqa: BLE001 -- UnknownTeam / BoardLess / malformed: not a candidate
+            continue
+    return out
+
+
+def resolve_kanban_dir(ctx, release_id=None, item_id=None):
+    """The kanban dir used when no --board / --kanban-dir / KB_KANBAN_DIR is given (XACA-1878).
+
+    1. the checkout default (default_kanban_dir, the XACA-1808 worktree rule) when it holds a *-board.json: on the dev
+       checkout nothing changes;
+    2. else (a TAP CONSUMER: the monitor runs from ~/aiteamforge/kanban-hooks or libexec/share/kanban-hooks, where no
+       board lives) the registry kanban dir of the CURRENT tmux session's team, when its board holds the release/item;
+    3. else the ONE registered team kanban dir whose board holds it;
+    4. else UsageError (exit 2) naming --kanban-dir and every dir tried. Never silently a dir with no board."""
+    own = default_kanban_dir(ctx.repo_root)
+    if _has_board(own):
+        return own
+    tried = [own + " (no board)"]
+    want = item_id or release_id
+    reg = _registry_kanban_dirs()
+    team = _tmux_team(ctx)
+    if team:
+        tdir = next((d for t, d in reg if t == team), None)
+        if tdir and _board_holds(tdir, release_id, item_id):
+            return tdir
+        tried.append("tmux team %s: %s" % (team, "%s does not hold %s" % (tdir, want) if tdir else "not in the registry"))
+    hits = sorted({d for _t, d in reg if _board_holds(d, release_id, item_id)})
+    if len(hits) == 1:
+        return hits[0]
+    if hits:
+        raise UsageError("%s is on more than one registered board (%s): pass --kanban-dir <dir>%s" % (
+            want, ", ".join(hits), " (tried: %s)" % "; ".join(tried[1:]) if len(tried) > 1 else ""))
+    tried.append("%d registered team kanban dir(s), none holding %s" % (len(reg), want))
+    raise UsageError("cannot find the kanban dir for %s: pass --kanban-dir <team kanban dir> (tried: %s)" % (
+        want, "; ".join(tried)))
+
+
 def locate_release(ctx):
     """-> (board_file, kanban_dir, board, release). Re-reads the board file every call (level-triggered)."""
     board_file, kdir = ctx.board, ctx.kanban_dir
@@ -317,7 +412,7 @@ def locate_release(ctx):
         if rel is None:
             raise UsageError("release %s not found in %s" % (ctx.release_id, board_file))
     else:
-        kdir = kdir or ctx.env.get("KB_KANBAN_DIR") or default_kanban_dir(ctx.repo_root)
+        kdir = kdir or ctx.env.get("KB_KANBAN_DIR") or resolve_kanban_dir(ctx, ctx.release_id)
         import release_resume
         try:
             board_file, board, rel = release_resume.find_release(kdir, ctx.release_id)
@@ -1104,8 +1199,11 @@ def tokens_cmd(args, out, overrides):
     now = ro._ts(ctx.clock())
     extra_problems, budget_info = [], None
     if args.item:
-        kdir = os.path.abspath(args.kanban_dir or (os.path.dirname(os.path.abspath(args.board)) if args.board else None)
-                               or ctx.env.get("KB_KANBAN_DIR") or default_kanban_dir(ctx.repo_root))
+        try:
+            kdir = os.path.abspath(args.kanban_dir or (os.path.dirname(os.path.abspath(args.board)) if args.board else None)
+                                   or ctx.env.get("KB_KANBAN_DIR") or resolve_kanban_dir(ctx, item_id=args.item))
+        except UsageError as exc:
+            return fail(str(exc))
         item, note = _find_item(kdir, args.item)
         rep = otok.collect_item(args.item, item, ctx.projects_dir, now=now, since=since, cache=ctx.token_cache)
         if note:

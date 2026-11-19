@@ -16321,7 +16321,7 @@ _kb_headless_worker_rules() {
     local id="${1-}" r=""
     r+="\n\n## Headless run rules (unattended kb-run)\n"
     r+="This session was launched unattended (\`kb-run ${id} --yes\`, KB_ASSUME_YES=1 or no terminal). Nobody is watching this window and nobody can approve: do NOT wait for approval, and do not end your turn at a plan. Work the ticket all the way through.\n"
-    r+="- **Full normal flow.** Stay on this worktree branch. Work the subitems (\`kb-backlog sub start/done\`). Run lint and tests. Open the PR against the branch this worktree was cut from (\`develop\`, or the item's release branch when it has one), then \`kb-pr\`. Launch BOTH gates yourself, each in its OWN background Bash call: \`kb-run-test ${id} --yes\` and \`kb-run-review ${id} --yes\` (add \`kb-run-ux ${id} --yes\` if the diff touches UI). Then run \`kb-pr-monitor --pr <N> --item ${id}\`. On GATES_PASSED: \`kb-sweep ${id}\`, then \`kb-done\`.\n"
+    r+="- **Full normal flow.** Stay on this worktree branch. Work the subitems (\`kb-backlog sub start/done\`). Run lint and tests. Open the PR against the branch this worktree was cut from (\`develop\`, or the item's release branch when it has one), then \`kb-pr\`. Launch BOTH gates yourself, each in its OWN background Bash call: \`kb-run-test ${id} --yes\` and \`kb-run-review ${id} --yes\` (if the diff touches UI, add \`kb-run-ux ${id} --yes\`, or the \`lal\` UX Agent gate if that launcher is absent). Then run \`kb-pr-monitor --pr <N> --item ${id}\`. On GATES_PASSED: \`kb-sweep ${id}\`, then \`kb-done\`.\n"
     r+="- **Order.** This flow overrides step 6 of the delegation workflow above: \`kb-done\` comes only after GATES_PASSED and \`kb-sweep\`, never as soon as the subitems are complete.\n"
     r+="- **Questions: stop, never guess.** There is no coordinator, so \`kb-ask\` is not available (rc 4). For a user-owned decision (scope, product behaviour, anything destructive or outward-facing), or anything you cannot resolve with confidence, stop and end your turn with the question as your final message.\n"
     r+="- **Monitor verdicts.** 10/11/12 are retried per the normal rules. 21 UX_REOPEN is self-serve: re-open the \`[UX]\` subitem, run \`kb-run-ux ${id} --yes\` (or the \`lal\` UX Agent gate if that launcher is absent), then re-run the monitor. If it ends 20 CONFLICT, 22 BLOCKED, 30 PR_CLOSED or 31 TIMEOUT, stop and report the VERDICT line; do not retry.\n"
@@ -16337,7 +16337,7 @@ _kb_orchestrated_worker_rules() {
     local id="${1-}" run="${2-}" coord="${3-}" r=""
     r+="\n\n## Orchestrated worker rules (run ${run}, coordinator ${coord})\n"
     r+="You were dispatched by the release coordinator. Nobody is watching this window: do NOT wait for approval. Work the ticket all the way through.\n"
-    r+="- **Full normal flow.** Stay on this worktree branch. Work the subitems (\`kb-backlog sub start/done\`). Run lint and tests. Open the PR against the release branch, then \`kb-pr\`. Launch BOTH gates yourself, each in its OWN background Bash call: \`kb-run-test ${id} --yes\` and \`kb-run-review ${id} --yes\` (add \`kb-run-ux ${id} --yes\` if the diff touches UI). Then run \`kb-pr-monitor --pr <N> --item ${id}\`. On GATES_PASSED: \`kb-sweep ${id}\`, then \`kb-done\`.\n"
+    r+="- **Full normal flow.** Stay on this worktree branch. Work the subitems (\`kb-backlog sub start/done\`). Run lint and tests. Open the PR against the release branch, then \`kb-pr\`. Launch BOTH gates yourself, each in its OWN background Bash call: \`kb-run-test ${id} --yes\` and \`kb-run-review ${id} --yes\` (if the diff touches UI, add \`kb-run-ux ${id} --yes\`, or the \`lal\` UX Agent gate if that launcher is absent). Then run \`kb-pr-monitor --pr <N> --item ${id}\`. On GATES_PASSED: \`kb-sweep ${id}\`, then \`kb-done\`.\n"
     r+="- **Questions: ask, never guess.** For anything you cannot resolve with confidence, and ALWAYS for a user-owned decision (scope, product behaviour, anything destructive or outward-facing), run \`kb-ask \"<question>\" [--options a|b]\`. Run kb-ask as a BACKGROUND Bash command (run_in_background): the Bash tool kills a foreground command after 600s and kb-ask waits up to 1800s. Act on its exit code: 0 = the answer is on stdout; 3 or 130 = no answer yet, so PARK (stop and end your turn; the question stays pending for the coordinator); 4/5/6/7/8 = you cannot ask, so stop and report.\n"
     r+="- **Milestone pings.** \`kb-msg send ${coord} \"${id}: <milestone>\"\` when the PR is opened (include the number), on each gate verdict, when merged, and when done.\n"
     r+="- **Freeze orders.** Right before merging, run \`kb-msg inbox --all\`. If the coordinator or the lead has ordered a freeze or hold, do not merge: park and say so.\n"
@@ -32520,6 +32520,48 @@ _kb_release_orch_precondition() {
     return 1
 }
 
+# _kb_release_orch_monitor_cmd -> the path of the kb-release-orchestrate wrapper the coordinator prompt runs (XACA-1878):
+# PATH first, then ${AITEAMFORGE_DIR}/scripts (the consumer install), then scripts/ beside the kanban-hooks dir in use (the
+# dev checkout). Prints nothing and returns 1 when none is executable.
+_kb_release_orch_monitor_cmd() {
+    local c="" _s _h cand
+    c=$(command -v "kb-release-orchestrate" 2>/dev/null) || c=""
+    [[ -n "$c" && "$c" == /* && -x "$c" ]] && { printf '%s\n' "$c"; return 0; }
+    _s=$(_kb_board_settings_script 2>/dev/null) || _s=""
+    _h=""; [[ -n "$_s" ]] && _h=$(dirname "$(dirname "$_s")")
+    for cand in "${AITEAMFORGE_DIR:-$HOME/aiteamforge}/scripts/kb-release-orchestrate" ${_h:+"$_h/scripts/kb-release-orchestrate"}; do
+        [[ -f "$cand" && -x "$cand" ]] && { printf '%s\n' "$cand"; return 0; }
+    done
+    return 1
+}
+
+# _kb_release_orch_monitor_preflight: coordinator mode REFUSES (rc 1) before anything is promoted, minted or dispatched
+# when the monitor wrapper its prompt runs is missing: the session would otherwise die 127 on its first step (XACA-1878,
+# XACA-1861). On success _KB_O_MONCMD holds the resolved path, which the prompt renders.
+_kb_release_orch_monitor_preflight() {
+    _KB_O_MONCMD=$(_kb_release_orch_monitor_cmd) && [[ -n "$_KB_O_MONCMD" ]] && return 0
+    _KB_O_MONCMD=""
+    local _s _h
+    _s=$(_kb_board_settings_script 2>/dev/null) || _s=""
+    _h="<aiteamforge>/kanban-hooks"; [[ -n "$_s" ]] && _h=$(dirname "$_s")
+    echo "✗ kb-run: coordinator mode refused: the release-orchestrator monitor 'kb-release-orchestrate' is not installed (not on PATH, not in ${AITEAMFORGE_DIR:-$HOME/aiteamforge}/scripts). The coordinator prompt runs it, so the session would fail on its first step. Nothing promoted, nothing dispatched." >&2
+    echo "  Fix: run 'aiteamforge upgrade', re-source the kanban helpers (or open a new pane), then re-run kb-run." >&2
+    echo "  Manual fallback: python3 ${_h}/orchestrator_monitor.py watch <REL-ID> --run <RUN-ID> --kanban-dir ${_KB_RS_KDIR:-<team kanban dir>}" >&2
+    return 1
+}
+
+# _kb_release_orch_sh_word <text> -> <text> as one shell word for a rendered prompt line: bare when it is plain, else
+# single-quoted. Backslashes are doubled because the prompt goes through `echo -e` (XACA-1128).
+_kb_release_orch_sh_quote() {   # one shell word, bare when safe, else single-quoted (for plain printf output)
+    local w="${1-}" sq="'" esc="'\\''"
+    if [[ "$w" =~ ^[A-Za-z0-9_./:@%+=-]+$ ]]; then printf '%s' "$w"; return 0; fi
+    printf '%s' "${sq}${w//$sq/$esc}${sq}"
+}
+_kb_release_orch_sh_word() {    # _kb_release_orch_sh_quote with backslashes doubled, for text rendered through echo -e
+    local w; w="$(_kb_release_orch_sh_quote "${1-}")"
+    printf '%s' "${w//\\/\\\\}"
+}
+
 # _kb_release_orch_entry <REL-ID> <team> <stage> <assume_yes> <context>
 # rc 0 orchestrate (promoted when it was PLANNED) | 10 manual: today's flow, and SILENT unless the user asked for
 # coordinator mode | 11 stop, nothing wrong | 12 resume the release's open run | else an error code to return.
@@ -32573,6 +32615,7 @@ _kb_release_orch_entry() {
         return 2
     fi
     if [[ -n "$active" ]]; then
+        _kb_release_orch_monitor_preflight || return 1
         _kb_release_orch_precondition "$team" "$context" || return 1
         echo "↻ $rel has an open orchestrated run ($active): resuming it, not starting another."
         if [[ -n "${_KB_O_MAXPAR-}" || ${#_KB_O_EXCL[@]} -gt 0 ]]; then
@@ -32629,6 +32672,7 @@ _kb_release_orch_entry() {
         echo "  Without a terminal: kb-run $rel --plan-only, show the plan to the user, then kb-run $rel --approve-plan <PLAN-HASH>." >&2
         return 2
     fi
+    _kb_release_orch_monitor_preflight || return 1
     _kb_release_orch_precondition "$team" "$context" || return 1
     if [[ "$stage" == "PLANNED" && -n "${_KB_O_APPROVE-}" ]]; then
         # The promote is irreversible: check the approved hash BEFORE it, not only after it (rc 4 = stale, nothing done).
@@ -32943,16 +32987,20 @@ kb-release-handoff() {
 # The prompt is a judgement layer over deterministic tools: the monitor (kb-release-orchestrate watch), the dispatcher
 # (kb-dispatch), the question channel (kb-ask list / kb-answer) and the freeze orders (kb-msg inbox --all).
 _kb_release_orch_prompt_rules() {
-    local rel="${1-}" ctx="${2-}" run r
+    local rel="${1-}" ctx="${2-}" run r mon kd=""
     run="${ctx#- Run id: }"; run="${run%%$'\n'*}"
     [[ "$run" =~ ^RUN-REL- ]] || run="<RUN-ID>"
+    # XACA-1878: the monitor is named by the path the launch preflight resolved, and the kanban dir is passed explicitly,
+    # so the rendered command runs from any cwd and never depends on the monitor's default (a consumer has no board there).
+    mon=$(_kb_release_orch_sh_word "${_KB_O_MONCMD:-kb-release-orchestrate}")
+    [[ -n "${_KB_RS_KDIR-}" ]] && kd=" --kanban-dir $(_kb_release_orch_sh_word "$_KB_RS_KDIR")"
     r="\n## Release orchestration: YOU ARE THE COORDINATOR (run ${run})\n"
     r+="The plan was approved by the lead and wave 1 is already dispatched. Each ticket runs in its OWN worker window and carries its own worktree, PR, test/review gates, merge and \`kb-done\`. You run none of that. You keep the run moving, answer questions, and escalate what is not yours to decide.\n\n"
     r+="### This run\n${ctx}\n\n"
     r+="### Resumed run (XACA-1547)\n"
-    r+="If the plan below carries an \`ACTIVE ORCHESTRATED RUN (resumed, XACA-1547)\` report, it is the per-item truth: never re-dispatch an item whose redispatch is \`never\`. If it instead carries a \`⛔ ACTIVE ORCHESTRATED RUN ... could not be resumed\` / \`Do NOT dispatch\` block, that block OVERRIDES the loop: dispatch NOTHING (SLOT_FREE and ITEM_CRASHED included) and tell the user, until \`kb-release-orchestrate resume ${rel}\` succeeds.\n\n"
+    r+="If the plan below carries an \`ACTIVE ORCHESTRATED RUN (resumed, XACA-1547)\` report, it is the per-item truth: never re-dispatch an item whose redispatch is \`never\`. If it instead carries a \`⛔ ACTIVE ORCHESTRATED RUN ... could not be resumed\` / \`Do NOT dispatch\` block, that block OVERRIDES the loop: dispatch NOTHING (SLOT_FREE and ITEM_CRASHED included) and tell the user, until \`${mon} resume ${rel}${kd}\` succeeds.\n\n"
     r+="### The loop (do not hand-roll polling)\n"
-    r+="1. Start the monitor in the BACKGROUND (Bash tool, run_in_background true; a foreground call is killed at 600s): \`kb-release-orchestrate watch ${rel} --run ${run}\`. Do not poll its output file; you are notified when it exits.\n"
+    r+="1. Start the monitor in the BACKGROUND (Bash tool, run_in_background true; a foreground call is killed at 600s): \`${mon} watch ${rel} --run ${run}${kd}\`. Do not poll its output file; you are notified when it exits.\n"
     r+="2. Its LAST stdout line is \`VERDICT: <NAME> run=.. item=.. detail=..\`. Act on the verdict (table below), then START THE MONITOR AGAIN. Read the verdict NAME, never only the exit code.\n"
     r+="3. Keep a running status table in every reply: item, wave, worker terminal, state, PR, open question.\n\n"
     r+="| Verdict (exit) | What you do |\n|---|---|\n"
@@ -33010,8 +33058,8 @@ _kb_release_orch_resume() {
     rc=$?
     if (( rc == 4 )); then return 1; fi
     if (( rc != 0 )); then
-        printf '⛔ ACTIVE ORCHESTRATED RUN %s could not be resumed (rc %s). Do NOT dispatch anything until\n   kb-release-orchestrate resume %s succeeds.\n   To abandon the run instead (USER decision only): kb-release handoff %s --cancel --reason "<why>"\n%s\n' \
-            "$active" "$rc" "$release_id" "$release_id" "$out"
+        printf '⛔ ACTIVE ORCHESTRATED RUN %s could not be resumed (rc %s). Do NOT dispatch anything until\n   `kb-release-orchestrate resume %s --kanban-dir %s` succeeds.\n   To abandon the run instead (USER decision only): kb-release handoff %s --cancel --reason "<why>"\n%s\n' \
+            "$active" "$rc" "$release_id" "$(_kb_release_orch_sh_quote "$_KB_RS_KDIR")" "$release_id" "$out"
         echo "⛔ kb-run: active run $active of $release_id could not be resumed (rc $rc); see the plan below" >&2
         return 0
     fi
