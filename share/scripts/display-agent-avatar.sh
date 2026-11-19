@@ -188,7 +188,7 @@ display_agent_avatar() {
         "richmond:Ted Lasso") avatar_codename="ted" ;;
         "richmond:Coach Beard") avatar_codename="beard" ;;
         "richmond:Leslie Higgins") avatar_codename="higgins" ;;
-        "richmond:Keeley Jones") avatar_codename="keeley" ;;
+        "richmond:Rebecca Welton") avatar_codename="rebecca" ;;
         "richmond:Roy Kent") avatar_codename="roy" ;;
         "richmond:Dr. Sharon Fieldstone") avatar_codename="sharon" ;;
         "richmond:Trent Crimm") avatar_codename="trent" ;;

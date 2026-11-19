@@ -14634,7 +14634,7 @@ _kb_get_persona_delegation_guide() {
             guide+="| Bug Fixing | sharon | Sharon |\n"
             guide+="| Testing / QA | roy | Roy Kent |\n"
             guide+="| Code Review | trent | Trent Crimm |\n"
-            guide+="| Documentation | keeley | Keeley Jones |\n"
+            guide+="| Documentation | rebecca | Rebecca Welton |\n"
             guide+="| Release / CI/CD | higgins | Higgins |"
             ;;
         medical*)

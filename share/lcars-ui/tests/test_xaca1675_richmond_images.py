@@ -252,7 +252,7 @@ class _ServeImageBase(unittest.TestCase):
 class TestRosterAndHarness(_ServeImageBase):
     def test_roster_is_derived_and_complete(self):
         slugs, terminals = _roster()
-        self.assertEqual(slugs, ["beard", "higgins", "keeley", "roy", "sharon", "ted", "trent"])
+        self.assertEqual(slugs, ["beard", "higgins", "rebecca", "roy", "sharon", "ted", "trent"])
         self.assertEqual(len(terminals), EXPECTED_TERMINAL_LOGOS)
         self.assertEqual(terminals[0], "lcars")
 
