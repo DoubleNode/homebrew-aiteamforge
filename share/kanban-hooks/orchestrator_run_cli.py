@@ -33,11 +33,19 @@ reused unchanged. Its items keep their real releaseAssignment (membership is rel
   batch-close      set an open batch's status (completed | cancelled) and closedAt. Idempotent; refuses a non-batch
                    release, and `completed` while the batch has an open run.
 
+XACA-1853 -- plan-hash approval (`kb-run <REL|A,B> --plan-only` / `--approve-plan <hash>`), so an agent can start a run
+without a tty while a human still approves the exact plan:
+
+  plan-hash   print the stable hash of a plan document plus the resolved settings (plan_hash below). Read-only.
+  batch-plan  the plan-run --json document for a batch that is NOT minted yet: the batch record exists only in memory, and
+              release_orchestrator.plan runs the same rules it runs after the mint. Read-only.
+
 Exit: 0 ok | 1 refused or failed (message on stderr) | 2 usage | 3 close refused (items unfinished).
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 from types import SimpleNamespace
 import json
 import os
@@ -123,6 +131,10 @@ def cmd_start(a):
     def _merge(orch):
         if orch.get("activeRunId") != run_id:
             raise ro.LedgerError("run %s is not the active run of %s" % (run_id, a.release))
+        # XACA-1853: the approval record belongs to THIS run. A terminal-approved re-run must not inherit a previous
+        # run's approvedVia/planHash (start_run keeps old summary keys), so drop them unless this meta sets them.
+        for k in ("approvedVia", "planHash"):
+            orch.pop(k, None)
         orch.update(meta)
 
     if meta:
@@ -168,6 +180,95 @@ def cmd_render(a):
     if plan_.get("excluded"):
         text += "\n\nExcluded by you (not dispatched): %s" % ", ".join(plan_["excluded"])
     print(text)
+    return 0
+
+
+PLAN_HASH_VERSION = 1
+PLAN_HASH_LEN = 16       # hex chars shown to (and typed back by) a human; an approval check, not a security boundary
+UNMINTED_BATCH_ID = "REL-BATCH-(unminted)"
+
+
+def canonical_plan(plan_, target, coordinator_model, coordinator_effort, worker_model):
+    """The plan facts a human approves, as a canonical dict (XACA-1853). Only what changes WHAT runs is in it: the target
+    (a release id, or a batch's sorted item ids: a batch's REL-BATCH-<UTC> id does not exist until the mint), max
+    parallel, the waves (ids, sorted within a wave: order inside a wave is not a decision), every scheduled id, the
+    refused ids, the exclusions and the three resolved model/effort settings. Terminal and persona picks are left out:
+    they follow terminal availability minute to minute, and kb-dispatch re-checks them at dispatch time anyway."""
+    if not isinstance(plan_, dict):
+        raise ro.LedgerError("the plan document is not a JSON object")
+
+    def _list(v, what):
+        if v is None:
+            return []
+        if not isinstance(v, list):
+            raise ro.LedgerError("malformed plan document: %s is not a list" % what)
+        return v
+
+    def _ids(entries, what):
+        out = []
+        for e in _list(entries, what):
+            if not (isinstance(e, dict) and "id" in e):
+                continue
+            if not isinstance(e["id"], str):
+                raise ro.LedgerError("malformed plan document: a %s id is not a string" % what)
+            out.append(e["id"])
+        return sorted(out)
+
+    waves = []
+    for w in _list(plan_.get("waves"), "waves"):
+        if not isinstance(w, dict):
+            raise ro.LedgerError("malformed plan document: a wave is not an object")
+        waves.append(_ids(w.get("items"), "wave item"))
+    refused = _ids(plan_.get("refused"), "refused")
+    excluded = _list(plan_.get("excluded"), "excluded")
+    if not all(isinstance(x, str) for x in excluded):
+        raise ro.LedgerError("malformed plan document: an excluded id is not a string")
+    return {"v": PLAN_HASH_VERSION, "target": target, "maxParallel": plan_.get("maxParallel"),
+            "waves": waves, "items": sorted(i for w in waves for i in w), "refused": refused,
+            "excluded": sorted(excluded),
+            "models": {"coordinator": coordinator_model, "coordinatorEffort": coordinator_effort, "worker": worker_model}}
+
+
+def plan_hash(canonical):
+    """sha256 of the canonical dict as sorted, separator-free JSON, cut to PLAN_HASH_LEN hex chars."""
+    blob = json.dumps(canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:PLAN_HASH_LEN]
+
+
+def _hash_target(a):
+    if a.batch_items:
+        return {"kind": "batch", "items": sorted(_batch_ids(a.batch_items))}
+    if not (a.board and a.release):
+        raise ro.LedgerError("plan-hash needs --batch-items, or --board and --release")
+    rel = ro._find_release_in(_read_json(a.board), a.release)
+    if ro.is_batch(rel):
+        return {"kind": "batch", "items": sorted(b for b in rel.get("batchItems") or [] if isinstance(b, str))}
+    return {"kind": "release", "id": a.release}
+
+
+def cmd_plan_hash(a):
+    canon = canonical_plan(_read_json(a.plan_file), _hash_target(a), a.coordinator_model, a.coordinator_effort,
+                           a.worker_model)
+    print(json.dumps(canon, sort_keys=True) if a.canonical else plan_hash(canon))
+    return 0
+
+
+def cmd_batch_plan(a):
+    ids = _batch_ids(a.items)
+    board = _read_json(a.board)
+    rel = {"id": UNMINTED_BATCH_ID, "kind": ro.BATCH_KIND, "team": a.team, "stage": "DEV", "status": BATCH_OPEN,
+           "batchItems": ids}
+    kdir = os.path.abspath(a.kanban_dir)
+    if a.terminals_json:
+        terms = _read_json(a.terminals_json)
+        terms = terms.get("terminals") if isinstance(terms, dict) else terms
+        if not isinstance(terms, list):
+            raise ro.LedgerError("--terminals-json %s has no terminals[] list" % a.terminals_json)
+    else:
+        terms = ro._terminals_from_helpers(kdir, a.team)
+    result = ro.plan(UNMINTED_BATCH_ID, kdir, a.repo_root or ro.DEFAULT_REPO_ROOT, terms, a.max_parallel,
+                     loaded=(board, rel))
+    print(json.dumps(result, sort_keys=True, indent=2))
     return 0
 
 
@@ -389,19 +490,37 @@ def main(argv=None):
     bx.add_argument("--kanban-dir", required=True)
     bx.add_argument("--release", required=True)
     bx.add_argument("--reason")
+    ph = sub.add_parser("plan-hash")
+    ph.add_argument("--plan-file", required=True)
+    ph.add_argument("--board")
+    ph.add_argument("--release")
+    ph.add_argument("--batch-items")
+    ph.add_argument("--coordinator-model", required=True)
+    ph.add_argument("--coordinator-effort", required=True)
+    ph.add_argument("--worker-model", required=True)
+    ph.add_argument("--canonical", action="store_true", help="print the canonical JSON instead of its hash")
+    bp = sub.add_parser("batch-plan")
+    bp.add_argument("--board", required=True)
+    bp.add_argument("--kanban-dir", required=True)
+    bp.add_argument("--items", required=True)
+    bp.add_argument("--team", required=True)
+    bp.add_argument("--repo-root")
+    bp.add_argument("--max-parallel", type=int)
+    bp.add_argument("--terminals-json")
     try:
         args = ap.parse_args(argv)
     except SystemExit as exc:
         return 0 if exc.code in (0, None) else 2
     fn = {"start": cmd_start, "close": cmd_close, "exclude": cmd_exclude, "render": cmd_render,
           "batch-readiness": cmd_batch_readiness, "batch-mint": cmd_batch_mint,
-          "batch-close": cmd_batch_close, "batch-cancel": cmd_batch_cancel}.get(args.cmd)
+          "batch-close": cmd_batch_close, "batch-cancel": cmd_batch_cancel,
+          "plan-hash": cmd_plan_hash, "batch-plan": cmd_batch_plan}.get(args.cmd)
     if fn is None:
         ap.print_usage(sys.stderr)
         return 2
     try:
         return fn(args)
-    except (ro.LedgerError, OSError, ValueError, KeyError) as exc:
+    except (ro.LedgerError, ro.PlanError, OSError, ValueError, KeyError, ImportError) as exc:
         print("Error: %s" % exc, file=sys.stderr)
         return 1
 

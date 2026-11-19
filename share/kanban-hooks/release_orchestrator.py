@@ -1069,14 +1069,16 @@ def _hotspot_config(board):
     return None, "releaseConfig.orchestration must be an object with a `hotspots` list, got %s (ignored)" % type(o).__name__
 
 
-def plan(release_id, kanban_dir, repo_root=None, terminals=None, max_parallel=None, contention=None):
+def plan(release_id, kanban_dir, repo_root=None, terminals=None, max_parallel=None, contention=None, loaded=None):
     """The whole read-only run plan for a release. `terminals` = parsed terminals[] (None -> no terminals: every item gets
     NO_TERMINAL). `contention` = module-like with extract_paths/find_plan_doc/load_hotspots/predict (default: the real
-    orchestrator_contention, imported here so the pure layers above never need it)."""
+    orchestrator_contention, imported here so the pure layers above never need it). `loaded` = an in-memory
+    (board, release) pair used instead of reading the release from kanban_dir: XACA-1853 plans a batch that is not
+    minted yet (`kb-run A,B --plan-only`), so the dry plan and the post-mint plan run the very same rules."""
     if contention is None:
         import orchestrator_contention as contention
     kanban_dir = os.path.abspath(kanban_dir)   # a relative dir must not depend on cwd vs repo_root (NO_PLAN_DOC for all)
-    board, rel = _load_board(kanban_dir, release_id)
+    board, rel = loaded if loaded is not None else _load_board(kanban_dir, release_id)
     orch = rel.get("orchestration") if isinstance(rel.get("orchestration"), dict) else {}
     if max_parallel is None:
         max_parallel = orch.get("maxParallel", DEFAULT_MAX_PARALLEL)

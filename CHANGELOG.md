@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1853: plan-hash approval for orchestrated runs (kb-run --plan-only / --approve-plan) (XACA-1853)
+- Tap files updated in this publish: `share/kanban-hooks/orchestrator_run_cli.py`,`share/kanban-hooks/release_orchestrator.py` `share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1844: kb-release orchestration setter; lead* keys become aliases (XACA-1844)
 - Tap files updated in this publish: `share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1877: kb-dispatch bootstraps freelance (parametric) team lanes (XACA-1877)

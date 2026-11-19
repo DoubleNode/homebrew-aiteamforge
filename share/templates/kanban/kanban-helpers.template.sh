@@ -15419,7 +15419,7 @@ _kb_item_list_args() {
     while (( $# > 0 )); do
         _a="$1"; shift
         case "$_a" in
-            --delta|--round|--max-parallel|--exclude|--model|--worker-model|--effort|--orchestrated|--coordinator)
+            --delta|--round|--max-parallel|--exclude|--model|--worker-model|--effort|--orchestrated|--coordinator|--approve-plan)
                 _KB_LIST_FLAGS+=("$_a")
                 if (( $# > 0 )); then _KB_LIST_FLAGS+=("$1"); shift; fi ;;
             -*) _KB_LIST_FLAGS+=("$_a") ;;
@@ -15549,7 +15549,8 @@ _kb_gate_fanout() {
 # (decision Q2: an unplanned ticket is never started; there is no --allow-unplanned). A batch whose run never started
 # (declined, refused) is closed as cancelled, so nothing is left open.
 _kb_batch_run() {
-    local yes=0 id team context bf csv="" rel rc refused hooks cli
+    local yes=0 id team context bf csv="" rel rc refused hooks cli plan_only=0 approve=""
+    local b_maxpar="" b_model="" b_wmodel="" b_effort="" _bf_name="" _bf_val=""
     local -a pass=()
     _kb_item_list_args "$@"
     _kb_parse_item_list ${_KB_LIST_SELECTORS[@]+"${_KB_LIST_SELECTORS[@]}"} || return 2
@@ -15563,12 +15564,23 @@ _kb_batch_run() {
         case "$1" in
             --yes|-y) yes=1; shift ;;
             --orchestrate|--force-coordinator-pane) pass+=("$1"); shift ;;
-            --max-parallel|--model|--worker-model|--effort)
-                if (( $# < 2 )) || [[ -z "${2-}" || "${2-}" == -* ]]; then echo "Error: kb-run $1 needs a value" >&2; return 2; fi
-                pass+=("$1" "$2"); shift 2 ;;
-            --max-parallel=*|--model=*|--worker-model=*|--effort=*)
-                if [[ -z "${1#*=}" ]]; then echo "Error: kb-run ${1%%=*} needs a value" >&2; return 2; fi
-                pass+=("${1%%=*}" "${1#*=}"); shift ;;
+            --max-parallel|--model|--worker-model|--effort|--approve-plan|--max-parallel=*|--model=*|--worker-model=*|--effort=*|--approve-plan=*)
+                if [[ "$1" == *=* ]]; then
+                    _bf_name="${1%%=*}" _bf_val="${1#*=}"; shift
+                    if [[ -z "$_bf_val" ]]; then echo "Error: kb-run ${_bf_name} needs a value" >&2; return 2; fi
+                else
+                    if (( $# < 2 )) || [[ -z "${2-}" || "${2-}" == -* ]]; then echo "Error: kb-run $1 needs a value" >&2; return 2; fi
+                    _bf_name="$1" _bf_val="$2"; shift 2
+                fi
+                pass+=("$_bf_name" "$_bf_val")
+                case "$_bf_name" in
+                    --max-parallel) b_maxpar="$_bf_val" ;;
+                    --model) b_model="$_bf_val" ;;
+                    --worker-model) b_wmodel="$_bf_val" ;;
+                    --effort) b_effort="$_bf_val" ;;
+                    --approve-plan) approve="$_bf_val" ;;
+                esac ;;
+            --plan-only) plan_only=1; shift ;;
             --no-orchestrate)
                 echo "Error: kb-run: a list always orchestrates; to work one ticket in this session use kb-run <ID>" >&2; return 2 ;;
             --exclude|--exclude=*)
@@ -15585,12 +15597,15 @@ _kb_batch_run() {
     for id in "${items[@]}"; do csv+="${csv:+,}${id}"; done
     bf=$(_kb_get_board_file "$team") || return 1
     [[ -f "$bf" ]] || { echo "✗ kb-run: no board for team '$team'" >&2; return 1; }
-    if [[ ! -t 0 ]]; then
+    _kb_orch_plan_flags_valid "$plan_only" "$approve" || return 2
+    # XACA-1853: --plan-only writes nothing and --approve-plan IS the approval, so neither needs a terminal.
+    if [[ ! -t 0 && "$plan_only" == 0 && -z "$approve" ]]; then
         echo "✗ kb-run: a batch ends at the plan approval, which needs a terminal (--yes and KB_ASSUME_YES do not skip it). Nothing was minted or dispatched." >&2
-        echo "  Run it from a terminal, or launch kb-run <ID> --yes once per ticket." >&2
+        echo "  Without a terminal: kb-run ${csv} --plan-only, show the plan to the user, then kb-run ${csv} --approve-plan <PLAN-HASH>." >&2
         return 2
     fi
-    _kb_release_orch_precondition "$team" "$context" || return 1
+    # --plan-only starts no coordinator, so the coordinator-pane precondition does not apply to it.
+    if (( ! plan_only )); then _kb_release_orch_precondition "$team" "$context" || return 1; fi
     _kb_release_stage_ctx || return 1
     hooks="$(dirname "$_KB_RS_CLI")"
     cli="$hooks/orchestrator_run_cli.py"
@@ -15604,6 +15619,38 @@ _kb_batch_run() {
         echo "  NOT_FOUND: the ID is not on your team's board (check the spelling). ALREADY_TERMINAL: the ticket is done or cancelled, so drop it." >&2
         echo "  BLOCKED_OUTSIDE_RELEASE: it waits on a ticket that is not in this list: add that ticket, or finish it first." >&2
         return 1
+    fi
+    if (( plan_only )) || [[ -n "$approve" ]]; then
+        # XACA-1853: plan the batch WITHOUT minting it (the record exists only in memory), hash it, and either print the
+        # hash (--plan-only) or refuse a stale approval here, before anything is written.
+        _KB_O_MAXPAR="$b_maxpar" _KB_O_MODEL="$b_model" _KB_O_WMODEL="$b_wmodel" _KB_O_EFFORT="$b_effort"
+        _KB_O_EXCL=()   # a batch takes no --exclude; never print a previous release run's exclusions in the approve line
+        _KB_O_NEEDYES=0   # a batch has no PLANNED promote to confirm
+        if [[ -n "$b_maxpar" ]] && ! _kb_orch_maxpar_valid "$b_maxpar"; then
+            echo "Error: kb-run: --max-parallel must be an integer from 1 to ${_KB_ORCH_MAXPAR_MAX}: '${b_maxpar}'" >&2; return 2
+        fi
+        if ! _kb_release_orch_settings "$bf" ""; then
+            echo "✗ kb-run: invalid orchestration setting: ${_KB_O_REASON}" >&2; return 2
+        fi
+        local tmpd pf h
+        tmpd=$(mktemp -d "${TMPDIR:-/tmp}/kb-batch-plan.XXXXXX") || { echo "✗ kb-run: cannot create a temp dir" >&2; return 1; }
+        pf="$tmpd/plan.json"
+        if ! _kb_batch_plan_json "$cli" "$bf" "$csv" "$team" "$_KB_O_MAXPAR_R" >"$pf" </dev/null; then
+            echo "✗ kb-run: could not plan the batch (see above); nothing was minted or dispatched" >&2; rm -r -f "$tmpd"; return 1
+        fi
+        h=$(_kb_orch_plan_hash "$cli" "$pf" --batch-items "$csv") || { rm -r -f "$tmpd"; return 1; }
+        if (( plan_only )) || [[ "$h" != "$approve" ]]; then
+            _kb_orch_print_settings "Batch ${csv//,/, }"
+            echo "═════════════ BATCH RUN PLAN: ${csv//,/, } ═════════════"
+            python3 "$cli" render --plan-file "$pf" || { rm -r -f "$tmpd"; return 1; }
+            echo "─────────────────────────────────────"
+            _kb_orch_plan_verdict "$pf" "$h" "$approve" "$csv" "batch"
+            rc=$?
+            rm -r -f "$tmpd"
+            return $rc
+        fi
+        rm -r -f "$tmpd"
+        echo "✓ Plan hash $h matches the approved plan: minting the batch."
     fi
     rel=$(python3 "$cli" batch-mint --board "$bf" --items "$csv" --team "$team") || {
         echo "✗ kb-run: could not mint the batch release (see above); nothing dispatched" >&2; return 1; }
@@ -15637,15 +15684,15 @@ kb-run() {
         case "$1" in
             --yes|-y) _kb_yes=1; shift ;;
             --resume) _KB_ORCH_RESUME=1; shift ;;
-            --orchestrate|--no-orchestrate|--force-coordinator-pane) _kb_rel_flags+=("$1"); shift ;;
-            --max-parallel=*|--exclude=*|--model=*|--worker-model=*|--effort=*)
+            --orchestrate|--no-orchestrate|--force-coordinator-pane|--plan-only) _kb_rel_flags+=("$1"); shift ;;
+            --max-parallel=*|--exclude=*|--model=*|--worker-model=*|--effort=*|--approve-plan=*)
                 # The `=` spelling must never fall into the selector catch-all below: that silently dropped the cap or the exclusion.
                 if [[ -z "${1#*=}" || "${1#*=}" == -* ]]; then
                     echo "Error: kb-run ${1%%=*} needs a value" >&2
                     return 1
                 fi
                 _kb_rel_flags+=("${1%%=*}" "${1#*=}"); shift ;;
-            --max-parallel|--exclude|--model|--worker-model|--effort)
+            --max-parallel|--exclude|--model|--worker-model|--effort|--approve-plan)
                 if (( $# < 2 )) || [[ -z "${2-}" || "${2-}" == -* ]]; then
                     echo "Error: kb-run $1 needs a value" >&2
                     return 1
@@ -15692,6 +15739,9 @@ kb-run() {
         echo "         [--orchestrate | --no-orchestrate] [--max-parallel N] [--exclude ITEM]... [--model M] [--worker-model M]"
         echo "         [--effort low|medium|high|xhigh|max|inherit]   the coordinator session's effort (XACA-1836)"
         echo "         [--force-coordinator-pane]   coordinator mode (XACA-1548); KB_RELEASE_AUTORUN=1|0 answers the DEV question"
+        echo "         [--plan-only | --approve-plan <PLAN-HASH>]   no terminal (XACA-1853): --plan-only prints the run plan and"
+        echo "              its PLAN-HASH and writes nothing; --approve-plan starts the run only if the recomputed plan has"
+        echo "              that exact hash (else rc 4, the new plan + hash printed, nothing written). Also for kb-run <ID>,<ID>."
         echo "  --yes, -y   skip the confirmation prompt (required without a tty; or set KB_ASSUME_YES=1)"
         echo "  --orchestrated <RUN-ID>   worker mode for a release-orchestrator run (XACA-1544): stamps"
         echo "              item.orchestration and adds the worker rules to the prompt. Normally sent by kb-dispatch."
@@ -32313,6 +32363,133 @@ _kb_release_orch_settings() {
     return 0
 }
 
+# ── XACA-1853: plan-hash approval ────────────────────────────────────────────────────────────────────────────────────
+# `kb-run <REL|A,B> --plan-only` renders the plan a new run would start from and prints PLAN-HASH (orchestrator_run_cli.py
+# plan-hash: waves, items, refused, excludes, max parallel, coordinator/worker models and coordinator effort). It writes
+# nothing: no promote, no mint, no run. `--approve-plan <hash>` recomputes the plan and proceeds without a terminal ONLY on
+# an exact match; a mismatch (the board or a setting changed) prints the new plan + hash and returns 4 with nothing
+# written. This is not a blanket approve flag: --yes / KB_ASSUME_YES still never approve a plan.
+_KB_ORCH_PLAN_HASH_RE='^[0-9a-f]{16}$'
+
+# _kb_orch_plan_flags_valid <plan_only 0|1> <approve hash|""> -> rc 0 | 2 (message on stderr)
+_kb_orch_plan_flags_valid() {
+    local plan_only="${1:-0}" approve="${2-}"
+    if [[ "$plan_only" == 1 && -n "$approve" ]]; then
+        echo "Error: kb-run: --plan-only and --approve-plan contradict each other (show the plan first, then approve it)" >&2
+        return 2
+    fi
+    if [[ -n "$approve" && ! "$approve" =~ $_KB_ORCH_PLAN_HASH_RE ]]; then
+        echo "Error: kb-run: --approve-plan needs the 16-hex-digit PLAN-HASH that --plan-only printed: '${approve}'" >&2
+        return 2
+    fi
+    return 0
+}
+
+# _kb_orch_plan_repo_root <hooks_dir>: the checkout whose sync-tap.sh defines the tap hotspots (kb-release plan-run's rule).
+_kb_orch_plan_repo_root() {
+    local top
+    top="$(git rev-parse --show-toplevel 2>/dev/null)"
+    if [[ -n "$top" && -f "$top/sync-tap.sh" ]]; then printf '%s\n' "$top"; else dirname "${1-}"; fi
+}
+
+# _kb_batch_plan_json <cli> <board_file> <csv> <team> <max_parallel>: the plan-run --json document of a batch that is NOT
+# minted (orchestrator_run_cli.py batch-plan; the batch record exists only in memory). Read-only. A function of its own
+# so the batch path has the same test seam as kb-release plan-run.
+_kb_batch_plan_json() {
+    python3 "${1-}" batch-plan --board "${2-}" --kanban-dir "$_KB_RS_KDIR" --items "${3-}" --team "${4-}" \
+        --repo-root "$(_kb_orch_plan_repo_root "$(dirname "${1-}")")" --max-parallel "${5-}"
+}
+
+# _kb_orch_plan_hash <cli> <plan_file> <target args: --board F --release R | --batch-items CSV>
+# The hash of a plan plus the RESOLVED settings (_kb_release_orch_settings must have run). stdout: the hash.
+_kb_orch_plan_hash() {
+    local cli="${1-}" pf="${2-}"
+    shift 2
+    python3 "$cli" plan-hash --plan-file "$pf" "$@" --coordinator-model "$_KB_O_CMODEL" \
+        --coordinator-effort "$_KB_O_CEFFORT" --worker-model "$_KB_O_WMODEL_R" </dev/null
+}
+
+# _kb_orch_print_settings <label>: the resolved settings block (the same lines the coordinator-mode entry prints).
+_kb_orch_print_settings() {
+    echo "${1-}: orchestration settings:"
+    echo "  coordinator model: ${_KB_O_CMODEL}   (source: ${_KB_O_CSRC})"
+    echo "  coordinator effort: ${_KB_O_CEFFORT}   (source: ${_KB_O_CESRC})"
+    echo "  worker model:      ${_KB_O_WMODEL_R}   (source: ${_KB_O_WSRC})"
+    echo "  max parallel:      ${_KB_O_MAXPAR_R}   (source: ${_KB_O_MAXSRC})"
+}
+
+# _kb_orch_approve_cmd <target> <hash>: the kb-run line that approves exactly this plan. The settings flags are repeated
+# because the hash covers the resolved settings: dropping one would (correctly) be refused as a mismatch. Values are
+# shell-quoted (${(q-)}: plain ids/models print unchanged) so the line is always copy-paste runnable, and a PLANNED
+# release adds --yes, which its gated PLANNED -> DEV promote needs without a terminal.
+_kb_orch_approve_cmd() {
+    local line="kb-run ${(q-)${1-}} --approve-plan ${(q-)${2-}}" x
+    [[ -n "${_KB_O_MAXPAR-}" ]] && line+=" --max-parallel ${(q-)_KB_O_MAXPAR}"
+    for x in ${_KB_O_EXCL[@]+"${_KB_O_EXCL[@]}"}; do line+=" --exclude ${(q-)x}"; done
+    [[ -n "${_KB_O_MODEL-}" ]] && line+=" --model ${(q-)_KB_O_MODEL}"
+    [[ -n "${_KB_O_WMODEL-}" ]] && line+=" --worker-model ${(q-)_KB_O_WMODEL}"
+    [[ -n "${_KB_O_EFFORT-}" ]] && line+=" --effort ${(q-)_KB_O_EFFORT}"
+    (( ${_KB_O_NEEDYES:-0} )) && line+=" --yes"
+    printf '%s\n' "$line"
+}
+
+# _kb_orch_plan_verdict <plan_file> <hash> <approved hash|""> <target> <what: "release"|"batch">
+# After the plan was rendered: --plan-only (approved "") prints PLAN-HASH and the approve line, rc 0 (nothing schedulable:
+# no hash, rc 0). A stale approval prints the refusal and the new hash, rc 4. Never called for a matching approval.
+_kb_orch_plan_verdict() {
+    local pf="${1-}" h="${2-}" approve="${3-}" target="${4-}" what="${5-release}" none="started"
+    [[ "$what" == "batch" ]] && none="minted"
+    if [[ -z "$approve" ]]; then
+        if ! jq -e '(.waves | length) > 0' "$pf" >/dev/null 2>&1; then
+            echo "Nothing is schedulable: there is no plan to approve. Nothing was written or dispatched."
+            return 0
+        fi
+        echo "PLAN-HASH: $h"
+        echo "Nothing was ${none}, written or dispatched. Review the plan above (an agent: show it to the user); to approve it, run:"
+        echo "  $(_kb_orch_approve_cmd "$target" "$h")"
+        return 0
+    fi
+    echo "✗ kb-run: the plan no longer matches the approved hash (approved ${approve}, now ${h}): the board or a setting changed since it was shown. Nothing was ${none} or dispatched." >&2
+    echo "PLAN-HASH: $h"
+    echo "Review the new plan above (an agent: show it to the user); to approve it, run:"
+    echo "  $(_kb_orch_approve_cmd "$target" "$h")"
+    return 4
+}
+
+# _kb_release_orch_plan_only <REL-ID> <team> <stage>   (kb-run <REL-ID> --plan-only)
+# Read-only: no promote, no run, no ledger, no dispatch. rc 0 | 1 error | 2 refused (not orchestratable, or an open run).
+_kb_release_orch_plan_only() {
+    local rel="${1-}" team="${2-}" stage="${3-}" bf active rc
+    if ! _kb_release_orch_available; then
+        echo "✗ kb-run: --plan-only needs coordinator mode, which this install does not have (kanban-hooks/orchestrator_run_cli.py is dev-team only)" >&2
+        return 2
+    fi
+    case "$stage" in
+        PLANNED|DEV) ;;
+        *) echo "✗ kb-run: $rel is at ${stage:-?}; a run plan applies to a PLANNED or DEV release only" >&2
+           return 2 ;;
+    esac
+    bf=$(_kb_get_board_file "$team" 2>/dev/null) || bf=""
+    [[ -f "$bf" ]] || { echo "✗ kb-run: no board for team '$team'" >&2; return 1; }
+    active=$(_kb_release_orch_active_run "$bf" "$rel")
+    if [[ -n "$active" ]]; then
+        echo "✗ kb-run: $rel already has an open orchestrated run ($active): there is no new plan to approve. kb-run $rel resumes it." >&2
+        return 2
+    fi
+    _kb_release_orch_settings "$bf" "$rel" || {
+        echo "✗ kb-run: invalid orchestration setting: ${_KB_O_REASON}" >&2
+        return 2
+    }
+    _kb_orch_print_settings "Release $rel"
+    if [[ "$stage" == "PLANNED" ]]; then
+        echo "ℹ $rel is PLANNED: approving it first runs the gated PLANNED -> DEV promote (which cuts the release branch); without a terminal that confirmation needs --yes."
+    fi
+    _kb_release_orch_start "$rel" "$team" "$bf" "" plan-only
+    rc=$?
+    (( rc == 11 )) && return 0
+    return $rc
+}
+
 # _kb_release_orch_precondition <team> <context>
 # The coordinator must run IN a tmux pane (XACA-0926: a non-tmux address cannot be reached) on a terminal that is never
 # routed to (coordinatorOnly, or empty roles: XACA-1542). Otherwise refuse, unless --force-coordinator-pane. rc 0 ok.
@@ -32365,6 +32542,11 @@ _kb_release_orch_entry() {
         return 10
     fi
     if [[ "$stage" != "PLANNED" && "$stage" != "DEV" ]]; then
+        # XACA-1853: an approved plan hash never falls back to today's flow (that would launch an unapproved session).
+        if [[ -n "${_KB_O_APPROVE-}" ]]; then
+            echo "✗ kb-run: --approve-plan: $rel is at $stage; a run plan applies to a PLANNED or DEV release only. Nothing was started." >&2
+            return 2
+        fi
         [[ "$mode" == "orchestrate" ]] && echo "ℹ kb-run: $rel is at $stage; coordinator mode applies to PLANNED/DEV only, running today's flow."
         return 10
     fi
@@ -32386,6 +32568,10 @@ _kb_release_orch_entry() {
         echo "ℹ kb-run: $rel has $n_open open items and no terminal: orchestrating by default. --no-orchestrate runs the tickets one at a time in this session."
     fi
     active=$(_kb_release_orch_active_run "$bf" "$rel")
+    if [[ -n "$active" && -n "${_KB_O_APPROVE-}" ]]; then
+        echo "✗ kb-run: --approve-plan approves a NEW run's plan, but $rel already has an open run ($active). Nothing was started; kb-run $rel resumes it." >&2
+        return 2
+    fi
     if [[ -n "$active" ]]; then
         _kb_release_orch_precondition "$team" "$context" || return 1
         echo "↻ $rel has an open orchestrated run ($active): resuming it, not starting another."
@@ -32402,6 +32588,10 @@ _kb_release_orch_entry() {
     fi
     n_open=$(_kb_release_orch_open_items "$bf" "$rel")
     if [[ ! "$n_open" =~ ^[0-9]+$ ]] || (( n_open == 0 )); then
+        if [[ -n "${_KB_O_APPROVE-}" ]]; then
+            echo "✗ kb-run: --approve-plan: $rel has no open items, so there is no plan to approve. Nothing was started." >&2
+            return 2
+        fi
         [[ "$mode" == "orchestrate" ]] && echo "ℹ kb-run: $rel has no open items; nothing to orchestrate."
         return 10
     fi
@@ -32433,11 +32623,17 @@ _kb_release_orch_entry() {
     fi
     # A NEW run always ends at the plan approval, which --yes / KB_ASSUME_YES never skip and which needs a terminal. Without
     # one the run cannot start, so refuse HERE, before the irreversible PLANNED->DEV promote (XACA-1548 gate round 1).
-    if [[ ! -t 0 ]]; then
+    # XACA-1853: --approve-plan <hash> IS the approval (checked against the recomputed plan), so it needs no terminal.
+    if [[ ! -t 0 && -z "${_KB_O_APPROVE-}" ]]; then
         echo "✗ kb-run: coordinator mode needs a terminal for the plan approval (--yes and KB_ASSUME_YES do not skip it). Nothing promoted, nothing dispatched; run kb-run interactively, or use --no-orchestrate." >&2
+        echo "  Without a terminal: kb-run $rel --plan-only, show the plan to the user, then kb-run $rel --approve-plan <PLAN-HASH>." >&2
         return 2
     fi
     _kb_release_orch_precondition "$team" "$context" || return 1
+    if [[ "$stage" == "PLANNED" && -n "${_KB_O_APPROVE-}" ]]; then
+        # The promote is irreversible: check the approved hash BEFORE it, not only after it (rc 4 = stale, nothing done).
+        _kb_release_orch_start "$rel" "$team" "$bf" "" check || return $?
+    fi
     if [[ "$stage" == "PLANNED" ]]; then
         # -001: the DEV promote goes through the EXISTING gated path; stage is never written directly here.
         local _kb_confirm_rc prc
@@ -32459,8 +32655,11 @@ _kb_release_orch_entry() {
 # plan-run -> render -> approval -> mint run -> dispatch wave 1. Publishes _KB_O_RUN. rc 0 started | 11 declined or nothing to
 # do | 2 no terminal | else error. APPROVAL IS A HARD STOP: --yes and KB_ASSUME_YES never skip it; without a tty it refuses (rc 2). Nothing
 # is written (no ledger, no summary) and nothing is typed anywhere before the approval.
+# XACA-1853 <how> (5th arg): "" the tty approval above | plan-only render + PLAN-HASH, then stop (rc 0, nothing written) |
+# check compare the hash with _KB_O_APPROVE, quietly on a match (rc 0), render + refuse on a mismatch (rc 4); the
+# pre-promote check | approve the same comparison, and a match IS the approval (no prompt, no tty needed).
 _kb_release_orch_start() {
-    local rel="${1-}" team="${2-}" bf="${3-}" coord="${4-}" hooks cli maxpar tmpd plan_raw plan_file
+    local rel="${1-}" team="${2-}" bf="${3-}" coord="${4-}" how="${5-}" hooks cli maxpar tmpd plan_raw plan_file h=""
     local -a excl xa margs
     _KB_O_RUN=""
     hooks=$(dirname "$(_kb_board_settings_script)") || return 1
@@ -32488,13 +32687,29 @@ _kb_release_orch_start() {
         else
             cp "$plan_raw" "$plan_file"
         fi
+        if [[ -n "$how" ]]; then
+            h=$(_kb_orch_plan_hash "$cli" "$plan_file" --board "$bf" --release "$rel") || {
+                echo "✗ kb-run: cannot hash the plan; nothing started, nothing dispatched" >&2; rm -r -f "$tmpd"; return 1; }
+            if [[ "$how" == "check" && "$h" == "${_KB_O_APPROVE-}" ]]; then rm -r -f "$tmpd"; return 0; fi
+        fi
         echo "═════════════ RELEASE RUN PLAN: $rel ═════════════"
         python3 "$cli" render --plan-file "$plan_file" || { rm -r -f "$tmpd"; return 1; }
+        if [[ "$how" == "plan-only" ]] || [[ -n "$how" && "$h" != "${_KB_O_APPROVE-}" ]]; then
+            echo "─────────────────────────────────────"
+            local vrc
+            _kb_orch_plan_verdict "$plan_file" "$h" "${_KB_O_APPROVE-}" "$rel" release
+            vrc=$?
+            rm -r -f "$tmpd"; return $vrc
+        fi
         if ! jq -e '(.waves | length) > 0' "$plan_file" >/dev/null 2>&1; then
             echo "Nothing is schedulable: no run started, nothing dispatched."
             rm -r -f "$tmpd"; return 11
         fi
         echo "─────────────────────────────────────"
+        if [[ "$how" == "approve" ]]; then
+            echo "✓ Plan hash $h matches the approved plan (--approve-plan): dispatching wave 1."
+            break
+        fi
         printf 'Approve this plan and dispatch wave 1 now? [y/N, or edit: "p <N>" = max parallel, "x <ITEM-ID>" = exclude]: '
         if [[ ! -t 0 ]]; then
             echo ""
@@ -32519,6 +32734,10 @@ _kb_release_orch_start() {
         --arg ce "$_KB_O_CEFFORT" --arg ces "$_KB_O_CESRC" --arg ms "$_KB_O_MAXSRC" \
         '{models: {coordinator: {model: $cm, source: $cs, effort: $ce, effortSource: $ces}, worker: {model: $wm, source: $ws}}, maxParallelSource: $ms}') || {
         rm -r -f "$tmpd"; return 1; }
+    if [[ "$how" == "approve" ]]; then
+        # XACA-1853: the run summary records HOW it was approved, and the exact plan hash the human approved.
+        meta=$(jq -c --arg ph "$h" '. + {approvedVia: "plan-hash", planHash: $ph}' <<<"$meta") || { rm -r -f "$tmpd"; return 1; }
+    fi
     run=$(python3 "$cli" start --board "$bf" --kanban-dir "$_KB_RS_KDIR" --release "$rel" --plan-file "$plan_file" \
         --coordinator "$coord" --max-parallel "$maxpar" --meta-json "$meta") || {
         echo "✗ kb-run: could not start the run; nothing dispatched" >&2; rm -r -f "$tmpd"; return 1; }
@@ -32589,7 +32808,9 @@ _kb_release_orch_coordinate() {
         if (( rc == 2 )); then return 2
         elif (( rc != 0 )); then echo "Cancelled. Coordinator not started."; return 0; fi
     else
-        _kb_release_orch_start "$rel" "$team" "$bf" "$coord"
+        local _how=""
+        [[ -n "${_KB_O_APPROVE-}" ]] && _how="approve"
+        _kb_release_orch_start "$rel" "$team" "$bf" "$coord" "$_how"
         rc=$?
         if (( rc == 11 )); then return 0; elif (( rc != 0 )); then return $rc; fi
         run="$_KB_O_RUN"
@@ -32806,6 +33027,7 @@ _kb_release_run() {
     # XACA-1548: coordinator-mode flags (kb-run passes them through after the two positionals).
     _KB_O_MODE="" _KB_O_MAXPAR="" _KB_O_MODEL="" _KB_O_WMODEL="" _KB_O_EFFORT="" _KB_O_FORCE=0 _KB_O_RUN=""
     _KB_O_EXCL=()
+    _KB_O_PLANONLY=0 _KB_O_APPROVE="" _KB_O_NEEDYES=0   # XACA-1853
     if (( $# > 2 )); then
         shift 2
         while (( $# > 0 )); do
@@ -32831,9 +33053,20 @@ _kb_release_run() {
                     # Validated by _kb_orch_resolve_effort with every other layer; only an empty value is refused here.
                     if [[ -z "${2-}" ]]; then echo "Error: kb-run: --effort needs a level (an empty value is refused, never defaulted)" >&2; return 2; fi
                     _KB_O_EFFORT="$2"; shift 2 ;;
+                --plan-only) _KB_O_PLANONLY=1; shift ;;
+                --approve-plan)
+                    if [[ -z "${2-}" ]]; then echo "Error: kb-run: --approve-plan needs the PLAN-HASH that --plan-only printed" >&2; return 2; fi
+                    _KB_O_APPROVE="$2"; shift 2 ;;
                 *) echo "Error: kb-run: unknown release option: $1" >&2; return 2 ;;
             esac
         done
+    fi
+    _kb_orch_plan_flags_valid "$_KB_O_PLANONLY" "$_KB_O_APPROVE" || return 2
+    if (( _KB_O_PLANONLY )) || [[ -n "$_KB_O_APPROVE" ]]; then
+        if [[ "$_KB_O_MODE" == "manual" ]]; then
+            echo "Error: kb-run: --plan-only / --approve-plan are coordinator mode; they contradict --no-orchestrate" >&2; return 2
+        fi
+        _KB_O_MODE="orchestrate"
     fi
     _kb_release_stage_ctx || return 1
     local resume_cli plan_json branch name stage context team
@@ -32845,6 +33078,17 @@ _kb_release_run() {
     branch=$(printf '%s\n' "$plan_json" | jq -r '.branch // empty')
     name=$(printf '%s\n' "$plan_json" | jq -r '.name // empty')
     stage=$(printf '%s\n' "$plan_json" | jq -r '.stage // empty')
+    # XACA-1853: a PLANNED approval also confirms the gated promote, so the printed approve line must carry --yes.
+    [[ "$stage" == PLANNED ]] && _KB_O_NEEDYES=1
+    # XACA-1853: --plan-only is read-only, so it runs before anything below can write (close-out resume, promote, worktree).
+    if (( _KB_O_PLANONLY )); then
+        _kb_release_orch_plan_only "$release_id" "$team" "$stage"
+        return $?
+    fi
+    if [[ -n "$_KB_O_APPROVE" && "$stage" != "PLANNED" && "$stage" != "DEV" ]]; then
+        echo "✗ kb-run: --approve-plan: $release_id is at ${stage:-?}; a run plan applies to a PLANNED or DEV release only. Nothing was started." >&2
+        return 2
+    fi
 
     # XACA-1446: resume when a live record is bound to the release's CURRENT stage (the last enabled stage before
     # PROD: GAMMA, or QA/DEV/... in a flow without it), never a hard-coded GAMMA. The stage comes from the binding
