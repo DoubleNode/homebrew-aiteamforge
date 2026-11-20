@@ -3537,6 +3537,16 @@
     color: var(--lcars-black);
 }
 
+/* XACA-1687-016: header elements that set their OWN colour, so the inherited
+   override above never reaches them. Kept as a separate rule so the list above
+   stays as XACA-1031-015 pins it. Black on alert-red is 7.34:1.
+   - .machine-hostname-secondary: lavender was 1.86:1.
+   - .machine-expand-indicator: pre-existing, found by the new guard; tan was 1.13:1. */
+.machine-row.offline .machine-hostname-secondary,
+.machine-row.offline .machine-expand-indicator {
+    color: var(--lcars-black);
+}
+
 /* XACA-1031-015: the version feature added .machine-version-label/-value
    after this override list existed and neither was added to it. The label
    is fixed above alongside its siblings (plain inheritance, same as
@@ -3751,6 +3761,15 @@
     letter-spacing: 1px;
     color: var(--lcars-peach);
     flex: 1;
+}
+
+/* XACA-1687: technical hostname shown beneath/after the fleet system name. */
+.machine-hostname-secondary {
+    margin-left: 10px;
+    font-size: 12px;
+    font-weight: 400;
+    letter-spacing: 0.5px;
+    color: var(--lcars-lavender);
 }
 
 .machine-sessions {

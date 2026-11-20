@@ -237,7 +237,7 @@ window.LCARSAnalyticsFleet = (function () {
         });
 
         const labels = sorted.map(function (m) {
-            return m.nickname || m.hostname || 'UNKNOWN';
+            return m.nickname || m.system_name || m.hostname || 'UNKNOWN';
         });
 
         const sessionData = sorted.map(function (m) {

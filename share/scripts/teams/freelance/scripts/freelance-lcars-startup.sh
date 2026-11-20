@@ -53,7 +53,9 @@ if [ $SESSION_EXISTS != 0 ]; then
     $TMUX_CMD set -t $SESSION_CODE status-left-length 15
     $TMUX_CMD set -t $SESSION_CODE status-left "  LCARS "
     $TMUX_CMD set -t $SESSION_CODE @developer "Enterprise NX-01"
-    $TMUX_CMD set -t $SESSION_CODE status-right "Kanban Monitor | Port $LCARS_PORT | 🖥  #h  "
+    # XACA-1687: @fleet_system feeds the #h segment below; unset (no fleet identity) renders plain #h
+    _fleet_sys=$("$HOME/dev-team/scripts/kb-fleet-identity" get 2>/dev/null) && [ "$(echo "$_fleet_sys" | tr '[:upper:]' '[:lower:]')" != "$(hostname -s | tr '[:upper:]' '[:lower:]')" ] && $TMUX_CMD set -g @fleet_system "$_fleet_sys" || $TMUX_CMD set -gu @fleet_system 2>/dev/null
+    $TMUX_CMD set -t $SESSION_CODE status-right "Kanban Monitor | Port $LCARS_PORT | 🖥  #{?@fleet_system,#{@fleet_system} · ,}#h  "
     $TMUX_CMD set -t $SESSION_CODE status-style "bg=colour208,fg=colour232"
     $TMUX_CMD set -t $SESSION_CODE status-left-style "bg=colour166,fg=colour255,bold"
     $TMUX_CMD set -t $SESSION_CODE status-right-style "bg=colour208,fg=colour232"

@@ -51,7 +51,7 @@
     }
 
     function machineName(m) {
-        return (m && (m.nickname || m.hostname)) || (m && m.machine_id) || DASH;
+        return (m && (m.nickname || m.system_name || m.hostname)) || (m && m.machine_id) || DASH;
     }
 
     function machineIndex(data) {

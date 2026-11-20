@@ -913,9 +913,9 @@ wt-new() {
             tmux set-option @current_worktree "$name" 2>/dev/null
             local agent=$(tmux show-options -v @claude_agent 2>/dev/null)
             if [ -n "$agent" ]; then
-                tmux set-option status-right "🌿 $name | 🤖 $agent | 🖥  #h  " 2>/dev/null
+                tmux set-option status-right "🌿 $name | 🤖 $agent | 🖥  #{?@fleet_system,#{@fleet_system} · ,}#h  " 2>/dev/null
             else
-                tmux set-option status-right "🌿 $name | 🖥  #h  " 2>/dev/null
+                tmux set-option status-right "🌿 $name | 🖥  #{?@fleet_system,#{@fleet_system} · ,}#h  " 2>/dev/null
             fi
         fi
 
@@ -975,9 +975,9 @@ wt() {
         tmux set-option @current_worktree "$name" 2>/dev/null
         local agent=$(tmux show-options -v @claude_agent 2>/dev/null)
         if [ -n "$agent" ]; then
-            tmux set-option status-right "🌿 $name | 🤖 $agent | 🖥  #h  " 2>/dev/null
+            tmux set-option status-right "🌿 $name | 🤖 $agent | 🖥  #{?@fleet_system,#{@fleet_system} · ,}#h  " 2>/dev/null
         else
-            tmux set-option status-right "🌿 $name | 🖥  #h  " 2>/dev/null
+            tmux set-option status-right "🌿 $name | 🖥  #{?@fleet_system,#{@fleet_system} · ,}#h  " 2>/dev/null
         fi
     fi
 
@@ -1437,7 +1437,7 @@ wt-finish() {
         tmux set-option @current_worktree "" 2>/dev/null
         local agent=$(tmux show-options -v @claude_agent 2>/dev/null)
         if [ -n "$agent" ]; then
-            tmux set-option status-right "🤖 $agent | 🖥  #h  " 2>/dev/null
+            tmux set-option status-right "🤖 $agent | 🖥  #{?@fleet_system,#{@fleet_system} · ,}#h  " 2>/dev/null
         else
             tmux set-option status-right "" 2>/dev/null
         fi
@@ -1815,7 +1815,7 @@ with open('$board_file', 'w') as f:
         tmux set-option @current_worktree "" 2>/dev/null
         local agent=$(tmux show-options -v @claude_agent 2>/dev/null)
         if [ -n "$agent" ]; then
-            tmux set-option status-right "🤖 $agent | 🖥  #h  " 2>/dev/null
+            tmux set-option status-right "🤖 $agent | 🖥  #{?@fleet_system,#{@fleet_system} · ,}#h  " 2>/dev/null
         else
             tmux set-option status-right "" 2>/dev/null
         fi
@@ -2038,9 +2038,9 @@ wt-dev() {
         tmux set-option @current_worktree "$main_branch" 2>/dev/null
         local agent=$(tmux show-options -v @claude_agent 2>/dev/null)
         if [ -n "$agent" ]; then
-            tmux set-option status-right "🌿 $main_branch | 🤖 $agent | 🖥  #h  " 2>/dev/null
+            tmux set-option status-right "🌿 $main_branch | 🤖 $agent | 🖥  #{?@fleet_system,#{@fleet_system} · ,}#h  " 2>/dev/null
         else
-            tmux set-option status-right "🌿 $main_branch | 🖥  #h  " 2>/dev/null
+            tmux set-option status-right "🌿 $main_branch | 🖥  #{?@fleet_system,#{@fleet_system} · ,}#h  " 2>/dev/null
         fi
     fi
 

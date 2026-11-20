@@ -567,7 +567,7 @@ const DASHBOARDS_UI = {
         const checkboxes = this.machines.map(machine => {
             const isChecked = selectedMachines.includes(machine.machine_id);
             const statusClass = machine.status === 'online' ? 'online' : 'offline';
-            const displayName = machine.nickname || machine.hostname;
+            const displayName = machine.nickname || machine.system_name || machine.hostname;
             return `
                 <label class="division-checkbox machine-checkbox ${isChecked ? 'checked' : ''} ${statusClass}"
                        data-machine="${machine.machine_id}"

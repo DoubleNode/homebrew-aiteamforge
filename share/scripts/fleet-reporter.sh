@@ -2096,6 +2096,72 @@ _system_power_get() {
     return 0
 }
 
+# XACA-1687: fleet system name from `kb-fleet-identity get`.
+#
+# Contract of the helper: exit 0 + prints the system name when this machine
+# has a fleet identity; otherwise prints the hostname and exits 3. ONLY an
+# exit-0 answer counts -- the exit-3 hostname is discarded.
+#
+# Three outcomes, cached once per reporter run in _FLEET_SYSTEM_NAME_STATE:
+#   absent  -- no helper found        -> payload omits "system_name" entirely
+#                                        (consumer without the helper reports
+#                                        EXACTLY as before XACA-1687)
+#   none    -- helper ran, non-zero   -> "system_name": "" (server clears it)
+#   set     -- helper ran, exit 0     -> "system_name": "<first line>"
+#
+# Helper lookup, first executable wins:
+#   1. $FLEET_IDENTITY_HELPER, if SET (even empty/non-executable: then it
+#      means "absent" -- the test seam, and an operator off-switch)
+#   2. sibling of this script (tap share/scripts/ mirror)
+#   3. ../../scripts/kb-fleet-identity (dev checkout: fleet-monitor/client/)
+#   4. $AITEAMFORGE_DIR/scripts/kb-fleet-identity, then $HOME/aiteamforge/scripts/
+#   5. kb-fleet-identity on PATH
+# Every failure degrades to "absent"/"none"; nothing here can abort the
+# report under `set -euo pipefail` (the call sits in an `if`).
+_FLEET_SYSTEM_NAME_STATE=""
+_FLEET_SYSTEM_NAME=""
+_system_name_collect() {
+    [ -z "$_FLEET_SYSTEM_NAME_STATE" ] || return 0
+    _FLEET_SYSTEM_NAME_STATE="absent"
+    _FLEET_SYSTEM_NAME=""
+
+    local helper="" candidate="" reporter_dir=""
+    if [ -n "${FLEET_IDENTITY_HELPER+x}" ]; then
+        [ -n "$FLEET_IDENTITY_HELPER" ] && [ -x "$FLEET_IDENTITY_HELPER" ] && helper="$FLEET_IDENTITY_HELPER"
+    else
+        reporter_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || reporter_dir=""
+        for candidate in \
+            "${reporter_dir:+$reporter_dir/kb-fleet-identity}" \
+            "${reporter_dir:+$reporter_dir/../../scripts/kb-fleet-identity}" \
+            "${AITEAMFORGE_DIR:+$AITEAMFORGE_DIR/scripts/kb-fleet-identity}" \
+            "${HOME:+$HOME/aiteamforge/scripts/kb-fleet-identity}"; do
+            if [ -n "$candidate" ] && [ -f "$candidate" ] && [ -x "$candidate" ]; then
+                helper="$candidate"
+                break
+            fi
+        done
+        if [ -z "$helper" ]; then
+            helper="$(command -v kb-fleet-identity 2>/dev/null)" || helper=""
+        fi
+    fi
+    [ -n "$helper" ] || return 0
+
+    local out=""
+    if out="$("$helper" get 2>/dev/null </dev/null)"; then
+        # First line only; the server sanitizes/caps again regardless.
+        local nl='
+'
+        out="${out%%"$nl"*}"
+        if [ -n "$out" ]; then
+            _FLEET_SYSTEM_NAME_STATE="set"
+            _FLEET_SYSTEM_NAME="$out"
+            return 0
+        fi
+    fi
+    _FLEET_SYSTEM_NAME_STATE="none"
+    return 0
+}
+
 # Build status payload
 build_payload() {
     # Prime the live-process sweep in THIS scope so the two command
@@ -2139,6 +2205,16 @@ build_payload() {
     ip_esc=$(json_escape "$IP_ADDRESS")
     os_esc=$(json_escape "$OS_TYPE")
     timestamp_esc=$(json_escape "$TIMESTAMP")
+
+    # XACA-1687: fleet system name -- see _system_name_collect() for the
+    # absent / none / set semantics. Called directly (not in $(...)) so its
+    # per-run cache lands in this shell.
+    _system_name_collect
+    local system_name_json=""
+    case "$_FLEET_SYSTEM_NAME_STATE" in
+        set)  system_name_json=",\"system_name\":\"$(json_escape "$_FLEET_SYSTEM_NAME")\"" ;;
+        none) system_name_json=",\"system_name\":\"\"" ;;
+    esac
 
     # Include dashboard_group if set (XACA-0024)
     local dashboard_group_json=""
@@ -2265,7 +2341,7 @@ _SYSTEM_LOAD_EMIT_EOF
 {
   "machine": {
     "machine_id": "$machine_id_esc",
-    "hostname": "$hostname_esc",
+    "hostname": "$hostname_esc"$system_name_json,
     "ip": "$ip_esc",
     "os": "$os_esc",
     "timestamp": "$timestamp_esc"$dashboard_group_json$fleet_mode_json

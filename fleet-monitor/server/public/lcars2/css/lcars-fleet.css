@@ -1783,6 +1783,20 @@ body {
    ACCESSORIES (XACA-1393-002) — UPS cards. The state badge renders the
    server-derived `state` only. ON BATTERY is yellow; UNKNOWN is muted.
    ========================================================================== */
+/* XACA-1687-022: generic visually-hidden utility (mirrors lcars/css/lcars-fleet.css
+   .visually-hidden); used for the system-name / hostname separator. */
+.visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
 /* XACA-1393 round 4: visually-hidden polite live region for attach/detach results (never display:none) */
 .accessory-sr-only {
     position: absolute;

@@ -1283,9 +1283,9 @@
     // the live DOM just before each rebuild, restored only if still a valid choice).
     const accessoriesUi = { busy: {}, errors: {}, sel: {}, lastSig: null, view: { accessories: [], machines: [] } };
 
-    // Same resolution order as the machine cards / v1: nickname -> hostname -> id.
+    // Same resolution order as the machine cards / v1: nickname -> system_name -> hostname -> id.
     function accessoryMachineLabel(m) {
-        return (m && (m.nickname || m.hostname || m.machine_id)) || '';
+        return (m && (m.nickname || m.system_name || m.hostname || m.machine_id)) || '';
     }
 
     // Before a rebuild, read each select's current choice via the OLD view (the
@@ -1442,7 +1442,7 @@
         // Don't rebuild under the operator's hands: the 30s poll would reset an
         // open <select> or drop focus mid-request. Re-render only on change.
         const sig = JSON.stringify([accessories, machines.map(function(m) {
-            return m && [m.machine_id, m.nickname, m.hostname];
+            return m && [m.machine_id, m.nickname, m.system_name, m.hostname];
         }), accessoriesUi.busy, accessoriesUi.errors]);
         if (sig === accessoriesUi.lastSig) return;
         accessoriesUi.lastSig = sig;

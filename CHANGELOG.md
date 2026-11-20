@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1687: Fleet machine identity - Star Trek system names (XACA-1687)
+- Tap files updated in this publish: `fleet-monitor/server/package.json`,`fleet-monitor/server/public/lcars/css/lcars-fleet-theme.css` `fleet-monitor/server/public/lcars/js/lcars-accessories.js`,`fleet-monitor/server/public/lcars/js/lcars-analytics-fleet.js` `fleet-monitor/server/public/lcars/js/lcars-dashboard-app.js`,`fleet-monitor/server/public/lcars/js/lcars-dashboards-ui.js` `fleet-monitor/server/public/lcars2/css/lcars-fleet-theme.css`,`fleet-monitor/server/public/lcars2/css/lcars-fleet.css` (+36 more). Run `brew upgrade aiteamforge` to receive them.
 
 ## [0.21.26] - 2026-11-19
 - XACA-1881: Port kb-run-ux UX gate launcher to tap consumers (XACA-1881)

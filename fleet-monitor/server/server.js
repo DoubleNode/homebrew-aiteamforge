@@ -1045,7 +1045,7 @@ function updateMachineStatuses() {
         // XACA-1407: observed on EVERY tick (not only on change); the tracker owns transition
         // detection, baselining and flap damping, and never throws.
         machineNotices.observe(hostname, data.status, {
-            label: data.nickname || data.hostname || hostname,
+            label: data.nickname || data.system_name || data.hostname || hostname,
             lastSeen: data.last_seen
         });
     }
@@ -1427,6 +1427,8 @@ function parseFleetData() {
             machine_id: m.machine_id,
             hostname: m.hostname,
             nickname: m.nickname || null,
+            // XACA-1687: reporter-supplied system name (null when none).
+            system_name: m.system_name || null,
             ip: m.ip,
             os: m.os,
             status: m.status,
@@ -1971,6 +1973,25 @@ function projectSystemBlock(storedSystem) {
     return out;
 }
 
+// XACA-1687: reporter-supplied fleet system name (kb-fleet-identity get).
+// Untrusted free text from POST /api/status: strip C0/C1 control chars and
+// invisible bidi/zero-width format chars,
+// trim, cap at SYSTEM_NAME_MAX. Anything that is not a non-empty string after
+// that becomes null (= "no system name"). Mirrored verbatim in
+// tests/helpers/app-factory.js (drift-guarded by
+// tests/xaca-1687-system-name.test.js).
+const SYSTEM_NAME_MAX = 64;
+function sanitizeSystemName(value) {
+    if (typeof value !== 'string') return null;
+    // C0/C1 controls, plus invisible format chars that enable label spoofing:
+    // zero-width (U+200B-200D, U+2060, U+FEFF), bidi marks/overrides/isolates
+    // (U+200E-200F, U+202A-202E, U+2066-2069, U+061C), invisible operators U+2061-2064.
+    // Truncate by code point (Array.from) so a surrogate pair is never split.
+    const stripped = value.replace(/[\u0000-\u001F\u007F-\u009F\u061C\u200B-\u200F\u202A-\u202E\u2060-\u2069\uFEFF]/g, '').trim();
+    const cleaned = Array.from(stripped).slice(0, SYSTEM_NAME_MAX).join('').trim();
+    return cleaned || null;
+}
+
 // ============================================================================
 // API ROUTES
 // ============================================================================
@@ -2027,6 +2048,14 @@ app.post('/api/status', requireApiKey, (req, res) => {
         // Preserve existing nickname (if any)
         const existingNickname = existingMachine?.nickname || null;
 
+        // XACA-1687: system_name is reporter-owned. Key PRESENT -> take the
+        // sanitized value ("" / junk clears it to null); key ABSENT (old
+        // reporter, or no kb-fleet-identity helper on that machine) -> keep
+        // whatever was stored. Never touches nickname.
+        const systemName = Object.prototype.hasOwnProperty.call(machine, 'system_name')
+            ? sanitizeSystemName(machine.system_name)
+            : (existingMachine?.system_name || null);
+
         // Detect and log state changes (before updating machine data)
         const changes = detectChanges(existingMachine, { machine_id: machineKey, hostname: machine.hostname, ip: machine.ip }, sessions);
         for (const change of changes) {
@@ -2038,6 +2067,7 @@ app.post('/api/status', requireApiKey, (req, res) => {
             machine_id: machineKey,
             hostname: machine.hostname,
             nickname: existingNickname,
+            system_name: systemName,
             ip: machine.ip || 'unknown',
             os: machine.os || 'unknown',
             first_seen: firstSeen,
@@ -2070,7 +2100,7 @@ app.post('/api/status', requireApiKey, (req, res) => {
         // lastSeen is the machine's PREVIOUS last_seen (existingMachine is the pre-update record;
         // `now` above is this heartbeat's own timestamp), so machine-recovered reports the real downtime.
         machineNotices.observe(machineKey, 'online', {
-            label: existingNickname || machine.hostname,
+            label: existingNickname || systemName || machine.hostname,
             lastSeen: existingMachine ? existingMachine.last_seen : undefined
         });
 
@@ -3438,7 +3468,8 @@ app.get('/api/machines/list', (req, res) => {
             machine_id: m.machine_id,
             hostname: m.hostname,
             nickname: m.nickname,
-            display_name: m.nickname || m.hostname,
+            system_name: m.system_name || null,
+            display_name: m.nickname || m.system_name || m.hostname,
             status: m.status,
             // XACA-1392-005: additive power fields (see parseFleetData).
             display_status: m.display_status,

@@ -412,6 +412,13 @@
     white-space: nowrap;
 }
 
+/* XACA-1687: technical hostname after the fleet system name. */
+.status-row .status-row-hostname-secondary {
+    margin-left: 8px;
+    font-size: 0.85em;
+    color: var(--lcars-lavender);
+}
+
 .status-row .status-row-version {
     flex-shrink: 0;
     max-width: 160px;

@@ -1358,9 +1358,22 @@ window.LCARS_CORE = window.LCARS_CORE || {};
             // attribute via string interpolation in this file, so escapeAttr()
             // is deliberately NOT defined here -- do not add a helper with no
             // call site.
+            // XACA-1687: reporter-supplied fleet system name is the primary
+            // label, technical hostname secondary when they differ. Both
+            // untrusted -> escapeHtml. No system_name -> byte-identical markup
+            // (the XACA-1110-004 render baseline depends on that).
+            // XACA-1687-026: case-insensitive, same rule as the statusline and tmux.
+            var hostnameHtml = (machine.system_name &&
+                    String(machine.system_name).toLowerCase() !== String(machine.hostname || '').toLowerCase())
+                ? LCARS.utils.escapeHtml(machine.system_name) +
+                  // XACA-1687-022: visually-hidden separator so screen
+                  // readers do not run the two names together.
+                  '<span class="visually-hidden"> \u00b7 </span>' +
+                  '<span class="status-row-hostname-secondary">' + LCARS.utils.escapeHtml(machine.hostname) + '</span>'
+                : LCARS.utils.escapeHtml(machine.hostname);
             item.innerHTML =
                 '<span class="status-indicator ' + displayStatus.cls + '"></span>' +
-                '<span class="lcars-text-sm status-row-hostname" style="flex: 1;">' + LCARS.utils.escapeHtml(machine.hostname) + '</span>' +
+                '<span class="lcars-text-sm status-row-hostname" style="flex: 1;">' + hostnameHtml + '</span>' +
                 '<span class="lcars-text-xs" style="color: var(--lcars-tan);">' + machine.session_count + ' sessions</span>';
 
             // XACA-1393-003: the mandatory ON UPS BATTERY label, built with the

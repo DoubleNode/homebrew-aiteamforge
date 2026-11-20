@@ -759,8 +759,8 @@
         navContainer.innerHTML = '';
 
         const sortedMachines = (machines || []).slice().sort(function(a, b) {
-            const nameA = (a.nickname || a.hostname || '').toLowerCase();
-            const nameB = (b.nickname || b.hostname || '').toLowerCase();
+            const nameA = (a.nickname || a.system_name || a.hostname || '').toLowerCase();
+            const nameB = (b.nickname || b.system_name || b.hostname || '').toLowerCase();
             return nameA.localeCompare(nameB);
         });
 
@@ -768,7 +768,7 @@
             const host = machine.hostname;
             if (!host) return; // nothing on a card could ever match this button
 
-            const displayName = machine.nickname || machine.hostname;
+            const displayName = machine.nickname || machine.system_name || machine.hostname;
             const isDisabled = !!machineFilterState[host];
             const status = machine.status || 'offline';
             // XACA-1062-012: Number(...) || 0 here MIRRORS the identical
@@ -1607,8 +1607,9 @@
         var machineDisplayName = session.hostname;
         if (cachedMachineData) {
             var machineInfo = cachedMachineData.find(function(m) { return m.hostname === session.hostname; });
-            if (machineInfo && machineInfo.nickname) {
-                machineDisplayName = machineInfo.nickname;
+            // XACA-1687: nickname > system_name > hostname.
+            if (machineInfo && (machineInfo.nickname || machineInfo.system_name)) {
+                machineDisplayName = machineInfo.nickname || machineInfo.system_name;
             }
         }
 
@@ -2322,8 +2323,22 @@
             // interpolation point if you do.
         }
 
-        const displayName = machine.nickname || machine.hostname;
+        const displayName = machine.nickname || machine.system_name || machine.hostname;
         const hasNickname = !!machine.nickname;
+        // XACA-1687: the reporter-supplied fleet system name is the card's
+        // primary label, with the technical hostname as a secondary line when
+        // they differ. Both are untrusted reporter input -> escapeHtml() below.
+        // No system_name -> markup is byte-identical to the pre-XACA-1687 card.
+        // XACA-1687-026: case-insensitive, same rule as the statusline and tmux.
+        const hasSystemName = !!machine.system_name &&
+            String(machine.system_name).toLowerCase() !== String(machine.hostname || '').toLowerCase();
+        const hostnameHtml = hasSystemName
+            ? escapeHtml(machine.system_name) +
+              // XACA-1687-022: screen readers otherwise run the two names
+              // together ("Solai-sol"); the separator is visually hidden.
+              '<span class="visually-hidden"> \u00b7 </span>' +
+              '<span class="machine-hostname-secondary">' + escapeHtml(machine.hostname) + '</span>'
+            : escapeHtml(machine.hostname);
         const isExpanded = expandedMachineId === machine.machine_id;
 
         // XACA-0416-004: this statement mixes BOTH output contexts, so the escaper
@@ -2355,7 +2370,7 @@
             '<div class="machine-row-header">' +
                 '<span class="machine-expand-indicator' + (isExpanded ? ' expanded' : '') + '">▶</span>' +
                 '<span class="status-indicator ' + displayStatus.cls + '"></span>' +
-                '<span class="machine-hostname">' + escapeHtml(machine.hostname) + '</span>' +
+                '<span class="machine-hostname">' + hostnameHtml + '</span>' +
                 displayStatus.labelHtml +
                 '<span class="machine-sessions">' + machine.session_count + ' sessions</span>' +
             '</div>' +

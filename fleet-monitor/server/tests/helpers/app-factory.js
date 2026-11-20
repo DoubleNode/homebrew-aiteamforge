@@ -398,6 +398,20 @@ function normalizeSystemBlock(system) {
 // APP FACTORY
 // ============================================================================
 
+// XACA-1687: verbatim mirror of server.js's sanitizeSystemName (drift-guarded
+// by tests/xaca-1687-system-name.test.js).
+const SYSTEM_NAME_MAX = 64;
+function sanitizeSystemName(value) {
+    if (typeof value !== 'string') return null;
+    // C0/C1 controls, plus invisible format chars that enable label spoofing:
+    // zero-width (U+200B-200D, U+2060, U+FEFF), bidi marks/overrides/isolates
+    // (U+200E-200F, U+202A-202E, U+2066-2069, U+061C), invisible operators U+2061-2064.
+    // Truncate by code point (Array.from) so a surrogate pair is never split.
+    const stripped = value.replace(/[\u0000-\u001F\u007F-\u009F\u061C\u200B-\u200F\u202A-\u202E\u2060-\u2069\uFEFF]/g, '').trim();
+    const cleaned = Array.from(stripped).slice(0, SYSTEM_NAME_MAX).join('').trim();
+    return cleaned || null;
+}
+
 /**
  * Create a test Express app.
  *
@@ -683,6 +697,7 @@ function createApp(opts = {}) {
                 machine_id: m.machine_id,
                 hostname: m.hostname,
                 nickname: m.nickname || null,
+                system_name: m.system_name || null,
                 ip: m.ip,
                 os: m.os,
                 status: m.status,
@@ -770,11 +785,16 @@ function createApp(opts = {}) {
 
             const sessionCount = (sessions || []).length;
             const existingNickname = existingMachine?.nickname || null;
+            // XACA-1687: mirrors server.js's POST /api/status system_name rule.
+            const systemName = Object.prototype.hasOwnProperty.call(machine, 'system_name')
+                ? sanitizeSystemName(machine.system_name)
+                : (existingMachine?.system_name || null);
 
             machines.set(machineKey, {
                 machine_id: machineKey,
                 hostname: machine.hostname,
                 nickname: existingNickname,
+                system_name: systemName,
                 ip: machine.ip || 'unknown',
                 os: machine.os || 'unknown',
                 first_seen: firstSeen,
@@ -1532,7 +1552,8 @@ function createApp(opts = {}) {
                 machine_id: m.machine_id,
                 hostname: m.hostname,
                 nickname: m.nickname,
-                display_name: m.nickname || m.hostname,
+                system_name: m.system_name || null,
+                display_name: m.nickname || m.system_name || m.hostname,
                 status: m.status,
                 session_count: m.session_count
             })).sort((a, b) => {
@@ -1620,6 +1641,8 @@ module.exports = {
         // one).
         isVersionOutdated,
         normalizeSystemBlock,
-        sanitizePowerBlock
+        sanitizePowerBlock,
+        // XACA-1687
+        sanitizeSystemName
     }
 };
