@@ -6720,6 +6720,53 @@ update_tmux_conf() {
   return 0
 }
 
+# XACA-1926: ~/.claude/statusline-command.sh on the UPGRADE path.
+#
+# install_statusline() (install-claude-config.sh) runs only from a fresh
+# `aiteamforge setup`, so no shipped statusline change (XACA-1687's fleet system
+# name) ever reached an installed Mac. Same design as update_tmux_conf: reuse
+# apply_template() via the receipt-guarded _xaca1926_refresh_statusline(),
+# refresh only a file PROVEN pristine, leave customized/symlinked files alone
+# with a statusline-command.sh.new beside them. Claude Code re-runs the script on
+# every refresh, so a running session picks the new file up by itself: nothing
+# to reload. Subshell + fail-soft: an error here never aborts the upgrade.
+update_statusline() {
+  print_section "Updating Claude statusline"
+
+  local installer="${LIBEXEC_DIR}/installers/install-claude-config.sh"
+  if [ ! -f "$installer" ]; then
+    print_warning "install-claude-config.sh not found ($installer) — skipping statusline refresh"
+    return 0
+  fi
+
+  if [ "$DRY_RUN" = true ]; then
+    echo "Would check ~/.claude/statusline-command.sh against the shipped template (via its render receipt, or a shipped-template sha256 bootstrap if no receipt exists yet) and refresh it only if proven pristine-but-stale; a customized or symlinked file would be left untouched"
+    return 0
+  fi
+
+  print_info "Checking the Claude statusline against the shipped template (idempotent; fail-soft; never overwrites a customized file)..."
+
+  local _xaca1926_result="" _xaca1926_rc=0
+  _xaca1926_result="$(
+      AITEAMFORGE_DIR="${WORKING_DIR}"
+      TEMPLATE_DIR="${FRAMEWORK_DIR}/share/templates"
+      export AITEAMFORGE_DIR TEMPLATE_DIR
+      # shellcheck source=/dev/null
+      source "$installer" >/dev/null 2>&1
+      _xaca1926_refresh_statusline
+    )" && _xaca1926_rc=0 || _xaca1926_rc=$?
+
+  case "$_xaca1926_rc" in
+    0) print_success "${_xaca1926_result:-Statusline already current}" ;;
+    2) print_success "${_xaca1926_result:-Statusline refreshed from shipped template}" ;;
+    3) print_warning "${_xaca1926_result:-Statusline left untouched — differs from our records (user-customized or symlinked)}" ;;
+    4) print_info "${_xaca1926_result:-No Claude statusline installed (nothing to refresh)}" ;;
+    *) print_warning "${_xaca1926_result:-Statusline refresh skipped (non-fatal; upgrade continues)}" ;;
+  esac
+
+  return 0
+}
+
 # XACA-1283: ~/.claude/settings.json on the UPGRADE path.
 #
 # install_settings_json() (install-claude-config.sh) renders and merges
@@ -7512,6 +7559,7 @@ update_team_image_assets
 update_claude_hooks
 update_global_claude_md
 update_tmux_conf
+update_statusline
 update_claude_settings
 update_claude_mods
 update_skills

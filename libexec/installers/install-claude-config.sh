@@ -1252,6 +1252,11 @@ install_statusline() {
     if [[ -f "$template" ]]; then
         apply_template "$template" "$target"
         chmod +x "$target"
+        # XACA-1926: render receipt (exact copy of the bytes just written) so a
+        # later `aiteamforge upgrade` can tell a pristine-but-stale statusline
+        # from a customized one. Same contract as the XACA-1669 tmux.conf
+        # receipt; see _xaca1926_refresh_statusline() below. Fail-soft.
+        _xaca1926_write_statusline_receipt "$target" || log_warning "Could not write the statusline render receipt; upgrade will re-derive provenance by comparison"
         log_success "Statusline command installed"
     else
         # Try copying from aiteamforge if template doesn't exist
@@ -1263,6 +1268,198 @@ install_statusline() {
             log_warning "Statusline command not found"
         fi
     fi
+}
+
+#------------------------------------------------------------------------------
+# XACA-1926: ~/.claude/statusline-command.sh refresh on the UPGRADE path.
+#
+# install_statusline() above runs only from install_claude_config() (a fresh
+# `aiteamforge setup`). No upgrade phase ever re-rendered the statusline, so a
+# template change (XACA-1687's fleet system name) never reached an installed
+# Mac: the XACA-1159 (CLAUDE.md) / XACA-1669 (tmux.conf) bug class. Same fix:
+# refresh only a file PROVEN pristine (receipt match, or a byte match with a
+# shipped render), leave customized/symlinked files alone and write
+# statusline-command.sh.new beside them to diff against.
+#
+# Bootstrap by sha256 is sound HERE because no shipped statusline template has
+# ever used an apply_template placeholder ({{AITEAMFORGE_DIR}}, {{HOME}},
+# {{CLAUDE_CONFIG_DIR}}, {{USER}}; measured over every tap version), so a
+# render is the raw template on every machine. The {{ORG_*}} tokens it does
+# carry are not substituted by apply_template. If a template ever gains one of
+# the four, the sha256 list stops working for it -- switch to rendered
+# historical variants (the XACA-1159 design).
+#
+# The template is canonical in dev-team since XACA-1926
+# (scripts/templates/tap/statusline-command.template.sh, mirrored by the
+# publisher). Before changing it, add the OUTGOING template's sha256 below
+# (tap-only edit), or every receipt-less Mac on it reads as "customized".
+#------------------------------------------------------------------------------
+
+_xaca1926_statusline_receipt_path() {
+    printf '%s' "${AITEAMFORGE_DIR}/.statusline-command.receipt"
+}
+
+# Every shipped statusline template except the current one, one sha256 per
+# line, oldest first (tap commit that last wrote it):
+#   bccefb52 b99bf32  dca285bb d864622  da5e1c0c 72c48b5 (v0.10.0)
+#   9bf9f675 322b99b (v0.11.1)  d19d5b37 53e6a0f  ea7de404 d620080 (v0.20.9 ..
+#   v0.21.26, the XACA-1161 template every fleet Mac ran until XACA-1926)
+_xaca1926_statusline_historical_sha256() {
+    cat <<'HIST'
+bccefb52636c383798435fc6f0fe7b7106b2b58bfd9a8e63a400eccae749f41f
+dca285bb8f1a0b4d8ec45f0b13f3db5363685f5a57d3f90a1ed1be280eddbe32
+da5e1c0c4543d5b79ea14f744ef6d639a58b8907e2210d6c8cb246ad95841034
+9bf9f6751179f704be0d96e14fb7dce1620c3daa383b911732452d7d5a4ee198
+d19d5b378033a12f78ca65c5708072bbd60ea9eff4038d343cf1b4c2b7bbf346
+ea7de4043815daec4498aaa91e72e86892c386ffb4af10e64f68f2ef9fbfc53a
+HIST
+}
+
+_xaca1926_sha256() {
+    shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'
+}
+
+_xaca1926_write_statusline_receipt() {
+    local rendered_target="$1" receipt
+    receipt="$(_xaca1926_statusline_receipt_path)"
+    mkdir -p "$(dirname "$receipt")" 2>/dev/null
+    cp "$rendered_target" "$receipt" 2>/dev/null || return 1
+    return 0
+}
+
+# On a skip, render the current template as <target>.new for the user to diff.
+# Prints the path on success; fail-soft.
+_xaca1926_render_statusline_sidecar() {
+    local target="$1" template="$2" sidecar tmp
+    sidecar="${target}.new"
+    [[ -f "$template" ]] || return 1
+    tmp="$(mktemp "${target}.XXXXXX" 2>/dev/null)" || return 1
+    if ! apply_template "$template" "$tmp" >/dev/null 2>&1 || cmp -s "$tmp" "$target"; then
+        command rm "$tmp" 2>/dev/null || true
+        return 1
+    fi
+    if mv "$tmp" "$sidecar" 2>/dev/null; then
+        chmod 644 "$sidecar" 2>/dev/null || true
+        printf '%s' "$sidecar"
+        return 0
+    fi
+    command rm "$tmp" 2>/dev/null || true
+    return 1
+}
+
+# 0 if the live file equals the CURRENT template's render; 1 otherwise (fail closed).
+_xaca1926_live_equals_current_render() {
+    local live="$1" template="$2" tmp rc=1
+    tmp="$(mktemp "${live}.XXXXXX" 2>/dev/null)" || return 1
+    if apply_template "$template" "$tmp" >/dev/null 2>&1 && cmp -s "$tmp" "$live"; then
+        rc=0
+    fi
+    command rm "$tmp" 2>/dev/null || true
+    return "$rc"
+}
+
+# Pre-receipt provenance: 0 if the live file equals the current render or a
+# historically shipped template (by sha256); 1 otherwise (fail closed).
+_xaca1926_bootstrap_statusline_provenance() {
+    local live="$1" template="$2" live_sha h
+    _xaca1926_live_equals_current_render "$live" "$template" && return 0
+    live_sha="$(_xaca1926_sha256 "$live")"
+    [[ -n "$live_sha" ]] || return 1
+    while IFS= read -r h; do
+        [[ -n "$h" && "$live_sha" == "$h" ]] && return 0
+    done <<< "$(_xaca1926_statusline_historical_sha256)"
+    return 1
+}
+
+# Upgrade-side decision function -- called ONLY from update_statusline()
+# (aiteamforge-upgrade.sh), never from a fresh install. Prints one summary line.
+#   0 = already current (receipt written/re-synced if needed)
+#   1 = skipped for a soft reason (missing template, render/backup/write failure)
+#   2 = refreshed from the shipped template (the ONLY code that means "changed")
+#   3 = left untouched: symlink, customized, or no provenance match (+ .new sidecar)
+#   4 = no statusline installed on this box -- nothing done
+_xaca1926_refresh_statusline() {
+    local target="${CLAUDE_CONFIG_DIR}/statusline-command.sh"
+    local template="${TEMPLATE_DIR}/claude/statusline-command.sh"
+    local receipt sidecar=""
+    receipt="$(_xaca1926_statusline_receipt_path)"
+
+    if [[ ! -f "$template" ]]; then
+        echo "Shipped statusline template not found -- skipping"
+        return 1
+    fi
+
+    # Symlink FIRST (cmp and -f follow links). Never write through it.
+    if [[ -L "$target" ]]; then
+        sidecar="$(_xaca1926_render_statusline_sidecar "$target" "$template")" || sidecar=""
+        echo "Left untouched: ${target} is a symlink (user-managed)${sidecar:+. Current shipped version written alongside it for comparison: ${sidecar}}"
+        return 3
+    fi
+
+    if [[ ! -f "$target" ]]; then
+        echo "${target} is not installed on this box (nothing to refresh) -- 'aiteamforge setup' installs it the first time"
+        return 4
+    fi
+
+    if [[ -f "$receipt" ]]; then
+        if ! cmp -s "$target" "$receipt"; then
+            # Stale receipt, but the live file already IS the current render: adopt it.
+            if _xaca1926_live_equals_current_render "$target" "$template"; then
+                _xaca1926_write_statusline_receipt "$target" || true
+                echo "Statusline already current (render receipt re-synced to the live file)"
+                return 0
+            fi
+            sidecar="$(_xaca1926_render_statusline_sidecar "$target" "$template")" || sidecar=""
+            echo "Left untouched: live statusline differs from our last-known render (user-customized) -- see ${receipt}${sidecar:+. Current shipped version written alongside it for comparison: ${sidecar}}"
+            return 3
+        fi
+    elif ! _xaca1926_bootstrap_statusline_provenance "$target" "$template"; then
+        sidecar="$(_xaca1926_render_statusline_sidecar "$target" "$template")" || sidecar=""
+        echo "Left untouched: no render receipt on file, and the live statusline matches no shipped version (user-customized or hand-authored)${sidecar:+. Current shipped version written alongside it for comparison: ${sidecar}}"
+        return 3
+    fi
+
+    # Live file is now KNOWN-pristine.
+    local candidate
+    candidate="$(mktemp "${target}.XXXXXX" 2>/dev/null)" || {
+        echo "Could not create a temp file to render the current statusline -- skipping this run"
+        return 1
+    }
+    if ! apply_template "$template" "$candidate" >/dev/null 2>&1; then
+        command rm "$candidate" 2>/dev/null || true
+        echo "Rendering the current statusline template failed -- leaving the existing file untouched"
+        return 1
+    fi
+
+    if cmp -s "$candidate" "$target"; then
+        command rm "$candidate" 2>/dev/null || true
+        _xaca1926_write_statusline_receipt "$target" || true
+        echo "Statusline already current"
+        return 0
+    fi
+
+    local backup_path="${BACKUP_DIR:-${AITEAMFORGE_DIR}/.backups/claude-config-$(date +%Y%m%d-%H%M%S)}/statusline-command.sh"
+    if ! { mkdir -p "$(dirname "$backup_path")" && cp "$target" "$backup_path"; } 2>/dev/null; then
+        command rm "$candidate" 2>/dev/null || true
+        echo "Could not back up ${target} to ${backup_path} -- existing file left in place"
+        return 1
+    fi
+
+    # Claude Code executes this file: keep it executable whatever mktemp gave us.
+    chmod 755 "$candidate" 2>/dev/null || true
+
+    if mv -f "$candidate" "$target" 2>/dev/null; then
+        if _xaca1926_write_statusline_receipt "$target"; then
+            echo "Statusline refreshed from shipped template (previous version backed up to ${backup_path})"
+        else
+            echo "Statusline refreshed from shipped template (backup: ${backup_path}), but the render receipt could not be written -- the next upgrade will re-derive provenance by comparison"
+        fi
+        return 2
+    fi
+
+    command rm "$candidate" 2>/dev/null || true
+    echo "Failed to install the refreshed statusline -- existing file left in place"
+    return 1
 }
 
 # Install tmux configuration
