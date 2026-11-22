@@ -12,6 +12,7 @@
 - [Server Configuration](#server-configuration)
 - [Client Configuration](#client-configuration)
 - [Hybrid Configuration](#hybrid-configuration)
+- [Fleet System Names](#fleet-system-names)
 - [Service Discovery](#service-discovery)
 - [Shared Kanban State](#shared-kanban-state)
 - [Monitoring Agents](#monitoring-agents)
@@ -386,6 +387,53 @@ During feature selection:
   }
 }
 ```
+
+---
+
+## Fleet System Names
+
+Each Mac can carry a second, human-friendly **fleet system name** next to its technical
+hostname. When a Mac has one, these surfaces show it:
+
+| Surface | What it shows | Picked up |
+|---------|---------------|-----------|
+| Claude Code statusline | `user@<system name> · <host>` | Within about 10 minutes after `aiteamforge upgrade` (see the cache note below) |
+| tmux status line (right side) of every team station | `<system name> · <host>` | When the team's tmux session next starts (restart the team after upgrading) |
+| Fleet Monitor dashboard, MACHINES card | The system name, with the hostname beside it | On the Mac's next fleet-reporter run |
+
+A Mac **without** a system name shows its hostname exactly as before, on all three surfaces.
+Nothing breaks and nothing needs configuring.
+
+- **Statusline cache:** the statusline caches the lookup for 10 minutes, including a "no name"
+  answer. A Mac that gets its helper after that answer was cached can take up to 10 minutes to
+  show the name. `KB_FLEET_IDENTITY_CACHE_TTL_MIN` changes the window.
+- **Nicknames win on the dashboard:** if you set a nickname for a machine in Fleet Monitor,
+  places that show one name per machine use it ahead of the system name. The order is
+  nickname, then system name, then hostname.
+
+### Where the name comes from
+
+The name comes from a small helper, `kb-fleet-identity`, and its registry,
+`fleet-systems.json`. They are **not shipped in this tap**: a fleet's naming is its own and is
+installed on each Mac by hand. The supported location on a tap Mac is
+`~/aiteamforge/scripts/kb-fleet-identity` (or `$AITEAMFORGE_DIR/scripts/` when that is set),
+with the registry in `~/aiteamforge/config/fleet-systems.json`. Every surface checks
+there. Each surface also checks a few places of its own first, such as a framework development
+checkout in `~/dev-team/scripts/`.
+
+If the helper is missing or fails, or if the name it returns is just the Mac's own hostname,
+the surfaces fall back to the hostname.
+
+### Turning it on for a Mac
+
+1. Put `kb-fleet-identity` in `~/aiteamforge/scripts/` (executable) and `fleet-systems.json`
+   in `~/aiteamforge/config/`.
+2. Check it: `~/aiteamforge/scripts/kb-fleet-identity get` should print the Mac's system
+   name.
+3. Run `aiteamforge upgrade`. It refreshes the statusline and regenerates every team's
+   station scripts.
+4. Restart each team (`<team>-shutdown.sh` then `<team>-startup.sh`) to pick up the tmux
+   name. The statusline and the MACHINES card need no restart.
 
 ---
 

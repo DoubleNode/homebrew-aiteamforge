@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1926: Fleet system names in the multi-machine guide (XACA-1926)
+- Tap files updated in this publish: `docs/MULTI_MACHINE.md`. Run `brew upgrade aiteamforge` to receive them.
 
 ## [0.21.27] - 2026-11-21
 - XACA-1926: Fleet system name on tap Macs' statusline and tmux (XACA-1926)
