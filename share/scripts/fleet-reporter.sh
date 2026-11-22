@@ -2605,9 +2605,23 @@ send_status() {
 # hostname, strip .local / domain, non-alnum -> dash, trim dashes, prefix "m-"
 # if it doesn't start with a letter. Used ONLY for the cheap pre-check below —
 # msg-client.js is the source of truth for the actual slug at send/pull time.
+#
+# XACA-1688: a PINNED slug wins over the hostname, in vault-keygen.js's
+# pinnedMachineSlug() order: $AITEAMFORGE_MACHINE_ID, then the first line of
+# ~/.aiteamforge/machine-slug. The pin keeps the vault key and relay identity
+# stable across a hostname rename.
 _msg_default_machine_slug() {
-    local raw slug
-    raw=$(hostname 2>/dev/null | tr '[:upper:]' '[:lower:]')
+    local raw slug pin=""
+    pin="${AITEAMFORGE_MACHINE_ID:-}"
+    if [ -z "$pin" ] && [ -r "$HOME/.aiteamforge/machine-slug" ]; then
+        IFS= read -r pin < "$HOME/.aiteamforge/machine-slug" || true
+    fi
+    pin=$(printf '%s' "$pin" | tr -d '[:space:]')
+    if [ -n "$pin" ]; then
+        raw=$(printf '%s' "$pin" | tr '[:upper:]' '[:lower:]')
+    else
+        raw=$(hostname 2>/dev/null | tr '[:upper:]' '[:lower:]')
+    fi
     slug=$(printf '%s' "$raw" \
         | sed -E 's/\.local$//' \
         | sed -E 's/\..*$//' \

@@ -21629,14 +21629,22 @@ _kb_host_matches() {
     want=$(_kb_host_normalize "$declared")
     [[ -z "$want" ]] && return 1
 
-    local scutil_name="" short_name=""
+    local scutil_name="" short_name="" pinned_name=""
     if command -v scutil &>/dev/null; then
         scutil_name=$(scutil --get ComputerName 2>/dev/null)
     fi
     short_name=$(hostname -s 2>/dev/null)
+    # XACA-1688: the pinned fleet slug ($AITEAMFORGE_MACHINE_ID, else line 1 of
+    # ~/.aiteamforge/machine-slug) is a name this machine answers to, so a
+    # primary_host naming it keeps matching after a hostname rename.
+    pinned_name="${AITEAMFORGE_MACHINE_ID:-}"
+    if [[ -z "$pinned_name" && -r "$HOME/.aiteamforge/machine-slug" ]]; then
+        IFS= read -r pinned_name < "$HOME/.aiteamforge/machine-slug" || true
+    fi
+    pinned_name="${pinned_name//[[:space:]]/}"
 
     local cand
-    for cand in "$actual" "$scutil_name" "$short_name"; do
+    for cand in "$actual" "$scutil_name" "$short_name" "$pinned_name"; do
         [[ -z "$cand" ]] && continue
         [[ "$(_kb_host_normalize "$cand")" == "$want" ]] && return 0
     done

@@ -128,8 +128,15 @@ def _vault_fetch_sh_path() -> Optional[str]:
 def _machine_slug() -> str:
     """Return a slugified machine hostname, mirroring vault-keygen.js derivation."""
     import re
+    pin = ""
+    try:  # XACA-1688: pinned slug, same order as vault-keygen.js pinnedMachineSlug()
+        with open(os.path.join(os.path.expanduser("~"), ".aiteamforge", "machine-slug")) as fh:
+            pin = fh.readline().strip()
+    except OSError:
+        pass
     hostname = (
         os.environ.get("AITEAMFORGE_MACHINE_ID")
+        or pin
         or subprocess.run(
             ["hostname", "-s"],
             capture_output=True, text=True, timeout=5

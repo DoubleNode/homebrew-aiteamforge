@@ -566,6 +566,18 @@ function detectChanges(existingMachine, newData, newSessions) {
         });
     }
 
+    // Hostname change detection (XACA-1688). Records are keyed by machine_id, so a
+    // renamed machine keeps its card and history; this entry makes the rename
+    // itself visible in that history instead of the name silently changing.
+    if (existingMachine.hostname && newData.hostname && existingMachine.hostname !== newData.hostname) {
+        changes.push({
+            type: 'hostname_change',
+            previous: existingMachine.hostname,
+            new: newData.hostname,
+            details: `Hostname changed from ${existingMachine.hostname} to ${newData.hostname}`
+        });
+    }
+
     // Session changes detection
     const existingSessions = new Set((existingMachine.sessions || []).map(s => s.session_name));
     const newSessionSet = new Set((newSessions || []).map(s => s.session_name));

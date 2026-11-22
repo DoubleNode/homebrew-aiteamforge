@@ -793,13 +793,36 @@ async function ensureSodium() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Derive a default machine slug from the hostname.
+ * The PINNED machine slug, or '' when none is pinned (XACA-1688).
+ * Order: $AITEAMFORGE_MACHINE_ID (kb-msg-provision's existing override), then the
+ * first line of ~/.aiteamforge/machine-slug. A pin keeps this machine's vault key
+ * (Keychain account = slug) and kb-msg relay identity stable while its hostname is
+ * renamed, so a rename needs no vault re-key. launchd agents never see the env var,
+ * which is why the file exists. Mirrored by _msg_default_machine_slug
+ * (fleet-reporter.sh) and team_routing.py; keep the three in step.
+ * @returns {string}
+ */
+function pinnedMachineSlug() {
+    const env = String(process.env.AITEAMFORGE_MACHINE_ID || '').trim();
+    if (env) return env;
+    try {
+        const pin = fs.readFileSync(path.join(os.homedir(), '.aiteamforge', 'machine-slug'), 'utf8');
+        return (pin.split('\n')[0] || '').trim();
+    } catch (_) {
+        return '';
+    }
+}
+
+/**
+ * Derive a default machine slug: the pinned slug (pinnedMachineSlug) when no
+ * hostname is passed and one is pinned, else the slugified hostname.
  * "Darrens-MacBook-Air.local" -> "darrens-macbook-air"
- * @param {string} [hostname] override (testing)
+ * @param {string} [hostname] override (testing). Passing one bypasses the pin.
  * @returns {string} a slug matching SLUG_RE (best effort; may be empty if hostname is exotic)
  */
 function defaultMachineSlug(hostname) {
-    const raw = (hostname || os.hostname() || '').toLowerCase();
+    const pinned = hostname ? '' : pinnedMachineSlug();
+    const raw = (hostname || pinned || os.hostname() || '').toLowerCase();
     let slug = raw
         .replace(/\.local$/, '')      // strip mDNS suffix
         .replace(/\..*$/, '')         // strip any remaining domain
@@ -2177,6 +2200,7 @@ module.exports = {
     EXIT_ROTATE_REFUSED,
     // slug/label
     defaultMachineSlug,
+    pinnedMachineSlug,
     validateSlug,
     validateLabel,
     // crypto

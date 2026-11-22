@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1688: Fleet hostname rename compatibility window (XACA-1688)
+- Tap files updated in this publish: `fleet-monitor/server/config/token-oauth-accounts.json`,`fleet-monitor/server/server.js` `share/kanban-hooks/team_routing.py`,`share/kanban-hooks/timepad_config.py` `share/scripts/fleet-reporter.sh`,`share/scripts/lcars-health-check.sh` `share/scripts/vault-keygen.js`,`share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 
 ## [0.21.28] - 2026-11-22
 - XACA-1926: Fleet system names in the multi-machine guide (XACA-1926)

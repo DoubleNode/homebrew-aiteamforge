@@ -29,6 +29,12 @@ THIS MACHINE'S IDENTITIES (a union, so a local team is never misjudged foreign):
   `scutil --get LocalHostName`). The slug rule mirrors
   fleet-monitor/client/vault-keygen.js defaultMachineSlug(), which is what
   kb-msg-provision records for this machine's own teams.
+  XACA-1688 adds two more, so a hostname rename never makes a machine's own
+  teams look foreign: the pinned slug in ~/.aiteamforge/machine-slug, and every
+  `hostname` + `aliases` of the config/fleet-systems.json machine that any of the
+  identities above already names (registry: $FLEET_SYSTEMS_FILE, else
+  <this dir>/../config/fleet-systems.json, else
+  ${AITEAMFORGE_DIR:-~/aiteamforge}/config/fleet-systems.json).
 
 CLI:
   team_routing.py owner-elsewhere <team> [--map PATH] [--also NAME ...]
@@ -84,17 +90,63 @@ def machine_slug(name):
     return slug
 
 
+def pinned_slug():
+    """First line of ~/.aiteamforge/machine-slug, slugified, or "" (XACA-1688)."""
+    try:
+        with open(os.path.join(os.path.expanduser("~"), ".aiteamforge", "machine-slug")) as fh:
+            return machine_slug(fh.readline())
+    except OSError:
+        return ""
+
+
+def registry_path():
+    override = os.environ.get("FLEET_SYSTEMS_FILE", "").strip()
+    if override:
+        return override
+    here = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "config", "fleet-systems.json")
+    if os.path.isfile(here):
+        return here
+    base = os.environ.get("AITEAMFORGE_DIR") or os.path.join(os.path.expanduser("~"), "aiteamforge")
+    return os.path.join(base, "config", "fleet-systems.json")
+
+
+def registry_aliases(ids, path=None):
+    """Every hostname + alias slug of each registry machine that one of `ids` names.
+
+    XACA-1688 compatibility window: after darren-m4-mini is renamed ai-vulcan, the
+    registry row {hostname: ai-vulcan, aliases: [darren-m4-mini]} makes a map entry
+    that still says darren-m4-mini count as THIS machine. An unreadable or
+    wrong-shape registry adds nothing (fail-open, like the map)."""
+    try:
+        with open(path or registry_path()) as fh:
+            machines = json.load(fh).get("machines")
+    except (OSError, ValueError, AttributeError):
+        return set()
+    out = set()
+    for m in machines if isinstance(machines, list) else []:
+        if not isinstance(m, dict):
+            continue
+        raw = [m.get("hostname")] + list(m.get("aliases") or [])
+        names = {machine_slug(n) for n in raw if isinstance(n, str)} - {""}
+        if names & ids:
+            out |= names
+    return out
+
+
 def this_machine_ids(also=()):
     ids = set()
     env_id = os.environ.get("AITEAMFORGE_MACHINE_ID", "").strip()
     if env_id:
         ids.add(env_id.lower())
+    pin = pinned_slug()
+    if pin:
+        ids.add(pin)
     names = [socket.gethostname()] + list(also or ())
     for n in names:
         s = machine_slug(n)
         if s:
             ids.add(s)
-    return ids
+    return ids | registry_aliases(ids)
 
 
 def mapped_owner(team, map_path=None):
