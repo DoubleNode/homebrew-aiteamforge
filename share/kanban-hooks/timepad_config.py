@@ -128,15 +128,27 @@ def _vault_fetch_sh_path() -> Optional[str]:
 def _machine_slug() -> str:
     """Return a slugified machine hostname, mirroring vault-keygen.js derivation."""
     import re
-    pin = ""
-    try:  # XACA-1688: pinned slug, same order as vault-keygen.js pinnedMachineSlug()
-        with open(os.path.join(os.path.expanduser("~"), ".aiteamforge", "machine-slug")) as fh:
-            pin = fh.readline().strip()
-    except OSError:
-        pass
+    # XACA-1688: pinned slug, same order as vault-keygen.js pinnedMachineSlug(): the env
+    # value if it is non-blank after trimming, else the first line of the pin file.
+    # STRICT (XACA-1688-013/016), the same rule as team_routing.valid_pin(): ASCII
+    # whitespace trim only, line 1 split on "\n" only, ASCII-only, lowercased,
+    # canonical slug ^[a-z][a-z0-9]*(-[a-z0-9]+)*$ <= 64, otherwise ignored.
+    ws = " \t\r\n\v\f"
+    # A raw value (env or line 1) over 8192 chars is invalid, never trimmed.
+    pin = os.environ.get("AITEAMFORGE_MACHINE_ID") or ""
+    pin = "\x01" if len(pin) > 8192 else pin.strip(ws)
+    if not pin:
+        try:
+            with open(os.path.join(os.path.expanduser("~"), ".aiteamforge", "machine-slug"), "rb") as fh:
+                pin = fh.readline().split(b"\n", 1)[0].decode("utf-8", "replace")
+            pin = "\x01" if len(pin) > 8192 else pin.strip(ws)
+        except OSError:
+            pass
+    pin = pin.lower() if pin.isascii() else ""
+    if len(pin) > 64 or not re.fullmatch(r"[a-z][a-z0-9]*(-[a-z0-9]+)*", pin):
+        pin = ""
     hostname = (
-        os.environ.get("AITEAMFORGE_MACHINE_ID")
-        or pin
+        pin
         or subprocess.run(
             ["hostname", "-s"],
             capture_output=True, text=True, timeout=5

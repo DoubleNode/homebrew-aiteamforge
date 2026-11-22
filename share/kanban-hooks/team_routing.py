@@ -91,12 +91,45 @@ def machine_slug(name):
 
 
 def pinned_slug():
-    """First line of ~/.aiteamforge/machine-slug, slugified, or "" (XACA-1688)."""
-    try:
-        with open(os.path.join(os.path.expanduser("~"), ".aiteamforge", "machine-slug")) as fh:
-            return machine_slug(fh.readline())
-    except OSError:
+    """The pinned slug, or "" (XACA-1688).
+
+    Source: $AITEAMFORGE_MACHINE_ID if it is non-blank after trimming, else the
+    first line of ~/.aiteamforge/machine-slug (vault-keygen.js pinnedMachineSlug()
+    order). STRICT, the same rule in every reader: trimmed + lowercased, used only
+    when it already IS a valid slug, otherwise ignored (never rewritten)."""
+    raw = os.environ.get("AITEAMFORGE_MACHINE_ID", "")
+    if len(raw) > PIN_RAW_MAX:
+        return ""  # over-long = chosen and invalid, never blank (shell-reader parity)
+    if not raw.strip(PIN_WS):
+        try:
+            raw = read_pin_line(os.path.join(os.path.expanduser("~"), ".aiteamforge", "machine-slug"))
+        except OSError:
+            return ""
+        if len(raw) > PIN_RAW_MAX:
+            return ""
+    return valid_pin(raw)
+
+
+PIN_RE = re.compile(r"[a-z][a-z0-9]*(-[a-z0-9]+)*")
+PIN_WS = " \t\r\n\v\f"  # ASCII whitespace only: str.strip() would also eat NBSP etc.
+PIN_RAW_MAX = 8192  # a raw value (env or line 1) longer than this is invalid, never trimmed
+
+
+def valid_pin(raw):
+    """Canonical-slug pin or "" (one rule in every reader, XACA-1688-013/016)."""
+    pin = (raw or "").strip(PIN_WS)
+    if not pin.isascii():
         return ""
+    pin = pin.lower()
+    return pin if len(pin) <= MAX_SLUG_LEN and PIN_RE.fullmatch(pin) else ""
+
+
+def read_pin_line(path):
+    """Line 1 of the pin file, whole (no read cap; over 8192 = invalid), split on "\\n" only (no universal
+    newlines: a bare \\r stays in the value, as in the shell and JS readers). A NUL is
+    kept, and undecodable bytes become U+FFFD; valid_pin rejects both."""
+    with open(path, "rb") as fh:  # binary readline: b"\n" only, whole line, no read cap
+        return fh.readline().split(b"\n", 1)[0].decode("utf-8", "replace")
 
 
 def registry_path():
@@ -135,10 +168,7 @@ def registry_aliases(ids, path=None):
 
 def this_machine_ids(also=()):
     ids = set()
-    env_id = os.environ.get("AITEAMFORGE_MACHINE_ID", "").strip()
-    if env_id:
-        ids.add(env_id.lower())
-    pin = pinned_slug()
+    pin = pinned_slug()  # env override or pin file, strict rule (XACA-1688-013)
     if pin:
         ids.add(pin)
     names = [socket.gethostname()] + list(also or ())

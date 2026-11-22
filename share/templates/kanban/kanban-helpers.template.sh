@@ -21638,10 +21638,22 @@ _kb_host_matches() {
     # ~/.aiteamforge/machine-slug) is a name this machine answers to, so a
     # primary_host naming it keeps matching after a hostname rename.
     pinned_name="${AITEAMFORGE_MACHINE_ID:-}"
+    # STRICT (XACA-1688-013/016, the same rule in every reader): env wins when non-blank
+    # after trimming ASCII whitespace, else line 1 of the file; ASCII-only, lowercased,
+    # canonical slug ^[a-z][a-z0-9]*(-[a-z0-9]+)*$ <= 64, otherwise ignored.
+    local _pin_ws=$' \t\r\n\v\f'
+    [[ ${#pinned_name} -gt 8192 ]] && pinned_name=$'\001'  # over-long = invalid; never trimmed (bash trim is O(n^2))
+    pinned_name="${pinned_name#"${pinned_name%%[!$_pin_ws]*}"}"
+    pinned_name="${pinned_name%"${pinned_name##*[!$_pin_ws]}"}"
     if [[ -z "$pinned_name" && -r "$HOME/.aiteamforge/machine-slug" ]]; then
-        IFS= read -r pinned_name < "$HOME/.aiteamforge/machine-slug" || true
+        # whole line 1 (no read cap; over 8192 = invalid; awk reads to EOF, so no SIGPIPE under pipefail); a NUL becomes \001 so it is kept and rejected, not dropped
+        pinned_name=$(LC_ALL=C tr '\000' '\001' < "$HOME/.aiteamforge/machine-slug" | LC_ALL=C awk 'NR == 1')
+        [[ ${#pinned_name} -gt 8192 ]] && pinned_name=$'\001'  # over-long = invalid; never trimmed (bash trim is O(n^2))
+        pinned_name="${pinned_name#"${pinned_name%%[!$_pin_ws]*}"}"
+        pinned_name="${pinned_name%"${pinned_name##*[!$_pin_ws]}"}"
     fi
-    pinned_name="${pinned_name//[[:space:]]/}"
+    pinned_name=$(printf '%s' "$pinned_name" | LC_ALL=C tr 'A-Z' 'a-z')
+    [[ ${#pinned_name} -le 64 && "$pinned_name" =~ ^[a-z][a-z0-9]*(-[a-z0-9]+)*$ ]] || pinned_name=""
 
     local cand
     for cand in "$actual" "$scutil_name" "$short_name" "$pinned_name"; do

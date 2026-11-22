@@ -2613,12 +2613,24 @@ send_status() {
 _msg_default_machine_slug() {
     local raw slug pin=""
     pin="${AITEAMFORGE_MACHINE_ID:-}"
-    if [ -z "$pin" ] && [ -r "$HOME/.aiteamforge/machine-slug" ]; then
-        IFS= read -r pin < "$HOME/.aiteamforge/machine-slug" || true
+    # STRICT (XACA-1688-013/016, the same rule in every reader): env wins when non-blank
+    # after trimming ASCII whitespace, else line 1 of the file; ASCII-only, lowercased,
+    # canonical slug ^[a-z][a-z0-9]*(-[a-z0-9]+)*$ <= 64, otherwise ignored.
+    local _pin_ws=$' \t\r\n\v\f'
+    [[ ${#pin} -gt 8192 ]] && pin=$'\001'  # over-long = invalid; never trimmed (bash trim is O(n^2))
+    pin="${pin#"${pin%%[!$_pin_ws]*}"}"
+    pin="${pin%"${pin##*[!$_pin_ws]}"}"
+    if [[ -z "$pin" && -r "$HOME/.aiteamforge/machine-slug" ]]; then
+        # whole line 1 (no read cap; over 8192 = invalid; awk reads to EOF, so no SIGPIPE under pipefail); a NUL becomes \001 so it is kept and rejected, not dropped
+        pin=$(LC_ALL=C tr '\000' '\001' < "$HOME/.aiteamforge/machine-slug" | LC_ALL=C awk 'NR == 1')
+        [[ ${#pin} -gt 8192 ]] && pin=$'\001'  # over-long = invalid; never trimmed (bash trim is O(n^2))
+        pin="${pin#"${pin%%[!$_pin_ws]*}"}"
+        pin="${pin%"${pin##*[!$_pin_ws]}"}"
     fi
-    pin=$(printf '%s' "$pin" | tr -d '[:space:]')
+    pin=$(printf '%s' "$pin" | LC_ALL=C tr 'A-Z' 'a-z')
+    [[ ${#pin} -le 64 && "$pin" =~ ^[a-z][a-z0-9]*(-[a-z0-9]+)*$ ]] || pin=""
     if [ -n "$pin" ]; then
-        raw=$(printf '%s' "$pin" | tr '[:upper:]' '[:lower:]')
+        raw="$pin"
     else
         raw=$(hostname 2>/dev/null | tr '[:upper:]' '[:lower:]')
     fi

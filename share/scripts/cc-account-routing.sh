@@ -843,6 +843,28 @@ print(json.dumps(rec))
                 return 0
             fi
         fi
+        # XACA-1688: no node -> still honour the pinned slug, by the same strict
+        # rule as vault-keygen.js pinnedMachineSlug() (valid slug or ignored).
+        local _pin="${AITEAMFORGE_MACHINE_ID:-}"
+        # STRICT (XACA-1688-013/016, the same rule in every reader): env wins when non-blank
+        # after trimming ASCII whitespace, else line 1 of the file; ASCII-only, lowercased,
+        # canonical slug ^[a-z][a-z0-9]*(-[a-z0-9]+)*$ <= 64, otherwise ignored.
+        local _pin_ws=$' \t\r\n\v\f'
+        [[ ${#_pin} -gt 8192 ]] && _pin=$'\001'  # over-long = invalid; never trimmed (bash trim is O(n^2))
+        _pin="${_pin#"${_pin%%[!$_pin_ws]*}"}"
+        _pin="${_pin%"${_pin##*[!$_pin_ws]}"}"
+        if [[ -z "$_pin" && -r "$HOME/.aiteamforge/machine-slug" ]]; then
+            # whole line 1 (no read cap; over 8192 = invalid; awk reads to EOF, so no SIGPIPE under pipefail); a NUL becomes \001 so it is kept and rejected, not dropped
+            _pin=$(LC_ALL=C tr '\000' '\001' < "$HOME/.aiteamforge/machine-slug" | LC_ALL=C awk 'NR == 1')
+            [[ ${#_pin} -gt 8192 ]] && _pin=$'\001'  # over-long = invalid; never trimmed (bash trim is O(n^2))
+            _pin="${_pin#"${_pin%%[!$_pin_ws]*}"}"
+            _pin="${_pin%"${_pin##*[!$_pin_ws]}"}"
+        fi
+        _pin=$(printf '%s' "$_pin" | LC_ALL=C tr 'A-Z' 'a-z')
+        if [[ ${#_pin} -le 64 && "$_pin" =~ ^[a-z][a-z0-9]*(-[a-z0-9]+)*$ ]]; then
+            printf '%s' "$_pin"
+            return 0
+        fi
         python3 -c "
 import re, socket
 h = socket.gethostname().lower()

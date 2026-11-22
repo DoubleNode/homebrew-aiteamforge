@@ -802,15 +802,30 @@ async function ensureSodium() {
  * (fleet-reporter.sh) and team_routing.py; keep the three in step.
  * @returns {string}
  */
+const PIN_RE = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
+const trimAsciiWs = (v) => String(v || '').replace(/^[ \t\r\n\v\f]+|[ \t\r\n\v\f]+$/g, '');
+
 function pinnedMachineSlug() {
-    const env = String(process.env.AITEAMFORGE_MACHINE_ID || '').trim();
-    if (env) return env;
-    try {
-        const pin = fs.readFileSync(path.join(os.homedir(), '.aiteamforge', 'machine-slug'), 'utf8');
-        return (pin.split('\n')[0] || '').trim();
-    } catch (_) {
-        return '';
+    // STRICT, the same rule in every reader (XACA-1688-013/016). Trim only ASCII
+    // whitespace (String#trim() also strips BOM/NBSP, which the shell readers keep).
+    // The env value wins when non-blank after that trim, else line 1 of the file,
+    // split on "\n" only. ASCII-only, lowercased, and used only when it already IS a
+    // canonical slug (PIN_RE, <= MAX_SLUG_LEN), otherwise ignored. A pin is never
+    // rewritten, so no two readers can turn one pin into two different slugs.
+    // A raw value (env or line 1) over PIN_RAW_MAX chars is invalid, never trimmed.
+    const PIN_RAW_MAX = 8192;
+    const capTrim = (v) => (String(v || '').length > PIN_RAW_MAX ? '\x01' : trimAsciiWs(v));
+    let pin = capTrim(process.env.AITEAMFORGE_MACHINE_ID);
+    if (!pin) {
+        try {
+            pin = capTrim(fs.readFileSync(path.join(os.homedir(), '.aiteamforge', 'machine-slug'), 'utf8').split('\n')[0]);
+        } catch (_) {
+            pin = '';
+        }
     }
+    if (/[^\x00-\x7f]/.test(pin)) return '';
+    pin = pin.toLowerCase();
+    return (pin.length <= MAX_SLUG_LEN && PIN_RE.test(pin)) ? pin : '';
 }
 
 /**
