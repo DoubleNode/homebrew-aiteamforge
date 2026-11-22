@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+
+## [0.21.29] - 2026-11-22
 - XACA-1688: Fleet hostname rename compatibility window (XACA-1688)
 - Tap files updated in this publish: `fleet-monitor/server/config/token-oauth-accounts.json`,`fleet-monitor/server/server.js` `share/kanban-hooks/team_routing.py`,`share/kanban-hooks/timepad_config.py` `share/scripts/fleet-reporter.sh`,`share/scripts/lcars-health-check.sh` `share/scripts/vault-keygen.js`,`share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 
@@ -8294,7 +8296,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.28...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.29...HEAD
+[0.21.29]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.28...v0.21.29
 [0.21.28]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.27...v0.21.28
 [0.21.27]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.26...v0.21.27
 [0.21.26]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.25...v0.21.26
