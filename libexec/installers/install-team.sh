@@ -1786,7 +1786,9 @@ if [ $? != 0 ]; then
     # Set session-specific variables for dynamic status-right
     $TMUX_CMD set -t $SESSION_CODE @developer "$SESSION_DEVELOPER"
     $TMUX_CMD set -t $SESSION_CODE @claude_agent "{character_esc}"
-    $TMUX_CMD set -t $SESSION_CODE status-right "🤖 #{{@claude_agent}} | 🖥  $DISPLAY_HOST  "
+    # XACA-1926: @fleet_system feeds the host segment below; unset (no fleet identity) renders plain $DISPLAY_HOST
+    _fleet_sys=$(_fid="$HOME/dev-team/scripts/kb-fleet-identity"; [ -x "$_fid" ] || _fid="${{AITEAMFORGE_DIR:-$HOME/aiteamforge}}/scripts/kb-fleet-identity"; "$_fid" get 2>/dev/null) && [ "$(echo "$_fleet_sys" | tr '[:upper:]' '[:lower:]')" != "$(hostname -s | tr '[:upper:]' '[:lower:]')" ] && $TMUX_CMD set -g @fleet_system "$_fleet_sys" || $TMUX_CMD set -gu @fleet_system 2>/dev/null
+    $TMUX_CMD set -t $SESSION_CODE status-right "🤖 #{{@claude_agent}} | 🖥  #{{?@fleet_system,#{{@fleet_system}} · ,}}$DISPLAY_HOST  "
     $TMUX_CMD set -t $SESSION_CODE status-style "bg=colour{bg_code},fg=colour255"
     $TMUX_CMD set -t $SESSION_CODE status-left-style "bg=colour{accent_code},fg=colour255,bold"
     $TMUX_CMD set -t $SESSION_CODE status-right-style "bg=colour{bg_code},fg=colour255"
