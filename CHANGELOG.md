@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1926: Fleet system name on tap Macs' statusline and tmux (XACA-1926)
+- Tap files updated in this publish: `share/scripts/teams/finance/scripts/finance-bar-startup.sh`,`share/scripts/teams/finance/scripts/finance-fca-startup.sh` `share/scripts/teams/finance/scripts/finance-lcars-startup.sh`,`share/scripts/teams/finance/scripts/finance-nagus-startup.sh` `share/scripts/teams/finance/scripts/finance-vault-startup.sh`,`share/scripts/teams/finance/scripts/finance-workshop-startup.sh` `share/scripts/teams/freelance/scripts/freelance-command-startup.sh`,`share/scripts/teams/freelance/scripts/freelance-comms-startup.sh` (+21 more). Run `brew upgrade aiteamforge` to receive them.
 - XACA-1687: Fleet machine identity - Star Trek system names (XACA-1687)
 - Tap files updated in this publish: `fleet-monitor/server/package.json`,`fleet-monitor/server/public/lcars/css/lcars-fleet-theme.css` `fleet-monitor/server/public/lcars/js/lcars-accessories.js`,`fleet-monitor/server/public/lcars/js/lcars-analytics-fleet.js` `fleet-monitor/server/public/lcars/js/lcars-dashboard-app.js`,`fleet-monitor/server/public/lcars/js/lcars-dashboards-ui.js` `fleet-monitor/server/public/lcars2/css/lcars-fleet-theme.css`,`fleet-monitor/server/public/lcars2/css/lcars-fleet.css` (+36 more). Run `brew upgrade aiteamforge` to receive them.
 

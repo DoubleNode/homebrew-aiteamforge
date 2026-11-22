@@ -30,6 +30,102 @@ hostname=$(hostname -s)
 short_dir=$(basename "$dir")
 
 # ============================================================================
+# Fleet System Name (XACA-1687)
+# ============================================================================
+# Renders `[user@Sol · ai-sol]` when this machine has a fleet identity, and
+# today's exact `[user@ai-sol]` otherwise. Contract of the helper:
+# `kb-fleet-identity get` prints the system name + exits 0 when an identity
+# exists; otherwise prints `hostname -s` and exits 3. ANY non-zero exit, a
+# missing/non-executable helper, empty output, or a name equal to the hostname
+# (case-insensitively) => no system name => today's output, byte for byte.
+#
+# The statusline renders on every refresh, so the helper is NOT called per
+# render: the resolved label (possibly empty = "no identity") is cached per
+# user+hostname for KB_FLEET_IDENTITY_CACHE_TTL_MIN minutes (default 10).
+# A cache hit costs one `find` fork.
+#
+# Env (tests / overrides):
+#   KB_FLEET_IDENTITY_BIN        helper path; when SET (even to a non-existent
+#                                path) no other location is probed
+#   KB_FLEET_IDENTITY_CACHE_DIR  cache dir (default ${TMPDIR:-/tmp})
+#   KB_FLEET_IDENTITY_CACHE_TTL_MIN  cache TTL in minutes (default 10)
+# First line only, conservative charset (apostrophe kept for names like Qo'noS),
+# so nothing the helper or a cache file holds can inject terminal escapes.
+# Applied on BOTH the helper path and the cache-read path (XACA-1687 review r1).
+_sl_fid_clean() {
+    printf '%s\n' "$1" | head -n 1 | tr -cd "[:alnum:] ._'-"
+}
+
+_sl_resolve_fleet_system() {
+    local _bin="" _cand _out _lc_sys _lc_host
+    if [ -n "${KB_FLEET_IDENTITY_BIN+x}" ]; then
+        _bin="$KB_FLEET_IDENTITY_BIN"
+    else
+        # Same location conventions as the loader probe below: dev-team checkout,
+        # then the brew-installed tap (formula installs scripts/ under libexec/).
+        # Last: the tap working dir, where a tap Mac keeps the helper because the
+        # public tap never ships it (XACA-1926). The launchd fleet reporter finds
+        # it there too, and the helper finds its registry in ../config next to it.
+        # No PATH lookup (dropped in XACA-1926): PATH is not a documented home for
+        # the helper, tmux never used it, and in the shipped template a
+        # `command -v` of an unshipped command is a call the XACA-1151 guard flags.
+        for _cand in \
+            "${HOME}/dev-team/scripts/kb-fleet-identity" \
+            "${AITEAMFORGE_HOME:+${AITEAMFORGE_HOME}/scripts/kb-fleet-identity}" \
+            "/opt/homebrew/opt/aiteamforge/libexec/scripts/kb-fleet-identity" \
+            "/usr/local/opt/aiteamforge/libexec/scripts/kb-fleet-identity" \
+            "${AITEAMFORGE_DIR:-${HOME}/aiteamforge}/scripts/kb-fleet-identity"; do
+            if [ -n "$_cand" ] && [ -x "$_cand" ]; then
+                _bin="$_cand"
+                break
+            fi
+        done
+    fi
+    [ -n "$_bin" ] && [ -x "$_bin" ] || return 0
+    _out=$("$_bin" get 2>/dev/null) || return 0
+    # First line only; keep a conservative charset so nothing the helper prints
+    # can inject terminal escapes into the statusline.
+    _out=$(_sl_fid_clean "$_out")
+    [ -n "$_out" ] || return 0
+    _lc_sys=$(printf '%s' "$_out" | tr '[:upper:]' '[:lower:]')
+    _lc_host=$(printf '%s' "$hostname" | tr '[:upper:]' '[:lower:]')
+    [ "$_lc_sys" = "$_lc_host" ] && return 0
+    printf '%s' "$_out"
+}
+
+fleet_system=""
+_sl_fid_cache="${KB_FLEET_IDENTITY_CACHE_DIR:-${TMPDIR:-/tmp}}"
+_sl_fid_cache="${_sl_fid_cache%/}/kb-fleet-identity.${user}.${hostname}.cache"
+# Trust the cache only if it is a regular file WE own: with TMPDIR unset the cache
+# lives in shared /tmp, where another local user could plant one. The owner is
+# compared to KB_FLEET_IDENTITY_CACHE_TRUST_UID (default: our own $UID) - the
+# override exists so the test can make its own file look foreign-owned, since an
+# unprivileged test cannot create a file owned by somebody else (review r2, 023).
+_sl_fid_owned() {
+    local _owner
+    # GNU first: BSD stat rejects -c (falls through), while GNU `stat -f` means
+    # filesystem status and could print junk with exit 0.
+    _owner=$(stat -c %u "$1" 2>/dev/null || stat -f %u "$1" 2>/dev/null) || return 1
+    case "$_owner" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$_owner" = "${KB_FLEET_IDENTITY_CACHE_TRUST_UID:-$UID}" ]
+}
+if [ -f "$_sl_fid_cache" ] && [ ! -L "$_sl_fid_cache" ] && _sl_fid_owned "$_sl_fid_cache" \
+    && [ -n "$(find "$_sl_fid_cache" -mmin "-${KB_FLEET_IDENTITY_CACHE_TTL_MIN:-10}" 2>/dev/null)" ]; then
+    IFS= read -r fleet_system < "$_sl_fid_cache" || true
+    fleet_system=$(_sl_fid_clean "$fleet_system")
+else
+    fleet_system=$(_sl_resolve_fleet_system)
+    # Atomic replace (mktemp + mv) so a concurrent render never reads a torn file;
+    # mv over a planted symlink replaces the link rather than following it.
+    _sl_fid_tmp=$(mktemp "${_sl_fid_cache}.XXXXXX" 2>/dev/null) \
+        && printf '%s\n' "$fleet_system" > "$_sl_fid_tmp" \
+        && mv -f "$_sl_fid_tmp" "$_sl_fid_cache" 2>/dev/null \
+        || rm -f "${_sl_fid_tmp:-}" 2>/dev/null
+    unset _sl_fid_tmp
+fi
+unset _sl_fid_cache
+
+# ============================================================================
 # Working Item Detection
 # ============================================================================
 # Get the current kanban item being worked on from the board file
@@ -510,13 +606,20 @@ fi
 
 # Use $'...' syntax for proper escape sequence handling
 esc=$'\033'
+
+# XACA-1687: `System · ` prefix inside the host segment; empty => today's output
+fleet_host_prefix=""
+if [ -n "$fleet_system" ]; then
+    fleet_host_prefix="${esc}[38;5;51m${fleet_system}${esc}[38;5;${border_color}m · "
+fi
+
 printf "%s" "${esc}[38;5;${border_color}m└─["\
 "${esc}[1;38;5;255m${emoji} ${title}"\
 "${esc}[0;38;5;${border_color}m]"\
 "${esc}[38;5;51m${working_item_segment}"\
 "${esc}[38;5;${border_color}m─["\
 "${esc}[38;5;226m${user}"\
-"${esc}[38;5;${border_color}m@"\
+"${esc}[38;5;${border_color}m@${fleet_host_prefix}"\
 "${esc}[38;5;51m${hostname}"\
 "${esc}[38;5;${border_color}m]─["\
 "${esc}[38;5;255m${short_dir}"\

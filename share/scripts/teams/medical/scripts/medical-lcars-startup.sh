@@ -44,7 +44,7 @@ if [ $? != 0 ]; then
     $TMUX_CMD set -t $SESSION_CODE status-left "  LCARS "
     $TMUX_CMD set -t $SESSION_CODE @developer "Medical Team"
     # XACA-1687: @fleet_system feeds the #h segment below; unset (no fleet identity) renders plain #h
-    _fleet_sys=$("$HOME/dev-team/scripts/kb-fleet-identity" get 2>/dev/null) && [ "$(echo "$_fleet_sys" | tr '[:upper:]' '[:lower:]')" != "$(hostname -s | tr '[:upper:]' '[:lower:]')" ] && $TMUX_CMD set -g @fleet_system "$_fleet_sys" || $TMUX_CMD set -gu @fleet_system 2>/dev/null
+    _fleet_sys=$(_fid="$HOME/dev-team/scripts/kb-fleet-identity"; [ -x "$_fid" ] || _fid="${AITEAMFORGE_DIR:-$HOME/aiteamforge}/scripts/kb-fleet-identity"; "$_fid" get 2>/dev/null) && [ "$(echo "$_fleet_sys" | tr '[:upper:]' '[:lower:]')" != "$(hostname -s | tr '[:upper:]' '[:lower:]')" ] && $TMUX_CMD set -g @fleet_system "$_fleet_sys" || $TMUX_CMD set -gu @fleet_system 2>/dev/null
     $TMUX_CMD set -t $SESSION_CODE status-right "Kanban Monitor | Port $LCARS_PORT | 🖥  #{?@fleet_system,#{@fleet_system} · ,}#h  "
     $TMUX_CMD set -t $SESSION_CODE status-style "bg=colour25,fg=colour255"
     $TMUX_CMD set -t $SESSION_CODE status-left-style "bg=colour231,fg=colour25,bold"
