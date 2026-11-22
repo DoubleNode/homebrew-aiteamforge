@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+
+## [0.21.27] - 2026-11-21
 - XACA-1926: Fleet system name on tap Macs' statusline and tmux (XACA-1926)
 - Tap files updated in this publish: `share/scripts/teams/finance/scripts/finance-bar-startup.sh`,`share/scripts/teams/finance/scripts/finance-fca-startup.sh` `share/scripts/teams/finance/scripts/finance-lcars-startup.sh`,`share/scripts/teams/finance/scripts/finance-nagus-startup.sh` `share/scripts/teams/finance/scripts/finance-vault-startup.sh`,`share/scripts/teams/finance/scripts/finance-workshop-startup.sh` `share/scripts/teams/freelance/scripts/freelance-command-startup.sh`,`share/scripts/teams/freelance/scripts/freelance-comms-startup.sh` (+21 more). Run `brew upgrade aiteamforge` to receive them.
 - XACA-1687: Fleet machine identity - Star Trek system names (XACA-1687)
@@ -8286,7 +8288,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.26...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.27...HEAD
+[0.21.27]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.26...v0.21.27
 [0.21.26]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.25...v0.21.26
 [0.21.25]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.24...v0.21.25
 [0.21.24]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.23...v0.21.24
