@@ -10816,7 +10816,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         evaluates + logs and lets a structurally sane forward move proceed; 'enforce' (the default
         when the key is ABSENT since XACA-1352-014, or an invalid value) refuses with 409 and
         writes nothing.
-        Backward/same/terminal/disabled-target moves are refused in BOTH modes.
+        Backward/same/terminal/disabled-target moves are refused in BOTH modes, and so is a
+        PLANNED->DEV promote whose branch cut failed (XACA-1738: a missing branch is not a verdict).
         dryRun=true (the LCARS modal preview) runs the SAME evaluation and answers 200
         {allowed, dryRun, mode, from, to, next, reasons, error}: no write, no manifest mirror,
         no activity-log entry; `allowed` is what the real call would do.
@@ -11052,7 +11053,12 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     cut = precut["cut"]
                     if precut["err"]:
                         reasons.append("PLANNED->DEV: %s" % precut["err"])
-                    if cut is None and mode == 'enforce':
+                    if cut is None:
+                        # XACA-1738: a failed cut is a MISSING SIDE EFFECT, not a gate verdict report mode may
+                        # override. Proceeding would record DEV with branch=null, and kb-pr-base would then send
+                        # the release's PRs to the integration branch. Refused in BOTH modes, like the race above.
+                        reasons.append("PLANNED->DEV: no release branch was recorded, so the release stays at "
+                                       "PLANNED in every gateEnforcement mode; retry the promote")
                         proceed = False
                 if proceed and not dry_run:
                     now = self._get_timestamp()

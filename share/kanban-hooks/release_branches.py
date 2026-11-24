@@ -415,6 +415,29 @@ def is_trunk_planned(release, board):
         return False
 
 
+def branchless_past_planned(release, board):
+    """XACA-1738: True iff `release` is past PLANNED and not PROD, has no recorded branch, is not a trunk-planned
+    release (whose branch is the integration branch) and is not an XACA-1834 batch release (branchless by design). The ONE predicate behind both `item-branch`'s refusal and
+    release_resume's `branch-missing` row, so they cannot disagree. The stage comes from release_gate.current_stage
+    (explicit stage, else stages{}.enteredAt, else legacy platform environment, else PLANNED), the same reader the gate
+    and resume use; a raw release["stage"] read misses legacy records. Never raises on a malformed record."""
+    if not isinstance(release, dict):
+        return False
+    if release.get("kind") == "batch":
+        # XACA-1834 batch release (release_orchestrator.BATCH_KIND): created at DEV with NO branch by design; its items
+        # keep their real releaseAssignment and branch from that release. Not a failed cut (PR #1391 round 2).
+        return False
+    br = release.get("branch")
+    if isinstance(br, str) and br.strip():
+        return False
+    import release_gate  # noqa: PLC0415 - lazy, keeps this module importable without the gate
+    try:
+        stage = release_gate.current_stage(release)
+    except Exception:  # noqa: BLE001 - an unreadable stage is not "past PLANNED"
+        return False
+    return stage not in ("PLANNED", "PROD") and not is_trunk_planned(release, board)
+
+
 def integration_branch_name(board):
     """The configured integration branch for messages, or a generic phrase when releaseConfig is malformed."""
     try:
@@ -570,6 +593,17 @@ def _cmd_item_branch(a):
             print("error: release %s has an unusable branch %r" % (rid, br), file=sys.stderr)
             return 1
         print(br)
+        return 0
+    # XACA-1738: past PLANNED, the promote records the branch (trunk mode: the integration branch). None here means a
+    # report-mode promote advanced on a failed cut (or a record predating branch-per-release); falling back to
+    # integration would base the release's PRs (and the kb-pick worktree) on unreleased work. Refuse.
+    if branchless_past_planned(rel, board):
+        import release_gate  # noqa: PLC0415 - lazy: release_gate is the one stage reader (resume uses it too)
+        print("error: release %s is at %s but has no recorded branch (its branch cut failed, or it predates "
+              "branch-per-release); refusing to fall back to the integration branch. Fix: kb-release plan %s "
+              "--reason \"re-cut the branch\", then kb-release promote %s --to DEV"
+              % (rid, release_gate.current_stage(rel), rid, rid), file=sys.stderr)
+        return 1
     return 0
 
 

@@ -2118,7 +2118,11 @@ class TestHandlePromoteRelease(unittest.TestCase):
         handler._log_release_activity = MagicMock()
         handler._sync_release_metadata_to_manifest = MagicMock()
 
-        handler.handle_promote_release("REL-001")
+        # XACA-1738: a FAILED PLANNED->DEV cut is now refused in report mode too, so stub a successful cut; this suite
+        # covers advancement, not git (the cut-failure refusal is covered in tests/test_xaca1738_branchless_release.py).
+        with patch.object(server, "_cut_release_branch",
+                          lambda r, b, dry_run=False: {"branch": "releases/1.0.0", "branchBaseSha": "a" * 40}):
+            handler.handle_promote_release("REL-001")
 
         # A refused move answers 409 (JSON), never a 200 body
         if handler._response_code != 200:
@@ -2190,7 +2194,10 @@ class TestHandlePromoteRelease(unittest.TestCase):
         handler._log_release_activity = MagicMock()
         handler._sync_release_metadata_to_manifest = MagicMock()
 
-        handler.handle_promote_release("REL-001")
+        # XACA-1738: PLANNED->DEV needs a successful cut even in report mode (see _run_promote)
+        with patch.object(server, "_cut_release_branch",
+                          lambda r, b, dry_run=False: {"branch": "releases/1.0.0", "branchBaseSha": "a" * 40}):
+            handler.handle_promote_release("REL-001")
         self.assertEqual(handler._response_code, 200)
         self.assertEqual(release["stage"], "DEV")
         handler.send_error.assert_not_called()

@@ -72,7 +72,7 @@ def resume_plan(release, *, flow_config, cr_support_enabled, items=None, other_r
 
     row = the spec 5.2 table row (planned | dev-items-open | dev-deploy-pending | tests-running | tests-failed |
     cr-draft-not-approved | cr-submitted | gamma-soak-pending) or one of the follow-on rows the table implies
-    (stage-passed, gamma-ready, gamma-passed, gamma-cr-unbound (XACA-1682), closeout-ready, cr-stage-incomplete, cr-held, gamma-failed, stage-sha-missing, terminal).
+    (stage-passed, gamma-ready, gamma-passed, gamma-cr-unbound (XACA-1682), closeout-ready, cr-stage-incomplete, cr-held, gamma-failed, stage-sha-missing, branch-missing (XACA-1738), terminal).
     action = what the session does next. `items` [{id,title,status,prMerged}], `scheduled` [{provider, schedule[],
     tests[]}], `cr` {id, crState, draftApproved, feed} (feed = approval_providers.release_cr_feed) are pre-resolved by
     the loader; None means "could not read" and fails closed. `board` (optional) only feeds the
@@ -135,6 +135,15 @@ def resume_plan(release, *, flow_config, cr_support_enabled, items=None, other_r
                         offer=promote_offer("DEV"))
         return done("planned", "fix-planning", "PLANNED: the DEV promote would be refused.",
                     *["unmet: " + r for r in v["reasons"]])
+    if release_branches.branchless_past_planned(release, board):   # shared with item-branch (XACA-1738)
+        # XACA-1738: past PLANNED with no recorded branch (a report-mode promote that advanced on a failed cut).
+        # Checked BEFORE the items: every PR for this release would otherwise target the integration branch.
+        return done("branch-missing", "replan-and-repromote",
+                    "%s: no release branch is recorded, so the release's PRs would target the integration branch."
+                    % cur,
+                    "Send it back to PLANNED and promote again so the branch is cut and recorded:",
+                    "  kb-release plan %s --reason \"branch cut failed at the DEV promote; re-cutting\"" % rid,
+                    "  kb-release promote %s --to DEV" % rid)
     if cur == "DEV":
         deliv = G.deliverable_items(items)
         bad = [it for it in deliv if G.item_blocks_dev_exit(it)]
