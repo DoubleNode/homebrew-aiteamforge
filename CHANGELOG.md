@@ -6,6 +6,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1876: kb-pr-monitor surfaces a stale other-gate approval as STALE_APPROVAL (13); CLAUDE.md kb-msg rule names Team Transfer _INBOX (XACA-1876, XACA-1965)
+- XACA-1965: kb-pr-monitor surfaces a stale other-gate approval as STALE_APPROVAL (13); CLAUDE.md kb-msg rule names Team Transfer _INBOX (XACA-1876, XACA-1965)
+- Tap files updated in this publish: `share/scripts/kb-pr-monitor`,`share/templates/claude/claude-md-global.template` `share/templates/claude/historical/claude-md-global.2c7eef6.template`,`share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1862: Free an orchestration lane held by a QUEUED item; kb-dispatch ignores its own lane (XACA-1862)
 - Tap files updated in this publish: `share/claude-mods/ticket-lamp/tests/lanes.fixture.json`,`share/claude-mods/ticket-lamp/tests/lanes.fixture.ts` `share/kanban-hooks/orchestrator_monitor.py`,`share/kanban-hooks/release_orchestrator.py` `share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1628: Release engine no longer freezes a provider harness failure into the stage SHA (XACA-1628)

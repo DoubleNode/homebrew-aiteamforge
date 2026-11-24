@@ -80,12 +80,13 @@ Launch them in parallel, in one message. They carry the context, checklist, find
 {{AITEAMFORGE_DIR}}/scripts/kb-pr-monitor --pr <N> --item <ITEM-ID> [--repo <owner>/<repo>] [--once] [--no-merge] [--merge-method squash|merge|rebase]
   sync PR (integration<->release): --merge-method merge, never squash
   0 GATES_PASSED (merged via kb-merge; caller still runs kb-done) — 0 is ALSO HELP (--help): read the NAME, not just $?
- 10 RESPAWN_TESTER   11 RESPAWN_REVIEWER   12 RESPAWN_BOTH (update-branch ran)
+ 10 RESPAWN_TESTER   11 RESPAWN_REVIEWER   12 RESPAWN_BOTH (update-branch ran)   13 STALE_APPROVAL
  20 CONFLICT   21 UX_REOPEN   22 BLOCKED   30 PR_CLOSED   31 TIMEOUT   2 usage/env
 final stdout line: VERDICT: <NAME> pr=<N> item=<ID> detail=<...>
 ```
 - **0** — already merged; run `kb-done`.
-- **10 / 11** — push fixes, re-launch only that gate (`kb-run-test` / `kb-run-review <ITEM-ID> --yes`), re-run the monitor.
+- **10 / 11** — push fixes, re-launch the named gate in full AND the other gate per its `*_mode=` hint (`kb-run-test` / `kb-run-review <ITEM-ID> [--delta <sha>] --yes`), re-run the monitor.
+- **13** — a gate's only review is on an older commit. Any push after an APPROVE (e.g. fixing an advisory) makes it stale. No fix push: re-launch each `stale_bots=` gate per its `*_mode=` hint (`current` = leave it), re-run.
 - **12** — `gh pr update-branch` ran, so both approvals are stale: re-launch BOTH gates, re-run.
 - **20** — resolve by hand (merge the base in, fix, push); `update-branch` does not fix content conflicts. `CHANGELOG.md`: **union-resolve, keep BOTH blocks**, then count occurrences and drop genuine duplicates. Re-launch BOTH gates, re-run.
 - **21** — the diff touches UI but `[UX]` was cancelled: re-open it, get a UX evaluation, re-run.
@@ -225,7 +226,7 @@ Find the item ID from the launch prompt (`Kanban Item:`), else the branch name (
 - **Communication:** summarize changes, explain architectural reasoning, flag risks, suggest testing.
 - **User-only flags:** `--force` on `kb-done` and `--allow-red` on `kb-merge`. Agents never use them.
 - **Context:** warn about remaining context before starting a new task; if it is insufficient, ask the user to compact.
-- **kb-msg notice** (`📨 kb-msg: N unread`): spawn the subagent it names to triage, and act on its ≤5-line digest. If you can't spawn one, run `kb-msg inbox`.
+- **kb-msg notice** (`📨 kb-msg: N unread`, may add `+ 📥 Team Transfer _INBOX: M pending`): spawn the subagent it names to triage both channels (kb-msg mail and the Team Transfer `_INBOX`), and act on its ≤5-line digest. If you can't spawn one, run `kb-msg inbox` (it lists both). Never open or process `_INBOX` files yourself.
 
 ### **💸 Subagents Cost Tokens**
 Subagents were 62.7% of measured token spend (XACA-1832 context audit); each one restarts cold and re-reads its context. Spawn one only for work that can run in parallel or would flood your own context with reading. Do sequential work and quick lookups yourself.

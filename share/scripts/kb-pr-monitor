@@ -17,6 +17,23 @@
 #   10  RESPAWN_TESTER   tester bot submitted CHANGES_REQUESTED
 #   11  RESPAWN_REVIEWER reviewer bot submitted CHANGES_REQUESTED
 #   12  RESPAWN_BOTH     `gh pr update-branch` ran; both prior approvals stale
+#   13  STALE_APPROVAL   (XACA-1876) a bot's only APPROVED/CHANGES_REQUESTED
+#                        review is on an OLDER commit, it has posted nothing on
+#                        HEAD, and KBPM_STALE_APPROVAL_MINUTES (default 60) have
+#                        passed since this head was first seen in that state
+#                        (a durable record under $KBPM_STATE_DIR/stale, NEVER
+#                        the committer date). Typical causes: a RESPAWN fix push
+#                        re-ran only the named gate, or a push after an APPROVE
+#                        (e.g. fixing an advisory). No fix push is needed:
+#                        re-launch each bot in `stale_bots=` per its mode hint
+#                        (`tester_mode=`/`reviewer_mode=`: `full`,
+#                        `delta:<sha>`, or `current` = already reviewed HEAD,
+#                        leave it alone), then re-run the monitor. A SECOND
+#                        full window on the same pr/head/bot after emitting is
+#                        BLOCKED `stale_approval_persisted` (the relaunch did
+#                        not land — investigate, do not loop). A new head starts
+#                        a fresh window. An unreadable reviews fetch is never
+#                        stale. KBPM_NOW (epoch seconds) is a test-only clock.
 #   23  ROUND_LIMIT      (XACA-1299-004) a bot submitted CHANGES_REQUESTED for
 #                        the >=4th time (KBPM_ROUND_LIMIT, env-overridable) on
 #                        this PR — TERMINAL, like BLOCKED: the monitor does NOT
@@ -298,6 +315,7 @@ verdict() {
         RESPAWN_TESTER)   _v_code=10 ;;
         RESPAWN_REVIEWER) _v_code=11 ;;
         RESPAWN_BOTH)     _v_code=12 ;;
+        STALE_APPROVAL)   _v_code=13 ;;
         ROUND_LIMIT)      _v_code=23 ;;
         CONFLICT)         _v_code=20 ;;
         UX_REOPEN)        _v_code=21 ;;
@@ -718,6 +736,12 @@ esac
 case "$PR_NUM" in ''|*[!0-9]*) verdict USAGE_ERROR "--pr must be a number, got '$PR_NUM'" ;; esac
 case "$POLL_SECONDS" in ''|*[!0-9]*) verdict USAGE_ERROR "--poll-seconds must be a number" ;; esac
 case "$MAX_HOURS" in ''|*[!0-9]*) verdict USAGE_ERROR "--max-hours must be a number" ;; esac
+# XACA-1876: the stale-approval window (see _kbpm_stale_arm). A positive whole
+# number of minutes; 0 would emit STALE_APPROVAL on first sight of every push.
+KBPM_STALE_APPROVAL_MINUTES="${KBPM_STALE_APPROVAL_MINUTES:-60}"
+case "$KBPM_STALE_APPROVAL_MINUTES" in
+    ''|*[!0-9]*|0|00|000) verdict USAGE_ERROR "KBPM_STALE_APPROVAL_MINUTES must be a positive whole number of minutes, got '$KBPM_STALE_APPROVAL_MINUTES'" ;;
+esac
 
 command -v gh  >/dev/null 2>&1 || verdict USAGE_ERROR "gh CLI not found on PATH"
 command -v zsh >/dev/null 2>&1 || verdict USAGE_ERROR "zsh not found on PATH (kanban-helpers.sh is zsh-only)"
@@ -1019,11 +1043,196 @@ _kbpm_respawn_mode_detail() {
 }
 # ── end round-limit circuit breaker + delta re-review mode hints ────────────
 
-PR_MONITOR_START=$(date +%s)
+# ── stale other-gate approval (XACA-1876) ───────────────────────────────────
+# Gates 1/2 key on commit_id == HEAD, so after ANY push a bot whose only
+# review sits on an older commit can never go green on its own. Twice that
+# state polled silently for 8-11h toward MAX_HOURS: PR #1363 (a RESPAWN fix
+# push re-ran only the named gate) and PR #1375 (a push after an APPROVE, no
+# RESPAWN at all). This arm turns it into a verdict.
+#
+# _kbpm_now — epoch seconds. KBPM_NOW is a TEST-ONLY seam (a plain integer),
+# so the suite can step a window without sleeping; anything else is ignored.
+_kbpm_now() {
+    case "${KBPM_NOW:-}" in
+        ''|*[!0-9]*) date +%s ;;
+        *)           printf '%s\n' "$KBPM_NOW" ;;
+    esac
+}
+
+# _kbpm_stale_scan <head-sha> <effective-cutoff>
+# One raw reviews fetch (the same --paginate | jq -s shape as
+# _kbpm_fetch_review_rounds). Prints exactly two lines, "tester <status>
+# <sha> <state>" and "reviewer <status> <sha> <state>", where <status> is:
+#   current — an APPROVED/CHANGES_REQUESTED review on HEAD after the cutoff
+#   stale   — none of those, but an earlier APPROVED/CHANGES_REQUESTED review
+#             exists (<sha>/<state> = the latest one, by submitted_at)
+#   never   — that bot has never reviewed: "not launched yet", not stale
+#   unknown — the fetch or parse failed. NEVER read as stale: an unreadable
+#             reviews list is not evidence anything is stuck, and the gates
+#             themselves stay closed regardless.
+# COMMENTED reviews are ignored (they neither pass nor block a gate).
+_kbpm_stale_scan() {
+    _ss_head="$1"; _ss_cut="$2"
+    _ss_unknown='tester unknown - -
+reviewer unknown - -'
+    if ! command -v jq >/dev/null 2>&1; then printf '%s\n' "$_ss_unknown"; return 0; fi
+    _ss_raw=$(mktemp "${TMPDIR:-/tmp}/kb-pr-monitor-stale-raw.XXXXXX" 2>/dev/null)
+    if [ -z "$_ss_raw" ]; then printf '%s\n' "$_ss_unknown"; return 0; fi
+    gh api --paginate "repos/$REPO/pulls/$PR_NUM/reviews" > "$_ss_raw" 2>/dev/null
+    _ss_gh_rc=$?   # capture-first
+    if [ "$_ss_gh_rc" -ne 0 ] || [ ! -s "$_ss_raw" ]; then
+        command rm -f "$_ss_raw"; printf '%s\n' "$_ss_unknown"; return 0
+    fi
+    _ss_out=$(jq -s -r --arg head "$_ss_head" --arg cut "$_ss_cut" \
+        --arg t "$TESTER_BOT" --arg r "$REVIEWER_BOT" '
+        (add // []) as $all
+        | if ($all | type) != "array" then error("not an array") else . end
+        | [["tester", $t], ["reviewer", $r]][]
+        | .[0] as $role | .[1] as $login
+        | [ $all[] | select(.user.login == $login
+                            and (.state == "APPROVED" or .state == "CHANGES_REQUESTED")) ] as $rv
+        | if ($rv | length) == 0 then "\($role) never - -"
+          elif ([ $rv[] | select(.commit_id == $head and ((.submitted_at // "") > $cut)) ] | length) > 0
+            then "\($role) current \($head) -"
+          else ($rv | sort_by(.submitted_at // "") | last) as $l
+            | "\($role) stale \($l.commit_id // "-") \($l.state)"
+          end
+    ' "$_ss_raw" 2>/dev/null)
+    _ss_jq_rc=$?
+    command rm -f "$_ss_raw"
+    case "$_ss_out" in
+        "tester "*"
+reviewer "*) : ;;
+        *) _ss_jq_rc=1 ;;
+    esac
+    if [ "$_ss_jq_rc" -ne 0 ]; then printf '%s\n' "$_ss_unknown"; return 0; fi
+    printf '%s\n' "$_ss_out"
+}
+
+# Durable record, one file per pr/head/role:
+#   $KBPM_STATE_DIR/stale/<owner>/<repo>/<pr>.<head>.<role>
+# containing "<first_seen_epoch> [<emitted_epoch>]". Keyed by head identity
+# like the CI-absence record (_kbpm_ca_*), so a monitor restart does not
+# restart the window and a new head starts a fresh one. A non-hex head is
+# refused as a path component (return 1), like _kbpm_ca_file.
+_kbpm_stale_dir() {
+    printf '%s/stale/%s/%s\n' "$KBPM_STATE_DIR" "$REPO_OWNER" "$REPO_NAME"
+}
+_kbpm_stale_file() {
+    case "$1" in ""|*[!0-9a-fA-F]*) return 1 ;; esac
+    printf '%s/%s.%s.%s\n' "$(_kbpm_stale_dir)" "$PR_NUM" "$1" "$2"
+}
+
+# _kbpm_stale_mode <status> <sha> <state> — the re-launch hint for one bot.
+_kbpm_stale_mode() {
+    case "$1" in
+        current) printf 'current' ;;
+        stale)
+            if [ "$3" = "APPROVED" ] && [ "$2" != "$HEAD_SHA" ]; then
+                _kbpm_delta_mode "$2" "$HEAD_SHA"
+            else
+                # CHANGES_REQUESTED (that bot re-runs in full, as after a
+                # RESPAWN), or an approval re-pointed onto HEAD by a rebase
+                # (there is no reviewed base to delta against).
+                printf 'full'
+            fi ;;
+        *) printf 'full' ;;
+    esac
+}
+
+# _kbpm_stale_arm — called once per poll, only while a gate is unsatisfied,
+# just before the ordinary re-poll. Exits via verdict() on STALE_APPROVAL or
+# a BLOCKED; returns 0 to let the poll fall through to the ordinary wait.
+_kbpm_stale_arm() {
+    _sa_scan=$(_kbpm_stale_scan "$HEAD_SHA" "$EFFECTIVE_CUTOFF")
+    # The poll's own clock read (top of the loop), not a second one: one
+    # clock per poll keeps every gate in that poll on the same instant.
+    _sa_now="${NOW:-$(_kbpm_now)}"
+    _sa_win=$((KBPM_STALE_APPROVAL_MINUTES * 60))
+    _sa_t_status="unknown"; _sa_t_sha="-"; _sa_t_state="-"
+    _sa_r_status="unknown"; _sa_r_sha="-"; _sa_r_state="-"
+    while IFS=' ' read -r _sa_role _sa_st _sa_sha _sa_state; do
+        case "$_sa_role" in
+            tester)   _sa_t_status="$_sa_st"; _sa_t_sha="$_sa_sha"; _sa_t_state="$_sa_state" ;;
+            reviewer) _sa_r_status="$_sa_st"; _sa_r_sha="$_sa_sha"; _sa_r_state="$_sa_state" ;;
+        esac
+    done <<KBPM_STALE_SCAN_EOF
+$_sa_scan
+KBPM_STALE_SCAN_EOF
+    if [ "$_sa_t_status" != "stale" ] && [ "$_sa_r_status" != "stale" ]; then
+        return 0
+    fi
+
+    _sa_expired=""; _sa_persisted=""
+    for _sa_role in tester reviewer; do
+        if [ "$_sa_role" = "tester" ]; then
+            _sa_st="$_sa_t_status"; _sa_sha="$_sa_t_sha"; _sa_state="$_sa_t_state"
+        else
+            _sa_st="$_sa_r_status"; _sa_sha="$_sa_r_sha"; _sa_state="$_sa_r_state"
+        fi
+        [ "$_sa_st" = "stale" ] || continue
+        _sa_file=$(_kbpm_stale_file "$HEAD_SHA" "$_sa_role") \
+            || verdict BLOCKED "cannot key the stale-approval state for head '$HEAD_SHA' (not a git object id)"
+        if ! mkdir -p "$(_kbpm_stale_dir)" 2>/dev/null; then
+            verdict BLOCKED "could not create the stale-approval state dir $(_kbpm_stale_dir) — the $_sa_role bot's review is on $_sa_sha, not HEAD $HEAD_SHA; check KBPM_STATE_DIR"
+        fi
+        _sa_first=""; _sa_emitted=""
+        if [ -f "$_sa_file" ]; then
+            read -r _sa_first _sa_emitted < "$_sa_file" 2>/dev/null
+            case "$_sa_first" in
+                ''|*[!0-9]*) verdict BLOCKED "unreadable stale-approval state $_sa_file — remove it to restart the window" ;;
+            esac
+            case "$_sa_emitted" in *[!0-9]*) _sa_emitted="" ;; esac
+        else
+            if ! printf '%s\n' "$_sa_now" > "$_sa_file" 2>/dev/null; then
+                verdict BLOCKED "could not write the stale-approval state $_sa_file — check KBPM_STATE_DIR"
+            fi
+            _sa_first="$_sa_now"
+        fi
+        if [ -n "$_sa_emitted" ]; then
+            if [ $((_sa_now - _sa_emitted)) -ge "$_sa_win" ]; then
+                _sa_persisted="$_sa_persisted${_sa_persisted:+,}$_sa_role"
+            else
+                printf '%s\n' "! stale approval: STALE_APPROVAL already emitted for the $_sa_role bot on $HEAD_SHA; waiting $(( (_sa_win - (_sa_now - _sa_emitted) + 59) / 60 )) more min for its review on HEAD."
+            fi
+        elif [ $((_sa_now - _sa_first)) -ge "$_sa_win" ]; then
+            _sa_expired="$_sa_expired${_sa_expired:+,}$_sa_role"
+            printf '%s %s\n' "$_sa_first" "$_sa_now" > "$_sa_file" 2>/dev/null \
+                || printf '%s\n' "! could not record the STALE_APPROVAL emission in $_sa_file — the second-expiry BLOCKED cannot fire for it."
+        else
+            printf '%s\n' "! stale approval: the $_sa_role bot's latest review ($_sa_state) is on $_sa_sha, not HEAD $HEAD_SHA; STALE_APPROVAL in $(( (_sa_win - (_sa_now - _sa_first) + 59) / 60 )) min unless it reviews HEAD."
+        fi
+    done
+
+    if [ -n "$_sa_persisted" ]; then
+        verdict BLOCKED "stale_approval_persisted: stale_bots=$_sa_persisted still have no review on HEAD $HEAD_SHA a full ${KBPM_STALE_APPROVAL_MINUTES}-minute window after STALE_APPROVAL was emitted — the relaunch did not land; check the gate session, do not loop"
+    fi
+    if [ -n "$_sa_expired" ]; then
+        _sa_tm=$(_kbpm_stale_mode "$_sa_t_status" "$_sa_t_sha" "$_sa_t_state")
+        _sa_rm=$(_kbpm_stale_mode "$_sa_r_status" "$_sa_r_sha" "$_sa_r_state")
+        [ "$_sa_t_status" = "never" ] && _sa_tm="pending"
+        [ "$_sa_r_status" = "never" ] && _sa_rm="pending"
+        _sa_cmds=""
+        case ",$_sa_expired," in *,tester,*)
+            case "$_sa_tm" in delta:*) _sa_c="kb-run-test $ITEM_ID --delta ${_sa_tm#delta:} --yes" ;; *) _sa_c="kb-run-test $ITEM_ID --yes" ;; esac
+            _sa_cmds="$_sa_cmds${_sa_cmds:+; }$_sa_c" ;;
+        esac
+        case ",$_sa_expired," in *,reviewer,*)
+            case "$_sa_rm" in delta:*) _sa_c="kb-run-review $ITEM_ID --delta ${_sa_rm#delta:} --yes" ;; *) _sa_c="kb-run-review $ITEM_ID --yes" ;; esac
+            _sa_cmds="$_sa_cmds${_sa_cmds:+; }$_sa_c" ;;
+        esac
+        printf '%s\n' "x stale approval: $_sa_expired has no review on HEAD $HEAD_SHA after ${KBPM_STALE_APPROVAL_MINUTES} min. No fix push needed — re-launch: $_sa_cmds"
+        verdict STALE_APPROVAL "stale_bots=$_sa_expired head=$HEAD_SHA tester_mode=$_sa_tm reviewer_mode=$_sa_rm tester_last=$_sa_t_state@$_sa_t_sha reviewer_last=$_sa_r_state@$_sa_r_sha window=${KBPM_STALE_APPROVAL_MINUTES}m; relaunch: $_sa_cmds"
+    fi
+    return 0
+}
+# ── end stale other-gate approval ───────────────────────────────────────────
+
+PR_MONITOR_START=$(_kbpm_now)
 POLL=0
 
 while true; do
-    NOW=$(date +%s)
+    NOW=$(_kbpm_now)
     if [ $((NOW - PR_MONITOR_START)) -gt $((MAX_HOURS * 3600)) ]; then
         verdict TIMEOUT "monitor exceeded ${MAX_HOURS}h"
     fi
@@ -1276,6 +1485,9 @@ while true; do
     fi
 
     if [ "$TEST_OK" != "true" ] || [ "$REVIEW_OK" != "true" ]; then
+        # XACA-1876: a gate whose only review is on an older commit must not
+        # wait silently to MAX_HOURS (may exit STALE_APPROVAL / BLOCKED).
+        _kbpm_stale_arm
         repoll_or_block "$POLL_SECONDS" "gates not yet satisfied (TEST=$TEST_OK REVIEW=$REVIEW_OK) on head $HEAD_SHA"
         continue
     fi
