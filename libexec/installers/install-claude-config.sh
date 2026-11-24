@@ -390,6 +390,7 @@ claude-md-global.36b24bc.template|AITEAMFORGE_DIR
 claude-md-global.3d1f2ac.template|AITEAMFORGE_DIR
 claude-md-global.cc9296c.template|AITEAMFORGE_DIR
 claude-md-global.93ec9a0.template|AITEAMFORGE_DIR
+claude-md-global.2c7eef6.template|AITEAMFORGE_DIR
 EOF
 }
 
