@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1864: Surface worker kb-msg escalations to the coordinator monitor (XACA-1864)
+- Tap files updated in this publish: `share/kanban-hooks/orchestrator_monitor.py`,`share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1659 reset outbound counter on a pushed tick with held dirt
 - Tap files updated in this publish: `share/scripts/kb-knowledge-sync.sh`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1738 — refuse a failed branch cut in report mode; flag branchless releases

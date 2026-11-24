@@ -32,7 +32,12 @@ EXIT CODES / VERDICTS (stdout's LAST line is ALWAYS `VERDICT: <NAME> run=<RUN|->
                         corrupt or missing ledger, repo not derivable, bad maxParallel, no tracked items
    3  PENDING           --once only: nothing actionable (NOT in the plan table; added here)
   10  SLOT_FREE         a lane is free AND an item is eligible (compute_slot_free); detail names lane(s) + first eligible
-  11  QUESTION_PENDING  an item has an open pendingQuestion; detail carries threadId and question age
+  11  QUESTION_PENDING  an item has an open pendingQuestion; detail carries threadId and question age. ALSO (XACA-1864,
+                        channel=kb-msg) an UNREAD message in the coordinator's kb-msg inbox from a run worker (from_team = the
+                        run's team, from_terminal = an in-flight item's latest DISPATCHED terminal, created_at >= that dispatch's
+                        ts; kb-ask's own `[kb-ask ` rows and messages on an open pendingQuestion thread excluded): detail `<ITEM>: channel=kb-msg msg=<id8> thread=<id> age=<s>[ attribution=ambiguous]; <body[:120]>`.
+                        The inbox is read READ-ONLY (plain JSONL read; never `kb-msg inbox`, never marks read); a missing file is
+                        empty, an unreadable / malformed one is a warning. `kb-msg read <id>` / `kb-msg reply <id>` clears it.
   12  ITEM_STALLED      STALLED, or UNKNOWN persisted longer than dispatch_seconds (summary items[ID].since)
   13  ITEM_CRASHED      CRASHED (worker gone). The detail ends with the re-dispatch offer (XACA-1547-003):
                         `kb-dispatch <ID> --terminal <T> --run <RUN> --resume`, or ask the lead to cancel / re-plan
@@ -67,7 +72,7 @@ UNKNOWN, and the summary is re-read after this poll's writes, so a fresh UNKNOWN
 
 REPEAT SUPPRESSION (stops the coordinator busy-looping on a condition it already escalated). Every emitted verdict is appended
 to the ledger as kind "verdict" {item, verdict, signature, detail}. signature = verdict | item | the evidence that would change
-if the situation changed: QUESTION_PENDING threadId; ITEM_CRASHED the derived detail; ITEM_FAILED PR number + state + detail;
+if the situation changed: QUESTION_PENDING threadId (channel=kb-msg: `msg=<message id>`); ITEM_CRASHED the derived detail; ITEM_FAILED PR number + state + detail;
 DISPATCH_FAILED the dispatch event's ts + reason; ITEM_STALLED the lastActivity value (or the UNKNOWN `since`); SLOT_FREE the
 free-lane set + eligible ids; MODEL_MISMATCH `expected=<id>|observed=<bad ids>` (stable per item and cause: new token counts never
 change it); TOKEN_BUDGET `item|limit=<N>` or `run|limit=<N>` (stable per scope and limit: raising the budget and blowing the new
@@ -108,7 +113,8 @@ the report is STILL printed). Unlike watch/status its stdout is the report, not 
 
 TERMINAL used to find the window row / tmux window: the terminal of the item's latest DISPATCHED ledger `dispatch` event
 (the dispatcher may pick a terminal other than the plan's), else summary items[ID].terminal. Team = release.team, else board.team,
-else the `<team>-board.json` file name. Env: KB_ORCH_TMUX (default tmux), KB_ORCH_GH (default gh), KB_KANBAN_DIR (default
+else the `<team>-board.json` file name. Env: KB_ORCH_TMUX (default tmux), KB_ORCH_GH (default gh), KB_ORCH_MAIL_DIR (default
+~/.aiteamforge/mail: the kb-msg store whose <team>__<terminal>.jsonl is the coordinator inbox, XACA-1864), KB_KANBAN_DIR (default
 <checkout>/kanban, or the MAIN checkout's kanban/ from a linked worktree with no board, when neither --board
 nor --kanban-dir is given; on a TAP CONSUMER, where neither holds a board, resolve_kanban_dir() falls back to the current
 tmux team's registry kanban dir, then the ONE registered board holding the release, else exit 2 naming --kanban-dir:
@@ -221,6 +227,47 @@ def real_msg(environ=None):
     return fn
 
 
+_MAIL_SAFE_RE = re.compile(r"[^A-Za-z0-9._-]")      # msg-store.py _SAFE_RE: the inbox file name of a team / terminal token
+
+
+def inbox_file(address, environ):
+    """XACA-1864: the JSONL inbox of a "team:terminal" address, in msg-store.py's inbox_path layout
+    (<mail dir>/<team>__<terminal>.jsonl). KB_ORCH_MAIL_DIR replaces ~/.aiteamforge/mail, like KB_ORCH_TMUX / KB_ORCH_GH."""
+    team, _sep, term = (address or "").partition(":")
+    base = environ.get("KB_ORCH_MAIL_DIR") or os.path.join(os.path.expanduser("~"), ".aiteamforge", "mail")
+    return os.path.join(base, "%s__%s.jsonl" % (_MAIL_SAFE_RE.sub("_", team), _MAIL_SAFE_RE.sub("_", term)))
+
+
+def real_inbox(environ=None, warn=None):
+    """XACA-1864 -> callable(address) -> list of message records (dicts) in that address's kb-msg inbox. STRICTLY READ-ONLY:
+    a plain open() of the JSONL, never `kb-msg inbox` (its sync_broadcasts writes), no lock file, never marks anything read.
+    A missing file is an empty inbox. Malformed / non-object lines are skipped with ONE warning (via warn). An unreadable
+    file raises OSError; gather() turns that into a warning, never a verdict."""
+    env = environ if environ is not None else os.environ
+
+    def fn(address):
+        path = inbox_file(address, env)
+        if not os.path.exists(path):
+            return []
+        out, bad = [], 0
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if not line.strip():
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    rec = None
+                if isinstance(rec, dict):
+                    out.append(rec)
+                else:
+                    bad += 1
+        if bad and warn:
+            warn("coordinator inbox %s has malformed line(s); skipped them" % path)
+        return out
+    return fn
+
+
 def repo_from_git(repo_root):
     """owner/repo from `git remote get-url` of the FIRST remote (never assumes `origin`)."""
     try:
@@ -244,7 +291,7 @@ class Ctx(object):
     def __init__(self, release_id, run=None, board=None, kanban_dir=None, repo=None, cli_thresholds=None,
                  repeat_after=DEFAULT_REPEAT_AFTER, interval=DEFAULT_INTERVAL, timeout=DEFAULT_TIMEOUT,
                  tmux=None, gh=None, clock=None, sleep=None, env=None, repo_root=None, stderr=None, out=None,
-                 tokens_interval=None, projects_dir=None, worktrees_root=None, msg=None, token_cache=None):
+                 tokens_interval=None, projects_dir=None, worktrees_root=None, msg=None, token_cache=None, inbox=None):
         self.release_id = release_id
         self.run = run
         self.board = board
@@ -270,6 +317,8 @@ class Ctx(object):
         self.out = out if out is not None else sys.stdout
         self._warned = set()
         self._kdir = None
+        # XACA-1864: callable(address) -> the coordinator's kb-msg records, read-only (real_inbox); tests inject a fake.
+        self.inbox = inbox or real_inbox(self.env, self.warn)
 
     def warn(self, text):
         if text not in self._warned:
@@ -569,8 +618,16 @@ def gather(ctx, rel, board, board_file, run, orch, events):
                 prs[iid] = newest_pr(ctx.gh(repo, "feature/%s" % iid.lower()))
             except Exception as exc:  # noqa: BLE001 -- a gh failure is data, not a crash
                 prs[iid] = {"error": one_line(exc)}
+    # XACA-1864: the coordinator's kb-msg inbox, read-only. A failure is a warning and an empty inbox, never a verdict.
+    inbox, coord = [], ro.coordinator_address(orch.get("coordinator"))
+    if coord:
+        try:
+            inbox = list(ctx.inbox(coord) or [])
+        except Exception as exc:  # noqa: BLE001 -- an unreadable inbox must never stop the monitor
+            ctx.warn("cannot read the coordinator inbox of %s (%s); kb-msg escalations are not visible" % (
+                coord, one_line(exc)[:200]))
     return {"now": now, "team": team, "thresholds": th, "sources": sources, "items": items, "windows": windows,
-            "panes": panes, "prs": prs, "terminals": terminals, "dispatches": dispatches, "run": run}
+            "panes": panes, "prs": prs, "terminals": terminals, "dispatches": dispatches, "run": run, "inbox": inbox}
 
 
 # ------------------------------------------------------------------ conditions
@@ -599,6 +656,85 @@ def plan_from_summary(orch):
 def _age(now, ts):
     t = ostate.parse_ts(ts)
     return None if t is None else max(0, int((now - t).total_seconds()))
+
+
+NOT_IN_FLIGHT = ("DONE", "CANCELLED", "QUEUED")
+
+
+def _mentions(body, iid):
+    return re.search(r"(?<![A-Za-z0-9])%s(?![A-Za-z0-9])" % re.escape(iid), body) is not None
+
+
+KB_ASK_PREFIX = "[kb-ask "     # kanban-helpers.sh kb-ask: its question AND its SUPERSEDED note both start "[kb-ask <ITEM> thread=.."
+
+
+def _is_kb_ask_traffic(rec, open_threads):
+    """XACA-1864 (PR #1395 QA): kb-ask delivers its question as a real kb-msg into the coordinator's inbox, and nothing on
+    the kb-ask path (kb-ask list / kb-answer / --clear) marks that row read. It belongs to the kb-ask channel (pendingQuestion
+    raises its own QUESTION_PENDING; kb-answer resolves it), so counting it here re-raised the same question as channel=kb-msg
+    and told the coordinator to answer it a second time. Excluded: any body starting with KB_ASK_PREFIX (question, SUPERSEDED
+    note), and any message on a thread that is an item's OPEN pendingQuestion. Answered (lastQuestion) threads are NOT
+    excluded: a worker writing back on a thread after its answer is a new escalation the coordinator has not seen."""
+    body = rec.get("body")
+    if isinstance(body, str) and body.lstrip().startswith(KB_ASK_PREFIX):
+        return True
+    return rec.get("thread_id") in open_threads
+
+
+def worker_messages(states, g, events):
+    """XACA-1864 -> [{"item", "msg", "ambiguous"}] for every UNREAD message in the coordinator's inbox (g["inbox"]) that a
+    run worker sent. Pure. A message counts only when it is unread (read_at empty), from_team is the run's team, from_terminal
+    is the terminal of an in-flight item's latest DISPATCHED ledger event, and created_at is at or after that event's ts (an
+    unparseable created_at never counts: it cannot be shown to postdate the dispatch). In flight = derived state not in
+    NOT_IN_FLIGHT. Several candidate items on one terminal (S11): the item the body STARTS with (`<ITEM>:`, the milestone-ping
+    convention), else the one item the body mentions, else the oldest dispatch, flagged ambiguous."""
+    dispatched = {}
+    for ev in events or []:
+        d = ev.get("dispatch") if ev.get("kind") == ro.KIND_DISPATCH else None
+        if isinstance(d, dict) and d.get("outcome") == "DISPATCHED" and isinstance(d.get("terminal"), str):
+            t = ostate.parse_ts(ev.get("ts"))
+            if t is not None and isinstance(ev.get("item"), str):
+                dispatched[ev["item"]] = (d["terminal"], t)          # last one wins = the latest DISPATCHED event
+    team = g.get("team")
+    open_threads = set()
+    for it in (g.get("items") or {}).values():
+        pq = it.get("pendingQuestion") if isinstance(it, dict) else None
+        if isinstance(pq, dict) and isinstance(pq.get("threadId"), str) and pq["threadId"]:
+            open_threads.add(pq["threadId"])
+    out = []
+    for rec in g.get("inbox") or []:
+        if not isinstance(rec, dict) or rec.get("read_at") or not isinstance(rec.get("id"), str) or not rec["id"]:
+            continue
+        if not team or rec.get("from_team") != team:
+            continue
+        if _is_kb_ask_traffic(rec, open_threads):
+            continue
+        created = ostate.parse_ts(rec.get("created_at"))
+        if created is None:
+            continue
+        cands = sorted((t, iid) for iid, (term, t) in dispatched.items()
+                       if term == rec.get("from_terminal") and created >= t
+                       and (states.get(iid) or {}).get("state") not in NOT_IN_FLIGHT + (None,))
+        if not cands:
+            continue
+        body = rec.get("body")
+        body = body if isinstance(body, str) else ""
+        ids = [iid for _t, iid in cands]
+        ambiguous = False
+        if len(ids) == 1:
+            item = ids[0]
+        else:
+            lead = [i for i in ids if body.lstrip().startswith(i + ":")]
+            named = [i for i in ids if _mentions(body, i)]
+            if len(lead) == 1:
+                item = lead[0]
+            elif len(named) == 1:
+                item = named[0]
+            else:
+                pool = named or ids                                   # cands are sorted by dispatch ts: [0] is the oldest
+                item, ambiguous = next(i for i in ids if i in pool), True
+        out.append({"item": item, "msg": rec, "ambiguous": ambiguous})
+    return out
 
 
 def build_conditions(orch, states, g, events, th):
@@ -644,6 +780,16 @@ def build_conditions(orch, states, g, events, th):
             if isinstance(d, dict) and d.get("outcome") == "DISPATCH_FAILED":
                 add("DISPATCH_FAILED", iid, "ts=%s|%s" % (ev.get("ts"), d.get("reason")),
                     "%s: dispatch failed (%s) at %s" % (iid, d.get("reason") or "no reason given", ev.get("ts")))
+    # XACA-1864: a worker that escalated by `kb-msg send` instead of kb-ask. Same verdict and priority slot as a kb-ask
+    # question; keyed on the message id, so each message fires once per repeat window and clears once it is read. The
+    # derived item state is untouched (no record_state). Listed AFTER the kb-ask conditions: on a tie pick() keeps the first.
+    for wm in worker_messages(states, g, events):
+        rec, iid = wm["msg"], wm["item"]
+        age = _age(now, rec.get("created_at"))
+        add("QUESTION_PENDING", iid, "msg=%s" % rec["id"],
+            "%s: channel=kb-msg msg=%s thread=%s age=%s%s; %s" % (
+                iid, rec["id"][:8], rec.get("thread_id"), "%ds" % age if age is not None else "unknown",
+                " attribution=ambiguous" if wm["ambiguous"] else "", one_line(rec.get("body") or "")[:120]))
     return conds
 
 
