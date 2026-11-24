@@ -90,8 +90,33 @@ def team_fact(release, sha, team, config, repo_root, get_sources, file_at_sha):
     (_version_fact) share, so the gate and the resume hint cannot drift. `get_sources(team, platform, config=...)` is
     aiteamforge_paths.get_team_version_sources; `file_at_sha(root, sha, relpath)` is release_branches.file_at_sha.
     A relative version file is resolved against the team's working_dir, then made relative to `repo_root`; a file
-    outside the repo (or no repo / working_dir) reads as None, i.e. unknown. Never raises."""
-    wd = ((config or {}).get("teams", {}).get(team) or {}).get("working_dir") if isinstance(config, dict) else None
+    outside the repo (or no repo / working_dir) reads as None, i.e. unknown. A config the reader cannot walk (a null
+    or non-dict `teams` / team entry) and a PRESENT but malformed `version_sources` (not a list, or holding an
+    element that is not a dict with a string platform) read as unknown, never skip: get_sources collapses those to
+    [], which alone would look like "nothing configured" (XACA-1736-017/-018).
+    Never raises."""
+    teams = config.get("teams") if isinstance(config, dict) else None
+    entry = teams.get(team) if isinstance(teams, dict) else None
+    entry = entry if isinstance(entry, dict) else {}
+    wd = entry.get("working_dir")
+    # get_sources also silently DROPS non-dict elements and dicts with no string platform, so a list of only those
+    # collapses to [] too; any such element has no attributable platform, so the whole team is unverifiable.
+    vsrc = entry.get("version_sources")
+    unreadable = not isinstance(teams, dict) or (team in teams and not isinstance(teams.get(team), dict)) or (
+        "version_sources" in entry and (not isinstance(vsrc, list) or any(
+            not isinstance(s, dict) or not isinstance(s.get("platform"), str) or not s["platform"].strip()
+            for s in vsrc)))
+
+    def sources_for(plat):
+        if unreadable:
+            raise ValueError("team config unreadable or version_sources is not a list")
+        found = get_sources(team, plat, config=config)
+        # The reader matches platform case-sensitively, so a case typo ("OTHER" for "other") would drop the entry
+        # and read as skip; an entry that names THIS platform in another case is unverifiable (XACA-1736-021).
+        if not found and isinstance(vsrc, list) and any(
+                s["platform"] != plat and s["platform"].strip().lower() == str(plat).lower() for s in vsrc):
+            raise ValueError("version_sources platform differs from the release platform only in case")
+        return found
 
     def read_at_sha(file):
         if repo_root is None:
@@ -106,4 +131,4 @@ def team_fact(release, sha, team, config, repo_root, get_sources, file_at_sha):
             return None   # outside the team repo: it cannot be read at a commit
         return file_at_sha(str(repo_root), sha, rel.replace(os.sep, "/"))
 
-    return version_source_fact(release, lambda plat: get_sources(team, plat, config=config), read_at_sha, sha)
+    return version_source_fact(release, sources_for, read_at_sha, sha)
