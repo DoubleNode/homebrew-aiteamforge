@@ -36,7 +36,7 @@ import urllib.request
 import release_walkthrough
 from release_gate import TEST_STAGES, current_stage
 from release_providers import ProvidersError, load_providers, providers_for_stage
-from release_runner import RunnerError, build_expected, check_gamma, run_stage, verify_stage_sha
+from release_runner import RunnerError, _harness, build_expected, check_gamma, run_stage, verify_stage_sha
 
 RC_OK, RC_TRANSPORT, RC_USAGE, RC_REFUSED, RC_NOTFOUND, RC_FAILING = 0, 1, 2, 3, 4, 6
 
@@ -97,9 +97,13 @@ def _context(a):
     return release, stage, (release.get("stageSha") or {}).get(stage), providers
 
 
-def _plan_lines(providers, include_scheduled):
+def _plan_lines(providers, include_scheduled, select=None):
     lines = []
     for p in providers:
+        if select is not None and p["name"] not in select:
+            lines.append("  [%s] %s  -> SKIP (not selected by --provider; its tests stay expected)"
+                         % ("manual   " if p.get("kind") == "manual" else "automated", p["name"]))
+            continue
         if p.get("kind") == "manual":
             lines.append("  [manual]    %s  cases=%s  -> `kb-release walkthrough` (not run here)"
                          % (p["name"], p.get("cases")))
@@ -142,6 +146,21 @@ def missing_tests(release, stage, sha):
             if o == "missing"}
 
 
+def _recorded_harness_carry(release, stage, sha, providers, select, expected):
+    """XACA-1694: the `<name>::harness` ids of UNSELECTED providers that the stage's recorded expected set (same SHA)
+    already holds but this run's `expected` lacks. A run-time harness id is only re-derived when its provider runs,
+    so without this a `--provider` run after such a failure posts a subset and the add-only lock answers 409. Only
+    ever ADDS an entry the server already holds. A SELECTED provider's recorded harness id is XACA-1628's (it must
+    be satisfied by a PASS record, not merely kept)."""
+    import release_gate
+    st = (release.get("stages") or {}).get(stage) or {}
+    if str(st.get("expectedSha") or "").lower() != str(sha or "").lower():
+        return []
+    recorded = {name for name, _opt in release_gate._norm_expected(st.get("expected")) if isinstance(name, str)}
+    have = {e["test"] if isinstance(e, dict) else e for e in expected}
+    return [h for h in (_harness(p) for p in providers if p["name"] not in select) if h in recorded and h not in have]
+
+
 def cmd_test(a, *, run=None, post=None, out=None):
     import subprocess
     run = run or subprocess.run
@@ -161,12 +180,17 @@ def cmd_test(a, *, run=None, post=None, out=None):
     if refusal:
         print(refusal, file=sys.stderr)
         return RC_REFUSED
-    only = None
+    only = select = None
     if getattr(a, "provider", None):   # XACA-1350-004: an explicit provider (a due soak slot) re-runs by design
-        providers = [p for p in providers if p["name"] in a.provider]
-        if not providers:
-            print("kb-release test: no %s provider named %s" % (stage, ", ".join(a.provider)), file=sys.stderr)
+        # XACA-1694: --provider selects what RUNS. `providers` stays the stage's FULL list, so the expected set is
+        # built from every provider; filtering it here let a single-provider run pass a stage on missing evidence.
+        known = {p["name"] for p in providers}
+        unknown = [n for n in a.provider if n not in known]
+        if unknown:
+            print("kb-release test: no %s provider named %s (declared: %s)"
+                  % (stage, ", ".join(unknown), ", ".join(sorted(known))), file=sys.stderr)
             return RC_USAGE
+        select = set(a.provider)
     elif getattr(a, "only_missing", False):
         only = missing_tests(release, stage, sha)
         if only is not None and not only:
@@ -174,15 +198,17 @@ def cmd_test(a, *, run=None, post=None, out=None):
                 % (a.release, stage, str(sha)[:12]))
             return RC_OK
     if a.dry_run:
-        return _dry_run(a, release, stage, sha, providers, run, say)
+        return _dry_run(a, release, stage, sha, providers, run, say, select)
     try:
         result = run_stage(release, stage, providers, repo_dir=a.repo_dir, kanban_dir=a.kanban_dir,
                            verify=verify_only, include_scheduled=a.include_scheduled or bool(getattr(a, "provider", None)),
-                           run=run, only=only)
+                           run=run, only=only, select=select)
     except RunnerError as e:  # SHA/tree refusal or missing stageSha: nothing ran, nothing posted
         print("kb-release test: refused: %s" % (e,), file=sys.stderr)
         return RC_REFUSED
 
+    if select is not None:
+        result["expected"].extend(_recorded_harness_carry(release, stage, sha, providers, select, result["expected"]))
     for pr in result["problems"]:
         print("  problem: %s" % pr, file=sys.stderr)
     payload = {"sha": sha, "expected": result["expected"], "records": result["records"]}
@@ -203,10 +229,10 @@ def cmd_test(a, *, run=None, post=None, out=None):
     return RC_FAILING if failing or result["problems"] else RC_OK
 
 
-def _dry_run(a, release, stage, sha, providers, run, say):
+def _dry_run(a, release, stage, sha, providers, run, say, select=None):
     say("DRY RUN: %s stage %s  stageSha=%s" % (a.release, stage, sha or "<none>"))
     say("Providers:")
-    for line in _plan_lines(providers, a.include_scheduled):
+    for line in _plan_lines(providers, a.include_scheduled or select is not None, select):
         say(line)
     if not sha:
         say("WOULD REFUSE: release has no stageSha.%s" % stage)

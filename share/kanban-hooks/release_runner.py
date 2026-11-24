@@ -523,8 +523,14 @@ def _per_file_rows(fid, protos, pname, owner, seen):
 
 def run_stage(release, stage, providers, *, repo_dir, kanban_dir, env_label_default=None,
               now=None, run=subprocess.run, environ=None, verify=verify_stage_sha,
-              include_scheduled=False, list_timeout=LIST_TIMEOUT_SEC, only=None):
+              include_scheduled=False, list_timeout=LIST_TIMEOUT_SEC, only=None, select=None):
     """Verify the stage SHA, build the expected set, run AUTOMATED providers.
+
+    `select` (XACA-1694, `kb-release test --provider`): None runs every provider; a set of provider names runs only
+    those. It narrows what RUNS, never what is EXPECTED: `providers` must be EVERY provider of the stage, all of them
+    are listed into `expected`, and an unselected provider is skipped like an `only`-excluded one (no run, no
+    records, no harness record for a listing problem; its `<name>::harness` id stays expected, so the gate stays
+    closed). Narrowing the list instead let a single-provider run grade a stage passed on missing evidence.
 
     `only` (XACA-1350-004, spec 5.2 "running only the expected tests with no current record"): None runs everything;
     a set of test names runs only those. A provider whose tests are all outside `only` is NOT run; a perFile provider
@@ -550,6 +556,8 @@ def run_stage(release, stage, providers, *, repo_dir, kanban_dir, env_label_defa
     for p, names, problem in per_provider:
         if not p.get("envLabel") and env_label_default:
             p = dict(p, envLabel=env_label_default)
+        if select is not None and p.get("name") not in select:
+            continue   # XACA-1694: listed above (its ids are expected), but the operator did not ask to run it
         if problem:  # automated AND manual: the reason must reach the board, not only this process's stderr
             if only is None or _harness(p) in only:
                 rec.add(_harness(p), "FAIL", problem, p["envLabel"])
