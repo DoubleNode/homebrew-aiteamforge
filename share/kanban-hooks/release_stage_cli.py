@@ -245,6 +245,8 @@ def _dry_run(a, release, stage, sha, providers, run, say, select=None):
         return RC_REFUSED
     say("SHA check: HEAD == stageSha, tree clean")
     expected, problems = build_expected(providers, repo_dir=a.repo_dir, kanban_dir=a.kanban_dir, run=run)
+    if select is not None:   # XACA-1694-011: preview the same set the real run posts, carried harness ids included
+        expected.extend(_recorded_harness_carry(release, stage, sha, providers, select, expected))
     say("Expected set (%d):" % len(expected))
     for e in expected:
         say("  - %s" % (e["test"] + " (optional)" if isinstance(e, dict) else e))
