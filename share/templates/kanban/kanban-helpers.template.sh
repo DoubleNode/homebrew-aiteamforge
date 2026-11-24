@@ -25404,30 +25404,57 @@ _kb_alloc_slot() {
 # opens a YAML comment — knowledge_entry_template.md); lowercased;
 # whitespace/underscore runs -> '-'; every byte outside [a-z0-9./-] dropped,
 # so no ',', '[', ']', ':' or quote can reach the frontmatter; '-' runs
-# collapsed and edge '-' trimmed. Empty results and duplicates are dropped
-# (first occurrence wins). rc 1, nothing printed, when no tag survives.
-# Pure zsh, no forks. Body is shared verbatim with the tap template.
+# collapsed and edge '-' trimmed. A tag with no letter or digit left ('.',
+# '..', '/') is dropped, and so are duplicates (first occurrence wins). Each
+# lossy step (bytes dropped, e.g. non-ASCII; edge/repeated '-' trimmed; a tag
+# dropped) prints a Note on
+# stderr naming the tag, so nothing is lost silently (XACA-1671-018). A tag
+# that YAML would NOT read as a string — anything not starting with a letter
+# (1, 2.0, 2026-11-24, .inf) or a YAML 1.1 bool/null keyword (yes, no, y, n,
+# on, off, true, false, null) — is written double-quoted ("1", "yes"), so
+# yaml.safe_load sees a string tag (XACA-1671-016). Quotes cannot otherwise
+# occur (stripped above), and kb-knowledge-index strips them from INDEX rows.
+# rc 1, nothing on stdout, when no tag survives. Pure zsh, no forks. Body is
+# shared verbatim with the tap template.
 _kb_knowledge_normalize_tags() {
     emulate -LR zsh
     setopt EXTENDED_GLOB
     local LC_ALL=C
-    local raw="${1-}" t
-    local -a out
+    local raw="${1-}" t orig kept
+    local -a out shown
     for t in "${(@s:,:)raw}"; do
         t="${t##[[:space:]]##}"
         t="${t%%[[:space:]]##}"
+        orig="$t"
         t="${t##\###}"
         t="${(L)t}"
         t="${t//[[:space:]_]##/-}"
-        t="${t//[^a-z0-9.\/-]/}"
-        t="${t//-##/-}"
-        t="${t##-}"
-        t="${t%%-}"
-        [[ -n "$t" ]] || continue
-        (( ${out[(Ie)$t]} )) || out+=("$t")
+        kept="${t//[^a-z0-9.\/-]/}"
+        kept="${kept//-##/-}"
+        kept="${kept##-}"
+        kept="${kept%%-}"
+        if [[ -z "$orig" ]]; then
+            continue
+        elif [[ "$kept" != *[a-z0-9]* ]]; then
+            print -r -- "Note: tag '${orig}' dropped: no letter or digit left after normalization (tags are [a-z0-9./-])." >&2
+            continue
+        elif [[ "$kept" != "$t" ]]; then
+            # Any loss beyond case and space/underscore -> '-': bytes outside
+            # [a-z0-9./-] (non-ASCII, '+', ':') or edge/repeated '-' (`-1`
+            # -> `1`, XACA-1671-020).
+            print -r -- "Note: tag '${orig}' written as '${kept}': characters outside [a-z0-9./-] (e.g. non-ASCII) or edge/repeated '-' were dropped." >&2
+        fi
+        t="$kept"
+        (( ${out[(Ie)$t]} )) && continue
+        out+=("$t")
+        if [[ "$t" == [a-z]* && "$t" != (y|n|yes|no|on|off|true|false|null) ]]; then
+            shown+=("$t")
+        else
+            shown+=("\"$t\"")
+        fi
     done
     (( ${#out} )) || return 1
-    print -r -- "${(j:, :)out}"
+    print -r -- "${(j:, :)shown}"
 }
 
 # XACA-1671: rc 0 when the given frontmatter lines (one per argument, no
@@ -25492,7 +25519,9 @@ kb-knowledge-add() {
         echo "  --tags a,b,c   (also --tags=a,b,c)"
         echo "             XACA-1671: comma-separated tags written into the entry's"
         echo "             frontmatter (and so its INDEX row). Normalized: lowercase,"
-        echo "             spaces/underscores -> '-', leading '#' dropped. kb-knowledge-sync"
+        echo "             spaces/underscores -> '-', leading '#' dropped; other characters"
+        echo "             outside [a-z0-9./-] are dropped with a Note, and a repeated --tags"
+        echo "             adds to the list. Numeric or yes/no-style tags are quoted. kb-knowledge-sync"
         echo "             HOLDS an entry whose tags are empty (tags-empty), so an untagged"
         echo "             entry never reaches other machines until someone tags it."
         echo "  --force    subject/project tiers only (XACA-0754-014): proceed with a"
@@ -25635,12 +25664,14 @@ kb-knowledge-add() {
                 echo "Error: --tags requires a value, e.g. --tags gotcha,testing" >&2
                 return 1
             fi
+            # A repeated --tags ADDS to the earlier value(s) rather than
+            # replacing them (XACA-1671-017: `--tags a --tags b` lost `a`).
             _kb_add_tags_given=true
-            _kb_add_tags_raw="$1"
+            _kb_add_tags_raw="${_kb_add_tags_raw:+${_kb_add_tags_raw},}$1"
             shift
         elif [[ "$_kb_add_arg" == --tags=* ]]; then
             _kb_add_tags_given=true
-            _kb_add_tags_raw="${_kb_add_arg#--tags=}"
+            _kb_add_tags_raw="${_kb_add_tags_raw:+${_kb_add_tags_raw},}${_kb_add_arg#--tags=}"
         elif [[ "$_kb_add_arg" == "--force" ]]; then
             flag_allow_global=true
         elif [[ "$_kb_add_arg" == "--allow-foreign-host" ]]; then
