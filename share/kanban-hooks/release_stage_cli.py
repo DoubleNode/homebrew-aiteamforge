@@ -142,23 +142,36 @@ def missing_tests(release, stage, sha):
     exp = st.get("expected")
     if not release_gate._norm_expected(exp) or str(st.get("expectedSha") or "").lower() != str(sha or "").lower():
         return None
+    # XACA-1628: a recorded `<p>::harness` whose latest record is a FAIL is due too. Its provider must re-run so a
+    # fixed provider can write the harness PASS; without it, --only-missing never re-ran a provider whose only gap
+    # was its harness record, and the post that did run it omitted the id and was refused (409).
     return {n for n, o, _w in release_gate._grade(exp, release.get("tests"), sha, st.get("waiver"), stage)
-            if o == "missing"}
+            if o == "missing" or (o == release_gate.FAILED and n.endswith("::harness"))}
 
 
-def _recorded_harness_carry(release, stage, sha, providers, select, expected):
-    """XACA-1694: the `<name>::harness` ids of UNSELECTED providers that the stage's recorded expected set (same SHA)
-    already holds but this run's `expected` lacks. A run-time harness id is only re-derived when its provider runs,
-    so without this a `--provider` run after such a failure posts a subset and the add-only lock answers 409. Only
-    ever ADDS an entry the server already holds. A SELECTED provider's recorded harness id is XACA-1628's (it must
-    be satisfied by a PASS record, not merely kept)."""
-    import release_gate
+def recorded_expected(release, stage, sha):
+    """XACA-1628: the stage's stored expected set when it was recorded for `sha` (the set the server's add-only lock
+    compares the post against), else None. Passed to run_stage as `recorded`; the runner never reads the board."""
     st = (release.get("stages") or {}).get(stage) or {}
     if str(st.get("expectedSha") or "").lower() != str(sha or "").lower():
+        return None
+    exp = st.get("expected")
+    return exp if isinstance(exp, list) else None
+
+
+def _recorded_harness_carry(release, stage, sha, providers, expected):
+    """XACA-1694 / XACA-1628: the `<name>::harness` ids of the stage's providers that the recorded expected set (same
+    SHA) already holds but `expected` lacks. A run-time harness id is only re-derived when its provider runs and
+    fails, so a listing alone omits it and the add-only lock would answer 409. Only ever ADDS an entry the server
+    already holds. The real run gets this from run_stage(recorded=...), which also writes the harness PASS for a
+    provider that now runs clean; --dry-run uses it to preview the same set."""
+    import release_gate
+    exp = recorded_expected(release, stage, sha)
+    if exp is None:
         return []
-    recorded = {name for name, _opt in release_gate._norm_expected(st.get("expected")) if isinstance(name, str)}
+    recorded = {name for name, _opt in release_gate._norm_expected(exp) if isinstance(name, str)}
     have = {e["test"] if isinstance(e, dict) else e for e in expected}
-    return [h for h in (_harness(p) for p in providers if p["name"] not in select) if h in recorded and h not in have]
+    return [h for h in (_harness(p) for p in providers) if h in recorded and h not in have]
 
 
 def cmd_test(a, *, run=None, post=None, out=None):
@@ -202,13 +215,11 @@ def cmd_test(a, *, run=None, post=None, out=None):
     try:
         result = run_stage(release, stage, providers, repo_dir=a.repo_dir, kanban_dir=a.kanban_dir,
                            verify=verify_only, include_scheduled=a.include_scheduled or bool(getattr(a, "provider", None)),
-                           run=run, only=only, select=select)
+                           run=run, only=only, select=select, recorded=recorded_expected(release, stage, sha))
     except RunnerError as e:  # SHA/tree refusal or missing stageSha: nothing ran, nothing posted
         print("kb-release test: refused: %s" % (e,), file=sys.stderr)
         return RC_REFUSED
 
-    if select is not None:
-        result["expected"].extend(_recorded_harness_carry(release, stage, sha, providers, select, result["expected"]))
     for pr in result["problems"]:
         print("  problem: %s" % pr, file=sys.stderr)
     payload = {"sha": sha, "expected": result["expected"], "records": result["records"]}
@@ -245,8 +256,8 @@ def _dry_run(a, release, stage, sha, providers, run, say, select=None):
         return RC_REFUSED
     say("SHA check: HEAD == stageSha, tree clean")
     expected, problems = build_expected(providers, repo_dir=a.repo_dir, kanban_dir=a.kanban_dir, run=run)
-    if select is not None:   # XACA-1694-011: preview the same set the real run posts, carried harness ids included
-        expected.extend(_recorded_harness_carry(release, stage, sha, providers, select, expected))
+    # XACA-1694-011 / XACA-1628: preview the same set the real run posts, recorded harness ids included
+    expected.extend(_recorded_harness_carry(release, stage, sha, providers, expected))
     say("Expected set (%d):" % len(expected))
     for e in expected:
         say("  - %s" % (e["test"] + " (optional)" if isinstance(e, dict) else e))

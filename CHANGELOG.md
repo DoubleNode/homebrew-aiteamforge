@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1628: Release engine no longer freezes a provider harness failure into the stage SHA (XACA-1628)
+- Tap files updated in this publish: `share/kanban-hooks/release_runner.py`,`share/kanban-hooks/release_stage_cli.py`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1671: kb-knowledge-add --tags so authored entries are not held by knowledge-sync (XACA-1671)
 - Tap files updated in this publish: `share/scripts/kb-knowledge-sync.sh`,`share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1937: Rename CI pool hosts to romulus/vulcan with dual-name window (XACA-1937)

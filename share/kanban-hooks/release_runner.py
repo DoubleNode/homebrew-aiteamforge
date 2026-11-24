@@ -249,6 +249,19 @@ def _harness(provider):
     return "%s::harness" % provider["name"]
 
 
+_HARNESS_RESOLVED = "harness OK: %s at this SHA; resolves the earlier harness record in the expected set (XACA-1628)"
+
+
+def _recorded_harness_ids(recorded):
+    """`<name>::harness` names in a stored expected set ([str | {test, optional}] or None)."""
+    out = set()
+    for e in recorded if isinstance(recorded, (list, tuple)) else []:
+        n = e.get("test") if isinstance(e, dict) else e
+        if isinstance(n, str) and n.endswith("::harness"):
+            out.add(n)
+    return out
+
+
 def _entry(name, optional):
     return {"test": name, "optional": True} if optional else name
 
@@ -523,7 +536,7 @@ def _per_file_rows(fid, protos, pname, owner, seen):
 
 def run_stage(release, stage, providers, *, repo_dir, kanban_dir, env_label_default=None,
               now=None, run=subprocess.run, environ=None, verify=verify_stage_sha,
-              include_scheduled=False, list_timeout=LIST_TIMEOUT_SEC, only=None, select=None):
+              include_scheduled=False, list_timeout=LIST_TIMEOUT_SEC, only=None, select=None, recorded=None):
     """Verify the stage SHA, build the expected set, run AUTOMATED providers.
 
     `select` (XACA-1694, `kb-release test --provider`): None runs every provider; a set of provider names runs only
@@ -536,6 +549,14 @@ def run_stage(release, stage, providers, *, repo_dir, kanban_dir, env_label_defa
     a set of test names runs only those. A provider whose tests are all outside `only` is NOT run; a perFile provider
     runs just its files in `only`; any other provider runs whole but the records of tests outside `only` are dropped,
     so a record that is still current is never re-run or re-posted.
+
+    `recorded` (XACA-1628): the stage's stored expected set when its expectedSha is THIS stage SHA, else None. The
+    server lets that set only grow, so a `<name>::harness` id in it can never be dropped from the post. When that
+    provider now lists and runs clean, the runner keeps the id and writes `<name>::harness PASS` (the latest record
+    per name is what the gate grades, so it supersedes the earlier FAIL). When the provider does not run, the id is
+    carried with no new record. When it is still broken, it records FAIL again. Under `only`, a recorded harness id
+    in `only` makes its provider run (a perFile provider with no other file due runs every file and posts only the
+    harness record), so a PASS is never written for a run that executed nothing.
 
     Returns {"expected": [...], "records": [proto...], "problems": [...]}.
     Raises RunnerError (nothing run) on a GAMMA safety violation, a missing/invalid stageSha, a dirty
@@ -553,34 +574,60 @@ def run_stage(release, stage, providers, *, repo_dir, kanban_dir, env_label_defa
                               for p in providers])
     expected, problems = _assemble(per_provider)
     owner = {n: p.get("name") for p, names, problem in per_provider if not problem for n in names}
+    rec_h = _recorded_harness_ids(recorded)
     for p, names, problem in per_provider:
         if not p.get("envLabel") and env_label_default:
             p = dict(p, envLabel=env_label_default)
+        h = _harness(p)
         if select is not None and p.get("name") not in select:
             continue   # XACA-1694: listed above (its ids are expected), but the operator did not ask to run it
         if problem:  # automated AND manual: the reason must reach the board, not only this process's stderr
-            if only is None or _harness(p) in only:
-                rec.add(_harness(p), "FAIL", problem, p["envLabel"])
+            if only is None or h in only:
+                rec.add(h, "FAIL", problem, p["envLabel"])
             continue
         if p.get("kind") == "manual":
+            # XACA-1628: a manual provider's harness id only ever comes from its case file failing to load. It
+            # loaded this time, so a recorded entry is satisfied (the walkthrough records the cases themselves).
+            if h in rec_h and (only is None or h in only):
+                rec.add(h, "PASS", _HARNESS_RESOLVED % "its case file loaded", p["envLabel"])
             continue
         if p.get("schedule") and not include_scheduled:
             continue
+        drop_current = only is not None and not p.get("perFile")
+        keep_fail = False
         if only is not None:
-            if not (set(names) & only):
+            due = [n for n in names if n in only]
+            if not due and not (h in only and h in rec_h):   # XACA-1628: a recorded harness with no PASS is due
                 continue   # every test of this provider already has a current record
             if p.get("perFile"):
-                names = [n for n in names if n in only]
+                if due:
+                    names = due
+                else:
+                    # only its harness is due: run every file to prove it and post just the harness, EXCEPT a file
+                    # that now FAILs. That is new failing evidence on this SHA; dropping it would leave the stale
+                    # PASS current beside a fresh harness PASS (XACA-1628-014). Posting it only tightens the gate.
+                    drop_current = keep_fail = True
         start = len(rec.items)
         failed = _run_provider(p, rec, names, repo_dir, environ, run, owner)
-        if only is not None and not p.get("perFile"):
+        if drop_current:
             drop = {r["ref"] for r in rec.items[start:]
-                    if not r["parentRef"] and r["test"] not in only and not r["test"].endswith("::harness")}
+                    if not r["parentRef"] and r["test"] not in only and not r["test"].endswith("::harness")
+                    and not (keep_fail and r["result"] != "PASS")}
             rec.items[start:] = [r for r in rec.items[start:] if r["ref"] not in drop and r["parentRef"] not in drop]
         if failed:
-            h = _harness(p)
             if h not in expected:
                 expected.append(h)
+        elif h in rec_h and (only is None or h in only):
+            # XACA-1628: the recorded entry leaves only by being SATISFIED, never by being omitted (the server's
+            # add-only lock refuses the omission). The provider ran clean, so the runner writes the PASS.
+            rec.add(h, "PASS", _HARNESS_RESOLVED % "it listed and ran clean", p["envLabel"])
+    for p, _names, _problem in per_provider:
+        h = _harness(p)
+        if h in rec_h and h not in expected:
+            # XACA-1628: a recorded harness id of a provider this run did not run (unselected, scheduled, or already
+            # current under --only-missing) is CARRIED so the post stays a superset. Carried is not satisfied: its
+            # latest record (FAIL, or none) still decides the gate.
+            expected.append(h)
     counts = collections.Counter(r["test"] for r in rec.items if not r["test"].endswith("::harness"))
     dup = sorted(n for n, c in counts.items() if c > 1)
     if dup:   # defence in depth: the per-provider checks should make this unreachable
