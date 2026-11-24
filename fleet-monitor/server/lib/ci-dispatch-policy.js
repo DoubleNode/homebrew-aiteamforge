@@ -51,6 +51,8 @@
  * the placement module's helpers.
  */
 
+const { canonicalMachine } = require('./ci-machine-aliases');
+
 const REASONS = Object.freeze([
   'ok', 'not-allowlisted', 'reject:fork-unverifiable', 'reject:fork', 'label:not-pool',
   'label:unknown', 'label:ambiguous', 'malformed'
@@ -145,7 +147,8 @@ function evaluateJob(record, ctx) {
 
   // 7. ambiguity (XACA-1441-031). Distinct canonical labels, so `Linux` + `linux` is one OS label.
   const osCount = new Set(labels.filter(function (l) { return OS_LABELS.indexOf(l) !== -1; })).size;
-  const hostCount = hostOnJob.size;
+  // XACA-1937: an old and a new name of ONE machine (m1mini + romulus) target one host, not two.
+  const hostCount = new Set([...hostOnJob].map(function (l) { return canonical(canonicalMachine(l)); })).size;
   if (osCount !== 1 || hostCount > 1) return verdict(false, 'label:ambiguous');
 
   // XACA-1445-014: say WHICH path accepted the job, so callers never re-derive it from labels. A job

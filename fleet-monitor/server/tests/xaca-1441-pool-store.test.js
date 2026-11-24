@@ -54,15 +54,17 @@ test('a new machine record defaults to enabled:false, not paused', () => {
 });
 
 test('round-trip through disk', () => {
+    // XACA-1937: an exact round trip needs a name load() keeps; an old name (m1mini) is renamed on load
+    // (tests/xaca-1937-machine-aliases.test.js covers that path).
     const { store, file } = tmpStore();
     assert.equal(store.updateConfig({ allowlist: ['DoubleNode/dev-team'], poolLabel: 'p1' }).ok, true);
-    assert.equal(store.upsertMachine('m1mini', { enabled: true, prefers: 'short', thresholds: { swapUsedBytes: 4 * S.GIB } }).ok, true);
-    assert.equal(store.setHostSecret('m1mini', 'host-secret-1').ok, true);
+    assert.equal(store.upsertMachine('romulus', { enabled: true, prefers: 'short', thresholds: { swapUsedBytes: 4 * S.GIB } }).ok, true);
+    assert.equal(store.setHostSecret('romulus', 'host-secret-1').ok, true);
     const again = S.createPoolStore({ file, logger: quiet });
     assert.deepEqual(again.load(), { ok: true });
     assert.deepEqual(again.getConfig(), store.getConfig());
     assert.deepEqual(again.listMachines(), store.listMachines());
-    assert.equal(again.getMachine('m1mini').enabled, true);
+    assert.equal(again.getMachine('romulus').enabled, true);
 });
 
 test('atomic write: no temp file left, file mode 0600, rollback when the write fails', () => {

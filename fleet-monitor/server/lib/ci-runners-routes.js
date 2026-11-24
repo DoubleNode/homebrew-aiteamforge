@@ -43,6 +43,7 @@ const fs   = require('fs');
 const path = require('path');
 
 const { requireCiTelemetryKey } = require('./ci-pool-routes');
+const { exactNamesOf } = require('./ci-machine-aliases');
 
 const SCHEMA_VERSION = 1;          // push payload + store file
 const CONTRACT_SCHEMA_VERSION = 1; // GET /api/ci-runners response
@@ -788,6 +789,17 @@ function createRollupStore(file, { maxIdsPerDay = MAX_IDS_PER_DAY } = {}) {
         }
     }
 
+    /**
+     * XACA-1937: move a renamed machine's rollups (and its id ledger) to its new name. Only when the new name
+     * holds none yet; otherwise the old name's rollups are left alone (capMachines() ages the orphan out).
+     */
+    function renameMachine(from, to) {
+        if (from === to || !machines.has(from) || machines.has(to)) return false;
+        machines.set(to, machines.get(from)); machines.delete(from);
+        if (index.has(from)) { index.set(to, index.get(from)); index.delete(from); }
+        return true;
+    }
+
     function dropMachine(machine) {
         machines.delete(machine);
         index.delete(machine);
@@ -932,7 +944,7 @@ function createRollupStore(file, { maxIdsPerDay = MAX_IDS_PER_DAY } = {}) {
         catch (error) { console.error('Error saving CI runner rollups:', error.message); }
     }
 
-    return { load, save, recordJob, backfill, prune, dropMachine, capMachines, totals, toJSON, machines, file };
+    return { load, save, recordJob, backfill, prune, dropMachine, renameMachine, capMachines, totals, toJSON, machines, file };
 }
 
 // ---------------------------------------------------------------------------
@@ -1048,11 +1060,33 @@ function createCiRunnerStore(file, { rollupFile, clock = () => new Date(), guest
     }
 
     /**
+     * XACA-1937: a record stored under ANOTHER name of the pushing machine (m1mini, before the rename to
+     * romulus) must not stay behind as a phantom machine. With no record under the pushed name yet, the
+     * old record becomes this push's previous record (its jobs dedupe this push) and its rollups move over;
+     * if both exist, the other-name record is dropped (its rollups age out as an orphan).
+     */
+    function foldAliasRecords(machine) {
+        for (const other of exactNamesOf(machine)) {
+            if (other === machine || !machines.has(other)) continue;
+            const old = machines.get(other);
+            machines.delete(other);
+            if (!machines.has(machine)) {
+                machines.set(machine, { ...old, machine });
+                rollups.renameMachine(other, machine);
+                console.log(`[CI-RUNNERS] XACA-1937: folded record '${other}' into '${machine}'`);
+            } else {
+                console.error(`[CI-RUNNERS] XACA-1937: dropped stale record '${other}'; '${machine}' already exists`);
+            }
+        }
+    }
+
+    /**
      * Apply a validated push. Returns { receivedAt, jobsAccepted, jobsDuplicate }.
      * Throws CapacityError when a new machine cannot be admitted (nothing stored).
      */
     function applyPush(parsed, now = clock()) {
         const nowMs = now.getTime();
+        foldAliasRecords(parsed.machine);
         makeRoomFor(parsed.machine, nowMs);
         const receivedAt = now.toISOString();
         const prev = machines.get(parsed.machine);
@@ -1162,6 +1196,9 @@ function registerCiRunnersRoutes(app, opts = {}) {
                 if (e instanceof ValidationError) return res.status(400).json({ error: e.message, field: e.field });
                 throw e;
             }
+            // XACA-1937: store under the KEY's machine, so a reporter still sending an old name (m1mini) with
+            // the renamed machine's key lands on romulus rather than creating a phantom second machine.
+            if (typeof req.ciTelemetryMachine === 'string' && req.ciTelemetryMachine) parsed.machine = req.ciTelemetryMachine;
             let result;
             try { result = store.applyPush(parsed); }
             catch (e) {

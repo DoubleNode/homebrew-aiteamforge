@@ -26,7 +26,10 @@ Usage:
   ci-host.sh status --host H [--json]
   ci-host.sh recycle --host H [--if-idle] [--min-uptime SECS] [--online-timeout SECS] [--recover] [--dry-run]
 
-H is m1mini or m4mini (any case). Run ON the CI host as an admin user.
+H is romulus or vulcan (any case). The old names m1mini (= romulus) and m4mini (= vulcan)
+are accepted aliases until XACA-1936 closes the rename window; either spelling finds the same
+daemons, state files (<state-dir>/m1mini.* / m4mini.*) and GitHub runners (XACA-1937).
+Run ON the CI host as an admin user.
 pause drains (never cancels a job), then stops the runners and the VM.
 Defaults: --drain-timeout 3600, --online-timeout 300.
 recycle (XACA-1708-004) restarts the Lima VM (graceful stop, never -f) ONLY when it is safe: no CI job

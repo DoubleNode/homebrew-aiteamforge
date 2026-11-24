@@ -33,6 +33,7 @@
 const fs     = require('fs');
 const path   = require('path');
 const crypto = require('crypto');
+const { exactNamesOf } = require('./ci-machine-aliases');
 
 const SCHEMA_VERSION = 1;
 const GIB = 1024 * 1024 * 1024;
@@ -325,6 +326,36 @@ function upgradeLegacy(parsed) {
     }
 }
 
+/**
+ * XACA-1937: rename every record keyed by an OLD machine name (ci-machine-aliases) to its new name,
+ * carrying every field as-is (keyHash, telemetryKeyHash, enabled, paused + who/when/why, thresholds,
+ * prefers, mode, repos). Idempotent: a pool with no old-name keys is untouched.
+ *
+ * If BOTH the old and the new key exist, nothing is merged: the new-name record is kept and the old one
+ * is returned in `conflicts` (the caller writes it to a side file and logs it) so an operator can
+ * reconcile by hand. Mutates `parsed`. Returns {renamed: [[old, new]], conflicts: [{from, to, record}]}.
+ */
+function migrateAliases(parsed) {
+    const out = { renamed: [], conflicts: [] };
+    if (!isPlainObject(parsed) || !isPlainObject(parsed.machines)) return out;
+    const next = {};
+    const ids = Object.keys(parsed.machines);
+    // New-name records first, so a both-present conflict always keeps the new one whatever the key order.
+    // Exact table spellings only (exactNamesOf), the same rule resolveId() and the routes use: a record keyed
+    // 'M1Mini' is an unknown name, not an alias, so it is never renamed and later dropped as a conflict (PR #1400 test).
+    const target = (id) => exactNamesOf(id)[0];
+    for (const id of ids) if (target(id) === id) next[id] = parsed.machines[id];
+    for (const id of ids) {
+        const to = target(id);
+        if (to === id) continue;
+        if (has(next, to)) { out.conflicts.push({ from: id, to, record: parsed.machines[id] }); continue; }
+        next[to] = parsed.machines[id];
+        out.renamed.push([id, to]);
+    }
+    if (out.renamed.length || out.conflicts.length) parsed.machines = next;
+    return out;
+}
+
 // --------------------------------------------------------------- persistence
 
 /** temp + rename (same idiom as ci-runners-routes.js). */
@@ -348,6 +379,19 @@ function createPoolStore(opts) {
     const file = opts.file;
     const log = opts.logger || console;
     let pool = defaultPool();
+    // XACA-1937: what the last load() did to old-name records (load() itself still returns {ok:true}).
+    let migration = { renamed: [], conflicts: [], conflictsFile: null };
+
+    /**
+     * XACA-1937: the record key a lookup by `id` acts on. An exact key wins; otherwise the record stored
+     * under another name of the same machine (old or new). Nothing stored for the group -> `id` itself, so
+     * a create keeps the name it was given (load() renames an old-name record on the next boot).
+     */
+    function resolveId(id) {
+        if (typeof id !== 'string' || has(pool.machines, id)) return id;
+        for (const n of exactNamesOf(id)) if (has(pool.machines, n)) return n;
+        return id;
+    }
 
     function commit(candidate) {
         const errs = validatePool(candidate);
@@ -376,7 +420,10 @@ function createPoolStore(opts) {
         }
         let parsed;
         let errs;
-        try { parsed = JSON.parse(raw); upgradeLegacy(parsed); errs = validatePool(parsed); } catch (e) { errs = [`not valid JSON: ${e.message}`]; }
+        let migrated = { renamed: [], conflicts: [] };
+        try {
+            parsed = JSON.parse(raw); upgradeLegacy(parsed); migrated = migrateAliases(parsed); errs = validatePool(parsed);
+        } catch (e) { errs = [`not valid JSON: ${e.message}`]; }
         if (errs.length) {
             const aside = `${file}.corrupt-${Date.now()}`;
             try { fs.renameSync(file, aside); } catch (_) { /* best effort */ }
@@ -385,6 +432,36 @@ function createPoolStore(opts) {
             return { ok: false, error: errs.join('; '), movedTo: aside };
         }
         pool = parsed;
+        migration = { renamed: [], conflicts: [], conflictsFile: null };
+        if (migrated.renamed.length || migrated.conflicts.length) {
+            for (const [from, to] of migrated.renamed) {
+                if (log.log) log.log(`[CI-POOL] XACA-1937: renamed machine record '${from}' -> '${to}' (all fields carried)`);
+            }
+            migration.renamed = migrated.renamed.map(([from, to]) => ({ from, to }));
+            let asideSaved = true;
+            if (migrated.conflicts.length) {
+                const aside = `${file}.alias-conflict-${Date.now()}`;
+                try { writeAtomic(aside, { conflicts: migrated.conflicts }); } catch (e) {
+                    // The dropped record exists nowhere else: never persist a pool that loses it. The file on
+                    // disk keeps the old record, and the next load retries the side file (PR #1400 review).
+                    // It is also put BACK in memory under its old name, so a later admin write (updateConfig,
+                    // upsertMachine, a secret setter) cannot save the pool without it either (PR #1400 round 2).
+                    // Both names then stay live until an operator reconciles; data beats tidy routing here.
+                    asideSaved = false;
+                    for (const c of migrated.conflicts) pool.machines[c.from] = c.record;
+                    if (log.error) log.error(`[CI-POOL] XACA-1937: cannot write ${aside} (${e.message}); alias migration NOT persisted, ${file} left unchanged`);
+                }
+                for (const c of migrated.conflicts) {
+                    if (log.error) log.error(`[CI-POOL] XACA-1937: both '${c.from}' and '${c.to}' records exist; ${asideSaved ? `kept '${c.to}', dropped '${c.from}' WITHOUT merging (saved to ${aside})` : `side file failed, so BOTH are kept; reconcile by hand`}`);
+                }
+                migration.conflicts = migrated.conflicts.map((c) => ({ from: c.from, to: c.to }));
+                migration.conflictsFile = asideSaved ? aside : null;
+            }
+            if (asideSaved) {
+                const saved = save();
+                if (!saved.ok && log.error) log.error(`[CI-POOL] XACA-1937: alias migration not persisted: ${saved.error}`);
+            }
+        }
         return { ok: true };
     }
 
@@ -394,7 +471,10 @@ function createPoolStore(opts) {
 
     const getConfig = () => clone(pool.config);
     const listMachines = () => clone(pool.machines);
-    const getMachine = (id) => (typeof id === 'string' && has(pool.machines, id) ? clone(pool.machines[id]) : null);
+    const getMachine = (id) => {
+        const k = resolveId(id);
+        return typeof k === 'string' && has(pool.machines, k) ? clone(pool.machines[k]) : null;
+    };
 
     /** Replace any subset of config fields; the merged result must validate. */
     function updateConfig(patch) {
@@ -412,8 +492,9 @@ function createPoolStore(opts) {
      * `meta.now` when `paused` flips (never client-supplied); un-pausing clears
      * all three. The credential hash is set only via setHostSecret().
      */
-    function upsertMachine(id, patch, meta) {
-        if (typeof id !== 'string' || !MACHINE_ID_RE.test(id)) return { ok: false, error: 'bad machine id' };
+    function upsertMachine(rawId, patch, meta) {
+        if (typeof rawId !== 'string' || !MACHINE_ID_RE.test(rawId)) return { ok: false, error: 'bad machine id' };
+        const id = resolveId(rawId);
         if (!isPlainObject(patch)) return { ok: false, error: 'patch must be an object' };
         const patchable = ['enabled', 'paused', 'pauseReason', 'prefers', 'thresholds', 'mode', 'repos'];
         const bad = unknownFields(patch, patchable, 'machine patch');
@@ -438,8 +519,9 @@ function createPoolStore(opts) {
     }
 
     /** Store only sha256(secret). The plaintext is never retained. */
-    function setHostSecret(id, secret) {
-        if (!getMachine(id)) return { ok: false, error: 'unknown machine' };
+    function setHostSecret(rawId, secret) {
+        if (!getMachine(rawId)) return { ok: false, error: 'unknown machine' };
+        const id = resolveId(rawId);
         let h;
         try { h = hashSecret(secret); } catch (e) { return { ok: false, error: e.message }; }
         const next = clone(pool);
@@ -447,8 +529,9 @@ function createPoolStore(opts) {
         return commit(next);
     }
 
-    function clearHostSecret(id) {
-        if (!getMachine(id)) return { ok: false, error: 'unknown machine' };
+    function clearHostSecret(rawId) {
+        if (!getMachine(rawId)) return { ok: false, error: 'unknown machine' };
+        const id = resolveId(rawId);
         const next = clone(pool);
         next.machines[id].keyHash = null;
         return commit(next);
@@ -468,8 +551,9 @@ function createPoolStore(opts) {
     }
 
     /** CI telemetry credential (`fct_`, XACA-1422): same contract as the host-secret trio, independent hash. */
-    function setTelemetrySecret(id, secret) {
-        if (!getMachine(id)) return { ok: false, error: 'unknown machine' };
+    function setTelemetrySecret(rawId, secret) {
+        if (!getMachine(rawId)) return { ok: false, error: 'unknown machine' };
+        const id = resolveId(rawId);
         let h;
         try { h = hashSecret(secret); } catch (e) { return { ok: false, error: e.message }; }
         const next = clone(pool);
@@ -477,8 +561,9 @@ function createPoolStore(opts) {
         return commit(next);
     }
 
-    function clearTelemetrySecret(id) {
-        if (!getMachine(id)) return { ok: false, error: 'unknown machine' };
+    function clearTelemetrySecret(rawId) {
+        if (!getMachine(rawId)) return { ok: false, error: 'unknown machine' };
+        const id = resolveId(rawId);
         const next = clone(pool);
         next.machines[id].telemetryKeyHash = null;
         return commit(next);
@@ -511,7 +596,8 @@ function createPoolStore(opts) {
 
     return {
         getFallbackSwitches, setFallbackSwitches,
-        load, save, getConfig, updateConfig, listMachines, getMachine, upsertMachine,
+        load, save, getConfig, updateConfig, listMachines, getMachine, upsertMachine, resolveId,
+        lastMigration: () => clone(migration),
         setHostSecret, clearHostSecret, verifyHostSecret,
         setTelemetrySecret, clearTelemetrySecret, verifyTelemetrySecret, file,
     };
@@ -521,5 +607,5 @@ module.exports = {
     SCHEMA_VERSION, GIB, DEFAULT_THRESHOLDS, DEFAULT_JOB_CLASSES, THRESHOLD_BOUNDS,
     MACHINE_ID_RE, REPO_RE, DEFAULT_FALLBACK_SWITCHES, MAX_FALLBACK_SWITCHES, validateFallbackSwitches,
     defaultPool, defaultConfig, defaultMachine, validatePool, validateConfig, validateMachine,
-    hashSecret, createPoolStore, validateRepos, MAX_BOUND_REPOS,
+    hashSecret, migrateAliases, createPoolStore, validateRepos, MAX_BOUND_REPOS,
 };

@@ -22,8 +22,9 @@
 #                        it with --no-macos leaves nothing to provision: usage error (rc 2).
 #   --label <extra>      Extra runner label, repeatable (default: none).
 #   --legacy-names       Keep the pre-XACA-1436 unsuffixed VM/daemon names
-#                        (ci-linux, com.doublenode.ci-runner.*). Only for the
-#                        M1Mini wrapper, whose live artifacts carry those names.
+#                        (ci-linux, com.doublenode.ci-runner.*). Only for
+#                        romulus/m1mini (the M1Mini wrapper), whose live artifacts
+#                        carry those names; --host romulus implies it (XACA-1937).
 #   --no-register        Register NO GitHub runner (XACA-1442): VM + guest
 #                        baseline + runner tarball cache + reporter daemon only;
 #                        no token needed, no persistent runner, no macOS runner
@@ -275,7 +276,7 @@ Host shape (all optional except --host):
   --no-linux           skip the Lima VM, the guest and its runners entirely (macOS side only);
                        not combinable with --no-macos or --baseline-only
   --label <extra>      extra runner label, repeatable
-  --legacy-names       unsuffixed VM/daemon names (M1Mini wrapper only)
+  --legacy-names       unsuffixed VM/daemon names (romulus/m1mini only; implied by --host romulus)
   --no-register        register no GitHub runner (VM + baseline + cache + reporter only);
                        no token needed; not combinable with --token-file
   --refuse-if-busy     exit 3, changing nothing, while the agent's slots.json shows a pool job
@@ -370,11 +371,31 @@ if [ "$NO_LINUX" = "1" ] && [ "$MODE" = "baseline-only" ]; then
   exit 2
 fi
 
+# XACA-1937: host rename M1Mini -> Romulus, M4Mini -> Vulcan, with a DUAL-NAME WINDOW
+# (closes under XACA-1936). Same table as CIH_HOST_ALIASES in lib/ci-host-lib.sh.
+# NAMING RULE: a provision under the NEW name must produce the file/daemon names the
+# live host ALREADY has, so a re-run on it is never a rename. So two keys:
+#   HOST      as typed: GitHub runner names (<host>-linux-N, <host>-macos-1), the runner
+#             label, the reporter/agent `machine`, the log prefix and the recycle
+#             daemon's `--host` argument (ci-host.sh resolves either spelling).
+#   NAME_KEY  the legacy naming key: daemon labels, VM name, the provision manifest
+#             (<state-dir>/<key>.provision-manifest) and the recycle log files.
+#             romulus -> m1mini, and --host romulus IMPLIES --legacy-names (the live
+#             Romulus runs the unsuffixed com.doublenode.ci-runner.* daemons + VM ci-linux);
+#             vulcan -> m4mini (com.doublenode.ci-runner.m4mini.*, VM ci-linux-m4mini).
+#             Old names map to themselves and keep their historical behaviour exactly.
+case "$HOST" in
+  romulus|m1mini) NAME_KEY=m1mini ;;
+  vulcan|m4mini) NAME_KEY=m4mini ;;
+  *) NAME_KEY="$HOST" ;;
+esac
+[ "$HOST" != "romulus" ] || LEGACY_NAMES=1
+
 # --legacy-names reproduces M1Mini's live unsuffixed VM/daemon names. On any
 # other host it would plan a colliding `ci-linux` VM (and its 6 GiB default),
-# so it is M1Mini-only (XACA-1436-014).
-if [ "$LEGACY_NAMES" = "1" ] && [ "$HOST" != "m1mini" ]; then
-  echo "provision-host.sh: --legacy-names is only valid with --host m1mini, got '${HOST}'" >&2
+# so it is M1Mini/Romulus-only (XACA-1436-014, XACA-1937).
+if [ "$LEGACY_NAMES" = "1" ] && [ "$NAME_KEY" != "m1mini" ]; then
+  echo "provision-host.sh: --legacy-names is only valid with --host m1mini or romulus, got '${HOST}'" >&2
   exit 2
 fi
 
@@ -490,7 +511,7 @@ fi
 
 # Everything that used to be a hardcoded `m1mini` / unsuffixed constant.
 derive_names() {
-  local sfx=".${HOST}"
+  local sfx=".${NAME_KEY}"
   VM_MEMORY="${VM_MEMORY_GIB}GiB"
   RUNNER_LABELS="${HOST}${EXTRA_LABELS:+,${EXTRA_LABELS}}"
   MAC_RUNNER_NAME="${HOST}-macos-1"
@@ -499,7 +520,7 @@ derive_names() {
     sfx=""
     VM_NAME="ci-linux"
   else
-    VM_NAME="ci-linux-${HOST}"
+    VM_NAME="ci-linux-${NAME_KEY}"
   fi
   [ -z "$VM_NAME_OVERRIDE" ] || VM_NAME="$VM_NAME_OVERRIDE"
   LABEL_VM="com.doublenode.ci-runner${sfx}.lima-vm"
@@ -576,7 +597,7 @@ resolve_runner_try() {
   # shellcheck source=/dev/null
   . "$lib"
   # A runner staged earlier lets a refresh that cannot reach GitHub KEEP it rather than fall back to an older pin.
-  if ci_runner_manifest_record "$HOST" 2>/dev/null && { [ -n "$CI_RR_LINUX" ] || { [ "$NO_LINUX" = "1" ] && [ -n "$CI_RR_OSX" ]; }; }; then
+  if ci_runner_manifest_record "$NAME_KEY" 2>/dev/null && { [ -n "$CI_RR_LINUX" ] || { [ "$NO_LINUX" = "1" ] && [ -n "$CI_RR_OSX" ]; }; }; then
     if [ "$NO_LINUX" = "1" ]; then set -- $CI_RR_OSX; else set -- $CI_RR_LINUX; fi
     kv="$1"; ksl="$2"
     if [ -n "$CI_RR_OSX" ]; then set -- $CI_RR_OSX; if [ "$1" = "$kv" ]; then kso="$2"; fi; fi
@@ -874,8 +895,8 @@ plist_recycle() {
   <key>StartInterval</key><integer>$((RECYCLE_EVERY_HOURS * 3600))</integer>
   <key>RunAtLoad</key><false/>
   <key>ProcessType</key><string>Background</string>
-  <key>StandardOutPath</key><string>${RECYCLE_LOG_DIR}/recycle.${HOST}.out.log</string>
-  <key>StandardErrorPath</key><string>${RECYCLE_LOG_DIR}/recycle.${HOST}.err.log</string>
+  <key>StandardOutPath</key><string>${RECYCLE_LOG_DIR}/recycle.${NAME_KEY}.out.log</string>
+  <key>StandardErrorPath</key><string>${RECYCLE_LOG_DIR}/recycle.${NAME_KEY}.err.log</string>
 </dict>
 </plist>
 EOF
@@ -1775,12 +1796,12 @@ write_provision_manifest() {
   [ -d "$MANIFEST_DIR" ] || install -d -m 0775 -o root -g admin "$MANIFEST_DIR"
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   tmp=$(mktemp /tmp/ci-provision-manifest.XXXXXX)
-  if ! ci_provision_manifest_render "$HOST" "$ts" >"$tmp"; then
+  if ! ci_provision_manifest_render "$NAME_KEY" "$ts" >"$tmp"; then
     command rm -f "$tmp"; warn "provision manifest NOT written (render failed)"; return 0
   fi
-  install -m 644 -o root -g wheel "$tmp" "$(ci_provision_manifest_path "$HOST")"
+  install -m 644 -o root -g wheel "$tmp" "$(ci_provision_manifest_path "$NAME_KEY")"
   command rm -f "$tmp"
-  log "recorded provision version $(awk -F= '$1=="provision_version"{print $2;exit}' "$(ci_provision_manifest_path "$HOST")") in $(ci_provision_manifest_path "$HOST")"
+  log "recorded provision version $(awk -F= '$1=="provision_version"{print $2;exit}' "$(ci_provision_manifest_path "$NAME_KEY")") in $(ci_provision_manifest_path "$NAME_KEY")"
 }
 
 # ── Main ──────────────────────────────────────────────────────────────────

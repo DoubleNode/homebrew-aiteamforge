@@ -34,6 +34,7 @@
  */
 
 const { DEFAULT_THRESHOLDS, DEFAULT_JOB_CLASSES, REPO_RE, validateRepos } = require('./ci-pool-store');
+const aliases = require('./ci-machine-aliases');
 
 const DEFAULT_POOL_LABEL = 'fleet-pool';
 const OS_LABELS = ['Linux', 'macOS'];
@@ -120,11 +121,10 @@ function toMs(v) {
 }
 
 /** Host label a runner minted on this machine carries: machine.hostLabel, else the lowercased id. */
-function hostLabelOf(machine) {
-    if (!machine) return null;
-    if (typeof machine.hostLabel === 'string' && machine.hostLabel) return machine.hostLabel.toLowerCase();
-    return typeof machine.id === 'string' && machine.id ? machine.id.toLowerCase() : null;
-}
+const hostLabelOf = aliases.primaryHostLabel;
+
+/** XACA-1937: every host label that targets this machine (primary + its old/new names), lowercased. */
+const hostLabelsOf = aliases.hostLabelsOf;
 
 /**
  * XACA-1704-001: the JOB-INDEPENDENT half of D4 eligibility, in stages so isEligible() can interleave the
@@ -283,11 +283,11 @@ function isEligible(machine, report, job, opts) {
 
     // Host-targeting label: a job may only carry labels the full mint set would carry.
     const jl = job && normalizeLabels(job.labels);
-    const host = hostLabelOf(machine);
+    const hosts = hostLabelsOf(machine);   // XACA-1937: old and new names both target this machine
     if (jl && os) {
         const known = new Set(['self-hosted', os.toLowerCase(), 'arm64', String(o.poolLabel || DEFAULT_POOL_LABEL).toLowerCase()]);
         const extra = jl.filter((l) => !known.has(l));
-        if (extra.length && (host === null || extra.some((l) => l !== host))) reasons.push('label-mismatch');
+        if (extra.length && (hosts.length === 0 || extra.some((l) => !hosts.includes(l)))) reasons.push('label-mismatch');
     }
 
     if (gate.noReport.length) {
@@ -391,18 +391,21 @@ function computeSupply(queuedEligibleJobs, outstandingIdleBySet) {
 
 /**
  * A3: the full label set to pass to generate-jitconfig:
- * self-hosted, <OS>, ARM64, <poolLabel>, <host label>.
+ * self-hosted, <OS>, ARM64, <poolLabel>, <host label(s)>.
+ * XACA-1937: the host label(s) are the names of this machine the JOB named (old and/or new), so GitHub
+ * routes the job to the runner; a job naming none gets the machine's primary label.
  * Returns null (do not mint) if the job's OS is unknown, its labels are not a
  * subset of that set, or the machine has no usable host label.
  */
 function mintLabels(job, machine, cfg) {
     const os = jobOs(job);
-    const host = hostLabelOf(machine);
+    const hosts = hostLabelsOf(machine);
     const pool = (cfg && typeof cfg.poolLabel === 'string' && cfg.poolLabel) || DEFAULT_POOL_LABEL;
-    if (os === null || host === null) return null;
-    const full = ['self-hosted', os, 'ARM64', pool, host];
-    const fullKeys = new Set(full.map((l) => l.toLowerCase()));
+    if (os === null || hosts.length === 0) return null;
     const jl = normalizeLabels(job.labels);
+    const named = hosts.filter((h) => jl.includes(h));
+    const full = ['self-hosted', os, 'ARM64', pool, ...(named.length ? named : [hosts[0]])];
+    const fullKeys = new Set(['self-hosted', os, 'ARM64', pool, ...hosts].map((l) => l.toLowerCase()));
     if (!jl.every((l) => fullKeys.has(l))) return null;
     return full;
 }
@@ -410,6 +413,6 @@ function mintLabels(job, machine, cfg) {
 module.exports = {
     DEFAULT_POOL_LABEL,
     repoSlug, bindingOf, boundRepoSet, BINDING_REASONS,
-    normalizeLabels, labelSetKey, jobOs, jobClass, effectiveThresholds, hostLabelOf,
+    normalizeLabels, labelSetKey, jobOs, jobClass, effectiveThresholds, hostLabelOf, hostLabelsOf,
     hostGate, hostGateForOs, isEligible, evaluateMachines, rankCandidates, computeSupply, mintLabels,
 };

@@ -42,6 +42,7 @@ const realFs = require('fs');
 const nodePath = require('path');
 const crypto = require('crypto');
 const { labelSetKey } = require('./ci-dispatch-placement');
+const { sameMachine } = require('./ci-machine-aliases');
 
 const SCHEMA_VERSION = 1;
 const MINUTE = 60 * 1000;
@@ -354,7 +355,7 @@ function createAssignments(opts) {
         expireDue(now);
         const out = [];
         for (const rec of records.values()) {
-            if (rec.machine !== machine || rec.state !== 'pending') continue;
+            if (!sameMachine(rec.machine, machine) || rec.state !== 'pending') continue;
             const cfg = configs.get(rec.id);
             configs.delete(rec.id);                       // drop first: nothing can deliver it twice
             if (typeof cfg !== 'string') {                // config lost (should not happen): never serve an empty one
@@ -379,7 +380,7 @@ function createAssignments(opts) {
         const now = Number.isFinite(nowArg) ? nowArg : clock();
         const ids = [];
         for (const rec of records.values()) {
-            if (rec.machine === machine && (rec.state === 'expired' || rec.state === 'cancelled') &&
+            if (sameMachine(rec.machine, machine) && (rec.state === 'expired' || rec.state === 'cancelled') &&
                 rec.killNeeded && !rec.killAcked && now - rec.endedAt < T.cancelRetainMs) ids.push(rec.id);
         }
         return ids;
@@ -393,7 +394,7 @@ function createAssignments(opts) {
      */
     function report(id, machine, body) {
         const rec = isStr(id) ? records.get(id) : undefined;
-        if (!rec || rec.machine !== machine) return { status: 'notfound' };
+        if (!rec || !sameMachine(rec.machine, machine)) return { status: 'notfound' };
         const to = body && body.state;
         const cur = rec.state;
         const now = clock();

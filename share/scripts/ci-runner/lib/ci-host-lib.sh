@@ -56,7 +56,18 @@ _CIH_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${CIH_PROVISION_SCRIPT:=${_CIH_LIB_DIR}/../provision-host.sh}"
 : "${CIH_STATE_DIR:=/usr/local/etc/ci-runner}"
 : "${CIH_REPO:=DoubleNode/dev-team}"
-: "${CIH_KNOWN_HOSTS:=m1mini m4mini}"
+: "${CIH_KNOWN_HOSTS:=romulus vulcan m1mini m4mini}"
+# XACA-1937: CI-host alias table for the M1Mini -> Romulus / M4Mini -> Vulcan rename.
+# DUAL-NAME WINDOW: either spelling is accepted everywhere; the window closes under
+# XACA-1936, which drops the old names. Each pair is canonical:legacy-key.
+#   canonical   the new name, used for display and as the new GitHub runner label.
+#   legacy key  the LEGACY naming key. The live hosts keep their on-disk names, so every
+#               file/daemon name is derived from it: state files (<key>.pause.json,
+#               <key>.recycle.json, the per-host lock dir) and provision-host.sh's daemon/VM
+#               names (m1mini -> unsuffixed --legacy-names; m4mini -> com.doublenode.ci-runner.m4mini.*).
+# GitHub runners and routing variables match on ANY alias (runners may carry either name
+# until they are re-registered). CIH_HOST itself stays the spelling the operator typed.
+: "${CIH_HOST_ALIASES:=romulus:m1mini vulcan:m4mini}"
 : "${CIH_POLL_SECS:=15}"
 : "${CIH_PLIST_ROOT:=}"
 : "${CIH_CI_USER:=ci-runner}"
@@ -295,8 +306,9 @@ try:
 except Exception:
     sys.exit(3)
 if op == "targets":
-    h = sys.argv[3]
-    ok = (isinstance(x, list) and h in x) or (isinstance(x, str) and x == h)
+    hs = set(sys.argv[3].split())   # XACA-1937: every alias of the host
+    ok = (isinstance(x, list) and any(isinstance(i, str) and i in hs for i in x)) \
+        or (isinstance(x, str) and x in hs)
     sys.exit(0 if ok else 1)
 if op == "host-of":
     known = sys.argv[3].split()
@@ -307,10 +319,10 @@ if op == "host-of":
             sys.exit(0)
     sys.exit(1)
 if op == "replace":
-    a, b = sys.argv[3], sys.argv[4]
+    a, b = set(sys.argv[3].split()), sys.argv[4]   # a: every alias of the paused host
     if isinstance(x, list):
-        x = [b if i == a else i for i in x]
-    elif x == a:
+        x = [b if i in a else i for i in x]
+    elif x in a:
         x = b
     print(json.dumps(x, separators=(",", ":")))
     sys.exit(0)
@@ -439,11 +451,42 @@ cih_normalize_host() { # RAW -> prints normalized host; rc 2 when unusable
   printf '%s\n' "$h"
 }
 
+# XACA-1937 alias resolvers (see CIH_HOST_ALIASES). A name outside the table maps to itself.
+cih_host_canonical() { # NAME -> canonical name
+  local p
+  for p in $CIH_HOST_ALIASES; do
+    case "$1" in "${p%%:*}"|"${p#*:}") printf '%s\n' "${p%%:*}"; return 0 ;; esac
+  done
+  printf '%s\n' "$1"
+}
+cih_host_key() { # NAME -> legacy naming key (state files, daemon/VM names)
+  local p
+  for p in $CIH_HOST_ALIASES; do
+    case "$1" in "${p%%:*}"|"${p#*:}") printf '%s\n' "${p#*:}"; return 0 ;; esac
+  done
+  printf '%s\n' "$1"
+}
+cih_host_aliases() { # NAME -> space-separated spellings of the same host (canonical first)
+  local p
+  for p in $CIH_HOST_ALIASES; do
+    case "$1" in "${p%%:*}"|"${p#*:}") printf '%s %s\n' "${p%%:*}" "${p#*:}"; return 0 ;; esac
+  done
+  printf '%s\n' "$1"
+}
+_cih_host_alt_re() { # NAME -> "(a|b)" ERE alternation (names are [a-z0-9-], regex-safe)
+  local a out=""
+  for a in $(cih_host_aliases "$1"); do out="${out:+$out|}$a"; done
+  printf '(%s)\n' "$out"
+}
+
 # Sets CIH_VM_NAME CIH_LABEL_VM CIH_LABEL_MAC CIH_PLIST_VM CIH_PLIST_MAC CIH_HAS_MACOS.
 # Names come from provision-host.sh through its PROVISION_SOURCE_ONLY seam, in a
 # subshell (it sets -euo pipefail and parses "$@" at top level).
 cih_load_names() { # HOST
-  local h="$1" legacy="" out
+  local h legacy="" out
+  # XACA-1937: names come from the legacy key, so romulus/m1mini both find the unsuffixed
+  # daemons and vulcan/m4mini both find com.doublenode.ci-runner.m4mini.*.
+  h="$(cih_host_key "$1")"
   [ "$h" != "m1mini" ] || legacy="--legacy-names"
   [ -f "$CIH_PROVISION_SCRIPT" ] || { _cih_fail ENV "provision script not found: $CIH_PROVISION_SCRIPT"; return $?; }
   # shellcheck disable=SC2086,SC2034,SC1090
@@ -518,12 +561,15 @@ _cih_host_runners_raw() { # HOST
   local h="$1" all rc id name status busy labels re
   all="$(cih_gh_runners)"; rc=$?
   [ "$rc" = "0" ] || return "$rc"
-  re="^${h}-(linux|macos)-[0-9]+\$"
+  # XACA-1937: a runner belongs to HOST when its name and a label use ANY alias of it.
+  re="^$(_cih_host_alt_re "$h")-(linux|macos)-[0-9]+\$"
   while IFS="	" read -r id name status busy labels; do
     [ -n "$id" ] || continue
-    local nm=0 lb=0
+    local nm=0 lb=0 a
     [[ $name =~ $re ]] && nm=1
-    case ",${labels}," in *",${h},"*) lb=1 ;; esac
+    for a in $(cih_host_aliases "$h"); do
+      case ",${labels}," in *",${a},"*) lb=1 ;; esac
+    done
     if [ "$nm" != "$lb" ]; then
       _cih_fail GITHUB "runner identity conflict: '$name' (labels: ${labels}) matches host '$h' by only one of name/label"; return $?
     fi
@@ -598,6 +644,24 @@ EOF
   echo "$n"
 }
 
+# XACA-1937: the routing label to write for a --redirect-to HOST: the first alias
+# (canonical first) that an ONLINE runner of HOST carries as a label, so a redirect
+# during the dual-name window never names a label no live runner has. Falls back to
+# the spelling given.
+_cih_online_label() { # HOST
+  local out a id name status busy labels
+  out="$(_cih_host_runners_raw "$1")" || return $?
+  for a in $(cih_host_aliases "$1"); do
+    while IFS="	" read -r id name status busy labels; do
+      [ "$status" = "online" ] || continue
+      case ",${labels}," in *",${a},"*) printf '%s\n' "$a"; return 0 ;; esac
+    done <<EOT
+$out
+EOT
+  done
+  printf '%s\n' "$1"
+}
+
 # Prints the number of not-yet-started jobs labelled HOST, across EVERY run that
 # is not completed (XACA-1440-013). A job pinned to H waits as queued/waiting/
 # pending/requested, and its run can be queued OR in_progress (a multi-job run
@@ -608,7 +672,9 @@ EOF
 # Fail-closed: any API error, non-numeric run id, or jq failure on an
 # unclassifiable body is rc 6, never a "zero pinned".
 cih_queued_pinned() { # HOST
-  local h="$1" st runs rc rid jobs n=0 c
+  local h="$1" st runs rc rid jobs n=0 c a lsel=""
+  # XACA-1937: a job pinned to ANY alias of HOST (m1mini/romulus, m4mini/vulcan) waits for it.
+  for a in $(cih_host_aliases "$h"); do lsel="${lsel:+$lsel or }.==\"$a\""; done
   for st in in_progress queued waiting pending requested; do
     runs="$(_cih_gh api --paginate "repos/${CIH_REPO}/actions/runs?status=${st}&per_page=100" --jq '.workflow_runs[].id' 2>/dev/null)"; rc=$?
     if [ "$rc" != "0" ]; then _cih_fail GITHUB "${st}-runs API call failed or was unclassifiable (rc $rc)"; return $?; fi
@@ -616,7 +682,7 @@ cih_queued_pinned() { # HOST
       [ -n "$rid" ] || continue
       case "$rid" in *[!0-9]*) _cih_fail GITHUB "unclassifiable run id '$rid'"; return $? ;; esac
       jobs="$(_cih_gh api --paginate "repos/${CIH_REPO}/actions/runs/${rid}/jobs?per_page=100" \
-        --jq '.jobs[] | select(.status=="queued" or .status=="waiting" or .status=="pending" or .status=="requested") | select(any(.labels[]; .=="'"$h"'")) | .id' 2>/dev/null)"; rc=$?
+        --jq '.jobs[] | select(.status=="queued" or .status=="waiting" or .status=="pending" or .status=="requested") | select(any(.labels[]; '"$lsel"')) | .id' 2>/dev/null)"; rc=$?
       if [ "$rc" != "0" ]; then _cih_fail GITHUB "run $rid jobs API call failed or was unclassifiable (rc $rc)"; return $?; fi
       c="$(printf '%s' "$jobs" | grep -c '[0-9]')" || true
       n=$((n + ${c:-0}))
@@ -655,7 +721,7 @@ cih_var_delete() { # NAME
 
 # 0 targets HOST, 1 does not, 3 malformed JSON.
 cih_value_targets_host() { # VALUE HOST
-  _cih_py -c "$_CIH_PY_VALUE" targets "$1" "$2"
+  _cih_py -c "$_CIH_PY_VALUE" targets "$1" "$(cih_host_aliases "$2")"
 }
 
 # Prints the known host a value points at (first match); rc 1 none, 3 malformed.
@@ -665,12 +731,13 @@ _cih_value_host() { _cih_py -c "$_CIH_PY_VALUE" host-of "$1" "$CIH_KNOWN_HOSTS";
 # Marker (state file + lock)
 # ---------------------------------------------------------------------------
 # KIND pause (default) = operator pause marker; recycle = the recycle sentinel (XACA-1708-004).
-cih_marker_path() { printf '%s/%s.%s.json\n' "$CIH_STATE_DIR" "$1" "${_CIH_MARKER_KIND:-pause}"; }
-cih_sentinel_path() { printf '%s/%s.recycle.json\n' "$CIH_STATE_DIR" "$1"; }
+# XACA-1937: state files are named by the legacy key (cih_host_key), so both spellings share them.
+cih_marker_path() { printf '%s/%s.%s.json\n' "$CIH_STATE_DIR" "$(cih_host_key "$1")" "${_CIH_MARKER_KIND:-pause}"; }
+cih_sentinel_path() { printf '%s/%s.recycle.json\n' "$CIH_STATE_DIR" "$(cih_host_key "$1")"; }
 
 _cih_marker_py() { # OP HOST [args...]
   local op="$1" h="$2"; shift 2
-  _cih_py -c "$_CIH_PY_MARKER" "$op" "$(cih_marker_path "$h")" "$h" "$@"
+  _cih_py -c "$_CIH_PY_MARKER" "$op" "$(cih_marker_path "$h")" "$(cih_host_key "$h")" "$@"
 }
 
 cih_marker_state() { _cih_marker_py state "$1"; } # absent|draining|paused|resuming|corrupt
@@ -709,7 +776,7 @@ _cih_ensure_state_dir() {
 cih_lock_acquire() { # HOST
   local h="$1" lock pid
   _cih_ensure_state_dir || return $?
-  lock="$CIH_STATE_DIR/.${h}.lock"
+  lock="$CIH_STATE_DIR/.$(cih_host_key "$h").lock"
   if mkdir "$lock" 2>/dev/null; then
     echo $$ >"$lock/pid"; return 0
   fi
@@ -724,7 +791,8 @@ cih_lock_acquire() { # HOST
 }
 
 cih_lock_release() { # HOST
-  local lock="$CIH_STATE_DIR/.${1}.lock" pid
+  local lock pid
+  lock="$CIH_STATE_DIR/.$(cih_host_key "$1").lock"
   pid="$(cat "$lock/pid" 2>/dev/null || true)"
   [ "$pid" = "$$" ] && rm -rf "$lock"
   return 0
@@ -783,7 +851,7 @@ _cih_parse_opts() { # CMD args...
     r="$(printf '%s' "$CIH_OPT_REDIRECT" | tr '[:upper:]' '[:lower:]')"
     for k in $CIH_KNOWN_HOSTS; do [ "$k" = "$r" ] && known=1; done
     [ "$known" = "1" ] || { _cih_fail USAGE "--redirect-to '$CIH_OPT_REDIRECT' is not a known host ($CIH_KNOWN_HOSTS)"; return $?; }
-    [ "$r" != "$CIH_HOST" ] || { _cih_fail USAGE "--redirect-to cannot be the host being paused"; return $?; }
+    [ "$(cih_host_canonical "$r")" != "$(cih_host_canonical "$CIH_HOST")" ] || { _cih_fail USAGE "--redirect-to cannot be the host being paused"; return $?; }
     CIH_OPT_REDIRECT="$r"
   fi
   return 0
@@ -841,7 +909,7 @@ cih_plan_reroute() {
       if [ "${oc:-0}" -lt 1 ]; then
         _cih_fail REFUSED "--redirect-to $CIH_OPT_REDIRECT: that host has no online runner, redirecting would strand CI"; return $?
       fi
-      _CIH_NEW_BASE="$(_cih_py -c "$_CIH_PY_VALUE" replace "$_CIH_VAL_BASE" "$CIH_HOST" "$CIH_OPT_REDIRECT")" \
+      _CIH_NEW_BASE="$(_cih_py -c "$_CIH_PY_VALUE" replace "$_CIH_VAL_BASE" "$(cih_host_aliases "$CIH_HOST")" "$(_cih_online_label "$CIH_OPT_REDIRECT")")" \
         || { _cih_fail REFUSED "cannot rewrite CI_LINUX_RUNNER for --redirect-to"; return $?; }
       _CIH_ACT_BASE="set"
       base_targets=1; base_val="$_CIH_NEW_BASE"
@@ -859,7 +927,7 @@ cih_plan_reroute() {
     local fb_ok=0 fh oc rc
     if [ "$base_pres" = "1" ] && [ "$base_targets" != "0" ]; then
       fh="$(_cih_value_host "$base_val")"
-      if [ -n "$fh" ] && [ "$fh" != "$CIH_HOST" ]; then
+      if [ -n "$fh" ] && [ "$(cih_host_canonical "$fh")" != "$(cih_host_canonical "$CIH_HOST")" ]; then
         oc="$(_cih_online_count "$fh")"; rc=$?
         [ "$rc" = "0" ] || return "$rc"
         [ "${oc:-0}" -ge 1 ] && fb_ok=1
@@ -1046,6 +1114,20 @@ cih_wait_vm_state() { # STATE SECS
 
 _cih_daemon_loaded() { _cih_launchctl print "system/$1" >/dev/null 2>&1; }
 
+# XACA-1937: the macOS runner's GitHub name under whichever alias it was registered
+# (<alias>-macos-N); falls back to <host>-macos-1, which then reads as "not found".
+_cih_mac_runner_name() {
+  local out re id name status busy labels
+  out="$(cih_host_runners "$CIH_HOST")" || return $?
+  re="^$(_cih_host_alt_re "$CIH_HOST")-macos-[0-9]+\$"
+  while IFS="	" read -r id name status busy labels; do
+    [[ $name =~ $re ]] && { printf '%s\n' "$name"; return 0; }
+  done <<EOF
+$out
+EOF
+  printf '%s-macos-1\n' "$CIH_HOST"
+}
+
 # Runner name for a guest unit (runner names are <host>-linux-N inside the unit name).
 _cih_unit_runner() { # UNIT -> runner name or empty
   local unit="$1" out rc id name status busy labels
@@ -1096,7 +1178,7 @@ cih_stop_services() { # HOST
   fi
   if [ "$CIH_HAS_MACOS" = "1" ] && [ "${_CIH_RECYCLING:-}" != "1" ]; then
     if _cih_daemon_loaded "$CIH_LABEL_MAC"; then
-      rn="${CIH_HOST}-macos-1"
+      rn="$(_cih_mac_runner_name)" || return $?
       bs="$(_cih_runner_busy_state "$h" "$rn")" || return $?
       [ "$bs" = "idle" ] || { _cih_log "runner $rn became busy again; back to draining"; return 10; }
       _cih_log "booting out $CIH_LABEL_MAC"
@@ -1244,16 +1326,21 @@ cih_publish_pause_flag() { # HOST true|false REASON
 # ---------------------------------------------------------------------------
 # Pool summary
 # ---------------------------------------------------------------------------
-# Sets _CIH_POOL_ONLINE ("m1mini=2 m4mini=0") and _CIH_POOL_ALL_OUT (1/0).
+# Sets _CIH_POOL_ONLINE ("romulus=2 vulcan=0") and _CIH_POOL_ALL_OUT (1/0).
+# XACA-1937: one entry per physical host under its canonical name; runners named with
+# either alias count toward it.
 _cih_pool_compute() {
-  local all rc k n online="" outs=0 total=0 ms
+  local all rc k c n online="" outs=0 total=0 ms seen=" "
   all="$(cih_gh_runners)"; rc=$?
   [ "$rc" = "0" ] || return "$rc"
-  for k in $CIH_KNOWN_HOSTS; do
-    n="$(printf '%s\n' "$all" | awk -F'\t' -v h="$k" '$2 ~ ("^" h "-linux-[0-9]+$") && $3=="online" {c++} END {print c+0}')"
+  for c in $CIH_KNOWN_HOSTS; do
+    k="$(cih_host_canonical "$c")"
+    case "$seen" in *" $k "*) continue ;; esac
+    seen="$seen$k "
+    n="$(printf '%s\n' "$all" | awk -F'\t' -v h="$(_cih_host_alt_re "$k")" '$2 ~ ("^" h "-linux-[0-9]+$") && $3=="online" {c++} END {print c+0}')"
     online="${online:+$online }$k=$n"
     total=$((total + 1))
-    ms="$(_cih_py -c "$_CIH_PY_MARKER" state "$(cih_marker_path "$k")" "$k" 2>/dev/null || echo absent)"
+    ms="$(_cih_py -c "$_CIH_PY_MARKER" state "$(cih_marker_path "$k")" "$(cih_host_key "$k")" 2>/dev/null || echo absent)"
     if [ "$ms" = "paused" ] || [ "$ms" = "draining" ] || [ "$n" = "0" ]; then outs=$((outs + 1)); fi
   done
   _CIH_POOL_ONLINE="$online"

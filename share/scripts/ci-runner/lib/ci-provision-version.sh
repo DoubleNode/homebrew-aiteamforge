@@ -97,8 +97,19 @@ _cipv_dest_ok() {
     return 0
 }
 
+# XACA-1937: the manifest is named by the host's LEGACY naming key, so either spelling of a
+# renamed host (romulus/m1mini, vulcan/m4mini) reads the file the live host already has.
+# Same table as CIH_HOST_ALIASES in ci-host-lib.sh; the dual-name window closes under XACA-1936.
+_cipv_host_key() { # host -> legacy naming key
+    case "${1:-}" in
+        romulus|m1mini) printf 'm1mini' ;;
+        vulcan|m4mini) printf 'm4mini' ;;
+        *) printf '%s' "${1:-}" ;;
+    esac
+}
+
 ci_provision_manifest_path() { # host -> path
-    printf '%s/%s.provision-manifest' "${CIH_STATE_DIR:-/usr/local/etc/ci-runner}" "$1"
+    printf '%s/%s.provision-manifest' "${CIH_STATE_DIR:-/usr/local/etc/ci-runner}" "$(_cipv_host_key "$1")"
 }
 
 # ---------------------------------------------------------------- writer half (root, provision-host.sh)
@@ -205,7 +216,7 @@ ci_provision_manifest_load() {
         esac
     done <"$f"
     [ "$schema" = "1" ] || { CI_PM_WHY="unknown schema '${schema}'"; return 2; }
-    [ "$mhost" = "$host" ] || { CI_PM_WHY="host mismatch (manifest says '${mhost}')"; return 2; }
+    [ "$(_cipv_host_key "$mhost")" = "$(_cipv_host_key "$host")" ] || { CI_PM_WHY="host mismatch (manifest says '${mhost}')"; return 2; }
     [ "$n" -ge 1 ] || { CI_PM_WHY="no F lines"; return 2; }
     case "$ver" in ''|*[!0-9a-f]*) CI_PM_WHY="bad provision_version"; return 2 ;; esac
     [ "${#ver}" -eq 12 ] || { CI_PM_WHY="bad provision_version length"; return 2; }

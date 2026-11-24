@@ -49,6 +49,7 @@ const { MACHINE_ID_RE } = require('./ci-pool-store');
 const { ID_RE } = require('./ci-dispatch-assignments');
 const derive = require('./ci-pool-derive');
 const plc = require('./ci-dispatch-placement');
+const { sameMachine } = require('./ci-machine-aliases');
 
 const SCHEMA_VERSION = 1;
 const MAX_POLL_BYTES = 16 * 1024;
@@ -259,7 +260,9 @@ function requireCiTelemetryKey(store) {
         }
         if (matched === null) return res.status(401).set('WWW-Authenticate', 'Bearer').json(UNAUTHORIZED_BODY);
         const claimed = req.body && typeof req.body === 'object' ? req.body.machine : undefined;
-        if (claimed !== matched) return res.status(403).json(FORBIDDEN_BODY);
+        // XACA-1937: the reporter may still send the OLD name (m1mini) with the renamed machine's key;
+        // any name of the key's own machine is that machine. The caller stores under req.ciTelemetryMachine.
+        if (!sameMachine(claimed, matched)) return res.status(403).json(FORBIDDEN_BODY);
         req.ciTelemetryMachine = matched;
         return next();
     };
@@ -298,6 +301,8 @@ function registerCiPoolRoutes(app, deps) {
     if (!store || !assignments) throw new TypeError('registerCiPoolRoutes: store and assignments are required');
     const clock = typeof d.now === 'function' ? d.now : Date.now;
     const reports = d.reports || new Map();
+    // XACA-1937: an admin URL may name a machine by its old name; act on (and echo) the stored record's key.
+    const resolveMachine = (id) => (typeof store.resolveId === 'function' ? store.resolveId(id) : id);
     const log = d.logger || console;
     const ciHostKey = d.hostAuth || requireCiHostKey(store);
     /** machine -> last drift verdict, so a warning is logged once per transition INTO drift. */
@@ -375,7 +380,7 @@ function registerCiPoolRoutes(app, deps) {
             const notFound = () => res.status(404).json({ error: 'Not found' });
             if (!ID_RE.test(id)) return notFound();
             const owner = assignments.get(id);
-            if (!owner || owner.machine !== req.ciMachine) return notFound();
+            if (!owner || !sameMachine(owner.machine, req.ciMachine)) return notFound();
             if (bodySize(req.body) > MAX_STATE_BYTES) return res.status(413).json({ error: `payload too large (max ${MAX_STATE_BYTES} bytes)` });
             let parsed;
             try { parsed = validateStateReport(req.body); } catch (e) {
@@ -479,8 +484,8 @@ function registerCiPoolRoutes(app, deps) {
 
     app.put('/api/ci-pool/machines/:machine', requireAdminKey, (req, res) => {
         try {
-            const id = req.params.machine;
-            if (!MACHINE_ID_RE.test(id)) return res.status(400).json({ error: 'bad machine id' });
+            if (!MACHINE_ID_RE.test(req.params.machine)) return res.status(400).json({ error: 'bad machine id' });
+            const id = resolveMachine(req.params.machine);
             const body = req.body;
             if (!isPlainObject(body)) return res.status(400).json({ error: 'body must be a JSON object' });
             const allowed = ['enabled', 'paused', 'reason', 'prefers', 'thresholds', 'mode', 'repos', 'confirm'];
@@ -603,8 +608,8 @@ function registerCiPoolRoutes(app, deps) {
     function mintHandler(kind) {
         return (req, res) => {
             try {
-                const id = req.params.machine;
-                if (!MACHINE_ID_RE.test(id)) return res.status(400).json({ error: 'bad machine id' });
+                if (!MACHINE_ID_RE.test(req.params.machine)) return res.status(400).json({ error: 'bad machine id' });
+                const id = resolveMachine(req.params.machine);
                 if (!store.getMachine(id)) return res.status(404).json({ error: 'unknown machine' });
                 const minted = mintKey(KINDS[kind].prefix);
                 const result = KINDS[kind].set(id, minted);
@@ -622,8 +627,8 @@ function registerCiPoolRoutes(app, deps) {
     function revokeHandler(kind) {
         return (req, res) => {
             try {
-                const id = req.params.machine;
-                if (!MACHINE_ID_RE.test(id)) return res.status(400).json({ error: 'bad machine id' });
+                if (!MACHINE_ID_RE.test(req.params.machine)) return res.status(400).json({ error: 'bad machine id' });
+                const id = resolveMachine(req.params.machine);
                 if (!store.getMachine(id)) return res.status(404).json({ error: 'unknown machine' });
                 const result = KINDS[kind].clear(id);
                 if (!result.ok) return storeFailure(res, result);

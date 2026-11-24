@@ -62,6 +62,7 @@ const fs = require('fs');
 const path = require('path');
 const placement = require('./ci-dispatch-placement');
 const policy = require('./ci-dispatch-policy');
+const { namesOf, sameMachine } = require('./ci-machine-aliases');
 const derive = require('./ci-pool-derive');
 
 const NO_CAPACITY_AFTER_MS = 120 * 1000;
@@ -299,7 +300,7 @@ function createDispatcher(deps) {
     /** The pool machine a static-label job is pinned to (its host label), or null. */
     const pinnedMachineOf = (rec, machines) => {
         const jl = plc.normalizeLabels(rec.labels) || [];
-        const id = Object.keys(machines).find((k) => jl.includes(plc.hostLabelOf(Object.assign({ id: k }, machines[k]))));
+        const id = Object.keys(machines).find((k) => plc.hostLabelsOf(Object.assign({ id: k }, machines[k])).some((h) => jl.includes(h)));
         return id === undefined ? null : machines[id];
     };
 
@@ -389,15 +390,14 @@ function createDispatcher(deps) {
     /** First eligible host -> placed/pinned; otherwise host-paused (a pinned host is paused) or no-capacity. */
     function decisionFrom(rec, evals, machines) {
         const jl = plc.normalizeLabels(rec.labels) || [];
-        const hostLabel = (id) => plc.hostLabelOf(Object.assign({ id }, machines[id]));
+        // XACA-1937: a job naming ANY name of the host (old or new) is pinned to it.
+        const named = (id) => plc.hostLabelsOf(Object.assign({ id }, machines[id])).some((h) => jl.includes(h));
         const top = evals.find((e) => e.eligible);
         if (top) {
-            const hl = hostLabel(top.id);
-            return { host: top.id, reason: hl && jl.includes(hl) ? `pinned:${top.id}` : 'placed' };
+            return { host: top.id, reason: named(top.id) ? `pinned:${top.id}` : 'placed' };
         }
         for (const e of evals) {
-            const hl = hostLabel(e.id);
-            if (hl && jl.includes(hl) && e.reasons.includes('paused')) return { host: null, reason: 'host-paused' };
+            if (named(e.id) && e.reasons.includes('paused')) return { host: null, reason: 'host-paused' };
         }
         return { host: null, reason: 'no-capacity' };
     }
@@ -474,7 +474,7 @@ function createDispatcher(deps) {
     function evaluate(rec) {
         const cfg = store.getConfig();
         const machines = store.listMachines();
-        const hostLabels = Object.keys(machines).map((id) => plc.hostLabelOf(Object.assign({ id }, machines[id]))).filter(Boolean);
+        const hostLabels = Object.keys(machines).flatMap((id) => plc.hostLabelsOf(Object.assign({ id }, machines[id])));
         const v = pol.evaluateJob(rec, { allowlist: cfg.allowlist, poolLabel: cfg.poolLabel, hostLabels });
         if (v.accept) {
             configRejected.delete(rec.key);
@@ -558,7 +558,7 @@ function createDispatcher(deps) {
     function policyAccepts(rec) {
         const cfg = store.getConfig();
         const machines = store.listMachines();
-        const hostLabels = Object.keys(machines).map((id) => plc.hostLabelOf(Object.assign({ id }, machines[id]))).filter(Boolean);
+        const hostLabels = Object.keys(machines).flatMap((id) => plc.hostLabelsOf(Object.assign({ id }, machines[id])));
         return pol.evaluateJob(rec, { allowlist: cfg.allowlist, poolLabel: cfg.poolLabel, hostLabels }).accept === true;
     }
 
@@ -939,7 +939,7 @@ function createDispatcher(deps) {
     function hostOfLabels(labels) {
         const jl = plc.normalizeLabels(labels) || [];
         const machines = store.listMachines();
-        const id = Object.keys(machines).find((k) => jl.includes(plc.hostLabelOf(Object.assign({ id: k }, machines[k]))));
+        const id = Object.keys(machines).find((k) => plc.hostLabelsOf(Object.assign({ id: k }, machines[k])).some((h) => jl.includes(h)));
         return id === undefined ? null : id;
     }
     function queueAgeView(nowMs) {
@@ -1111,7 +1111,12 @@ function createDispatcher(deps) {
         if (!isEnabled()) return [];
         const nowMs = now();
         const machines = store.listMachines();
-        const prefixes = Object.keys(machines).map((id) => [id, [id.toLowerCase(), plc.hostLabelOf(Object.assign({ id }, machines[id]))].filter(Boolean)]);
+        // XACA-1937: every name of the machine (old and new) and its JIT prefix (`fcp-<name>`), so a runner
+        // named before the rename (m1mini-*, fcp-m1mini-*) still maps to the renamed machine.
+        const prefixes = Object.keys(machines).map((id) => {
+            const names = [...new Set([id.toLowerCase(), ...plc.hostLabelsOf(Object.assign({ id }, machines[id])), ...namesOf(id)])];
+            return [id, [...names, ...names.map((n) => `fcp-${n}`)]];
+        });
         const snap = assignments.snapshot();
         const out = [];
         for (const [jobKey, r] of [...running.entries()]) {
@@ -1122,7 +1127,10 @@ function createDispatcher(deps) {
             let machine = null;
             if (runnerName) {
                 const a = snap.find((x) => x.runnerName === runnerName && String(x.repo).toLowerCase() === repo.toLowerCase());
-                if (a && typeof a.machine === 'string') machine = a.machine;
+                if (a && typeof a.machine === 'string') {
+                    // XACA-1937: an assignment minted before the rename names the old id; report the pool record's key.
+                    machine = Object.keys(machines).find((k) => sameMachine(k, a.machine)) || a.machine;
+                }
                 else {
                     const low = runnerName.toLowerCase();
                     const hit = prefixes.find(([, ps]) => ps.some((p) => low.startsWith(`${p}-`)));

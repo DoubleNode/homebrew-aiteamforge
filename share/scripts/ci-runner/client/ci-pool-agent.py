@@ -314,6 +314,19 @@ def collect_vm_state(limactl, vm_name):
     return map_vm_status(status)
 
 
+# XACA-1937: CI-host rename M1Mini -> Romulus, M4Mini -> Vulcan, with a DUAL-NAME WINDOW
+# (closes under XACA-1936). agent.json `machine` may carry either spelling. The live hosts
+# keep their on-disk names, so every file/daemon name derives from the LEGACY naming key
+# (same table as CIH_HOST_ALIASES in scripts/ci-runner/lib/ci-host-lib.sh).
+HOST_LEGACY_KEY = {"romulus": "m1mini", "m1mini": "m1mini",
+                   "vulcan": "m4mini", "m4mini": "m4mini"}
+
+
+def host_key(machine):
+    """Legacy naming key for machine (state files, daemon labels); unknown names map to themselves."""
+    return HOST_LEGACY_KEY.get(machine, machine) if isinstance(machine, str) else machine
+
+
 def read_pause_marker(marker_dir, machine):
     """State of the XACA-1440 marker <dir>/<machine>.pause.json.
 
@@ -324,7 +337,8 @@ def read_pause_marker(marker_dir, machine):
     """
     if not machine or not re.match(r"^[A-Za-z0-9._-]+$", machine):
         return None
-    path = os.path.join(marker_dir, machine + ".pause.json")
+    key = host_key(machine)   # XACA-1937: ci-host.sh writes <legacy key>.pause.json
+    path = os.path.join(marker_dir, key + ".pause.json")
     try:
         with open(path) as f:
             d = json.load(f)
@@ -335,7 +349,7 @@ def read_pause_marker(marker_dir, machine):
     except OSError:
         return None
     if (not isinstance(d, dict) or d.get("schema_version") != 1
-            or d.get("host") != machine
+            or host_key(d.get("host")) != key
             or d.get("state") not in ("draining", "paused", "resuming")):
         return "corrupt"
     return d["state"]
@@ -354,7 +368,7 @@ def recycle_in_progress(marker_dir, machine):
     """
     if not machine or not re.match(r"^[A-Za-z0-9._-]+$", machine):
         return False
-    path = os.path.join(marker_dir or DEFAULT_MARKER_DIR, machine + ".recycle.json")
+    path = os.path.join(marker_dir or DEFAULT_MARKER_DIR, host_key(machine) + ".recycle.json")
     try:
         os.stat(path)
     except (FileNotFoundError, NotADirectoryError):
@@ -1693,11 +1707,12 @@ def run_rc(argv, timeout=60):
 
 
 def mac_label(config):
-    """The macOS runner LaunchDaemon label, as provision-host.sh derives it
-    (m1mini keeps the legacy unsuffixed name)."""
+    """The macOS runner LaunchDaemon label, as provision-host.sh derives it from the
+    legacy naming key (XACA-1937): romulus/m1mini keep the unsuffixed name, vulcan/m4mini
+    the m4mini-suffixed one, any other host its own suffix."""
     if config.get("macLabel"):
         return config["macLabel"]
-    host = config.get("machine") or ""
+    host = host_key(config.get("machine") or "")
     return "com.doublenode.ci-runner.macos" if host == "m1mini" \
         else "com.doublenode.ci-runner.%s.macos" % host
 

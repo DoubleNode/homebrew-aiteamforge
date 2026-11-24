@@ -59,6 +59,13 @@
 #   CI_RUNNER_UPTIME_SECONDS override uptime (tests)
 #   CI_RUNNER_HOSTNAME       override host.hostname (tests); omitted from the payload if the server would reject it
 #   CI_RUNNER_PYTHON, CI_RUNNER_LAUNCHCTL, CI_RUNNER_PGREP, CI_RUNNER_SYSTEMCTL   binaries (tests)
+#
+# XACA-1937 (M1Mini -> Romulus, M4Mini -> Vulcan; dual-name window closes under XACA-1936): the
+# built-in defaults above are Romulus's LEGACY layout (runner names m1mini-*, label m1mini, VM
+# ci-linux, unsuffixed daemon label) and are deliberately left on the old spellings: they only apply
+# when the variable is UNSET, and every provisioned host (provision-host.sh stage_reporter) sets all of
+# them explicitly in its plist, so the explicit env always wins. Renaming a host's telemetry identity
+# is done by editing that env (CI_RUNNER_MACHINE, CI_RUNNER_LABELS_*, CI_RUNNER_*_RUNNERS), not here.
 
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 set -uo pipefail
