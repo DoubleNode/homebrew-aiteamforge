@@ -16975,12 +16975,15 @@ kb-dispatch() {
     fi
 
     # ── open lanes (defence in depth behind the coordinator's own cap) ───────
+    # XACA-1862: the item's OWN lane and OWN run stamp are not "another open lane". A demoted occupant (lanes[] still names
+    # it) or a requeued stamped item was otherwise refused LANES_FULL by the very slot it would take.
     local open_lanes
     open_lanes=$(_kb_jq_read "$board_file" "${_KB_ITEM_STATUS_JQ_DEFS}"'
-        ([.releases[]? | select(.id == $rel) | .orchestration.lanes // [] | .[]? | objects | select(.current != null)] | length) as $l
-        | ([.backlog[]? | select(((.orchestration // {}) | if type == "object" then .runId else null end) == $run)
+        ([.releases[]? | select(.id == $rel) | .orchestration.lanes // [] | .[]? | objects | select(.current != null)
+            | select((.current | if type == "object" then .id else . end) != $id)] | length) as $l
+        | ([.backlog[]? | select(.id != $id) | select(((.orchestration // {}) | if type == "object" then .runId else null end) == $run)
             | kb_resolve_item_status | select(. != "completed" and . != "cancelled" and . != "done")] | length) as $s
-        | [$l, $s] | max' --arg rel "$rel" --arg run "$run" -r 2>/dev/null) || open_lanes=""
+        | [$l, $s] | max' --arg rel "$rel" --arg run "$run" --arg id "$item" -r 2>/dev/null) || open_lanes=""
     if [[ ! "$open_lanes" =~ ^[0-9]+$ ]]; then
         _kb_dispatch_refuse CONFIG_INVALID "cannot count open lanes for $run"; return 3
     fi

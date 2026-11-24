@@ -34,7 +34,8 @@ export const LANES_FIXTURE = {
   ],
   "laneFreeingStates": [
     "DONE",
-    "CANCELLED"
+    "CANCELLED",
+    "QUEUED"
   ],
   "tokenContract": {
     "run": {

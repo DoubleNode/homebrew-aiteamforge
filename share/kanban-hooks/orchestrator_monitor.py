@@ -1013,16 +1013,34 @@ def _sync_lanes(ctx, board_file, kdir, run, orch, states, now, lines):
     holds no lane gets the lowest free one via assign_lane, so lanes[] - which ticket-lamp shows and kb-dispatch's
     LANES_FULL counts - reflects reality even when nothing called assign_lane at dispatch time. Items are taken in plan
     order (wave, then position). No free lane: skipped (capacity is still enforced by compute_slot_free's in-flight
-    count). Returns True iff a lane was assigned."""
+    count). FREES FIRST (XACA-1862): an occupant whose derived state is QUEUED (demoted back to todo, no run stamp, so no
+    worker) has its lane nulled via free_lane. record_state frees on the QUEUED edge, but a summary that already says QUEUED
+    sees no transition again, and a held lane both fills kb-dispatch's cap and hides the item from SLOT_FREE (rule 3b).
+    This sync is the only assigner and assigns only non-QUEUED items, so a QUEUED occupant is always stale.
+    Returns True iff a lane was assigned or freed."""
     laned = set()
+    changed = False
     for ln in orch.get("lanes") or []:
         cur = ln.get("current") if isinstance(ln, dict) else None
         cid = cur.get("id") if isinstance(cur, dict) else cur
-        if isinstance(cid, str) and cid:
-            laned.add(cid)
+        if not (isinstance(cid, str) and cid):
+            continue
+        if (states.get(cid) or {}).get("state") == "QUEUED":
+            try:
+                n = ro.free_lane(board_file, kdir, ctx.release_id, run, cid, now=now, require_unclaimed=True)
+            except ro.LedgerError as exc:
+                lines.append("lane sync: cannot free %s (%s)" % (cid, exc))
+                laned.add(cid)
+                continue
+            if n is None:                   # claimed under the lock since the snapshot (XACA-1862-014): keep it
+                laned.add(cid)
+                continue
+            lines.append("lane sync: %s is QUEUED, lane %s freed" % (cid, n))
+            changed = True
+            continue
+        laned.add(cid)
     order = [i for w in orch.get("waves") or [] for i in (w if isinstance(w, list) else [])]
     order += sorted(i for i in states if i not in order)
-    changed = False
     for iid in order:
         st = (states.get(iid) or {}).get("state")
         if iid in laned or st in ostate.TERMINAL_STATES or st in (None, "QUEUED"):

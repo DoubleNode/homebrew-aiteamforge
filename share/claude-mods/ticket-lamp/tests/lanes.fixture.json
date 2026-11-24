@@ -31,7 +31,8 @@
   ],
   "laneFreeingStates": [
     "DONE",
-    "CANCELLED"
+    "CANCELLED",
+    "QUEUED"
   ],
   "tokenContract": {
     "run": {

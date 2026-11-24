@@ -11,7 +11,8 @@ the ONLY part of this module that writes, and it is the shell-out boundary for b
   write_summary / start_run / record_state / close_run
                                             board .releases[].orchestration summary, written ONLY via
                                             kanban_utils.update_board_safely; double start refused
-  assign_lane / lanes_view / STATE_STAGE    the LANE summary release.orchestration.lanes[] (XACA-1546-011, ticket-lamp
+  assign_lane / free_lane / lanes_view / STATE_STAGE
+                                            the LANE summary release.orchestration.lanes[] (XACA-1546-011, ticket-lamp
                                             XACA-1786): one entry per dispatch slot, see LANES below
   hook_append                               kb-ask / kb-answer / kb-dispatch hook: no-op unless the item carries
                                             orchestration.runId (a flat k=v `dispatch` event is nested for the caller)
@@ -505,11 +506,13 @@ def _find_release_in(board, release_id):
     raise LedgerError("release %s not found in the board" % release_id)
 
 
-def write_summary(board_file, release_id, mutate_fn):
+def write_summary(board_file, release_id, mutate_fn, pass_board=False):
     """Apply mutate_fn(orchestration_dict) to board .releases[id].orchestration under update_board_safely's lock; returns
     the resulting dict. mutate_fn mutates in place (or returns a replacement dict). A missing release, a board that cannot
     be read/written, or anything mutate_fn raises RAISES here (update_board_safely itself only returns False, which would
-    otherwise read as success). Keys mutate_fn does not touch, `lanes` included, are preserved."""
+    otherwise read as success). Keys mutate_fn does not touch, `lanes` included, are preserved. pass_board=True calls
+    mutate_fn(orch, board) instead, so a predicate can read the board UNDER the same lock (XACA-1862-014); the board must
+    not be modified through it."""
     import kanban_utils
     box = {}
 
@@ -519,7 +522,7 @@ def write_summary(board_file, release_id, mutate_fn):
             orch = rel.get("orchestration")
             if not isinstance(orch, dict):
                 orch = {}
-            res = mutate_fn(orch)
+            res = mutate_fn(orch, board) if pass_board else mutate_fn(orch)
             if res is not None:
                 orch = res
             rel["orchestration"] = orch
@@ -603,16 +606,21 @@ def start_run(board_file, kanban_dir, release_id, plan_, coordinator, max_parall
 #     prNumber), and bumps `since` on every change of `current`.
 #   * HARD CONTRACT with the bash dispatcher (kb-dispatch in kanban-helpers.sh): it counts
 #         .orchestration.lanes[] | objects | select(.current != null)
-#     as OPEN lanes and refuses LANES_FULL at >= maxParallel. So `current` MUST become null when the lane's item reaches a
-#     terminal board state: DONE (completed) or CANCELLED. Otherwise dispatch deadlocks. The lane NUMBER stays, so the next
-#     dispatch ("SLOT_FREE") reuses it. FAILED, CRASHED, STALLED and every other state KEEP the lane: a human decides, and a
-#     dead item must keep counting against the cap rather than silently free capacity.
+#     as OPEN lanes (minus the dispatched item's OWN lane, XACA-1862) and refuses LANES_FULL at >= maxParallel. So `current`
+#     MUST become null when the lane's item reaches a terminal board state, DONE (completed) or CANCELLED, AND when it goes
+#     back to QUEUED (XACA-1862: kb-backlog demote of a stale in_progress item; QUEUED means "todo/blocked with no run stamp",
+#     a stamped todo derives DISPATCHING, so a QUEUED occupant holds no worker). Otherwise dispatch deadlocks: the lane counts
+#     against the cap and compute_slot_free rule 3b never names the occupant, so no SLOT_FREE fires and every later wave stalls.
+#     The lane NUMBER stays, so the next dispatch ("SLOT_FREE") reuses it. FAILED, CRASHED, STALLED and every other state
+#     KEEP the lane: a human decides, and a dead item must keep counting against the cap rather than silently free capacity.
+#   * free_lane is the LEVEL-triggered twin of that edge: orchestrator_monitor._sync_lanes calls it for an occupant whose state
+#     is already QUEUED (a summary written before XACA-1862, where record_state will never see a transition again).
 STATE_STAGE = {
     "QUEUED": "queued", "DISPATCHING": "dispatching", "RUNNING": "coding", "QUESTION_PENDING": "question",
     "IN_REVIEW": "review", "MERGED_PENDING_DONE": "merged", "DONE": "done", "FAILED": "failed",
     "CRASHED": "crashed", "STALLED": "stalled", "CANCELLED": "cancelled", "UNKNOWN": "unknown",
 }
-LANE_FREEING_STATES = ("DONE", "CANCELLED")   # the ONLY states that null `current` (see the contract above)
+LANE_FREEING_STATES = ("DONE", "CANCELLED", "QUEUED")   # the ONLY states that null `current` (see the contract above)
 
 
 def _stage_of(status):
@@ -673,9 +681,12 @@ def lanes_view(summary):
 
 
 def _find_lane(lanes, item):
+    """The lane whose `current` names item: an object {"id": ...} or a bare string id (XACA-1862-013: compute_slot_free and
+    kb-dispatch both treat a string `current` as an occupant, so the lane writers must find it too)."""
     for e in lanes:
         cur = e.get("current") if isinstance(e, dict) else None
-        if isinstance(cur, dict) and cur.get("id") == item:
+        cid = cur.get("id") if isinstance(cur, dict) else cur
+        if isinstance(cid, str) and cid.strip() == item:
             return e
     return None
 
@@ -743,10 +754,50 @@ def _sync_lane(orch, kanban_dir, run_id, item, to, pr_number, has_pr, ts, now):
         ledger_append(kanban_dir, run_id, KIND_LANE, now=now, item=item, lane=entry.get("lane"), action="free")
     else:
         cur = entry["current"]
+        if not isinstance(cur, dict):           # a legacy string occupant: normalise to the object shape (see LANES)
+            cur = entry["current"] = {"id": item, "prNumber": None}
         cur["status"], cur["stage"] = to, _stage_of(to)
         if has_pr:
             cur["prNumber"] = pr_number
     entry["since"] = ts
+
+
+def _board_item_unclaimed(board, item_id):
+    """True iff the board item is todo/blocked AND carries no orchestration.runId stamp: the board half of the QUEUED
+    derivation (orchestrator_state.derive_item_state). A missing item is NOT unclaimed (fail closed: keep the lane)."""
+    for it in (board or {}).get("backlog") or []:
+        if isinstance(it, dict) and it.get("id") == item_id:
+            orch = it.get("orchestration")
+            stamped = isinstance(orch, dict) and bool(orch.get("runId"))
+            return ostate.resolve_item_status(it) in ("todo", "blocked") and not stamped
+    return False
+
+
+def free_lane(board_file, kanban_dir, release_id, run_id, item_id, now=None, require_unclaimed=False):
+    """Level-triggered lane free (XACA-1862, see LANES): null `current` of the lane item_id occupies, bump `since`, append a
+    `lane` free event; returns the lane number, or None (no write, no event) when the item holds no lane. The caller decides
+    WHEN (orchestrator_monitor frees only a QUEUED occupant). require_unclaimed=True re-checks UNDER the board lock that the
+    item is still todo/blocked with no run stamp, so a kb-dispatch that lands between the caller's snapshot and this write
+    keeps its lane (XACA-1862-014); a claimed item returns None with no write. Refuses (LedgerError) a run that is not the
+    active open one. Under the board lock."""
+    ts = _ts(now)
+    box = {"lane": None}
+
+    def _mut(orch, board):
+        _active_run_check(orch, release_id, run_id)
+        lanes = orch.get("lanes")
+        entry = _find_lane(lanes, item_id) if isinstance(lanes, list) else None
+        if entry is None:
+            return
+        if require_unclaimed and not _board_item_unclaimed(board, item_id):
+            return
+        entry["current"] = None
+        entry["since"] = ts
+        ledger_append(kanban_dir, run_id, KIND_LANE, now=now, item=item_id, lane=entry.get("lane"), action="free")
+        box["lane"] = entry.get("lane")
+
+    write_summary(board_file, release_id, _mut, pass_board=True)
+    return box["lane"]
 
 
 def _active_run_check(orch, release_id, run_id):
@@ -760,7 +811,7 @@ def record_state(board_file, kanban_dir, release_id, run_id, item, to, detail=No
     """Append a `state` event AND update summary items[item] in ONE locked call. `from` is read from the summary.
     extra may carry terminal=... / prNumber=...: they ride on the event and are stored on items[item]. Refuses a run that
     is not the active, open run, and an item the run does not track. Also mirrors the change onto the item's lane (see LANES:
-    DONE / CANCELLED null the lane's `current` and keep the lane number; every other state keeps the lane)."""
+    DONE / CANCELLED / QUEUED null the lane's `current` and keep the lane number; every other state keeps the lane)."""
     ts = _ts(now)
     # ONE vocabulary: the summary, the lanes and the ledger all carry orchestrator_state.STATES names, so a reader
     # (status, LCARS, ticket-lamp) never has to guess a spelling.
