@@ -57,6 +57,17 @@ whose data is absent is UNMET ("cannot verify"), never assumed satisfied.
   It is NOT enforced once close-out's mergeProduction is `done` for a record bound to the current S/stageSha: from then on
   production's tip descends FROM the build, so containment reads False by construction, and the check already passed
   before the tag. A stale / unbound / malformed record never excuses it.
+  Version source at the build (XACA-1736): close-out must not tag `v<version>` on a build whose version_source file
+  (VERSION for academy) says another version (REL-2026-Q4-070 tagged v1.25.1 on a VERSION of 1.25.0). The server reads
+  the file AT the close-out-bound sha (release_version_source.version_source_fact) and sets, for a release at S:
+    `version_source`: {"state": "match"|"mismatch"|"unknown"|"skip", "sha", "platforms": [rows]}.
+                      skip = the team has no version_source for any release platform (the ONLY affirmative skip);
+                      unknown (or any malformed / unrecognised value) fails closed.
+  ABSENT means "not supplied" and does NOT refuse: the server always supplies it at S, and pure callers that own no
+  git/config (fixtures, the resume planner without a repo) would otherwise be refused for a fact they cannot compute.
+  Fires (CODE_VERSION_SOURCE_MISMATCH, blocking) at the exit of S and on a PROD-target promote, ONCE per evaluate.
+  Not enforced once close-out's own `tag` step is `done` for a record bound to the current S/stageSha (the tag exists;
+  refusing would only strand the rest of close-out).
 """
 from datetime import datetime, timezone
 
@@ -108,11 +119,15 @@ CODE_PRODUCTION_NOT_IN_BUILD = "PRODUCTION_NOT_IN_BUILD"
 # XACA-1703: at GAMMA the linked CR is not yet cr-completed. Blocking; `kb-release close-out` completes a CR that is
 # deployed-prod/emergency-deployed and bound to the current build (kb-cr complete) before it promotes.
 CODE_GAMMA_CR_NOT_COMPLETED = "GAMMA_CR_NOT_COMPLETED"
+# XACA-1736: the version_source file at the close-out-bound build disagrees with the release version (or could not be
+# read for a team that configures one). Blocking and a HARD refusal in both gate modes (server wiring).
+CODE_VERSION_SOURCE_MISMATCH = "VERSION_SOURCE_MISMATCH"
 REASON_CODES = (CODE_OTHER, CODE_GAMMA_CONFIRM_REQUIRED, CODE_GAMMA_ACTOR_NOT_LEAD, CODE_WAIVER_NEEDED,
                 CODE_TEST_MISSING, CODE_WAIVER_VOID_SHA, CODE_WAIVER_VOID_INVALID, CODE_WAIVER_NOT_LEAD,
                 CODE_NOT_IN_LEADS, CODE_LEADS_NOT_CONFIGURED, CODE_CR_SUPPORT_DISABLED,
                 CODE_MANDATORY_STAGE_SKIPPED, CODE_ROLLBACK_SHA_UNKNOWN, CODE_ROLLBACK_OVERRIDE_CONFLICT,
-                CODE_CLOSEOUT_INCOMPLETE, CODE_PRODUCTION_NOT_IN_BUILD, CODE_GAMMA_CR_NOT_COMPLETED)
+                CODE_CLOSEOUT_INCOMPLETE, CODE_PRODUCTION_NOT_IN_BUILD, CODE_GAMMA_CR_NOT_COMPLETED,
+                CODE_VERSION_SOURCE_MISMATCH)
 INFORMATIONAL_CODES = frozenset((CODE_CR_SUPPORT_DISABLED,))
 CR_SUPPORT_DISABLED_MSG = "CR support disabled"
 
@@ -721,6 +736,52 @@ def _production_refusal(release, order, target_stage, cur, ctx):
             % (S, "unknown" if "production_in_build" in ctx else "absent"), data)
 
 
+def _tagged_for_build(release, S):
+    """XACA-1736: True only when release.closeOut is bound to S and the CURRENT stageSha[S] and its `tag` step is `done`
+    (same binding rule as _production_merged_for_build). Anything malformed/unbound/stale is False."""
+    co = release.get("closeOut")
+    if not isinstance(co, dict) or not isinstance(co.get("steps"), dict) or _closeout_binding_gap(release) is not None:
+        return False
+    if (_closeout_binding(co) or (None, None))[0] != S:
+        return False
+    tg = co["steps"].get("tag")
+    return isinstance(tg, dict) and tg.get("status") == "done"
+
+
+def _version_refusal(release, order, target_stage, cur, ctx):
+    """XACA-1736: the (message, data) of a VERSION_SOURCE_MISMATCH refusal, or None. See the module docstring."""
+    if "version_source" not in ctx:
+        return None   # not supplied (pure callers); the server always supplies it at S
+    try:
+        S = closeout_stage(order)
+    except ValueError:
+        return None   # closeout_gap() reports an unresolvable S on a PROD target
+    at = [w for w, hit in (("exit", cur == S), ("prod-entry", target_stage == "PROD")) if hit]
+    if not at:
+        return None
+    fact = ctx.get("version_source")
+    state = fact.get("state") if isinstance(fact, dict) else None
+    if state in ("match", "skip"):
+        return None
+    if _tagged_for_build(release, S):
+        return None
+    rows = [r for r in (fact.get("platforms") if isinstance(fact, dict) else None) or [] if isinstance(r, dict)]
+    data = {"stage": S, "sha": _graded_sha(release, S), "at": at, "releaseId": release.get("id"), "state": state,
+            "platforms": rows}
+    fix = ("Bump the version file to the release version through a PR into the release branch, record the new build "
+           "as stageSha.%s (re-run the %s tests on it), then re-run close-out" % (S, S))
+    if state == "mismatch":
+        bad = ["%s: %s reads %s, release is %s" % (r.get("platform"), r.get("file"), r.get("found"), r.get("expected"))
+               for r in rows if r.get("state") == "mismatch"]
+        return ("the version file at stageSha.%s disagrees with the release version (%s); close-out would tag a build "
+                "that reports the wrong version. %s" % (S, "; ".join(bad) or "details unavailable", fix), data)
+    bad = ["%s: %s" % (r.get("platform"), r.get("file")) for r in rows if r.get("state") != "match"]
+    return ("could not verify the version file at stageSha.%s says the release version (context.version_source %s%s); "
+            "make sure the build commit is in the team clone (`git fetch`), the version_sources entry has file and "
+            "match_pattern, and the release has a version, then retry. If the version is wrong: %s"
+            % (S, state if isinstance(state, str) else "malformed", (": " + "; ".join(bad)) if bad else "", fix), data)
+
+
 def _cr_closed_by_close_out(release, cr):
     """XACA-1353-016: the GAMMA-exit CR condition for a release whose CRs were closed BY ITS OWN close-out. crClose
     (spec 13.4, before the PROD promote) moves every linked CR to cr-closed, which release_cr_feed reads as "no open CR",
@@ -970,6 +1031,9 @@ def evaluate(release, target_stage, flow_config, *, cr_support_enabled, actor=No
         _pr = _production_refusal(release, order, target_stage, cur, ctx)   # XACA-1705: exit of S and PROD entry
         if _pr:
             reasons.append("PROD close-out: " + _pr[0], CODE_PRODUCTION_NOT_IN_BUILD, _pr[1])
+        _vr = _version_refusal(release, order, target_stage, cur, ctx)   # XACA-1736: exit of S and PROD entry
+        if _vr:
+            reasons.append("PROD close-out: " + _vr[0], CODE_VERSION_SOURCE_MISMATCH, _vr[1])
         if target_stage == "PROD":
             # XACA-1353-004 (spec 13.4) + XACA-1446-003: PROD entry is the LAST act of close-out, from whichever
             # stage S is last before PROD (GAMMA, or QA/BETA/... when GAMMA is off). Keyed on the TARGET, not the

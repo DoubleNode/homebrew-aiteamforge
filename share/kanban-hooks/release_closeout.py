@@ -159,6 +159,17 @@ def stage_sha(release, stage):
     return _valid_sha(ss.get(stage)) if isinstance(ss, dict) else None
 
 
+def bound_sha(release, stage):
+    """XACA-1705-012 / XACA-1736: the sha close-out tags for `stage`: the live record's bound sha only while the record
+    is valid AND current (binding_gap None) and bound to `stage`; else stageSha[stage]. None when neither is valid."""
+    co = (release or {}).get("closeOut")
+    if isinstance(co, dict) and binding_gap(release) is None:
+        b = close_out_binding(co)
+        if b is not None and b[0] == stage:
+            return b[1]
+    return stage_sha(release, stage)
+
+
 def binding_gap(release):
     """Why the live closeOut is not bound to the CURRENT build of its OWN stage, or None when it is. Record-
     intrinsic: compares close_out_binding(record) with stageSha[record.stage]; flow config plays no part (the

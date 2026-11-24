@@ -254,6 +254,27 @@ def sha_reachable_from_tip(repo_root, branch, sha, *, run=subprocess.run):
         return None
 
 
+def file_at_sha(repo_root, sha, path, *, run=subprocess.run):
+    """XACA-1736: the text of `path` (repo-relative, '/'-separated) in commit `sha`, or None. Reads the local
+    object store only and NEVER fetches (the server calls it under the board lock): a commit that is not local, a
+    path absent at that commit, a path escaping the repo, or any git error gives None, so callers fail closed."""
+    if not isinstance(sha, str) or not _SHA.fullmatch(sha) or not isinstance(path, str):
+        return None
+    path = path.strip()
+    while path.startswith("./"):
+        path = path[2:]
+    if not path or path.startswith(("/", "-")) or ".." in path.split("/"):
+        return None
+    try:
+        git = _Git(repo_root, run)
+        if git("cat-file", "-e", sha + "^{commit}", ok=(0, 1, 128)).returncode != 0:
+            return None
+        r = git("show", "%s:%s" % (sha, path), ok=(0, 128))
+        return r.stdout if r.returncode == 0 else None
+    except (ValueError, RuntimeError, OSError):
+        return None
+
+
 _CONFLICT_ENTRY = re.compile(r"(\d{6}) ([0-9a-f]{40,64}) ([123])\t(.+)", re.S)
 
 

@@ -67,7 +67,7 @@ def _slots(scheduled, tests, sha, t0, now):
 
 
 def resume_plan(release, *, flow_config, cr_support_enabled, items=None, other_releases=None, manual_tests=(),
-                scheduled=(), cr=None, branch_head=None, now=None, board=None, production=None):
+                scheduled=(), cr=None, branch_head=None, now=None, board=None, production=None, version=None):
     """-> plan dict {release, stage, stageSha, branch, row, action, headline, lines[], offer, run{}}.
 
     row = the spec 5.2 table row (planned | dev-items-open | dev-deploy-pending | tests-running | tests-failed |
@@ -80,7 +80,10 @@ def resume_plan(release, *, flow_config, cr_support_enabled, items=None, other_r
     `production` (XACA-1705-003, optional) = {"inBuild": True|False|None, "check": None|"client-merge"|"same-branch"} as
     the loader resolved it (the SAME two facts the server hands the gate as production_in_build / production_check);
     None = not evaluated (no repo to ask), which adds nothing. At the close-out stage it feeds the gate's own
-    PRODUCTION_NOT_IN_BUILD refusal into the row as a next-action hint."""
+    PRODUCTION_NOT_IN_BUILD refusal into the row as a next-action hint.
+    `version` (XACA-1736, optional) = the `version_source` fact (release_version_source.version_source_fact) as the
+    loader resolved it, the same fact the server hands the gate; None = not evaluated, which adds nothing. At the
+    close-out stage it feeds the gate's own VERSION_SOURCE_MISMATCH refusal into the row as a next-action hint."""
     now = now or datetime.now(timezone.utc)
     cur, rid = G.current_stage(release), release.get("id")
     sha = G.graded_sha(release, cur)
@@ -122,6 +125,21 @@ def resume_plan(release, *, flow_config, cr_support_enabled, items=None, other_r
         return ("PRODUCTION_NOT_IN_BUILD: could not verify production is contained in the build, so close-out must NOT "
                 "run yet. Next: fetch the production ref / `git submodule update --init` in the release clone, "
                 "then re-run `kb-release close-out %s`. [%s]" % (rid, ref[0]))
+
+    def version_hint():
+        """XACA-1736: the close-out rows' hint when the gate would refuse VERSION_SOURCE_MISMATCH. Uses the gate's own
+        refusal (G._version_refusal: same skip, same tag-done exemption) so the plan and the gate cannot disagree."""
+        if not isinstance(version, dict):
+            return None
+        try:
+            ref = G._version_refusal(release, G.enabled_stages(flow_config, cr_support_enabled=cr_support_enabled),
+                                     "PROD", cur, {"version_source": version})
+        except ValueError:
+            return None
+        if not ref:
+            return None
+        return ("VERSION_SOURCE_MISMATCH: close-out must NOT run yet (it would tag a build whose version file does not "
+                "say the release version). [%s]" % ref[0])
 
     if cur == "PROD":
         return done("terminal", "none", "Release is at PROD (terminal): nothing to resume.")
@@ -235,7 +253,7 @@ def resume_plan(release, *, flow_config, cr_support_enabled, items=None, other_r
     if cur != "GAMMA" and cur == s_stage:
         return done("closeout-ready", "offer-closeout", "%s %s: PROD close-out is next (%s is the last stage before PROD)."
                     % (cur, status, cur),
-                    production_hint(),
+                    production_hint(), version_hint(),
                     ("Run `kb-release close-out %s` (tag, merges, branch delete, CR close, then the gated promote); PROD is "
                      "the deploy-confirm stage, so only a lead (releaseConfig.leads) can run it; the gate refuses a bare "
                      "promote until it is done." % rid)
@@ -255,7 +273,7 @@ def resume_plan(release, *, flow_config, cr_support_enabled, items=None, other_r
             return done("gamma-cr-complete-pending", "offer-closeout",
                         "GAMMA %s: CR %s %s and not yet cr-completed; the PROD promote is refused until %s."
                         % (status, names, "is" if len(ready) == 1 else "are", "it is" if len(ready) == 1 else "they are"),
-                        production_hint(),
+                        production_hint(), version_hint(),
                         "`kb-release close-out %s` completes %s for you (it runs `kb-cr complete`), then tags, merges and "
                         "promotes; do not run the promote by hand." % (rid, ids))
         why = "; ".join("CR %s (%s): %s" % (x["id"], x["crState"], x.get("why") or
@@ -268,7 +286,7 @@ def resume_plan(release, *, flow_config, cr_support_enabled, items=None, other_r
                 % (status, names, rid, "it" if len(ready) == 1 else "them")) if ready else \
                ("GAMMA %s: a deployed CR is not yet cr-completed and `kb-release close-out %s` cannot complete it; the PROD "
                 "promote is refused until the CR is cr-completed." % (status, rid))
-        return done("gamma-cr-complete-pending", "offer-closeout", head, production_hint(),
+        return done("gamma-cr-complete-pending", "offer-closeout", head, production_hint(), version_hint(),
                     "Close-out completes CRs all-or-nothing, so fix first: %s. Then re-run `kb-release close-out %s`; do "
                     "not run the promote by hand." % (why or "no completable CR", rid))
     if cur == "GAMMA" and cr_support_enabled and isinstance(cr, dict) and isinstance(cr.get("feed"), dict):
@@ -286,7 +304,7 @@ def resume_plan(release, *, flow_config, cr_support_enabled, items=None, other_r
                         "so the current build gets its own CR; do not run the promote by hand." % (rid, rid))
     if cur == "GAMMA":
         return done("gamma-passed", "offer-promote", "GAMMA %s: offer the PROD promote (session promote)." % status,
-                    production_hint(),
+                    production_hint(), version_hint(),
                     # XACA-1353-004: a branch-per-release release enters PROD only through the close-out
                     ("Close-out is the PROD entry: run `kb-release close-out %s` (tag, merges, branch delete, CR close, "
                      "then the gated promote); the gate refuses a bare promote until it is done." % rid)
@@ -399,6 +417,30 @@ def _production_fact(rel, rc, crsupport, repo_dir):
     return {"inBuild": release_branches.production_contained_in(repo_dir, cfg["production"], sha), "check": None}
 
 
+def _version_fact(rel, rc, crsupport, repo_dir, team):
+    """XACA-1736: the `version_source` fact for resume_plan, resolved the way the server resolves it
+    (lcars-ui/server.py _version_source_fact): the team's version_sources, the file read AT the bound (else
+    stageSha.<S>) sha. None when it cannot matter (not at the close-out stage S, no repo or team to ask): the plan then
+    adds nothing, it never invents a refusal. Never raises."""
+    if not repo_dir or not team:
+        return None
+    cr_on = isinstance(crsupport, dict) and crsupport.get("enabled") is True
+    try:
+        s_stage = G.closeout_stage(G.enabled_stages(rc.get("flowConfig") or {}, cr_support_enabled=cr_on))
+    except ValueError:
+        return None
+    if G.current_stage(rel) != s_stage:
+        return None
+    try:
+        import aiteamforge_paths as _ap
+        import release_closeout as _rc
+        import release_version_source as _vs
+        return _vs.team_fact(rel, _rc.bound_sha(rel, s_stage), team, _ap.read_config_view(), repo_dir,
+                             _ap.get_team_version_sources, release_branches.file_at_sha)
+    except Exception:  # noqa: BLE001 -- unreadable config: the server's gate is still the enforcement
+        return {"state": "unknown", "sha": None, "platforms": []}
+
+
 def load_plan(kanban_dir, release_id, repo_dir=None, now=None):
     from release_providers import load_providers, providers_for_stage
     from release_runner import build_expected
@@ -457,7 +499,8 @@ def load_plan(kanban_dir, release_id, repo_dir=None, now=None):
                   "feed": ap.release_cr_feed(board, rel, now.isoformat())}
     plan = resume_plan(rel, flow_config=rc.get("flowConfig") or {}, cr_support_enabled=cr_on, items=items,
                        other_releases=board.get("releases") or [], manual_tests=manual, scheduled=sched, cr=cr,
-                       branch_head=head, now=now, board=board, production=_production_fact(rel, rc, cs, repo_dir))
+                       branch_head=head, now=now, board=board, production=_production_fact(rel, rc, cs, repo_dir),
+                       version=_version_fact(rel, rc, cs, repo_dir, rel.get("team") or board.get("team")))
     plan["name"] = rel.get("name")
     return plan
 

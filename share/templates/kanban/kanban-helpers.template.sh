@@ -2820,6 +2820,33 @@ _kb_release_close_out_production_ok() {
     return 1
 }
 
+# XACA-1736: does the version file AT the bound build say the release version? Same promote dry-run, VERSION_SOURCE_MISMATCH
+# only. A fresh start already refuses it through _kb_release_close_out_ready (any non-allowlisted code blocks); a RESUMED
+# record skips that preflight, so this guards every path before the tag step. The gate stops asking once the record's
+# own tag step is done for the current build, so a late resume is not refused.
+# rc 0 not flagged | 1 flagged (reasons + the next action on stderr), or the gate cannot be asked (fails closed).
+_kb_release_close_out_version_ok() {
+    local release_id="${1-}" n st
+    _kb_release_close_out_gate_info "$release_id" || return 1
+    n=$(printf '%s' "$_KB_REL_BODY" | jq -r '[.reasonCodes[]? | select(. == "VERSION_SOURCE_MISMATCH")] | length' 2>/dev/null)
+    [[ "$n" == "0" ]] && return 0
+    # The gate's reasonData.state says WHICH failure: only a real mismatch warrants a bump PR. Anything else (unknown, a
+    # malformed fact, an unreadable answer) gets the could-not-verify wording, so a correct VERSION is never "bumped".
+    st=$(printf '%s' "$_KB_REL_BODY" | jq -r '[range(0; (.reasonCodes | length)) as $i | select(.reasonCodes[$i] == "VERSION_SOURCE_MISMATCH") | (.reasonData[$i].state // "")] | first // ""' 2>/dev/null)
+    if [[ "$st" == "mismatch" ]]; then
+        echo "Error: $release_id close-out refused: the version file in the build it would tag does not say the release version (VERSION_SOURCE_MISMATCH):" >&2
+    else
+        echo "Error: $release_id close-out refused: could not verify the version file in the build it would tag says the release version (VERSION_SOURCE_MISMATCH):" >&2
+    fi
+    printf '%s' "$_KB_REL_BODY" | jq -r '[range(0; (.reasons | length)) as $i | select(.reasonCodes[$i] == "VERSION_SOURCE_MISMATCH") | .reasons[$i]][] | "  - " + .' >&2 2>/dev/null
+    if [[ "$st" == "mismatch" ]]; then
+        echo "  next: bump the version file via a PR into the release branch, record that build as stageSha.${_KB_CO_STAGE:-<S>} (re-run its tests), then re-run close-out" >&2
+    else
+        echo "  next: make the build commit readable (git fetch in the team clone) and check the team's version_sources entry and the release version, then re-run close-out" >&2
+    fi
+    return 1
+}
+
 # XACA-1446 round 2 (-019): the lead question alone, asked of the promote dry-run (actor + confirmDeploy), BEFORE a
 # git action. $2 = the release JSON as the caller last read it. rc 1 (reasons on stderr) when the dry-run carries
 # GAMMA_ACTOR_NOT_LEAD or LEADS_NOT_CONFIGURED, or when the gate cannot be asked (fails closed). A release already AT PROD
@@ -2892,6 +2919,10 @@ _kb_release_close_out_run() {
     # A fresh start already passed this through _kb_release_close_out_ready; a resumed record never does, so it is asked here.
     local _co_pout _co_prc
     _co_pout=$(_kb_release_close_out_production_ok "$release_id" 2>&1); _co_prc=$?
+    # XACA-1736: and the version file at that build must say the release version (same paths, same placement).
+    if (( _co_prc == 0 )); then
+        _co_pout=$(_kb_release_close_out_version_ok "$release_id" 2>&1); _co_prc=$?
+    fi
     if (( _co_prc != 0 )); then
         [[ "$dry_run" == "1" ]] && echo "[dry-run] would refuse:" >&2
         printf '%s\n' "$_co_pout" >&2

@@ -248,6 +248,13 @@ except ImportError as e:  # pragma: no cover
     _release_closeout = None
     print(f"[LCARS] Warning: release_closeout unavailable, close-out step-state writes fail closed: {e}")
 _PIB_ABSENT = object()   # XACA-1705: _production_in_build "fact does not apply" (key left out of the context)
+# XACA-1736: the version_source-at-build fact (pure; git is injected). Missing module = the fact is "unknown" and the
+# gate refuses close-out (fails closed), never "no check".
+try:
+    import release_version_source as _release_version_source
+except ImportError as e:  # pragma: no cover
+    _release_version_source = None
+    print(f"[LCARS] Warning: release_version_source unavailable, close-out version check fails closed: {e}")
 
 # CR approval providers (XACA-1349-014): feeds release.cr to the gate. Missing module = no feed =
 # the gate sees no CR state and refuses (fail closed).
@@ -10266,17 +10273,45 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             return _PIB_ABSENT
         # XACA-1705-012: the bound sha counts only while the record is valid AND current (binding_gap is None, the
         # gate's own resume-exemption rule) and bound to S; a stale/foreign record falls back to stageSha[S].
-        co = release.get('closeOut')
-        bound = None
-        if isinstance(co, dict) and _release_closeout.binding_gap(release) is None:
-            bound = _release_closeout.close_out_binding(co)
-            if bound is not None and bound[0] != s_stage:
-                bound = None
-        sha = bound[1] if bound else _release_closeout.stage_sha(release, s_stage)
+        sha = self._closeout_bound_sha(release, s_stage)
         root = self._release_repo_root(team)
         if root is None or not isinstance(sha, str):
             return None
         return _release_branches.production_contained_in(root, cfg['production'], sha)
+
+    def _version_source_fact(self, release, team, board_raw, flow=None):
+        """XACA-1736: the `version_source` gate fact (release_version_source.version_source_fact): does the team's
+        version_source file, read AT the close-out-bound build (git show <sha>:<file>, never the working tree), say
+        release.platforms.<p>.version? _PIB_ABSENT (caller omits the key) when the release is not at the close-out
+        stage S (the gate reads the fact only on exit of S / a PROD-target promote, which is only reachable from S).
+        Same sha as _production_in_build: the valid, current close-out record's bound sha, else stageSha[S].
+        Read-only and never raises: anything unreadable gives state "unknown" for a configured platform, and an
+        unreadable config / missing module gives a bare {"state": "unknown"} (the gate fails closed on both). A team
+        with no version_source for any release platform gives "skip"."""
+        try:
+            order = _release_gate.enabled_stages(
+                flow or {}, cr_support_enabled=self._crsupport_enabled(board_raw))
+            s_stage = _release_gate.closeout_stage(order)
+            if _release_gate.current_stage(release) != s_stage:
+                return _PIB_ABSENT
+        except Exception:  # noqa: BLE001 -- S unresolvable: closeout_gap reports it; this fact is not asked for
+            return _PIB_ABSENT
+        unknown = {"state": "unknown", "sha": None, "platforms": []}
+        if _release_version_source is None or _release_branches is None or not _AITEAMFORGE_PATHS_AVAILABLE:
+            return unknown
+        try:
+            import aiteamforge_paths as _ap
+            return _release_version_source.team_fact(
+                release, self._closeout_bound_sha(release, s_stage), team, _ap.read_config_view(),
+                self._release_repo_root(team), _ap.get_team_version_sources, _release_branches.file_at_sha)
+        except Exception:  # noqa: BLE001 -- never raises; unknown fails closed in the gate
+            return unknown
+
+    @staticmethod
+    def _closeout_bound_sha(release, s_stage):
+        """XACA-1705-012 / XACA-1736: the sha close-out will tag: the record's bound sha only while the record is valid
+        AND current (binding_gap None) and bound to S, else stageSha[S]. None when unreadable."""
+        return _release_closeout.bound_sha(release, s_stage) if _release_closeout is not None else None
 
     def _prod_tag_lookup(self, repo_root, branch, prefix, sort):
         """XACA-1349-004: the injectable production-tag lookup (tests replace it)."""
@@ -10339,6 +10374,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         _pib = self._production_in_build(release, team, board_raw, data.get('flowConfig'))
         if _pib is not _PIB_ABSENT:
             ctx["production_in_build"] = _pib
+        # XACA-1736: the version_source file at the close-out-bound build must say the release version.
+        _vsf = self._version_source_fact(release, team, board_raw, data.get('flowConfig'))
+        if _vsf is not _PIB_ABSENT:
+            ctx["version_source"] = _vsf
         # XACA-1349-014: the release.cr feed. release_gate reads release.cr (CR exit: cr-approved +
         # approval time + deploy window; GAMMA exit: cr-completed) but nothing persists it, so it is
         # built here from the board's CRs, with due assumed approvals stamped first by the SAME core
@@ -11017,6 +11056,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         or _release_gate.CODE_ROLLBACK_OVERRIDE_CONFLICT in reasons.codes
                         or _release_gate.CODE_CLOSEOUT_INCOMPLETE in reasons.codes   # XACA-1353-013: PROD is the LAST act of close-out
                         or _release_gate.CODE_PRODUCTION_NOT_IN_BUILD in reasons.codes   # XACA-1705: never tag/promote a build lacking production
+                        or _release_gate.CODE_VERSION_SOURCE_MISMATCH in reasons.codes   # XACA-1736: never tag a build whose version file disagrees
                         or release.get('status') == _release_gate.STATUS_RELEASED   # XACA-1726-002: terminal
                         or crsupport_malformed)
                 # XACA-1375: the informational CR_SUPPORT_DISABLED reason (release stranded at CR)

@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1736: Close-out refuses a build whose version file disagrees with the release version (XACA-1736)
+- Tap files updated in this publish: `share/kanban-hooks/release_branches.py`,`share/kanban-hooks/release_closeout.py` `share/kanban-hooks/release_gate.py`,`share/kanban-hooks/release_resume.py` `share/kanban-hooks/release_version_source.py`,`share/lcars-ui/server.py` `share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1938: Run-planner resolves worktree-absolute hotspot paths under its own repo root (XACA-1938)
 - Tap files updated in this publish: `share/kanban-hooks/orchestrator_contention.py`. Run `brew upgrade aiteamforge` to receive them.
 
