@@ -81,7 +81,12 @@
  *
  *   _crGapInfo(cr, state, evidenceMap)
  *     Combines the above into one decision object:
- *       { mapAvailable, missing, approvalOnlyGap, missingLabels, waiverAllowed }
+ *       { mapAvailable, missing, approvalOnlyGap, missingLabels, waiverAllowed,
+ *         waiverRetiredV2 }
+ *     waiverRetiredV2 (XACA-1760, D1) is true for a v2-marked CR
+ *     (cr_lifecycle === 'v2'): the approval waiver is retired for v2, so
+ *     waiverAllowed is then ALWAYS false and the modal names the v2 paths
+ *     (approve --assumed / emergency-deploy) instead of offering a waiver.
  *     mapAvailable is false when evidenceMap itself is falsy (map failed to
  *     load / not yet loaded) — every other field is then a safe empty
  *     default so a caller that forgets to check mapAvailable still reads
@@ -164,6 +169,14 @@
         return Object.prototype.hasOwnProperty.call(WAIVER_ALLOWED_CR_STATES, crState);
     }
 
+    // XACA-1760 (D1, the lead's decision): the approval waiver is RETIRED
+    // for v2 CRs. cr_lifecycle === 'v2' is the ONLY v2 signal (same as
+    // kb-cr.sh _kb_cr_is_v2 / server.py _cr_is_v2). Mirrors kb-cr.sh
+    // _kb_cr_waive_approval rc 7 and server.py _cr_v2_waiver_refusal.
+    function crWaiverRetiredForCr(cr) {
+        return !!(cr && cr.cr_lifecycle === 'v2');
+    }
+
     // ─── Human labels ─────────────────────────────────────────────────────────
 
     // Small named table for the tokens operators actually see today. Anything
@@ -217,16 +230,20 @@
 
     function crGapInfo(cr, state, evidenceMap) {
         if (!evidenceMap) {
-            return { mapAvailable: false, missing: [], approvalOnlyGap: false, missingLabels: [], waiverAllowed: false };
+            return { mapAvailable: false, missing: [], approvalOnlyGap: false, missingLabels: [], waiverAllowed: false,
+                     waiverRetiredV2: crWaiverRetiredForCr(cr) };
         }
         var sep = evidenceMap.orSeparator || '|';
         var missing = crMissingEvidence(cr, state, evidenceMap);
+        var retired = crWaiverRetiredForCr(cr);
         return {
             mapAvailable:    true,
             missing:         missing,
             approvalOnlyGap: crApprovalOnlyGap(missing, sep),
             missingLabels:   crMissingEvidenceLabels(missing, sep),
-            waiverAllowed:   crWaiverAllowedForCrState(cr && cr.crState),
+            // XACA-1760: never offered for a v2 CR, whatever its crState.
+            waiverAllowed:   !retired && crWaiverAllowedForCrState(cr && cr.crState),
+            waiverRetiredV2: retired,
         };
     }
 
@@ -263,6 +280,7 @@
         _crMissingEvidence:          crMissingEvidence,
         _crApprovalOnlyGap:          crApprovalOnlyGap,
         _crWaiverAllowedForCrState:  crWaiverAllowedForCrState,
+        _crWaiverRetiredForCr:       crWaiverRetiredForCr,
         _crEvidenceTokenLabel:       crEvidenceTokenLabel,
         _crMissingEvidenceLabels:    crMissingEvidenceLabels,
         _crGapInfo:                  crGapInfo,

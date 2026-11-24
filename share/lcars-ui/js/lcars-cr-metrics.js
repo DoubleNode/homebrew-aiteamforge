@@ -36,6 +36,11 @@
  *   countWaived(crs)
  *     XACA-1239: count of CRs carrying a recorded approval waiver
  *     (timestamps.cr_approval_waived_at). Unwindowed — see doc comment.
+ *     LEGACY-ONLY going forward (XACA-1760, D1): the waiver is retired for
+ *     v2 CRs (`kb-cr waive-approval` refuses them, rc 7), so new waivers
+ *     only ever land on legacy CRs. Deliberately NOT filtered by
+ *     cr_lifecycle: a waiver recorded on a v2 CR before XACA-1760 is real
+ *     audit history and stays counted, never hidden or reclassified.
  *
  * opts shape: { windowDays: number (default 14), now: number (default Date.now()) }
  *
@@ -425,7 +430,9 @@
 
     /**
      * XACA-1239: count CRs carrying a recorded approval waiver
-     * (timestamps.cr_approval_waived_at). Never label a waiver as an
+     * (timestamps.cr_approval_waived_at). Legacy-only for NEW waivers
+     * (XACA-1760: retired for v2), but counts every record that carries
+     * one, pre-XACA-1760 v2 waivers included. Never label a waiver as an
      * approval — this is a distinct, additive metric, not a substitute for
      * any approval count.
      *

@@ -121,7 +121,7 @@ fi
 #   Container lifecycle (v2.0 — state + timestamp, atomic — argument starts with CR-):
 #   kb-cr submit  <CR-ID>
 #   kb-cr approve <CR-ID> [--by <login>] [--name "<name>"] [--assumed]   (aliases: --approver / --approver-name)
-#   kb-cr waive-approval <CR-ID> --reason "<text>" [--actor <name>]  [XACA-1239 — evidence only, no crState change]
+#   kb-cr waive-approval <CR-ID> --reason "<text>" [--actor <name>]  [XACA-1239 — evidence only, no crState change; legacy CRs only — refused for v2, XACA-1760]
 #   kb-cr reject  <CR-ID> [--reason "<text>"]
 #   kb-cr hold    <CR-ID> [--reason "<text>"]
 #   kb-cr start-dev  <CR-ID>
@@ -779,7 +779,11 @@ _kb_cr_state_entry_ts_field() {
 # `deployed-dev` and `deployed-prod` accept EITHER a real cr_approved_at OR a
 # recorded cr_approval_waived_at (kb-cr waive-approval — XACA-1239-002) as
 # evidence the CR was deliberately moved forward without approval, not that
-# approval was fabricated. A waiver is new evidence, never a substitute value
+# approval was fabricated. (LEGACY CRs only: a v2 CR has no implementing /
+# deployed-dev stage and enters deployed-prod only from cr-approved, so the
+# waiver is retired for v2 and `waive-approval` refuses it — XACA-1760 D1. The
+# row stays per-state; the per-lifecycle rule lives in _kb_cr_waive_approval.)
+# A waiver is new evidence, never a substitute value
 # written into cr_approved_at itself — readers must still be able to tell the
 # two apart (see approvalWaiver in cr-schema.json). Consumers of this map
 # (_kb_cr_missing_evidence here, and the validator/endpoint mirrors below)
@@ -1263,7 +1267,13 @@ _kb_cr_stamp_state_entry() {
                 # "approval is one of the missing lines" and needs no separate
                 # single-field case.
                 if [[ "$missing" == *cr_approval_waived_at* ]]; then
-                    echo "  Approval not recorded — record it with 'kb-cr approve', or record a waiver with 'kb-cr waive-approval <CR> --reason \"...\"'." >&2
+                    # XACA-1760: the waiver is retired for v2 (waive-approval
+                    # exits 7), so never point a v2 CR at it.
+                    if _kb_cr_is_v2 "$board_file" "$cr_idx"; then
+                        echo "  Approval not recorded — record it with 'kb-cr approve' (or 'kb-cr approve --assumed' when the scheduled approval is due); break-glass: 'kb-cr emergency-deploy'. The approval waiver is retired for v2 CRs." >&2
+                    else
+                        echo "  Approval not recorded — record it with 'kb-cr approve', or record a waiver with 'kb-cr waive-approval <CR> --reason \"...\"'." >&2
+                    fi
                 fi
                 echo "  Writing $ts_field now would create a timestamp for something that did not happen, and nothing downstream can tell a fabricated one from an earned one." >&2
                 echo "  Advance the CR through the verbs that record the evidence (kb-cr submit / approve / …), or re-run with --force to override deliberately — the override is written to the CR activity log." >&2
@@ -1922,6 +1932,17 @@ _kb_cr_container_approve() {
 #   6 — timestamps.cr_submitted_at is missing. Keeps EVIDENCE_PREREQS honest:
 #       cr_approval_waived_at's own row requires cr_submitted_at, same as a
 #       real approval does.
+#   7 — the CR is v2-marked (cr_lifecycle == "v2"; XACA-1760, D1 — the
+#       lead's decision: the waiver is RETIRED for v2). Checked FIRST, before
+#       the reason, so a v2 CR is refused for what it is rather than for a
+#       blank reason. No v2 transition consumes a waiver: implementing /
+#       deployed-dev do not exist for v2, deployed-prod is entered only from
+#       cr-approved, and deployed-prod's timing gate plus cr-completed both
+#       need a real cr_approved_at. A waiver recorded on a v2 CR would be
+#       dead evidence. v2's no-explicit-approval paths are `approve --assumed`
+#       and `emergency-deploy` (break-glass + retroactive approval). Legacy
+#       CRs are unaffected. Waivers ALREADY on a v2 record (recorded before
+#       XACA-1760) are left in place as audit history — never stripped here.
 #   1 — usage error (a required positional is empty) or the board write
 #       itself failed.
 #
@@ -1945,6 +1966,14 @@ _kb_cr_waive_approval() {
     if [[ -z "$board_file" || -z "$cr_idx" || -z "$cr_id" ]]; then
         echo "kb-cr: ERROR: _kb_cr_waive_approval requires <board_file> <cr_idx> <cr_id> <reason> <actor>" >&2
         return 1
+    fi
+
+    # XACA-1760 (D1): the approval waiver is retired for v2 CRs — see rc 7 in
+    # the header. server.py mirrors this as a 400 before it ever shells out.
+    if _kb_cr_is_v2 "$board_file" "$cr_idx"; then
+        echo "kb-cr waive-approval: CR '$cr_id' is part of the v2 lifecycle, where the approval waiver is retired (XACA-1760) — no v2 transition consumes a waiver, and deployed-prod / cr-completed need a real approval." >&2
+        echo "  v2 paths without an explicit approval: 'kb-cr approve $cr_id --assumed' (scheduled assumed approval) or 'kb-cr emergency-deploy $cr_id --justification \"...\"' (break-glass; needs a retroactive approval to complete)." >&2
+        return 7
     fi
 
     # Trim leading/trailing whitespace so a reason of "   " (present but
@@ -7700,6 +7729,8 @@ _kb_cr_help() {
     echo "              cr_submitted_at. --reason is required (non-empty). Container-only"
     echo "              (CR-ID required) — no v1 per-item form. A stopgap until XACA-0899"
     echo "              provides a real approval signal."
+    echo "              LEGACY CRs ONLY (XACA-1760): refused for a v2 CR (exit 7) — use"
+    echo "              'approve --assumed' or 'emergency-deploy' on the v2 lifecycle."
     echo "  reject  <CR-ID> [--reason \"<text>\"]"
     echo "              cr-submitted|cr-held → cr-rejected"
     echo "              Writes timestamps.cr_rejected_at; increments pushback_count;"

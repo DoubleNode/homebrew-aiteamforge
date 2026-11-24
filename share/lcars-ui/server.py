@@ -17868,6 +17868,24 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         legacy_state, timestamps or crState)."""
         return isinstance(cr, dict) and cr.get("cr_lifecycle") == "v2"
 
+    @staticmethod
+    def _cr_v2_waiver_refusal(cr_id, approval_waiver_reason):
+        """XACA-1760 (D1, the lead's decision): the XACA-1239 approval waiver
+        is retired for v2 CRs. Call ONLY for a v2-marked CR. Returns the 400
+        message when the request carries fields.approval_waiver, else None.
+
+        Mirrors kb-cr.sh _kb_cr_waive_approval's rc 7 (the shell refusal is
+        the backstop — the generated script calls that helper) and
+        lcars-cr-evidence-helpers.js crGapInfo's waiverRetiredV2. The derived
+        evidence map is per-STATE and keeps its legacy OR-group unchanged;
+        this is the per-LIFECYCLE rule."""
+        if approval_waiver_reason is None:
+            return None
+        return (f"CR {cr_id} is a v2 CR; the approval waiver is retired for the "
+                f"v2 lifecycle (XACA-1760) — no v2 transition consumes one. Use "
+                f"'kb-cr approve --assumed' (scheduled assumed approval) or "
+                f"'kb-cr emergency-deploy' (break-glass) instead.")
+
     @classmethod
     def _cr_v2_structural_refusal(cls, from_state, to_state):
         """Return kb-cr's refusal reason when a v2 CR can NEVER move
@@ -18199,6 +18217,15 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                          f"kb-cr refuses {cr_id} {from_state} -> {target_state}: {refusal}."},
                         status=400,
                     )
+                    return
+                # XACA-1760 (D1): the approval waiver is retired for v2 CRs.
+                # After the structural refusal so an illegal move still names
+                # its own reason first; before the waiver pre-check so a v2
+                # CR is never told "record it from cr-submitted" when no v2
+                # state can record one. 400: a client error, not a conflict.
+                waiver_refusal = self._cr_v2_waiver_refusal(cr_id, approval_waiver_reason)
+                if waiver_refusal:
+                    self._send_json_response({"ok": False, "error": waiver_refusal}, status=400)
                     return
 
             # ── Close guard (XACA-1667-004) ────────────────────────────────────

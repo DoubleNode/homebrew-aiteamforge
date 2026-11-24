@@ -1761,6 +1761,19 @@
     }
 
     /**
+     * XACA-1760 (D1): blocking message for an approval-only gap on a v2 CR.
+     * The approval waiver is retired for the v2 lifecycle (kb-cr refuses it,
+     * rc 7), so no waiver section is offered; name the v2 paths instead.
+     */
+    function _renderWaiverRetiredV2Message() {
+        const text =
+            'Approval evidence is missing. The approval waiver is retired for v2 CRs. ' +
+            'Record the approval with kb-cr approve (or approve --assumed when the ' +
+            'scheduled approval is due), or use kb-cr emergency-deploy for a break-glass deploy.';
+        return `<div class="cr-sc-gap-blocked" role="alert">${escapeHtml(text)}</div>`;
+    }
+
+    /**
      * XACA-1239-019 (D3): blocking message for an approval-only gap where the
      * CR's CURRENT state is NOT cr-submitted/cr-held — e.g. a --force'd CR
      * sitting in 'implementing', or a 'cr-rejected' CR. A waiver can never be
@@ -1805,6 +1818,9 @@
             // still have an approval-only gap toward a later target; the
             // server would refuse the waiver write from there (409), so the
             // modal must not offer it either.
+            if (gapInfo.waiverRetiredV2) {
+                return _renderWaiverRetiredV2Message() + fieldsHtml;
+            }
             if (!gapInfo.waiverAllowed) {
                 return _renderWaiverNotAllowedMessage() + fieldsHtml;
             }
@@ -2067,6 +2083,7 @@
                 missing:         gapInfo.missing,
                 approvalOnlyGap: gapInfo.approvalOnlyGap,
                 waiverAllowed:   gapInfo.waiverAllowed,
+                waiverRetiredV2: gapInfo.waiverRetiredV2,
             });
         }
 

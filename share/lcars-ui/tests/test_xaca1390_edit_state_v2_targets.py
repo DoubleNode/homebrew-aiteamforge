@@ -306,16 +306,19 @@ def test_generated_script_v2_deployed_prod_to_cr_completed_succeeds(tmp_path):
 
 # ── (5) handler: structural refusal answered 400 BEFORE any shell-out ────────
 
-def _post_transition(tmp_path, cr_state, target, v2=True):
+def _post_transition(tmp_path, cr_state, target, v2=True, fields=None, timestamps=None):
     kdir = tmp_path / "kanban"
     kdir.mkdir()
     cr = {"id": "CR-ZZXACA-20261002-1", "crState": cr_state,
-          "updatedAt": "2026-08-01T00:00:00Z", "timestamps": {}}
+          "updatedAt": "2026-08-01T00:00:00Z", "timestamps": dict(timestamps or {})}
     if v2:
         cr["cr_lifecycle"] = "v2"
     # CR-ID prefix "ZZXACA" lowercases to the (synthetic) team id "zzxaca".
     (kdir / "zzxaca-board.json").write_text(json.dumps({"crs": [cr]}))
-    body = json.dumps({"targetState": target}).encode()
+    req = {"targetState": target}
+    if fields is not None:
+        req["fields"] = fields
+    body = json.dumps(req).encode()
 
     with patch.object(H, "__init__", lambda self, *a, **kw: None):
         h = H.__new__(H)
@@ -346,6 +349,111 @@ def test_handler_does_not_prefilter_legacy_cr(tmp_path):
     sent, run = _post_transition(tmp_path, "cr-submitted", "implementing", v2=False)
     run.assert_called_once()
     assert sent["status"] == 500
+
+
+# ── (5b) XACA-1760 (D1): the approval waiver is retired for v2 CRs ──────────
+# The only v2 move whose target still lists the approval OR-group AND passes
+# the structural check is cr-approved -> deployed-prod. The handler must
+# answer a waiver there with a 400 naming the v2 paths, before any shell-out.
+
+_V2_APPROVED_TS = {"cr_created_at": "2026-08-01T00:00:00Z",
+                   "cr_submitted_at": "2026-08-01T01:00:00Z",
+                   "cr_approved_at": "2026-08-01T02:00:00Z"}
+
+
+def test_handler_rejects_waiver_on_v2_cr_with_400_and_no_shell(tmp_path):
+    sent, run = _post_transition(
+        tmp_path, "cr-approved", "deployed-prod", timestamps=_V2_APPROVED_TS,
+        fields={"approval_waiver": {"reason": "no notice"},
+                "deploy_estimate": "2026-08-02T00:00:00Z"})
+    assert sent["status"] == 400, sent
+    err = sent["payload"]["error"]
+    assert "retired for the v2 lifecycle" in err
+    assert "--assumed" in err and "emergency-deploy" in err
+    run.assert_not_called()
+
+
+def test_handler_v2_structural_refusal_still_named_before_waiver_refusal(tmp_path):
+    sent, run = _post_transition(
+        tmp_path, "cr-submitted", "implementing",
+        fields={"approval_waiver": {"reason": "no notice"}})
+    assert sent["status"] == 400, sent
+    assert "kb-cr refuses" in sent["payload"]["error"]
+    assert "retired" not in sent["payload"]["error"]
+    run.assert_not_called()
+
+
+def test_v2_waiver_refusal_predicate():
+    assert H._cr_v2_waiver_refusal("CR-X", None) is None
+    assert "retired" in H._cr_v2_waiver_refusal("CR-X", "why")
+
+
+def test_handler_legacy_cr_waiver_is_not_refused_by_the_v2_rule(tmp_path):
+    """Legacy cr-submitted -> implementing with a waiver passes every pre-check
+    and reaches the shell (stub raises -> 500), proving the v2 rule is v2-only."""
+    sent, run = _post_transition(
+        tmp_path, "cr-submitted", "implementing", v2=False,
+        timestamps={"cr_submitted_at": "2026-08-01T01:00:00Z"},
+        fields={"approval_waiver": {"reason": "legacy"}})
+    run.assert_called_once()
+    assert sent["status"] == 500, sent
+
+
+def test_generated_script_backstop_kb_cr_refuses_v2_waiver_and_writes_nothing(tmp_path):
+    """Defence in depth: even if the handler pre-check were bypassed, the
+    generated script's _kb_cr_waive_approval refuses a v2 waiver with the
+    XACA-1760 refusal (rc 7), and nothing is written.
+
+    cr-approved -> deployed-prod is the ONLY v2 move that passes the guard and
+    reaches the waiver step. From cr-approved the pre-existing wrong-state
+    refusal (rc 3) would ALSO fail the script, so asserting only "non-zero"
+    is vacuous (QA round 1). Assert the v2 refusal's OWN message, and that the
+    wrong-state message did NOT fire — the v2 check runs first."""
+    board = _board(tmp_path, state="cr-approved", timestamps=dict(_V2_APPROVED_TS),
+                   extra={"approver": {"login": "lead"}, "approval_basis": "manual"})
+    proc, cr = _run_generated(tmp_path, board, "deployed-prod", approval_waiver="no notice")
+    assert proc.returncode != 0, proc.stderr
+    assert "approval waiver is retired" in proc.stderr, proc.stderr
+    assert "a waiver may only be recorded from" not in proc.stderr, proc.stderr
+    assert "cr_approval_waived_at" not in cr["timestamps"]
+    assert "approvalWaiver" not in cr
+    assert cr["crState"] == "cr-approved"
+
+
+def _run_waive_helper(tmp_path, board):
+    """Call _kb_cr_waive_approval directly — the exact helper the endpoint's
+    generated script calls — against <board>, from THIS worktree's kb-cr.sh."""
+    parts = [
+        "set +u",
+        f"source {shlex.quote(str(REPO_ROOT / 'kanban-helpers.sh'))} >/dev/null 2>&1",
+        f"source {shlex.quote(str(REPO_ROOT / 'scripts' / 'kb-cr.sh'))} >/dev/null 2>&1",
+        f"_kb_cr_waive_approval {shlex.quote(str(board))} 0 CR-ZZXACA-20261002-1 'no notice' pytest",
+    ]
+    proc = _run_zsh(parts, _sandbox_env(tmp_path))
+    return proc, json.loads(board.read_text(encoding="utf-8"))["crs"][0]
+
+
+@pytest.mark.parametrize("state", ["cr-submitted", "cr-held"])
+@pytest.mark.parametrize("v2", [True, False], ids=["v2", "legacy"])
+def test_waive_helper_table_waiver_eligible_states(tmp_path, state, v2):
+    """{cr-submitted, cr-held} x {v2, legacy}: from a waiver-eligible state no
+    other refusal can mask the v2 rule. v2 -> rc 7, nothing written; legacy ->
+    the waiver is recorded (the v2 rule is v2-only)."""
+    board = _board(tmp_path, state=state, v2=v2, timestamps={
+        "cr_created_at": "2026-08-01T00:00:00Z",
+        "cr_submitted_at": "2026-08-01T01:00:00Z",
+    }, extra={"approver": {}, "approval_basis": ""})
+    proc, cr = _run_waive_helper(tmp_path, board)
+    if v2:
+        assert proc.returncode == 7, (proc.returncode, proc.stderr)
+        assert "approval waiver is retired" in proc.stderr
+        assert "cr_approval_waived_at" not in cr["timestamps"]
+        assert "approvalWaiver" not in cr
+    else:
+        assert proc.returncode == 0, (proc.returncode, proc.stderr)
+        assert cr["timestamps"].get("cr_approval_waived_at")
+        assert cr["approvalWaiver"]["reason"] == "no notice"
+    assert cr["crState"] == state
 
 
 # ── (6) daily overview: a completed CR is done, never late/pending ───────────

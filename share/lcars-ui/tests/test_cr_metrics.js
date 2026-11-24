@@ -424,3 +424,15 @@ test('rollupAll: fixture cr_approval_waived_count is 0 (no waived CRs in the gol
     var result = metrics.rollupAll(fixture.crs, FIXTURE_OPTS);
     assert.strictEqual(result.cr_approval_waived_count, 0);
 });
+
+// XACA-1760 (D1): the waiver is retired for NEW v2 waivers, but countWaived is
+// deliberately NOT filtered by cr_lifecycle — a waiver already recorded on a
+// v2 CR (before XACA-1760) is audit history and must stay visible.
+test('XACA-1760: countWaived counts a pre-existing v2 waiver alongside a legacy one (no lifecycle filter)', function () {
+    var crs = [
+        { id: 'CR-L', timestamps: { cr_approval_waived_at: '2026-08-01T00:00:00Z' } },
+        { id: 'CR-V2', cr_lifecycle: 'v2', timestamps: { cr_approval_waived_at: '2026-08-02T00:00:00Z' } },
+        { id: 'CR-V2-NONE', cr_lifecycle: 'v2', timestamps: { cr_approved_at: '2026-08-03T00:00:00Z' } },
+    ];
+    assert.strictEqual(metrics.countWaived(crs), 2);
+});

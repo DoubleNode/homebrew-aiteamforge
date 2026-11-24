@@ -285,7 +285,7 @@ test('_crMissingEvidenceLabels: de-dupes and preserves order', () => {
 
 test('_crGapInfo: mapAvailable is false and every field is a safe empty default when evidenceMap is falsy', () => {
     var gap = _crGapInfo(crSubmittedOnly(), 'implementing', null);
-    assert.deepEqual(gap, { mapAvailable: false, missing: [], approvalOnlyGap: false, missingLabels: [], waiverAllowed: false });
+    assert.deepEqual(gap, { mapAvailable: false, missing: [], approvalOnlyGap: false, missingLabels: [], waiverAllowed: false, waiverRetiredV2: false });
 });
 
 test('_crGapInfo: full decision object for the approval-only implementing case (cr-submitted -> waiverAllowed true)', () => {
@@ -1131,4 +1131,46 @@ test('XACA-1390-013: .cr-sc-v2-hint overrides the faint hint style (AA-readable)
     assert.ok(alpha && parseFloat(alpha[1]) >= 0.7, 'hint alpha too low for AA on the black dialog');
     var size = /font-size:\s*(\d+)px/.exec(m[1]);
     assert.ok(size && parseInt(size[1], 10) >= 11, 'hint font-size below 11px');
+});
+
+
+// ─── XACA-1760 (D1): the approval waiver is RETIRED for v2 CRs ───────────────
+// A v2 CR (cr_lifecycle === 'v2') never gets a waiver offered, whatever its
+// crState — mirrors kb-cr.sh _kb_cr_waive_approval rc 7 and server.py
+// _cr_v2_waiver_refusal. Legacy CRs are unchanged (every test above).
+
+function markV2x1760(cr) { cr.cr_lifecycle = 'v2'; return cr; }
+
+test('XACA-1760: _crGapInfo marks a v2 CR waiverRetiredV2 and never waiverAllowed (cr-submitted and cr-held)', () => {
+    [crSubmittedOnly(), crHeldOnly()].forEach(function (cr) {
+        var gap = _crGapInfo(markV2x1760(cr), 'implementing', EVIDENCE_MAP);
+        assert.equal(gap.approvalOnlyGap, true, 'the per-state map still lists the OR-group');
+        assert.equal(gap.waiverRetiredV2, true);
+        assert.equal(gap.waiverAllowed, false);
+    });
+    assert.equal(_crGapInfo(markV2x1760(crSubmittedOnly()), 'implementing', null).waiverRetiredV2, true);
+});
+
+test('XACA-1760: a legacy CR is not marked retired (waiverAllowed unchanged)', () => {
+    var gap = _crGapInfo(crSubmittedOnly(), 'implementing', EVIDENCE_MAP);
+    assert.equal(gap.waiverRetiredV2, false);
+    assert.equal(gap.waiverAllowed, true);
+});
+
+test('XACA-1760: _renderStateCondFields shows the v2 retired message, never the waiver section, for a v2 CR', () => {
+    var sb = buildCondFieldsSandbox({});
+    var gap = _crGapInfo(markV2x1760(crSubmittedOnly()), 'deployed-prod', EVIDENCE_MAP);
+    var html = sb._renderStateCondFields('deployed-prod', gap);
+    assert.ok(html.indexOf('APPROVAL NOT RECEIVED') === -1, html);
+    assert.ok(html.indexOf('cr-sc-waiver-reason') === -1, html);
+    assert.ok(html.indexOf('retired for v2 CRs') !== -1, html);
+    assert.ok(html.indexOf('approve --assumed') !== -1 && html.indexOf('emergency-deploy') !== -1, html);
+    assert.ok(html.indexOf('role="alert"') !== -1, html);
+});
+
+test('XACA-1760: no waiver is ever submitted or sent for a v2 CR', () => {
+    var gap = _crGapInfo(markV2x1760(crSubmittedOnly()), 'implementing', EVIDENCE_MAP);
+    assert.equal(helpers._crWaiverSubmitAllowed(gap, 'a real reason'), false);
+    var fields = helpers._crWaiverPayloadFields(gap, 'a real reason', {});
+    assert.ok(!('approval_waiver' in fields), JSON.stringify(fields));
 });
