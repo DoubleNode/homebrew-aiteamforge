@@ -307,12 +307,17 @@ def model_matches(expected, observed):
 
 def expected_models(events):
     """-> {item: expected model}: from the LATEST dispatch event per item. Nested `dispatch.model` first (the kb-dispatch
-    --json object), then a top-level `model`. Empty / missing -> absent from the map (reported as `unknown`)."""
+    --json object), then a top-level `model`. Empty / missing -> absent from the map (reported as `unknown`).
+    XACA-1829: a REFUSED event created nothing (no window, no session), so it never supersedes the latest real attempt;
+    otherwise a null-model refusal (WORKER_ALIVE, ITEM_NOT_TODO, ...) would erase the expected model and MODEL_MISMATCH
+    would fail open. Same rule as orchestrator_monitor.is_dispatch_attempt."""
     out = {}
     for ev in events or []:
         if ev.get("kind") != "dispatch" or not isinstance(ev.get("item"), str):
             continue
         d = ev.get("dispatch") if isinstance(ev.get("dispatch"), dict) else {}
+        if d.get("outcome") == "REFUSED":
+            continue
         m = d.get("model") if d.get("model") else ev.get("model")
         if isinstance(m, str) and m.strip():
             out[ev["item"]] = m.strip()

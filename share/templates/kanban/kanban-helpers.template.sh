@@ -16792,20 +16792,60 @@ _kb_open_lane_window() {
     return 0
 }
 
+# _kb_dispatch_ledger <board_file> <run> <dispatch-json> [modelSource] [resume 0|1]   (XACA-1829)
+# The ONE writer of a run-ledger `dispatch` event: the kb-dispatch --json object nested under `dispatch` (plus modelSource
+# and resume, which the stdout contract does not carry), `model` lifted to the top level like hook_append does. Keyed on the
+# RUN kb-dispatch already validated, never on the item: a refused or failed item is usually not stamped yet, so the
+# item-keyed _kb_orch_ledger_hook would silently write nothing. Never CREATES a ledger (start_run owns that; ledger_append
+# would O_CREAT one). BEST-EFFORT: always rc 0, warns on stderr, never touches stdout.
+_kb_dispatch_ledger() {
+    local _board="${1-}" _run="${2-}" _obj="${3-}" _ms="${4-}" _rs="${5:-0}" _hdir _py _kdir _item _m _err _rc=0
+    [[ -n "$_board" && -n "$_run" && -n "$_obj" ]] || return 0
+    _hdir="$(_kb_board_settings_script 2>/dev/null)" && _hdir="$(dirname "$_hdir")" || _hdir=""
+    _py="$_hdir/release_orchestrator.py"
+    # No module => no orchestrated run can exist here (see _kb_orch_ledger_hook): stay silent.
+    [[ -n "$_hdir" && -f "$_py" ]] || return 0
+    [[ "$_rs" == 1 ]] || _rs=0
+    _obj=$(jq -c --arg ms "$_ms" --argjson rs "$_rs" \
+        '. + (if .model != null and $ms != "" then {modelSource: $ms} else {} end) + (if $rs == 1 then {resume: true} else {} end)' \
+        <<<"$_obj" 2>/dev/null) || _obj="${3-}"
+    _item=$(jq -r '.item // empty' <<<"$_obj" 2>/dev/null)
+    _m=$(jq -r '.model // empty' <<<"$_obj" 2>/dev/null)
+    _kdir="$(dirname "$_board")"
+    if [[ ! -f "$_kdir/orchestration/${_run}.jsonl" ]]; then
+        echo "kb: WARNING run-ledger append (dispatch, ${_item}) skipped: no ledger for run ${_run}; not creating one" >&2
+        return 0
+    fi
+    local -a _fargs
+    _fargs=(--field "item=${_item}" --json-field "dispatch=${_obj}")
+    [[ -n "$_m" ]] && _fargs+=(--field "model=${_m}")
+    _err="$(python3 "$_py" ledger-append --kanban-dir "$_kdir" --run "$_run" --kind dispatch "${_fargs[@]}" 2>&1 >/dev/null </dev/null)" || _rc=$?
+    (( _rc == 0 )) || echo "kb: WARNING run-ledger append (dispatch, ${_item}) failed: ${_err:-rc=$_rc}" >&2
+    return 0
+}
+
 # _kb_dispatch_result <outcome> <reason> <detail> [observed-json]
 # Reports one kb-dispatch outcome. Reads kb-dispatch's locals (item terminal session window model run team
-# want_json) through zsh dynamic scope; only kb-dispatch calls it.
+# want_json board_file resume _kbd_run_checked) through zsh dynamic scope; only kb-dispatch calls it.
+# XACA-1829: EVERY outcome reached after the run check (the run is the release's active, open run) is ledgered here, so no
+# exit path can forget it and the coordinator's own wave-2+ dispatches reach orchestrator_monitor (DISPATCH_FAILED, 15).
 _kb_dispatch_result() {
-    local _o="${1-}" _r="${2-}" _d="${3-}" _obs="${4:-null}" _ts
+    local _o="${1-}" _r="${2-}" _d="${3-}" _obs="${4:-null}" _ts _obj=""
     _ts=$(_kb_get_timestamp)
-    if (( want_json )); then
-        jq -cn --arg item "$item" --arg terminal "$terminal" --arg session "$session" --arg window "$window" \
+    if (( want_json || ${_kbd_run_checked:-0} )); then
+        _obj=$(jq -cn --arg item "$item" --arg terminal "$terminal" --arg session "$session" --arg window "$window" \
             --arg model "$model" --arg run "$run" --arg outcome "$_o" --arg reason "$_r" --arg detail "$_d" \
             --argjson observed "$_obs" --arg ts "$_ts" \
             '{item: $item, terminal: $terminal, session: (if $session == "" then null else $session end),
               window: $window, model: (if $model == "" then null else $model end), run: $run, outcome: $outcome,
               reason: (if $reason == "" then null else $reason end),
-              observed: (($observed // {}) + (if $detail == "" then {} else {detail: $detail} end)), ts: $ts}'
+              observed: (($observed // {}) + (if $detail == "" then {} else {detail: $detail} end)), ts: $ts}') || _obj=""
+    fi
+    if (( ${_kbd_run_checked:-0} )) && [[ -n "$_obj" ]]; then
+        _kb_dispatch_ledger "$board_file" "$run" "$_obj" "${_KB_ORCH_MODEL_SOURCE-}" "${resume:-0}"
+    fi
+    if (( want_json )); then
+        [[ -n "$_obj" ]] && print -r -- "$_obj"
     else
         echo "${_o}${_r:+ ${_r}}: ${item} -> ${session:-${team}-${terminal}} (run ${run}${model:+, model ${model}})"
         [[ -n "$_d" ]] && echo "  ${_d}"
@@ -16826,6 +16866,7 @@ _kb_dispatch_refuse() {
 kb-dispatch() {
     if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local item="" terminal="" run="" team="" cli_model="" coord="" deadline="${KB_DISPATCH_DEADLINE:-90}" want_json=0 resume=0
+    local _kbd_run_checked=0   # XACA-1829: set once $run is proven the release's active, open run; gates the ledger write
     if [[ "${1-}" == "-h" || "${1-}" == "--help" || $# -eq 0 ]]; then
         echo "Usage: kb-dispatch <ITEM> --terminal <name> --run <RUN-ID> [--team T] [--model M|inherit]"
         echo "                   [--coordinator team:terminal] [--deadline SECS] [--resume] [--json]"
@@ -16888,6 +16929,7 @@ kb-dispatch() {
         NO_RELEASE) _kb_dispatch_refuse RUN_NOT_ACTIVE "release $rel is not on the ${team} board"; return 3 ;;
         NOT_ACTIVE) _kb_dispatch_refuse RUN_NOT_ACTIVE "$run is not the active, open run of $rel (release.orchestration.activeRunId)"; return 3 ;;
     esac
+    _kbd_run_checked=1   # XACA-1829: from here on every outcome is ledgered (once, by _kb_dispatch_result)
     local max_par run_coord
     IFS=$'\t' read -r max_par run_coord <<<"$runinfo"
     if [[ "$max_par" == "BAD" ]]; then
@@ -17060,13 +17102,8 @@ kb-dispatch() {
             '.status == "in_progress" and .runId == $run and .windowRow and .windowItem == $id
              and ($resume == 0 or ((.resumeCount | type) == "number" and .resumeCount > $base))' <<<"$state" >/dev/null 2>&1; then
             # XACA-1808: every confirmed dispatch records the model it used, so the monitor can prove (MODEL_MISMATCH) that the
-            # setting took effect. Rides the rc-neutral, silent-when-absent run-ledger hook; values with spaces are safe
-            # (each k=v is one argv element). Not on any failure path: only a DISPATCHED outcome is a dispatch.
-            if (( resume )); then
-                _kb_orch_ledger_hook "$board_file" "$item" dispatch outcome=DISPATCHED model="$model" modelSource="$_KB_ORCH_MODEL_SOURCE" terminal="$terminal" resume=1
-            else
-                _kb_orch_ledger_hook "$board_file" "$item" dispatch outcome=DISPATCHED model="$model" modelSource="$_KB_ORCH_MODEL_SOURCE" terminal="$terminal"
-            fi
+            # setting took effect. XACA-1829: written by _kb_dispatch_result like every other post-run-check outcome (the
+            # nested object carries model, modelSource, terminal and resume; model is also lifted to the top level).
             _kb_dispatch_result DISPATCHED "" "" "$state"
             return 0
         fi
@@ -33349,13 +33386,15 @@ _kb_release_orch_start() {
         [[ "$_KB_O_WSRC" == --* ]] && margs=(--model "$_KB_O_WMODEL_R")
         out=$(kb-dispatch "$iid" --terminal "$term" --run "$run" --team "$team" --coordinator "$coord" ${margs[@]+"${margs[@]}"} --json 2>"$tmpd/disp.err" </dev/null)
         drc=$?
+        # XACA-1829: kb-dispatch ledgers every outcome it returns an object for itself, so only the synthetic NO_RESULT (it
+        # printed no object: it died before it could write) is appended here. Appending both would double every event.
         if ! jq -e 'type == "object"' <<<"$out" >/dev/null 2>&1; then
             out=$(jq -cn --arg item "$iid" --arg terminal "$term" --arg run "$run" --arg err "$(cat "$tmpd/disp.err" 2>/dev/null)" --arg rc "$drc" \
                 '{item: $item, terminal: $terminal, run: $run, outcome: "DISPATCH_FAILED", reason: "NO_RESULT", observed: {detail: ("kb-dispatch rc " + $rc + ": " + $err)}}')
+            python3 "$hooks/release_orchestrator.py" ledger-append --kanban-dir "$_KB_RS_KDIR" --run "$run" --kind dispatch \
+                --field "item=$iid" --json-field "dispatch=$out" >/dev/null 2>"$tmpd/ledger.err" </dev/null \
+                || echo "  ⚠ run-ledger append failed for $iid: $(cat "$tmpd/ledger.err")" >&2
         fi
-        python3 "$hooks/release_orchestrator.py" ledger-append --kanban-dir "$_KB_RS_KDIR" --run "$run" --kind dispatch \
-            --field "item=$iid" --json-field "dispatch=$out" >/dev/null 2>"$tmpd/ledger.err" </dev/null \
-            || echo "  ⚠ run-ledger append failed for $iid: $(cat "$tmpd/ledger.err")" >&2
         echo "  $(jq -r '"\(.item) -> \(.outcome)\(if .reason then " (" + .reason + ")" else "" end) via \(.terminal)"' <<<"$out" 2>/dev/null)"
     done < <(jq -r '.waves[0].items[] | [.id, (.terminal // "")] | @tsv' "$plan_file")
     rm -r -f "$tmpd"

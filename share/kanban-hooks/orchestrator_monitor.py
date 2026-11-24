@@ -458,6 +458,20 @@ def latest_by_item(events, kind):
     return out
 
 
+def is_dispatch_attempt(ev):
+    """XACA-1829: a REFUSED dispatch created nothing (no window, no stamp), so it never SUPERSEDES the item's latest real
+    attempt (DISPATCHED / DISPATCH_FAILED). Since kb-dispatch ledgers refusals too, a "latest dispatch event" reader that
+    did not skip them would let e.g. a DUPLICATE_WINDOW retry clear a live DISPATCH_FAILED. REFUSED is EXCLUDED (rather
+    than the attempt outcomes allow-listed) so an older event that carries no outcome still counts."""
+    d = ev.get("dispatch") if isinstance(ev, dict) else None
+    return not (isinstance(d, dict) and d.get("outcome") == "REFUSED")
+
+
+def latest_dispatch_attempts(events):
+    """-> {item: latest ledger `dispatch` event that is a real attempt (see is_dispatch_attempt)}."""
+    return latest_by_item([ev for ev in (events or []) if is_dispatch_attempt(ev)], ro.KIND_DISPATCH)
+
+
 # ------------------------------------------------------------------ inputs
 def parse_panes(text):
     rows = []
@@ -512,13 +526,13 @@ def gather(ctx, rel, board, board_file, run, orch, events):
         ctx.warn(w)
     backlog = {i.get("id"): i for i in board.get("backlog") or [] if isinstance(i, dict)}
     wins = {w.get("id"): w for w in board.get("activeWindows") or [] if isinstance(w, dict)}
-    dispatches = latest_by_item(events, ro.KIND_DISPATCH) if events else {}
+    dispatches = latest_dispatch_attempts(events) if events else {}
     try:
         pane_rows = parse_panes(ctx.tmux())
     except Exception:  # noqa: BLE001 -- any tmux failure = unreadable, never "gone"
         pane_rows = None
     items, windows, panes, prs, terminals = {}, {}, {}, {}, {}
-    repo = ctx.repo
+    repo, repo_err = ctx.repo, None
     for iid, srow in sorted(orch["items"].items()):
         it = backlog.get(iid)
         if it is not None:
@@ -539,8 +553,18 @@ def gather(ctx, rel, board, board_file, run, orch, events):
         if it is None or status in ("completed", "cancelled"):
             prs[iid] = None
         else:
+            if not repo and repo_err is None:
+                # XACA-1829 (user decision 1a): no --repo and none derivable (e.g. a checkout with no git remote) DEGRADES
+                # instead of aborting: warn once, and every PR lookup becomes an error row, so an item that needs PR evidence
+                # derives UNKNOWN (fail closed) while crashes, questions and free slots are still seen.
+                try:
+                    repo = repo_from_git(ctx.repo_root)
+                except UsageError as exc:
+                    repo_err = str(exc)
+                    ctx.warn("%s; PR evidence is unavailable, so items that need it derive UNKNOWN" % repo_err)
             if not repo:
-                repo = repo_from_git(ctx.repo_root)
+                prs[iid] = {"error": repo_err or "no --repo"}
+                continue
             try:
                 prs[iid] = newest_pr(ctx.gh(repo, "feature/%s" % iid.lower()))
             except Exception as exc:  # noqa: BLE001 -- a gh failure is data, not a crash
@@ -582,7 +606,7 @@ def build_conditions(orch, states, g, events, th):
     now = g["now"]
     waves = wave_of(orch)
     conds = []
-    dispatch_latest = latest_by_item(events, ro.KIND_DISPATCH)
+    dispatch_latest = latest_dispatch_attempts(events)
 
     def add(verdict, item, evidence, detail):
         conds.append({"verdict": verdict, "item": item, "wave": waves.get(item, 10 ** 6),

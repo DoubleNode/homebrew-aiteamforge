@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1829: Ledger every kb-dispatch outcome so the monitor sees failures after wave 1 (XACA-1829)
+- Tap files updated in this publish: `share/kanban-hooks/orchestrator_monitor.py`,`share/kanban-hooks/orchestrator_tokens.py` `share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 
 ## [0.21.29] - 2026-11-22
 - XACA-1688: Fleet hostname rename compatibility window (XACA-1688)
