@@ -23,6 +23,12 @@
 #   4. The count covers this terminal's directed mail AND team broadcasts,
 #      including broadcasts sent while this terminal had no live session
 #      (msg-store.py unread-count --sync-broadcasts claims those).
+#   5. The SAME line also counts the team's iCloud Team Transfer _INBOX
+#      (AITeamForge/team-transfers/<team>/_INBOX, XACA-1941) and fires when
+#      EITHER channel has something. It always starts "kb-msg:" so the one
+#      CLAUDE.md notice rule covers both. msg-store.py lists iCloud only in a
+#      killed-on-timeout child (KB_TRANSFER_TIMEOUT, default 3s): File
+#      Provider can hang whatever touches it (XACA-0772/0773).
 #
 # Register in ~/.claude/settings.json under BOTH SessionStart and Stop, e.g.:
 #   "Stop":         [ { "hooks": [ { "type": "command",
@@ -109,9 +115,10 @@ mkdir -p "$THROTTLE_DIR" 2>/dev/null || true
 date +%s > "$TS_FILE" 2>/dev/null || true
 
 # One JSON object: total/team/terminal/scope counts, after claiming any team
-# broadcasts this terminal missed while it had no live session.
+# broadcasts this terminal missed while it had no live session, plus the Team
+# Transfer _INBOX pending count (--transfer, XACA-1941).
 COUNTS=$(python3 "$STORE" unread-count --team "$TEAM" --terminal "$TERMINAL" \
-    --breakdown --sync-broadcasts 2>/dev/null || true)
+    --breakdown --sync-broadcasts --transfer 2>/dev/null || true)
 [ -n "$COUNTS" ] || exit 0
 
 NOTICE=$(printf '%s' "$COUNTS" | python3 -c "
@@ -120,12 +127,18 @@ term, team, store = sys.argv[1], sys.argv[2].lower(), sys.argv[3]
 try:
     c = json.load(sys.stdin)
     total = int(c.get('total', 0))
+    xfer = int(c.get('transfer_pending', 0) or 0)
 except Exception:
     sys.exit(0)
-if total <= 0:
-    sys.exit(0)  # EMPTY INBOX PRINTS NOTHING
-line = ('\U0001F4E8 kb-msg: %d unread (%d team-wide, %d for %s)'
-        % (total, int(c.get('team', 0)), int(c.get('terminal', 0)), term))
+if total <= 0 and xfer <= 0:
+    sys.exit(0)  # BOTH CHANNELS EMPTY PRINTS NOTHING
+if total > 0:
+    line = ('\U0001F4E8 kb-msg: %d unread (%d team-wide, %d for %s)'
+            % (total, int(c.get('team', 0)), int(c.get('terminal', 0)), term))
+else:
+    line = '\U0001F4E8 kb-msg: 0 unread'
+if xfer > 0:
+    line += (' + \U0001F4E5 Team Transfer _INBOX: %d pending (kb-msg transfer list)' % xfer)
 scope = int(c.get('scope', 0))
 if scope:
     srcs = ', '.join(c.get('scope_sources') or []) or 'outside'

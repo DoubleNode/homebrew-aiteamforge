@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1941: kb-msg inbox checks also surface the Team Transfer _INBOX (XACA-1941)
+- Tap files updated in this publish: `share/kanban-hooks/msg-store.py`,`share/personas/academy/agents/academy_nahla_chancellor_persona.md` `share/scripts/msg-inbox-check.sh`,`share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1760: Retire the approval waiver for v2 CRs (XACA-1760)
 - Tap files updated in this publish: `share/lcars-ui/index.html`,`share/lcars-ui/js/lcars-cr-evidence-helpers.js` `share/lcars-ui/js/lcars-cr-metrics.js`,`share/lcars-ui/js/lcars-cr-tab.js` `share/lcars-ui/server.py`,`share/lcars-ui/tests/test_cr_metrics.js` `share/lcars-ui/tests/test_cr_tab_edit_state_evidence.js`,`share/lcars-ui/tests/test_xaca1390_edit_state_v2_targets.py` (+1 more). Run `brew upgrade aiteamforge` to receive them.
 - XACA-1864: Surface worker kb-msg escalations to the coordinator monitor (XACA-1864)

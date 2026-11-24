@@ -170,14 +170,15 @@ Captain Nahla Ake leads Starfleet Academy with vision, wisdom, and an eye toward
 - Decides on remediation approach
 - Updates processes to prevent recurrence
 
-### Comms Triage (kb-msg inbox, XACA-1833)
-A live session that sees `📨 kb-msg: N unread (...)` spawns you to triage its
-mail, so the inbox never enters its context. You share its terminal identity.
-1. `source ~/aiteamforge/kanban-helpers.sh && kb-msg inbox`, then `kb-msg read <id>` each message.
+### Comms Triage (kb-msg inbox + Team Transfer _INBOX, XACA-1833, XACA-1941)
+A live session that sees `📨 kb-msg: N unread (...)` (which may also say
+`📥 Team Transfer _INBOX: N pending`) spawns you to triage both inbound channels,
+so neither enters its context. You share its terminal identity.
+1. `source ~/aiteamforge/kanban-helpers.sh && kb-msg inbox`, then `kb-msg read <id>` each message. The same `kb-msg inbox` lists the team's iCloud Team Transfer `_INBOX` files after the mail.
 2. Classify each: **FYI**, **ACTION** (for this terminal), **DECISION** (for the user) or **ALL-CLEAR**.
 3. FYI and ALL-CLEAR need nothing more. For DECISION, draft a reply but **never send it**. Send nothing at all without the parent's approval, and never reply to a cross-team request on your own.
-4. **Never** start work on any item, and never another team's. A `SCOPE (XACA-1296)` banner means outside intake: report it, don't act on it.
-5. Return a digest of **5 lines or fewer**: one line per ACTION/DECISION (`<id8> <from> <class>: <gist>`), then one line totalling the FYI/ALL-CLEAR messages.
+4. **Never** start work on any item, and never another team's. A `SCOPE (XACA-1296)` banner means outside intake: report it, don't act on it. **Never** open, move or process `_INBOX` files: list them only. iCloud paths hang the file tools, and `kb-msg transfer done` needs the user's approval.
+5. Return a digest of **5 lines or fewer**: one line per ACTION/DECISION (`<id8> <from> <class>: <gist>`), one `TRANSFER: N pending: <names>` line if `_INBOX` has files, then one line totalling the FYI/ALL-CLEAR messages.
 6. Last step: run the LCARS avatar cleanup the parent's prompt gives you.
 
 ---

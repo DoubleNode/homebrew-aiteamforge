@@ -182,19 +182,326 @@ def _broadcast_ttl_seconds():
 # its notice so ANY team's session can hand a generic subagent the brief; the
 # Academy `nahla` persona carries the same rules. Single source for non-Academy
 # teams: `python3 <msg-store.py> triage-brief`.
-TRIAGE_BRIEF = """kb-msg comms triage (XACA-1833). You share the parent session's terminal identity.
+TRIAGE_BRIEF = """kb-msg comms triage (XACA-1833, XACA-1941). You share the parent session's terminal identity.
 1. source ~/aiteamforge/kanban-helpers.sh && kb-msg inbox, then kb-msg read <id> for each message.
+   kb-msg inbox also lists the team's Team Transfer _INBOX (iCloud files the user dropped, XACA-1941).
 2. Classify each one: FYI, ACTION (for this terminal), DECISION (for the user) or ALL-CLEAR.
 3. FYI and ALL-CLEAR need nothing more. For DECISION, draft a reply but NEVER send it.
    Send nothing without the parent's approval; never answer a cross-team request yourself.
 4. NEVER start work on any item. A 'SCOPE (XACA-1296)' banner means outside intake: report it only.
+   NEVER open, move or process _INBOX files: list them only. Never read iCloud paths with file
+   tools (they hang); never run kb-msg transfer done (it needs the user's approval).
 5. Return a digest of 5 lines or fewer: one line per ACTION/DECISION
-   ('<id8> <from> <class>: <gist>'), then one line totalling FYI/ALL-CLEAR.
+   ('<id8> <from> <class>: <gist>'), one 'TRANSFER: N pending: <names>' line if _INBOX has files,
+   then one line totalling FYI/ALL-CLEAR.
 6. Last step: run the LCARS avatar cleanup command from your prompt, if it gave one."""
 
 
 def cmd_triage_brief(args):
     print(TRIAGE_BRIEF)
+
+
+# ---------------------------------------------------------------------------
+# Team Transfer _INBOX (XACA-1941)
+# ---------------------------------------------------------------------------
+#
+# The second inbound channel: files the user drops into the team's iCloud
+# Team Transfer folder, AITeamForge/team-transfers/<folder>/_INBOX. Nothing
+# read it before XACA-1941, so it was missed while kb-msg mail was surfaced
+# (or the reverse). Every inbox check now reports both.
+#
+# iCloud File Provider can hang ANY process that touches a dataless or
+# still-syncing tree (XACA-0772/0773 hung Claude's native file tools). So this
+# process never touches the tree itself: every stat/list/copy/move runs in a
+# child process in its own session, and on timeout the whole group is killed
+# and NOT waited for (a child stuck in an uninterruptible wait cannot be
+# reaped, and waiting for it would hang the hook that called us).
+
+TRANSFER_TIMEOUT_DEFAULT = 3.0        # listing, on every hook check
+TRANSFER_COPY_TIMEOUT_DEFAULT = 60.0  # stage/done may pull a file down first
+
+# Kanban team id -> Team Transfer folder name, where they differ. The same
+# instance-id aliases .githooks/prepare-commit-msg uses. Anything else uses the
+# team id itself (tmux-derived ids like "finance-personal" already match).
+_TRANSFER_FOLDER_ALIASES = {
+    "finance": "finance-personal",
+    "legal": "legal-coparenting",
+    "medical": "medical-general",
+}
+
+# Shell body for the listing child. $1 = root, $2 = folder. Prints one status
+# word on the first line, then (for OK) NUL-separated paths relative to
+# _INBOX. _processed/ is where handled files go, and dotfiles are Finder/sync
+# noise, so both are pruned; ".<name>.icloud" placeholders (in iCloud, not
+# downloaded here) are kept, because they are still pending files.
+_TRANSFER_LIST_SH = r'''
+r=$1; t=$2
+[ -d "$r" ] || { echo NO_ROOT; exit 0; }
+[ -d "$r/$t" ] || { echo NO_TEAM_FOLDER; exit 0; }
+[ -d "$r/$t/_INBOX" ] || { echo NO_INBOX; exit 0; }
+cd "$r/$t/_INBOX" || { echo ERROR; exit 0; }
+echo OK
+find . -mindepth 1 \( -name _processed -o \( -name '.*' ! -name '.*.icloud' \) \) -prune \
+    -o -type f -print0
+'''
+
+_TRANSFER_STATE_TEXT = {
+    "ok": "reachable",
+    "no_root": "iCloud Team Transfer root not found (iCloud Drive off or not synced here)",
+    "no_team_folder": "no Team Transfer folder for this team (channel not in use)",
+    "no_inbox": "team folder exists but has no _INBOX",
+    "timeout": "listing timed out (iCloud File Provider busy or hung)",
+    "error": "listing failed",
+}
+
+
+def _env_seconds(name, default, cap):
+    raw = os.environ.get(name, "")
+    try:
+        val = float(raw) if raw else default
+    except ValueError:
+        val = default
+    if not math.isfinite(val) or val <= 0:
+        val = default
+    return min(val, cap)
+
+
+def transfer_root():
+    """AITeamForge/team-transfers in iCloud Drive (KB_TRANSFER_ROOT overrides,
+    for tests and non-default layouts)."""
+    env = os.environ.get("KB_TRANSFER_ROOT", "")
+    if env:
+        return env
+    return os.path.join(os.path.expanduser("~"), "Library", "Mobile Documents",
+                        "com~apple~CloudDocs", "AITeamForge", "team-transfers")
+
+
+def transfer_folder(team):
+    team = (team or "").strip().lower()
+    return _safe_token(_TRANSFER_FOLDER_ALIASES.get(team, team))
+
+
+def transfer_inbox_path(team):
+    return os.path.join(transfer_root(), transfer_folder(team), "_INBOX")
+
+
+def _run_bounded(argv, timeout):
+    """Run argv in its own session. Returns (rc, stdout_bytes), or (None, b"")
+    on timeout. On timeout the process group is SIGKILLed and NOT reaped."""
+    try:
+        proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError:
+        return (-1, b"")
+    try:
+        out, _ = proc.communicate(timeout=timeout)
+        return (proc.returncode, out)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, 9)
+        except OSError:
+            pass
+        if proc.stdout is not None:
+            try:
+                proc.stdout.close()
+            except OSError:
+                pass
+        return (None, b"")
+
+
+def _placeholder_name(rel):
+    """'.x.pdf.icloud' -> 'x.pdf' (keeps the directory part), else None."""
+    d, b = os.path.split(rel)
+    if b.startswith(".") and b.endswith(".icloud") and len(b) > len(".icloud") + 1:
+        return os.path.join(d, b[1:-len(".icloud")])
+    return None
+
+
+def transfer_scan(team):
+    """State + pending files of the team's Team Transfer _INBOX. Never raises,
+    never blocks longer than KB_TRANSFER_TIMEOUT (default 3s, cap 30s)."""
+    folder = transfer_folder(team)
+    res = {"team": team, "folder": folder, "path": transfer_inbox_path(team),
+           "state": "error", "pending": 0, "placeholders": 0, "files": []}
+    if not folder:
+        return res
+    rc, out = _run_bounded(["/bin/sh", "-c", _TRANSFER_LIST_SH, "sh", transfer_root(), folder],
+                           _env_seconds("KB_TRANSFER_TIMEOUT", TRANSFER_TIMEOUT_DEFAULT, 30.0))
+    if rc is None:
+        res["state"] = "timeout"
+        return res
+    head, _, body = out.partition(b"\n")
+    word = head.decode("utf-8", "replace").strip()
+    if word != "OK":
+        res["state"] = word.lower() if word.lower() in _TRANSFER_STATE_TEXT else "error"
+        return res
+    # find's own exit status is ignored on purpose: a single unreadable entry
+    # must not hide the rest; whatever it printed is still pending.
+    files = []
+    for raw in body.split(b"\0"):
+        if not raw:
+            continue
+        rel = raw.decode("utf-8", "replace")
+        if rel.startswith("./"):
+            rel = rel[2:]
+        ph = _placeholder_name(rel)
+        files.append({"name": ph or rel, "placeholder": bool(ph)})
+    files.sort(key=lambda f: f["name"].lower())
+    res.update(state="ok", files=files, pending=len(files),
+               placeholders=sum(1 for f in files if f["placeholder"]))
+    return res
+
+
+def transfer_summary_lines(scan, explain=False):
+    """Human lines for kb-msg inbox / kb-msg transfer list. Empty and
+    unreachable inboxes print nothing unless explain (EMPTY PRINTS NOTHING)."""
+    if scan["state"] != "ok":
+        if not explain:
+            return []
+        return [f"Team Transfer _INBOX ({scan['folder']}): {_TRANSFER_STATE_TEXT[scan['state']]}",
+                f"  path: {scan['path']}"]
+    if not scan["pending"]:
+        return [f"Team Transfer _INBOX ({scan['folder']}): empty"] if explain else []
+    lines = [f"\U0001F4E5 Team Transfer _INBOX ({scan['folder']}): {scan['pending']} pending"
+             f" — {scan['path']}"]
+    for f in scan["files"]:
+        lines.append(f"    {f['name']}" + ("  (in iCloud, not downloaded)" if f["placeholder"] else ""))
+    lines.append("    (kb-msg transfer stage <name> copies one out; never open it in place)")
+    return lines
+
+
+def cmd_transfer_count(args):
+    scan = transfer_scan(args.team)
+    scan.pop("files")
+    print(json.dumps(scan))
+
+
+def cmd_transfer_list(args):
+    scan = transfer_scan(args.team)
+    if args.json:
+        print(json.dumps(scan))
+        return
+    for line in transfer_summary_lines(scan, explain=args.explain):
+        print(line)
+
+
+def _transfer_rel_ok(rel):
+    """A name from transfer-list: relative, normalized, no '..', not under
+    _processed. Anything else is refused before a child process sees it."""
+    if not rel or "\0" in rel or rel.startswith("/"):
+        return False
+    parts = rel.split("/")
+    if any(p in ("", ".", "..") for p in parts):
+        return False
+    return parts[0] != "_processed"
+
+
+def _transfer_fail(msg, code=1):
+    print(f"kb-msg transfer: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+# _has_link BASE REL: true if any component of BASE/REL is a symlink. A link at
+# ANY component (a linked folder inside _INBOX, not only the leaf) would lead
+# outside _INBOX, so every prefix is checked (PR #1393).
+_HAS_LINK_SH = r'''
+_has_link() {
+    cur=$1; old=$IFS; IFS=/; set -f
+    for c in $2; do
+        cur="$cur/$c"
+        if [ -L "$cur" ]; then IFS=$old; set +f; return 0; fi
+    done
+    IFS=$old; set +f; return 1
+}
+'''
+
+# $1 = inbox, $2 = rel, $3 = placeholder rel. Prints the real rel name used.
+_TRANSFER_PICK_SH = _HAS_LINK_SH + r'''
+for _p in "$2" "$3"; do _has_link "$1" "$_p" && { echo SYMLINK; exit 0; }; done
+if [ -f "$1/$2" ]; then echo "F $2"; elif [ -f "$1/$3" ]; then echo "P $3"; else echo "MISSING"; fi
+'''
+
+
+def _transfer_pick(inbox, rel, timeout):
+    d, b = os.path.split(rel)
+    ph = os.path.join(d, "." + b + ".icloud")
+    rc, out = _run_bounded(["/bin/sh", "-c", _TRANSFER_PICK_SH, "sh", inbox, rel, ph], timeout)
+    if rc is None:
+        _transfer_fail("timed out reaching the Team Transfer _INBOX (iCloud busy); try again")
+    word = out.decode("utf-8", "replace").rstrip("\n")
+    if word == "SYMLINK":
+        # transfer-list never shows symlinks (find -type f), so a symlink name
+        # cannot be a pending drop; following it could copy/move anything.
+        _transfer_fail(f"'{rel}' is a symlink; refusing to follow it")
+    if word == "MISSING" or word[:2] not in ("F ", "P "):
+        _transfer_fail(f"'{rel}' is not in {inbox} (see: kb-msg transfer list)")
+    return word[0], word[2:]
+
+
+def cmd_transfer_stage(args):
+    """Copy one pending file to a LOCAL staging dir so tools can open it
+    without touching iCloud. The _INBOX copy is left exactly where it was."""
+    if not _transfer_rel_ok(args.name):
+        _transfer_fail(f"refusing name '{args.name}' (use a name from kb-msg transfer list)", 2)
+    inbox = transfer_inbox_path(args.team)
+    timeout = _env_seconds("KB_TRANSFER_COPY_TIMEOUT", TRANSFER_COPY_TIMEOUT_DEFAULT, 600.0)
+    kind, real = _transfer_pick(inbox, args.name, timeout)
+    if kind == "P":
+        _transfer_fail(f"'{args.name}' is still in iCloud, not downloaded to this Mac. "
+                       f"Download it first: brctl download \"{os.path.join(inbox, args.name)}\"")
+    dest_dir = args.dest or os.path.join(os.path.expanduser("~"), ".aiteamforge",
+                                         "transfer-staging", transfer_folder(args.team))
+    dest = os.path.join(dest_dir, args.name)
+    os.makedirs(os.path.dirname(dest), mode=0o700, exist_ok=True)
+    rc, _ = _run_bounded(["/bin/cp", "-p", os.path.join(inbox, real), dest], timeout)
+    if rc is None:
+        _transfer_fail("copy timed out (iCloud busy); the staged copy may be partial")
+    if rc != 0:
+        _transfer_fail(f"copy failed (cp exit {rc})")
+    print(dest)
+
+
+# $1 = inbox, $2 = real rel. Never overwrites anything in _processed/: the
+# pre-check gives a clear message, and mv -n closes the check-then-move race
+# mv -n's exit status differs (BSD: 0 when it skips; GNU coreutils 9.x: 1),
+# so it is ignored and the outcome is read from the files themselves.
+_TRANSFER_DONE_SH = _HAS_LINK_SH + r'''
+# The DESTINATION is checked too (XACA-1941-022/023): a symlinked _processed
+# or subfolder under it would move the file outside _INBOX. Checked before
+# mkdir -p, which would otherwise create folders through the link.
+_has_link "$1" "_processed/$2" && { echo SYMLINK; exit 0; }
+dst="$1/_processed/$2"
+[ -e "$dst" ] && { echo EXISTS; exit 0; }
+mkdir -p "$(dirname "$dst")" || { echo FAILED; exit 0; }
+mv -n "$1/$2" "$dst" 2>/dev/null
+if [ ! -e "$1/$2" ] && [ ! -L "$1/$2" ]; then echo MOVED
+elif [ -e "$dst" ]; then echo EXISTS
+else echo FAILED; fi
+'''
+
+
+def cmd_transfer_done(args):
+    """Move a handled file into _INBOX/_processed/. Only on the user's
+    explicit approval: a file the user dropped is theirs to declare handled."""
+    if not args.approved:
+        _transfer_fail("moving a file to _processed needs the USER's explicit approval. "
+                       "Ask first, then re-run with --approved.", 2)
+    if not _transfer_rel_ok(args.name):
+        _transfer_fail(f"refusing name '{args.name}' (use a name from kb-msg transfer list)", 2)
+    inbox = transfer_inbox_path(args.team)
+    timeout = _env_seconds("KB_TRANSFER_COPY_TIMEOUT", TRANSFER_COPY_TIMEOUT_DEFAULT, 600.0)
+    _kind, real = _transfer_pick(inbox, args.name, timeout)
+    rc, out = _run_bounded(["/bin/sh", "-c", _TRANSFER_DONE_SH, "sh", inbox, real], timeout)
+    word = out.decode("utf-8", "replace").strip()
+    if rc is None:
+        _transfer_fail("move timed out (iCloud busy); check kb-msg transfer list before retrying")
+    if word == "SYMLINK":
+        _transfer_fail(f"_processed/{real} passes through a symlink; refusing to move outside _INBOX")
+    if word == "EXISTS":
+        _transfer_fail(f"_processed/{real} already exists; not overwriting it")
+    if word != "MOVED":
+        _transfer_fail("move failed")
+    print(os.path.join(inbox, "_processed", real))
 
 
 _ISO_FULL_RE = re.compile(
@@ -629,13 +936,21 @@ def cmd_unread_count(args):
             src = m.group(1) if m else "outside"
             if src not in sources:
                 sources.append(src)
-    print(json.dumps({
+    out = {
         "total": len(records),
         "team": team_wide,
         "terminal": len(records) - team_wide,
         "scope": scope,
         "scope_sources": sources,
-    }))
+    }
+    if args.transfer:
+        # XACA-1941: the Team Transfer _INBOX rides in the same JSON so the
+        # hook makes ONE call and prints ONE notice for both channels.
+        scan = transfer_scan(args.team)
+        out["transfer_state"] = scan["state"]
+        out["transfer_pending"] = scan["pending"]
+        out["transfer_folder"] = scan["folder"]
+    print(json.dumps(out))
 
 
 def cmd_read(args):
@@ -818,7 +1133,32 @@ def build_parser():
                    help="print JSON {total, team, terminal, scope, scope_sources}")
     s.add_argument("--sync-broadcasts", dest="sync_broadcasts", action="store_true",
                    help="first claim team broadcasts this terminal missed (XACA-1833)")
+    s.add_argument("--transfer", action="store_true",
+                   help="with --breakdown, add the Team Transfer _INBOX state/pending count (XACA-1941)")
     s.set_defaults(func=cmd_unread_count)
+
+    s = sub.add_parser("transfer-count", help="Team Transfer _INBOX state + pending count, as JSON (XACA-1941)")
+    s.add_argument("--team", required=True)
+    s.set_defaults(func=cmd_transfer_count)
+
+    s = sub.add_parser("transfer-list", help="list pending Team Transfer _INBOX files (XACA-1941)")
+    s.add_argument("--team", required=True)
+    s.add_argument("--json", action="store_true")
+    s.add_argument("--explain", action="store_true",
+                   help="also say so when the inbox is empty or unreachable")
+    s.set_defaults(func=cmd_transfer_list)
+
+    s = sub.add_parser("transfer-stage", help="copy one _INBOX file to a local staging dir (XACA-1941)")
+    s.add_argument("--team", required=True)
+    s.add_argument("--name", required=True, help="a name exactly as transfer-list prints it")
+    s.add_argument("--dest", default=None, help="staging dir (default ~/.aiteamforge/transfer-staging/<folder>)")
+    s.set_defaults(func=cmd_transfer_stage)
+
+    s = sub.add_parser("transfer-done", help="move a handled file to _INBOX/_processed (user-approved only)")
+    s.add_argument("--team", required=True)
+    s.add_argument("--name", required=True, help="a name exactly as transfer-list prints it")
+    s.add_argument("--approved", action="store_true", help="the user explicitly approved this move")
+    s.set_defaults(func=cmd_transfer_done)
 
     s = sub.add_parser("triage-brief", help="print the comms-triage brief for a subagent")
     s.set_defaults(func=cmd_triage_brief)

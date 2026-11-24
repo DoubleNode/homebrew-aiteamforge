@@ -36578,6 +36578,73 @@ print(len(d) if isinstance(d, dict) else "notdict")' "$map_path" 2>/dev/null)
         _kb_msg_row "[ok]" "inbox" "no unread mail"
     fi
 
+    # ── 6. Team Transfer _INBOX (XACA-1941) ─────────────────────────────────
+    # The second inbound channel. A team with no Team Transfer folder is not
+    # using it, which is fine ([ok]). A folder without _INBOX is a one-command
+    # fix ([GAP]). iCloud missing or hung cannot be fixed from a shell
+    # ([BLOCKED]). Pending files are reported like unread mail: never counted.
+    local xf_self xf_team xf_json xf_state xf_pending xf_path xf_store
+    xf_self=$(_kb_msg_self); xf_team="${xf_self%% *}"
+    xf_store=$(_kb_msg_store)
+    if [[ -z "$xf_team" ]]; then
+        # No team identity means no folder to resolve. That is the inbox row's
+        # situation too, so say so without counting it (kb-msg-doctor.bats T34).
+        xf_state="no_team"
+    elif [[ ! -f "$xf_store" ]]; then
+        xf_state="no_store"
+    else
+        xf_json=$(python3 "$xf_store" transfer-count --team "$xf_team" 2>/dev/null)
+    fi
+    # Parse only when the store ran: an unconditional parse would overwrite
+    # no_store with "" and misreport a missing store as a failed run (PR #1393).
+    if [[ "$xf_state" != "no_store" && "$xf_state" != "no_team" ]]; then
+        xf_state=$(printf '%s' "$xf_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["state"])' 2>/dev/null)
+        xf_pending=$(printf '%s' "$xf_json" | python3 -c 'import json,sys; print(int(json.load(sys.stdin)["pending"]))' 2>/dev/null)
+        xf_path=$(printf '%s' "$xf_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["path"])' 2>/dev/null)
+    fi
+    case "$xf_state" in
+        ok)
+            if [[ "${xf_pending:-0}" -gt 0 ]]; then
+                _kb_msg_row "[!]" "transfer inbox" "$xf_pending file(s) pending — kb-msg transfer list"
+            else
+                _kb_msg_row "[ok]" "transfer inbox" "_INBOX reachable, nothing pending"
+            fi ;;
+        no_team)
+            _kb_msg_row "[!]" "transfer inbox" "skipped: no team identity here (tmux session or KB_TEAM)" ;;
+        no_team_folder)
+            _kb_msg_row "[ok]" "transfer inbox" "no Team Transfer folder for '$xf_team' (channel not in use)" ;;
+        no_inbox)
+            _kb_msg_row "[GAP]" "transfer inbox" "team folder has no _INBOX — drops have nowhere to land"
+            _kb_msg_cont "fix: mkdir -p \"$xf_path\""
+            gaps=$((gaps + 1)) ;;
+        no_root|timeout)
+            if [[ "$xf_state" == timeout ]]; then
+                _kb_msg_row "[BLOCKED]" "transfer inbox" "listing timed out — iCloud File Provider busy or hung"
+            else
+                _kb_msg_row "[BLOCKED]" "transfer inbox" "iCloud Team Transfer root not found on this Mac"
+            fi
+            _kb_msg_cont "path: $xf_path"
+            _kb_msg_cont "needs iCloud Drive signed in and synced here (System Settings), not a shell command"
+            blocked=$((blocked + 1)) ;;
+        no_store)
+            # Not "cannot check" wording: that phrase means a doctor TOOL lookup
+            # failed (kb-msg-doctor.bats T8); this is the store itself missing.
+            _kb_msg_row "[??]" "transfer inbox" "msg-store.py not found at $xf_store"
+            _kb_msg_cont "fix: run  aiteamforge upgrade  (or set AITEAMFORGE_DIR) to restore it"
+            unknown=$((unknown + 1)) ;;
+        error)
+            # The store ran but could not list _INBOX (e.g. no team resolved, or
+            # the listing child could not start): not the same as "failed to run".
+            _kb_msg_row "[??]" "transfer inbox" "transfer-count ran but could not list _INBOX for '${xf_team:-?}'"
+            _kb_msg_cont "path: ${xf_path:-?}"
+            _kb_msg_cont "fix: check the team identity (KB_TEAM / tmux session) and that path"
+            unknown=$((unknown + 1)) ;;
+        *)
+            _kb_msg_row "[??]" "transfer inbox" "msg-store.py transfer-count failed to run"
+            _kb_msg_cont "fix: re-run  python3 $xf_store transfer-count --team $xf_team"
+            unknown=$((unknown + 1)) ;;
+    esac
+
     echo
     _kb_msg_doctor_summary "$gaps" "$blocked" "$unknown" "$strict"
 }
@@ -36667,6 +36734,7 @@ kb-msg() {
         read)    _kb_msg_read "$@" ;;
         reply)   _kb_msg_reply "$@" ;;
         who)     python3 "$store" who "$@" ;;
+        transfer) _kb_msg_transfer "$@" ;;
         doctor)  _kb_msg_doctor "$@" ;;
         ""|-h|--help|help)
             cat <<'USAGE'
@@ -36678,7 +36746,15 @@ Usage:
   kb-msg send <team>[:<terminal>] <message...>   Send a directed message or,
                                                  with no :terminal (or :*), a
                                                  team broadcast.
-  kb-msg inbox [--all]                           List your unread (or all) mail.
+  kb-msg inbox [--all]                           List your unread (or all) mail,
+                                                 then the team's Team Transfer
+                                                 _INBOX (XACA-1941).
+  kb-msg transfer list                           Pending files in the team's
+                                                 iCloud Team Transfer _INBOX.
+  kb-msg transfer stage <name> [<dir>]           Copy one to a local dir (never
+                                                 open iCloud files in place).
+  kb-msg transfer done <name> --approved         Move it to _INBOX/_processed.
+                                                 ONLY on the user's approval.
   kb-msg read <id>                               Show a message + mark it read.
   kb-msg reply <id> <message...>                 Reply to a message's sender.
   kb-msg who                                     Live team:terminal sessions here.
@@ -36887,6 +36963,48 @@ _kb_msg_inbox() {
     team="${self%% *}"; terminal="${self##* }"
     local store; store=$(_kb_msg_store)
     python3 "$store" inbox --team "$team" --terminal "$terminal" "$@"
+    local _rc=$? _a
+    # XACA-1941: one inbox check covers BOTH inbound channels. The Team
+    # Transfer section prints nothing when that _INBOX is empty or absent, and
+    # never starts with '*' (the doctor counts unread mail by that marker).
+    # --json output is machine-read, so it stays mail-only.
+    for _a in "$@"; do [[ "$_a" == "--json" ]] && return $_rc; done
+    [[ -n "$team" ]] && python3 "$store" transfer-list --team "$team" 2>/dev/null
+    return $_rc
+}
+
+# kb-msg transfer list|stage|done — the team's iCloud Team Transfer _INBOX
+# (AITeamForge/team-transfers/<team>/_INBOX, XACA-1941). Every iCloud touch
+# runs in msg-store.py's killed-on-timeout child; Claude's native file tools
+# hang on iCloud paths (XACA-0772/0773), so work on a STAGED local copy.
+_kb_msg_transfer() {
+    local sub="${1:-list}"; shift 2>/dev/null || true
+    local self team
+    self=$(_kb_msg_self)
+    team="${self%% *}"
+    if [[ -z "$team" ]]; then
+        echo "kb-msg transfer: cannot tell which team this session is (no tmux session or KB_TEAM)" >&2
+        return 1
+    fi
+    local store; store=$(_kb_msg_store)
+    case "$sub" in
+        list)
+            python3 "$store" transfer-list --team "$team" --explain "$@" ;;
+        stage)
+            if [[ -z "${1:-}" ]]; then echo "Usage: kb-msg transfer stage <name> [<dir>]" >&2; return 1; fi
+            # argv array: an unquoted ${2:+--dest "$2"} is ONE word in zsh (PR #1393).
+            local -a xargv
+            xargv=(transfer-stage --team "$team" --name="$1")
+            [[ -n "${2:-}" ]] && xargv+=(--dest="$2")
+            python3 "$store" "${xargv[@]}" ;;
+        done)
+            if [[ -z "${1:-}" ]]; then echo "Usage: kb-msg transfer done <name> --approved" >&2; return 1; fi
+            local name="$1"; shift
+            python3 "$store" transfer-done --team "$team" --name="$name" "$@" ;;
+        *)
+            echo "Usage: kb-msg transfer list | stage <name> [<dir>] | done <name> --approved" >&2
+            return 1 ;;
+    esac
 }
 
 # kb-msg read <id>
