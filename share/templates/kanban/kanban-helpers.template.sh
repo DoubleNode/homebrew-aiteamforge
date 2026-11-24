@@ -25398,8 +25398,75 @@ _kb_alloc_slot() {
     ' sh "$abs_dir" "$prefix" "$slug"
 }
 
+# XACA-1671: normalize a `--tags` value into the INNER text of a YAML flow
+# list. Input is one comma-separated string ("A, #b,c d"); output on stdout is
+# "a, b, c-d" (no brackets). Per tag: trimmed; leading '#'s dropped (`[#tag]`
+# opens a YAML comment — knowledge_entry_template.md); lowercased;
+# whitespace/underscore runs -> '-'; every byte outside [a-z0-9./-] dropped,
+# so no ',', '[', ']', ':' or quote can reach the frontmatter; '-' runs
+# collapsed and edge '-' trimmed. Empty results and duplicates are dropped
+# (first occurrence wins). rc 1, nothing printed, when no tag survives.
+# Pure zsh, no forks. Body is shared verbatim with the tap template.
+_kb_knowledge_normalize_tags() {
+    emulate -LR zsh
+    setopt EXTENDED_GLOB
+    local LC_ALL=C
+    local raw="${1-}" t
+    local -a out
+    for t in "${(@s:,:)raw}"; do
+        t="${t##[[:space:]]##}"
+        t="${t%%[[:space:]]##}"
+        t="${t##\###}"
+        t="${(L)t}"
+        t="${t//[[:space:]_]##/-}"
+        t="${t//[^a-z0-9.\/-]/}"
+        t="${t//-##/-}"
+        t="${t##-}"
+        t="${t%%-}"
+        [[ -n "$t" ]] || continue
+        (( ${out[(Ie)$t]} )) || out+=("$t")
+    done
+    (( ${#out} )) || return 1
+    print -r -- "${(j:, :)out}"
+}
+
+# XACA-1671: rc 0 when the given frontmatter lines (one per argument, no
+# `---` fences) carry a `tags:` key but NO tag — exactly the condition
+# kb-knowledge-sync's _ac_validate_entry_blob holds as `tags-empty`
+# (scripts/kb-knowledge-sync.sh): `tags: []`, `tags: [ ]`, a bare `tags:`
+# with no indented `- item` lines, or a value that is not a [list] at all.
+# rc 1 when a tag is present OR there is no `tags:` key (that case is
+# kb-knowledge-validate's own "Missing 'tags:'" error). Keep the two in
+# step: validate must not pass an entry the daemon will hold. Pure zsh.
+_kb_knowledge_fm_tags_empty() {
+    emulate -LR zsh
+    setopt EXTENDED_GLOB
+    local line val
+    local -i seen=0 ok=0 intags=0
+    for line in "$@"; do
+        line="${line%%$'\r'##}"
+        if (( intags )); then
+            if [[ "$line" == [$' \t']##-\ [^$' \t']* ]]; then ok=1; continue; fi
+            intags=0
+        fi
+        [[ "$line" == tags:* ]] || continue
+        seen=1
+        val="${line#tags:}"
+        val="${val##[$' \t']##}"
+        val="${val%%[$' \t']##}"
+        if [[ -z "$val" ]]; then
+            intags=1
+        elif [[ "$val" == \[*\] ]]; then
+            val="${val#\[}"
+            val="${val%\]}"
+            [[ "$val" == *[^$' \t']* ]] && ok=1
+        fi
+    done
+    (( seen && ! ok ))
+}
+
 # Scaffold a new knowledge entry at the correct tier location
-# Usage: kb-knowledge-add <tier> [<target>] "<title>"
+# Usage: kb-knowledge-add <tier> [<target>] "<title>" [--tags a,b,c]
 #
 # Examples:
 #   kb-knowledge-add agent emh "kapt error patterns"
@@ -25417,11 +25484,17 @@ kb-knowledge-add() {
     fi
 
     if $show_help; then
-        echo "Usage: kb-knowledge-add <tier> [<target>] \"<title>\" [--force] [--allow-foreign-host] [--allow-nonstandard-base] [--allow-retired-agent-dir] [--allow-new-agent-dir] [--allow-new-team]"
+        echo "Usage: kb-knowledge-add <tier> [<target>] \"<title>\" [--tags a,b,c] [--force] [--allow-foreign-host] [--allow-nonstandard-base] [--allow-retired-agent-dir] [--allow-new-agent-dir] [--allow-new-team]"
         echo ""
         echo "  tier       agent | subject | project | team"
         echo "  target     Agent name, subject path, team name, or (project) optional slug"
         echo "  title      Human-readable title for the entry"
+        echo "  --tags a,b,c   (also --tags=a,b,c)"
+        echo "             XACA-1671: comma-separated tags written into the entry's"
+        echo "             frontmatter (and so its INDEX row). Normalized: lowercase,"
+        echo "             spaces/underscores -> '-', leading '#' dropped. kb-knowledge-sync"
+        echo "             HOLDS an entry whose tags are empty (tags-empty), so an untagged"
+        echo "             entry never reaches other machines until someone tags it."
         echo "  --force    subject/project tiers only (XACA-0754-014): proceed with a"
         echo "             shared/synced write even when the session's team could not be"
         echo "             resolved at all (no tmux, KB_TEAM, or .kb-team sentinel) —"
@@ -25543,10 +25616,32 @@ kb-knowledge-add() {
     # XACA-0888: project-tier counterpart of --allow-new-team — see the
     # _kb_knowledge_destination_guard "project" case for what it waives.
     local flag_allow_new_project=false
+    # XACA-1671: --tags takes a VALUE, so it consumes the NEXT argument too,
+    # unlike the one-word boolean flags above. It is stripped before
+    # positional parsing for the same reason they are: the title is a greedy
+    # "${*:2}" join and would otherwise swallow it. The loop shifts instead
+    # of indexing so a caller's KSH_ARRAYS (0-based subscripts) cannot skew it.
+    local _kb_add_tags_given=false _kb_add_tags_raw="" _kb_add_tags=""
     local -a _kb_add_filtered_args=()
     local _kb_add_arg
-    for _kb_add_arg in "$@"; do
-        if [[ "$_kb_add_arg" == "--force" ]]; then
+    while (( $# > 0 )); do
+        _kb_add_arg="$1"
+        shift
+        if [[ "$_kb_add_arg" == "--tags" ]]; then
+            # A following "--flag" is a MISSING value, not a tag: swallowing
+            # it would silently drop that flag (e.g. a guard waiver) and
+            # write tags: [allow-new-agent-dir] (PR #1398 test gate).
+            if (( $# == 0 )) || [[ "$1" == --* ]]; then
+                echo "Error: --tags requires a value, e.g. --tags gotcha,testing" >&2
+                return 1
+            fi
+            _kb_add_tags_given=true
+            _kb_add_tags_raw="$1"
+            shift
+        elif [[ "$_kb_add_arg" == --tags=* ]]; then
+            _kb_add_tags_given=true
+            _kb_add_tags_raw="${_kb_add_arg#--tags=}"
+        elif [[ "$_kb_add_arg" == "--force" ]]; then
             flag_allow_global=true
         elif [[ "$_kb_add_arg" == "--allow-foreign-host" ]]; then
             flag_allow_foreign_host=true
@@ -25565,6 +25660,15 @@ kb-knowledge-add() {
         fi
     done
     set -- "${_kb_add_filtered_args[@]}"
+
+    # XACA-1671: reject an unusable --tags value HERE, before any guard,
+    # mkdir or id allocation runs, so the refusal leaves nothing on disk.
+    if $_kb_add_tags_given; then
+        if ! _kb_add_tags=$(_kb_knowledge_normalize_tags "$_kb_add_tags_raw"); then
+            echo "Error: --tags '${_kb_add_tags_raw}' contains no usable tag (tags are [a-z0-9./-] after normalization), e.g. --tags gotcha,testing" >&2
+            return 1
+        fi
+    fi
 
     local global_root
     global_root=$(_kb_knowledge_global_root)
@@ -25788,6 +25892,25 @@ kb-knowledge-add() {
             ;;
     esac
 
+    # XACA-1671 (D1, lead decision 2026-11-23): no --tags on an interactive
+    # terminal -> ASK, after every guard above has passed (so nobody is asked
+    # for tags on a write that is about to be refused) and before mkdir / id
+    # allocation (so a ^C leaves nothing on disk). Non-interactive callers
+    # (agents, scripts, tests) are NOT refused in this ticket: they still get
+    # `tags: []` plus the loud warning after "Created:". An empty answer means
+    # "skip"; an answer with no usable tag is reported and also skipped.
+    # KB_KNOWLEDGE_NO_TAG_PROMPT=1 turns the prompt off.
+    if ! $_kb_add_tags_given && [[ -t 0 && -t 2 && "${KB_KNOWLEDGE_NO_TAG_PROMPT:-0}" != "1" ]]; then
+        local _kb_add_tags_answer=""
+        read -r "_kb_add_tags_answer?Tags for this entry (comma-separated, e.g. gotcha,testing; Enter to skip): " || _kb_add_tags_answer=""
+        if [[ -n "${_kb_add_tags_answer//[[:space:]]/}" ]]; then
+            if ! _kb_add_tags=$(_kb_knowledge_normalize_tags "$_kb_add_tags_answer"); then
+                _kb_add_tags=""
+                echo "Note: '${_kb_add_tags_answer}' contains no usable tag; scaffolding untagged." >&2
+            fi
+        fi
+    fi
+
     # Ensure target directory exists
     if [[ ! -d "$target_dir" ]]; then
         echo "Creating directory: $target_dir"
@@ -25850,11 +25973,11 @@ kb-knowledge-add() {
     # only when applicable. Per SPEC §3, agent and team tiers REQUIRE this field.
     local frontmatter
     if [[ -n "$tier_field" ]]; then
-        frontmatter=$(printf -- '---\nid: %s\ntier: %s\n%s\ndate: %s\ntags: []\n---' \
-            "$entry_id" "$tier" "$tier_field" "$today")
+        frontmatter=$(printf -- '---\nid: %s\ntier: %s\n%s\ndate: %s\ntags: [%s]\n---' \
+            "$entry_id" "$tier" "$tier_field" "$today" "$_kb_add_tags")
     else
-        frontmatter=$(printf -- '---\nid: %s\ntier: %s\ndate: %s\ntags: []\n---' \
-            "$entry_id" "$tier" "$today")
+        frontmatter=$(printf -- '---\nid: %s\ntier: %s\ndate: %s\ntags: [%s]\n---' \
+            "$entry_id" "$tier" "$today" "$_kb_add_tags")
     fi
 
     if [[ -f "$template_file" ]]; then
@@ -25915,6 +26038,14 @@ FRONTMATTER
     fi
 
     echo "Created: ${new_file}"
+    # XACA-1671: an untagged entry is HELD by kb-knowledge-sync (tags-empty)
+    # and never leaves this machine until someone tags it. Say so now, while
+    # the author still has the context to pick tags — the daemon's hold line
+    # lands in a log nobody reads at authoring time.
+    if [[ -z "$_kb_add_tags" ]]; then
+        echo "Warning: no tags given — ${new_file:t} was scaffolded with 'tags: []'. kb-knowledge-sync will HOLD it (tags-empty) and it will not sync to other machines until it is tagged." >&2
+        echo "  Fix: edit its 'tags:' line, e.g.  tags: [gotcha, testing]  (next time pass --tags gotcha,testing)" >&2
+    fi
 
     # XACA-0991-003: validate-on-write. kb-knowledge-add was the ONE place
     # that wrote entry files with no validation at all — only argument
@@ -27604,6 +27735,7 @@ kb-knowledge-validate() {
     local dup_slots dup_slot dup_files root_label fname_stem
     local has_id has_tier has_date has_tags has_agent has_team file_id file_tier xref_line xref resolved_xref resolver_rc idx_id idx_file
     local xref_frontmatter index_ids_raw
+    local -a _kb_val_tag_fm
     # XACA-1191: state for the zero-fork content scan (_kb_val_scan_entry
     # below). Declared here, never inside the loop: zsh prints `name=value`
     # when a bare `local name` re-declares an already-set local.
@@ -28319,6 +28451,27 @@ kb-knowledge-validate() {
             [[ "$has_tier" -eq 0 ]] && _kb_val_error "Missing 'tier:' in ${ef}"
             [[ "$has_date" -eq 0 ]] && _kb_val_error "Missing 'date:' in ${ef}"
             [[ "$has_tags" -eq 0 ]] && _kb_val_error "Missing 'tags:' in ${ef}"
+
+            # XACA-1671: present-but-empty tags. A WARNING, not an error: the
+            # tree carried >100 such committed entries when this landed, and
+            # kb-knowledge-add's validate-on-write DELETES a new entry that
+            # fails — a fresh untagged scaffold must survive. The daemon
+            # holds these (tags-empty), so name the consequence and the fix.
+            if [[ "$has_tags" -gt 0 ]]; then
+                # The fast scan only recognises a fence that is EXACTLY `---`;
+                # the daemon also accepts `---` + trailing blanks/CR (a CRLF
+                # file). When the fast scan found no frontmatter, re-read it
+                # with the daemon's fence rule (one awk, only for those files)
+                # so a CRLF entry with empty tags still warns (PR #1398 review).
+                if (( _kb_val_fast && ${#_kb_val_fm_lines} )); then
+                    _kb_val_tag_fm=("${_kb_val_fm_lines[@]}")
+                else
+                    _kb_val_tag_fm=("${(@f)$(LC_ALL=C awk '/^---[ \t\r]*$/ { if (f) exit; f = 1; next } f { print }' "$ef" 2>/dev/null)}")
+                fi
+                if _kb_knowledge_fm_tags_empty "${_kb_val_tag_fm[@]}"; then
+                    _kb_val_warn "Empty tags in ${ef} — kb-knowledge-sync holds it (tags-empty), so it will not sync to other machines. Fix: edit its 'tags:' line, e.g. tags: [gotcha, testing]"
+                fi
+            fi
 
             # Tier-specific required fields (per SPEC.md §3)
             if [[ "$expected_tier" == "agent" ]]; then

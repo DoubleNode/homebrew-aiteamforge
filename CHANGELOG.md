@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1671: kb-knowledge-add --tags so authored entries are not held by knowledge-sync (XACA-1671)
+- Tap files updated in this publish: `share/scripts/kb-knowledge-sync.sh`,`share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1937: Rename CI pool hosts to romulus/vulcan with dual-name window (XACA-1937)
 - Tap files updated in this publish: `fleet-monitor/server/lib/ci-dispatch-assignments.js`,`fleet-monitor/server/lib/ci-dispatch-placement.js` `fleet-monitor/server/lib/ci-dispatch-policy.js`,`fleet-monitor/server/lib/ci-dispatcher.js` `fleet-monitor/server/lib/ci-machine-aliases.js`,`fleet-monitor/server/lib/ci-pool-routes.js` `fleet-monitor/server/lib/ci-pool-store.js`,`fleet-monitor/server/lib/ci-runners-routes.js` (+9 more). Run `brew upgrade aiteamforge` to receive them.
 - XACA-1694: kb-release test --provider narrows what runs, never what is expected (XACA-1694)

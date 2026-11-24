@@ -1083,6 +1083,18 @@ _ac_hold() {
     printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$TICK_TMP/held"
 }
 
+# XACA-1671: author-facing fix for a hold reason, appended to the
+# autocommit-held log line so whoever reads the log can act without reading
+# this daemon. Prints "" for reasons with no single mechanical fix. The line
+# prefix "autocommit-held: <path> (<reason>)" is unchanged — tests and
+# operators grep it.
+_ac_hold_fix_hint() {
+    case "$1" in
+        tags-empty)
+            printf '%s' ". Fix: edit the 'tags:' line in ${REPO_DIR}/${2} to list at least one tag, e.g. tags: [gotcha, testing] (kb-knowledge-add --tags sets them at creation); the next tick commits it" ;;
+    esac
+}
+
 _ac_flush_hold_log() {
     local heldlog="${STATE_FILE%.json}.held" p reason key
     [ -f "$TICK_TMP/held" ] || : > "$TICK_TMP/held"
@@ -1091,7 +1103,7 @@ _ac_flush_hold_log() {
         if [ -r "$heldlog" ] && grep -qxF "${p}${_AC_TAB}${reason}${_AC_TAB}${key}" "$heldlog" 2>/dev/null; then
             continue
         fi
-        log "autocommit-held: ${p} (${reason}) — not committed; it stays local and is re-evaluated every tick"
+        log "autocommit-held: ${p} (${reason}) — not committed; it stays local and is re-evaluated every tick$(_ac_hold_fix_hint "$reason" "$p")"
     done 4< "$TICK_TMP/held.sorted"
     if ! cmp -s "$TICK_TMP/held.sorted" "$heldlog" 2>/dev/null; then
         if mkdir -p "${heldlog%/*}" 2>/dev/null && cp "$TICK_TMP/held.sorted" "${heldlog}.tmp.$$" 2>/dev/null; then
