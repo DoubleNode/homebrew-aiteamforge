@@ -3395,6 +3395,8 @@ PYEOF
 # (this list + the sweep loop) or an upgraded consumer never receives it.
 # XACA-1878: kb-release-orchestrate (the release-orchestrator monitor CLI the tap
 # coordinator prompt runs) is extensionless and brand-new on upgraded boxes: same pair.
+# XACA-1851: kb-sync-branch (the "Sync Local Release Branch" gate and the release
+# close-out's printed LOCAL SYNC step) is extensionless and brand-new too: same pair.
 # XACA-1753: the fleet session-guard set. These are SessionStart/Stop hook
 # guards (kb-*-guard.sh, kanban-crash-detect.sh, kb-session-knowledge-check.sh,
 # kb-where-refresh.sh), the checkers they exec (kb-*-check.sh/.py, resolved
@@ -3457,6 +3459,7 @@ kb-release-version-gate
 kb-wiki
 kb-where
 kb-release-orchestrate
+kb-sync-branch
 aiteamforge-team-paths-wizard.py
 aitf-root.sh
 kb-gh-credential-guard.sh
@@ -3524,7 +3527,7 @@ update_runtime_helpers() {
   # an extensionless name; kb-msg-provision added under XACA-1078-004).
   # kb-tap-release is deliberately NOT swept (dev-only: needs an outer dev-team
   # checkout + kb-tap-lock.sh); the XACA-0673 guard allowlists it.
-  for src in "$scripts_source"/*.sh "$scripts_source"/*.py "$scripts_source"/kb-init-team "$scripts_source"/kb-api-key "$scripts_source"/kb-msg-provision "$scripts_source"/kb-spacedock "$scripts_source"/kb-pr-monitor "$scripts_source"/kb-pr-base "$scripts_source"/kb-token-report "$scripts_source"/aiteamforge-paths "$scripts_source"/kb-notify "$scripts_source"/kb-release-push-promote "$scripts_source"/kb-release-version-bump "$scripts_source"/kb-release-version-gate "$scripts_source"/kb-wiki "$scripts_source"/kb-where "$scripts_source"/kb-release-orchestrate; do
+  for src in "$scripts_source"/*.sh "$scripts_source"/*.py "$scripts_source"/kb-init-team "$scripts_source"/kb-api-key "$scripts_source"/kb-msg-provision "$scripts_source"/kb-spacedock "$scripts_source"/kb-pr-monitor "$scripts_source"/kb-pr-base "$scripts_source"/kb-token-report "$scripts_source"/aiteamforge-paths "$scripts_source"/kb-notify "$scripts_source"/kb-release-push-promote "$scripts_source"/kb-release-version-bump "$scripts_source"/kb-release-version-gate "$scripts_source"/kb-wiki "$scripts_source"/kb-where "$scripts_source"/kb-release-orchestrate "$scripts_source"/kb-sync-branch; do
     [ -f "$src" ] || continue
     name="$(basename "$src")"
     target="${scripts_dest}/${name}"
