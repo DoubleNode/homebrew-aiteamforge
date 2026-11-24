@@ -2333,10 +2333,14 @@ if [ "$OUTBOUND_TOKEN" != "outbound-not-attempted" ]; then
         esac
     elif [ "$AC_RESULT" = "disabled" ]; then
         OUTBOUND_TOKEN="autocommit-disabled"
+    elif [ "$PUSH_RESULT" = "pushed" ]; then
+        # XACA-1659: a tick that pushed is progress (design §5.3: pushed ->
+        # reset), even when held residual dirt remains (e.g. a near-permanently
+        # held agents/*/INDEX.md). Testing _RES_ALLOWED first made every such
+        # tick count +1 and reported "not SENDING" across successful pushes.
+        OUTBOUND_TOKEN="pushed"
     elif [ "$_RES_ALLOWED" -gt 0 ]; then
         OUTBOUND_TOKEN="outbound-withheld-incomplete"
-    elif [ "$PUSH_RESULT" = "pushed" ]; then
-        OUTBOUND_TOKEN="pushed"
     else
         OUTBOUND_TOKEN="outbound-current"
     fi
