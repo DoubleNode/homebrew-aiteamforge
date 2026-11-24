@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1938: Run-planner resolves worktree-absolute hotspot paths under its own repo root (XACA-1938)
+- Tap files updated in this publish: `share/kanban-hooks/orchestrator_contention.py`. Run `brew upgrade aiteamforge` to receive them.
 
 ## [0.21.30] - 2026-11-24
 - XACA-1876: kb-pr-monitor surfaces a stale other-gate approval as STALE_APPROVAL (13); CLAUDE.md kb-msg rule names Team Transfer _INBOX (XACA-1876, XACA-1965)

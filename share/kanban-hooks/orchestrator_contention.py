@@ -139,19 +139,32 @@ REPO_ANCHOR_PATTERNS = (
     r"^[^\s]*?/dev-team/worktrees/[^/]+/",
     r"^(?:~|\$HOME|\$\{HOME\}|/Users/[^/]+|/home/[^/]+)/(?:dev-team|aiteamforge)/",
     r"^/[^\s]*?/dev-team/",
+    r"^/[^\s]*?/worktrees/[^/]+/",   # XACA-1938: a worktree of a checkout at ANY path (not only ".../dev-team/")
 )
 _ANCHOR_RES = tuple(re.compile(p) for p in REPO_ANCHOR_PATTERNS)
+# After a root prefix is stripped, "worktrees/<name>/F" is still F in a worktree of that root (XACA-1938).
+_WORKTREE_RESIDUE_RE = re.compile(r"^worktrees/[^/]+/")
+
+
+def _strip_worktree_residue(t):
+    while True:
+        m = _WORKTREE_RESIDUE_RE.match(t)
+        if not m or len(t) <= m.end():
+            return t
+        t = t[m.end():]
 
 
 def _reanchor(t, literal_prefixes=()):
-    """Strip the first matching repo-absolute prefix; return t unchanged if none matches or nothing would remain."""
+    """Strip the first matching repo-absolute prefix, then any "worktrees/<name>/" left under that root; return t
+    unchanged if none matches or nothing would remain. The residue strip applies ONLY after an anchor matched, so a
+    plain repo-relative "worktrees/..." token is never rewritten."""
     for pre in literal_prefixes:
         if pre and t.startswith(pre) and len(t) > len(pre):
-            return t[len(pre):]
+            return _strip_worktree_residue(t[len(pre):])
     for rx in _ANCHOR_RES:
         m = rx.match(t)
         if m and len(t) > m.end():
-            return t[m.end():]
+            return _strip_worktree_residue(t[m.end():])
     return t
 
 
@@ -161,7 +174,14 @@ def _literal_prefixes(repo_root, anchors):
         if isinstance(a, str) and a.strip():
             a = a.strip()
             for v in {a, os.path.abspath(a), os.path.realpath(a)}:
-                out.add(v.rstrip("/") + "/")
+                v = v.rstrip("/")
+                out.add(v + "/")
+                head, sep, tail = v.rpartition("/worktrees/")
+                if (sep and head and tail and "/" not in tail
+                        and os.path.isfile(os.path.join(v, ".git")) and os.path.exists(os.path.join(head, ".git"))):
+                    # root is a REAL git worktree (.git file) of a checkout at head (.git present): that checkout
+                    # anchors sibling worktrees too. A plain dir merely named "worktrees" anchors nothing extra.
+                    out.add(head + "/")
     return sorted(out, key=lambda x: (-len(x), x))
 
 
