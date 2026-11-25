@@ -31,7 +31,7 @@ python3 {{AITEAMFORGE_DIR}}/kanban-hooks/subagent-track.py remove <AGENT_TYPE> <
 
 ### **🎛️ Multi-Ticket Work: Orchestrate, Never Accumulate**
 Context is re-sent every turn, so a session that works ticket after ticket pays for every earlier ticket on every later turn.
-- **When asked to run more than one ticket, your session is a COORDINATOR only.** Launch each ticket's full run cycle in its own fresh session: `kb-run <REL-ID> --orchestrate` for a release, `kb-run <ID>,<ID>` for any other set (plan approval needs a terminal); otherwise `kb-run <ITEM-ID> --yes` per ticket. Do not implement, gate or merge the tickets in the coordinator's own context.
+- **When asked to run more than one ticket, your session is a COORDINATOR only.** Launch each ticket's full run cycle in its own fresh session: `kb-run <REL-ID> --orchestrate` for a release, `kb-run <ID>,<ID>` for any other set (no terminal: run either with `--plan-only`, show the user the plan, and once they approve run the `--approve-plan` line it prints); otherwise `kb-run <ITEM-ID> --yes` per ticket. Do not implement, gate or merge the tickets in the coordinator's own context.
 - The coordinator tracks status, answers `kb-ask` questions and escalates user decisions. Workers own their ticket through merge and `kb-done`.
 
 ### **Standard Development Workflow**

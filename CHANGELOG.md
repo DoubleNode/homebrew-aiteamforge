@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1917: Global CLAUDE.md gives the headless plan-approval path (XACA-1917)
+- Tap files updated in this publish: `share/templates/claude/claude-md-global.template`,`share/templates/claude/historical/claude-md-global.21eda61.template`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1851: Sync Local Release Branch gate syncs the kb-pr-base branch from its real remote (XACA-1851)
 - Tap files updated in this publish: `share/scripts/kb-sync-branch`,`share/skills/Project Planner/SKILL.md` `share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1736: Close-out refuses a build whose version file disagrees with the release version (XACA-1736)
