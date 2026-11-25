@@ -2238,22 +2238,32 @@ _kb_co_merge_into() {
         || { _KB_CO_ERR="could not check out '$branch' in the scratch clone"; _KB_CO_KIND=other; return 1; }
     if ! _kb_co_git -C "$work" merge --no-ff --no-edit -m "Merge ${label} into ${branch}" "$sha" >/dev/null 2>&1; then
         _kb_co_git -C "$work" merge --abort >/dev/null 2>&1
-        local rbs tree why commit
+        # The judge runs ONCE: stdout = the tree to record, stderr = its one-line reason (accept or refuse).
+        local rbs tree="" why="" commit="" jrc=1 jerr="${work}/.git/kb-co-subsumed.err"
         rbs=$(_kb_release_branches_script 2>/dev/null)
-        if [[ -n "$rbs" && -f "$rbs" ]] \
-            && tree=$(python3 "$rbs" subsumed-merge --repo "$work" --target "$tip" --source "$sha" 2>/dev/null) \
-            && [[ "$tree" =~ ^[0-9a-f]{40,64}$ ]] \
-            && commit=$(_kb_co_git -C "$work" commit-tree "$tree" -p "$tip" -p "$sha" \
-                -m "Merge ${label} into ${branch}" \
-                -m "Content-subsumed (XACA-1735): the conflicted paths carry no ${branch}-only change; recorded with the ${label} tree." 2>/dev/null) \
-            && _kb_co_git -C "$work" checkout -q --detach "$commit" >/dev/null 2>&1; then
-            echo "  merge of ${label} into ${branch} conflicted only on content-subsumed paths; recording it with the ${label} tree (XACA-1735)"
+        if [[ -n "$rbs" && -f "$rbs" ]]; then
+            tree=$(python3 "$rbs" subsumed-merge --repo "$work" --target "$tip" --source "$sha" 2>"$jerr"); jrc=$?
+            why=$(tail -1 "$jerr" 2>/dev/null)
         else
-            why=""
-            [[ -n "$rbs" && -f "$rbs" ]] && why=$(python3 "$rbs" subsumed-merge --repo "$work" --target "$tip" --source "$sha" 2>&1 >/dev/null | tail -1)
+            why="release_branches.py not found; cannot judge"
+        fi
+        if [[ "$jrc" -ne 0 || ! "$tree" =~ ^[0-9a-f]{40,64}$ ]]; then
             _KB_CO_ERR="merge of ${label} into '$branch' conflicted (aborted; nothing pushed, release branch kept)${why:+; not content-subsumed: ${why}}"
             _KB_CO_KIND=conflict; return 1
         fi
+        # Accepted. A failure from here on is a recording failure, NOT a conflict: say which step failed.
+        if ! commit=$(_kb_co_git -C "$work" commit-tree "$tree" -p "$tip" -p "$sha" \
+                -m "Merge ${label} into ${branch}" \
+                -m "Content-subsumed (XACA-1735): the conflicted paths carry no ${branch}-only change; recorded with the ${label} tree." 2>/dev/null) \
+            || [[ ! "$commit" =~ ^[0-9a-f]{40,64}$ ]]; then
+            _KB_CO_ERR="merge of ${label} into '$branch' was judged content-subsumed (${why}) but commit-tree failed; nothing pushed, release branch kept"
+            _KB_CO_KIND=other; return 1
+        fi
+        if ! _kb_co_git -C "$work" checkout -q --detach "$commit" >/dev/null 2>&1; then
+            _KB_CO_ERR="merge of ${label} into '$branch' was judged content-subsumed (${why}) but checking out the recorded merge failed; nothing pushed, release branch kept"
+            _KB_CO_KIND=other; return 1
+        fi
+        echo "  merge of ${label} into ${branch} conflicted only on content-subsumed paths; recording it with the ${label} tree (XACA-1735)"
     fi
     if ! _kb_co_git -C "$work" push -q origin "HEAD:refs/heads/${branch}" >/dev/null 2>&1; then
         _KB_CO_ERR="push to '$branch' was rejected (protected or moved on); nothing published, release branch kept"

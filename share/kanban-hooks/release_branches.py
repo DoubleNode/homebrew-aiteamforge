@@ -385,11 +385,16 @@ def subsumed_merge_tree(repo_root, target, source, *, run=subprocess.run):
     so the two branches keep 2+ merge bases. The recursive virtual base then conflicts on paths where production's
     side is old content (a gitlink git cannot fast-forward without the submodule checked out; a text file whose
     production value was resolved to the release side). Accepted ONLY when both hold:
-      1. every conflicted path is untouched by production-only history: `rev-list --full-history target ^source -- p`
-         is empty. --full-history lists every target-only commit that is not TREESAME to ANY parent for `p`, so a
-         production hotfix, a revert to an old value, a deletion or a hand resolution that invented new content is
-         listed and refused. A merge that merely took one parent's value is TREESAME and is not listed; that value is
-         then traceable to a commit `source` already contains, which is exactly the "already seen" case;
+      1. no conflicted path carries a production-only change. Every commit `rev-list --full-history target ^source
+         -- p` lists must be a MERGE whose value at `p` equals one of its REAL parents' values (read separately with
+         `rev-list --parents -n1`; the path-limited walk's --parents shows rewritten parents). --full-history drops a
+         merge that is TREESAME to a target-side parent, but a match with an EXCLUDED (source-side) parent does not
+         count, so a merge that took the source's value (the hand resolution itself) is listed and must be skipped.
+         Consequence, on purpose: a target merge that kept an OLDER value from one parent (e.g. an `-s ours`
+         resolution) is accepted, because that value came from a parent and holds no new content; the source tree
+         wins (pinned by test_judge_accepts_a_production_merge_that_kept_an_older_value). Refused: any NON-merge
+         target-only commit on `p` (a hotfix, a revert commit, a deletion) and any merge that wrote a value neither
+         parent had;
       2. every NON-conflicted path of the merge-tree result already equals `source`'s tree (a production-only change
          that merges cleanly would otherwise be dropped).
     Anything else (bad input, clean merge, git too old for --write-tree, unparsable output, git errors) -> refuse."""
