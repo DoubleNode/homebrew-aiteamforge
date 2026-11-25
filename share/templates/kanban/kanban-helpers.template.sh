@@ -2220,6 +2220,11 @@ _kb_co_verify_client_merged() {
 }
 
 # Merge <sha> (no-ff) into <branch> in the clone <work> and push. rc 1 + reason in $_KB_CO_ERR on failure.
+# XACA-1735 content-subsumed acceptance: when plain `git merge` conflicts, ask `release_branches.py subsumed-merge`.
+# It accepts ONLY when no conflicted path has a production-only change (a criss-cross left by a hand-resolved merge
+# that never flowed back: the gitlink cannot fast-forward without the submodule checked out, and old hunks replay) AND
+# every other path already equals <sha>'s tree. The merge is then recorded with <sha>'s tree (parents: tip, sha).
+# Any other conflict, or any doubt, keeps the refusal (KIND=conflict).
 _kb_co_merge_into() {
     local work="${1-}" branch="${2-}" sha="${3-}" label="${4-}" tip
     _KB_CO_ERR=""; _KB_CO_KIND=""   # kind: missing | conflict | reject | other (per-cause handling in -003)
@@ -2233,14 +2238,50 @@ _kb_co_merge_into() {
         || { _KB_CO_ERR="could not check out '$branch' in the scratch clone"; _KB_CO_KIND=other; return 1; }
     if ! _kb_co_git -C "$work" merge --no-ff --no-edit -m "Merge ${label} into ${branch}" "$sha" >/dev/null 2>&1; then
         _kb_co_git -C "$work" merge --abort >/dev/null 2>&1
-        _KB_CO_ERR="merge of ${label} into '$branch' conflicted (aborted; nothing pushed, release branch kept)"
-        _KB_CO_KIND=conflict; return 1
+        local rbs tree why commit
+        rbs=$(_kb_release_branches_script 2>/dev/null)
+        if [[ -n "$rbs" && -f "$rbs" ]] \
+            && tree=$(python3 "$rbs" subsumed-merge --repo "$work" --target "$tip" --source "$sha" 2>/dev/null) \
+            && [[ "$tree" =~ ^[0-9a-f]{40,64}$ ]] \
+            && commit=$(_kb_co_git -C "$work" commit-tree "$tree" -p "$tip" -p "$sha" \
+                -m "Merge ${label} into ${branch}" \
+                -m "Content-subsumed (XACA-1735): the conflicted paths carry no ${branch}-only change; recorded with the ${label} tree." 2>/dev/null) \
+            && _kb_co_git -C "$work" checkout -q --detach "$commit" >/dev/null 2>&1; then
+            echo "  merge of ${label} into ${branch} conflicted only on content-subsumed paths; recording it with the ${label} tree (XACA-1735)"
+        else
+            why=""
+            [[ -n "$rbs" && -f "$rbs" ]] && why=$(python3 "$rbs" subsumed-merge --repo "$work" --target "$tip" --source "$sha" 2>&1 >/dev/null | tail -1)
+            _KB_CO_ERR="merge of ${label} into '$branch' conflicted (aborted; nothing pushed, release branch kept)${why:+; not content-subsumed: ${why}}"
+            _KB_CO_KIND=conflict; return 1
+        fi
     fi
     if ! _kb_co_git -C "$work" push -q origin "HEAD:refs/heads/${branch}" >/dev/null 2>&1; then
         _KB_CO_ERR="push to '$branch' was rejected (protected or moved on); nothing published, release branch kept"
         _KB_CO_KIND=reject; return 1
     fi
     echo "  merged ${label} into $branch"
+    return 0
+}
+
+# XACA-1735: back-merge the production tip into integration once the close-out has promoted to PROD, so production's
+# merge commits (a hand-resolved one included) are reachable from integration and the two never keep 2+ merge bases
+# (criss-cross). <work> <integ> <prod> [label]. ALWAYS rc 0: idempotent (already contained = no-op); a conflict, a
+# rejected push (integration ruleset) or a fetch failure is a NOTICE naming the remedy, never a close-out failure (the
+# release already shipped; _kb_co_merge_into's content-subsumed acceptance is the safety net for a missed back-merge).
+_kb_co_backmerge_production() {
+    local work="${1-}" integ="${2-}" prod="${3-}" label="${4-}" ptip
+    [[ -n "$integ" && -n "$prod" && "$integ" != "$prod" ]] || return 0
+    _KB_CO_ERR=""; _KB_CO_KIND=""
+    if ! _kb_co_git -C "$work" fetch -q origin >/dev/null 2>&1; then
+        _KB_CO_ERR="could not fetch the remote"
+    elif ! ptip=$(_kb_co_git -C "$work" rev-parse --verify "refs/remotes/origin/${prod}^{commit}" 2>/dev/null); then
+        _KB_CO_ERR="production branch '$prod' not found on the remote"
+    elif _kb_co_merge_into "$work" "$integ" "$ptip" "${label:-$prod}"; then
+        return 0
+    fi
+    echo "NOTICE: back-merge of ${prod} into ${integ} not done: ${_KB_CO_ERR}. The release is complete; ${integ} is untouched." >&2
+    echo "        Remedy: open a PR that merges ${prod} into ${integ}, or the next close-out may meet a criss-cross (XACA-1735)." >&2
+    _KB_CO_ERR=""; _KB_CO_KIND=""
     return 0
 }
 
@@ -3178,6 +3219,10 @@ print(r.release_version(json.load(sys.stdin)))' "$(dirname "$(_kb_release_branch
     fi
     _kb_release_close_out_promote "$release_id" "$confirm" || return 1
     echo "Close-out for $release_id complete: release promoted to PROD"
+    # XACA-1735: back-merge production into integration AFTER the promote (best effort, NOTICE on any failure): its
+    # merge commit then reaches integration, so the next close-out starts from ONE merge base. Not a step: it must not
+    # move the trunk HEAD the PROD gate verifies (local objects only), nor block a release on an integration ruleset.
+    [[ "$dry_run" == "1" || "$mode" == "client-merge" ]] || _kb_co_backmerge_production "$work" "$integ" "$prod"
     [[ "$dry_run" == "1" ]] || _kb_co_print_local_sync "$work" "$repo" "$integ" "$bsha"
     # XACA-1725-004: the promote's own refresh is bounded and may defer or be lost; the final refresh waits for the lock.
     # It runs even when _KB_CO_CRRECORD_STATUS=published (XACA-1725-017): the promote's Testing Log republish is a

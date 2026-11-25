@@ -376,6 +376,66 @@ def production_contained_in(repo_root, production_branch, sha, *, run=subprocess
         return None
 
 
+def subsumed_merge_tree(repo_root, target, source, *, run=subprocess.run):
+    """XACA-1735: (tree, why). When merging `source` into `target` CONFLICTS but `target` carries nothing `source`
+    lacks, return `source`'s tree so the caller can record the merge with it; else (None, reason) and the caller keeps
+    the conflict refusal. Local objects only, never fetches, never writes a ref (merge-tree writes loose objects only).
+
+    The incident (REL-2026-Q3-037, REL-2026-Q4-070): a hand-resolved production merge never flowed back to integration,
+    so the two branches keep 2+ merge bases. The recursive virtual base then conflicts on paths where production's
+    side is old content (a gitlink git cannot fast-forward without the submodule checked out; a text file whose
+    production value was resolved to the release side). Accepted ONLY when both hold:
+      1. every conflicted path is untouched by production-only history: `rev-list --full-history target ^source -- p`
+         is empty. --full-history lists every target-only commit that is not TREESAME to ANY parent for `p`, so a
+         production hotfix, a revert to an old value, a deletion or a hand resolution that invented new content is
+         listed and refused. A merge that merely took one parent's value is TREESAME and is not listed; that value is
+         then traceable to a commit `source` already contains, which is exactly the "already seen" case;
+      2. every NON-conflicted path of the merge-tree result already equals `source`'s tree (a production-only change
+         that merges cleanly would otherwise be dropped).
+    Anything else (bad input, clean merge, git too old for --write-tree, unparsable output, git errors) -> refuse."""
+    if not all(isinstance(x, str) and _SHA.fullmatch(x) for x in (target, source)):
+        return None, "target/source must be full commit SHAs"
+    try:
+        git = _Git(repo_root, run)
+        mt = git("merge-tree", "--write-tree", "--name-only", "-z", target, source, ok=(0, 1))
+        if mt.returncode == 0:
+            return None, "the merge is clean; nothing to accept"
+        fields = (mt.stdout or "").split("\0")
+        merged = fields[0].strip()
+        paths = []
+        for f in fields[1:]:
+            if not f:
+                break
+            paths.append(f)
+        want = (git("rev-parse", "--verify", source + "^{tree}").stdout or "").strip()
+        if not _SHA.fullmatch(merged) or not _SHA.fullmatch(want) or not paths:
+            return None, "could not read the merge-tree result"
+        paths = sorted(set(paths))
+        def at(commit, p):
+            r = git("rev-parse", "-q", "--verify", "%s:%s" % (commit, p), ok=(0, 1, 128))
+            return (r.stdout or "").strip() if r.returncode == 0 else None
+
+        own = []
+        for p in paths:
+            out = git("rev-list", "--full-history", target, "^" + source, "--", ":(literal)" + p).stdout or ""
+            for c in out.split():
+                # the REAL parents (--parents would show history-rewritten ones under a pathspec)
+                parents = (git("rev-list", "--parents", "-n1", c).stdout or "").split()[1:]
+                if len(parents) > 1 and at(c, p) in {at(q, p) for q in parents}:
+                    continue    # a merge that took one side's value verbatim introduces nothing
+                own.append("%s (%s)" % (p, c[:12]))
+                break
+        if own:
+            return None, "production carries its own change to conflicted path(s): " + ", ".join(own)
+        diff = git("diff-tree", "-r", "-z", "--name-only", merged, want).stdout or ""
+        extra = sorted({d for d in diff.split("\0") if d} - set(paths))
+        if extra:
+            return None, "production carries change(s) the release lacks on non-conflicted path(s): " + ", ".join(extra)
+        return want, "conflicted path(s) %s carry no production-only change" % ", ".join(paths)
+    except (ValueError, RuntimeError, OSError) as e:
+        return None, "cannot evaluate: %s" % e
+
+
 def _branch_spec(cfg, rtype):
     """(source branch, prefix) the promote uses for `rtype` under `cfg`; prefix None = trunk mode, nothing is cut
     (the release branch IS `source`). RuntimeError for the refused hotfix combination. Shared by cut_release_branch
@@ -644,10 +704,22 @@ def main(argv=None):
     p = sub.add_parser("planned-branch")
     p.add_argument("--board", required=True)
     p.add_argument("--release-id", required=True)
+    p = sub.add_parser("subsumed-merge")   # XACA-1735: stdout = tree to record the merge with; rc 1 + reason = refuse
+    p.add_argument("--repo", required=True)
+    p.add_argument("--target", required=True)
+    p.add_argument("--source", required=True)
     a = ap.parse_args(argv)
     try:
         if a.cmd == "item-branch":
             return _cmd_item_branch(a)
+        if a.cmd == "subsumed-merge":
+            tree, why = subsumed_merge_tree(a.repo, a.target, a.source)
+            if tree is None:
+                print(why, file=sys.stderr)
+                return 1
+            print(tree)
+            print(why, file=sys.stderr)
+            return 0
         board = _load_board(a.board)
         if a.cmd == "branches":
             print(json.dumps(effective_branches(board.get("releaseConfig"))))
