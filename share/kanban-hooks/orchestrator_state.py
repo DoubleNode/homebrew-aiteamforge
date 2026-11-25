@@ -91,7 +91,7 @@ PANE_GONE = "<pane-gone>"
 SHELL_COMMANDS = frozenset(("zsh", "bash", "sh", "dash", "fish", "ksh", "tcsh"))
 
 # kb-pr-monitor terminal-failure verdicts: name -> exit code
-FAILED_VERDICTS = {"CONFLICT": 20, "UX_REOPEN": 21, "BLOCKED": 22, "PR_CLOSED": 30, "TIMEOUT": 31}
+FAILED_VERDICTS = {"CONFLICT": 20, "UX_REOPEN": 21, "BLOCKED": 22, "CI_FLAKE_REPEAT": 24, "PR_CLOSED": 30, "TIMEOUT": 31}
 
 _TS_RE = re.compile(
     r"^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})(\.\d+)?(Z|[+-]\d{2}:?\d{2})$")

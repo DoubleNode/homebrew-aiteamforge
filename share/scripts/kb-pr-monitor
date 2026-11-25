@@ -77,7 +77,35 @@
 #                        with no bypass, mergeStateStatus off the allowlist,
 #                        unreadable behind-count, mergeability stuck UNKNOWN,
 #                        PR base != `kb-pr-base <ITEM>` or base unresolvable)
-#   30  PR_CLOSED        PR state CLOSED or MERGED externally
+#                        A red CI check's detail= carries `ci_class=<CLASS>`
+#                        (XACA-1883): OWN_FAIL = the PR's own failure, or one
+#                        that could not be classified (fail closed) — the
+#                        worker fixes it; BILLING_NOT_STARTED = the job never
+#                        started (Actions billing) — never rerun, apply the
+#                        local CI-equivalent waiver protocol. `ci_rerun_failed`
+#                        = an automatic rerun was refused by gh.
+#   24  CI_FLAKE_REPEAT  (XACA-1883) a check classified TIMEOUT_CANCEL (job
+#                        cancelled at its timeout-minutes, no failed step) or
+#                        UNRELATED_FAIL (every failing test/file outside the
+#                        PR's diff AND the same check green on the PR's base
+#                        sha or the base branch tip) was rerun ONCE
+#                        automatically (`gh run rerun <id> --failed`, logged to
+#                        stdout + the item's activity log) and went red AGAIN
+#                        on the same head. TERMINAL. detail= names the check,
+#                        class, run id and failing identifiers. NOT proof the
+#                        failure is outside the PR: red twice on one head is
+#                        either this PR's regression in a suite it did not
+#                        edit, or a hard flake. The WORKER first checks whether
+#                        the failing suite exercises any changed file (fix it
+#                        if so); only then does the coordinator route a
+#                        follow-up to the owning area. Do not rerun by hand
+#                        and never --admin past it. The one-rerun
+#                        budget is durable per (pr, head, check) under
+#                        $KBPM_STATE_DIR/ci-rerun, so a restarted monitor never
+#                        reruns twice; a new head gets a fresh budget. Any
+#                        OWN_FAIL/BILLING red on the PR blocks (22) BEFORE any
+#                        rerun is spent.
+#   30  PR_CLOSED       PR state CLOSED or MERGED externally
 #   31  TIMEOUT          exceeded --max-hours
 #    2  USAGE_ERROR      usage error / missing dependency / unresolvable env
 #    0  HELP             --help/-h: usage printed, no PR was monitored. It
@@ -180,6 +208,10 @@
 #                  mismatch / unresolvable / unreadable all fail CLOSED;
 #                  base_ref_changed raises the review cutoff + base change
 #                  between polls resets the gate latches (XACA-1483-012)
+#   XACA-1883      Gate 3.5 red-check classifier (billing -> timeout ->
+#                  unrelated -> own, fail CLOSED to OWN_FAIL on any gh read
+#                  failure or missing evidence) + ONE durable rerun per
+#                  (pr, head, check) + CI_FLAKE_REPEAT (24) on a second red
 # ============================================================================
 
 PR_NUM=""
@@ -317,6 +349,7 @@ verdict() {
         RESPAWN_BOTH)     _v_code=12 ;;
         STALE_APPROVAL)   _v_code=13 ;;
         ROUND_LIMIT)      _v_code=23 ;;
+        CI_FLAKE_REPEAT)  _v_code=24 ;;
         CONFLICT)         _v_code=20 ;;
         UX_REOPEN)        _v_code=21 ;;
         BLOCKED)          _v_code=22 ;;
@@ -456,6 +489,317 @@ _kbpm_ca_read() {
     # must not be silently reported as "nothing on file".
     mkdir -p "$(_kbpm_ca_dir)" 2>/dev/null || return 2
     return 1
+}
+
+# ── Gate 3.5 red-check classifier + bounded rerun (XACA-1883) ───────────────
+# Before this, every non-tap fail|cancel row went straight to UNSAFE_CHECKS
+# and BLOCKED (22), and workers are told never to retry a 22. So a timeout or
+# a flake in a suite the PR never touched parked the lane until a coordinator
+# approved a manual `gh run rerun --failed` (XACA-1846, -1840, -1853 in one
+# release). Each red row is now classified, in this order, and the FIRST
+# class whose POSITIVE evidence is present wins:
+#
+#   BILLING_NOT_STARTED  job runner_name empty AND zero steps AND an
+#                        annotation "...job was not started because...".
+#                        Checked FIRST: a rerun would fail again in 2 s and
+#                        fire CI_FLAKE_REPEAT on every PR (and burn paid
+#                        minutes if billing returns). NEVER rerun; stays 22.
+#   TIMEOUT_CANCEL       bucket cancel AND no failed step AND GitHub's own
+#                        "exceeded the maximum execution time" annotation.
+#                        Duration alone is never timeout evidence.
+#   UNRELATED_FAIL       bucket fail AND >=1 failing identifier extracted from
+#                        failure-level annotations AND every one lies OUTSIDE
+#                        `gh pr diff --name-only` AND no annotation token
+#                        (extensionless paths too) names a changed file AND
+#                        no token is a repo-wide meta suite (KBPM_CI_META_RE)
+#                        AND no failing test's source AT THE PR HEAD mentions
+#                        a changed path/basename/stem AND the same check name
+#                        concluded success on the PR's base sha (pulls/N
+#                        .base.sha) or on the base branch tip.
+#   OWN_FAIL             everything else — an identifier inside the diff, no
+#                        identifier, no base evidence, a truncated diff, ANY
+#                        gh read failure, an unparseable link. FAIL CLOSED.
+#
+# "Base green" is necessary, not sufficient: EVERY regression a PR introduces
+# is green on base, and the usual way a PR breaks CI is a change that breaks
+# a test it did not edit. The diff/meta/test-source guards are what separate
+# that from a flake. The residual gap is a test that reaches a changed file
+# only indirectly (through a helper it sources that never names it), which
+# is why 24 tells the WORKER to rule out its own change first. The price of a
+# wrong UNRELATED is one rerun and a CI_FLAKE_REPEAT — never a merge: a rerun
+# only ever leads back into this same allowlist gate.
+#
+# Identifiers are repo-relative paths with a code/test extension found in a
+# failure-level annotation's path or message. Absolute paths (fixture temp
+# dirs printed by tests that themselves PASSED) and doc paths (.md) are not
+# identifiers: measured on run 44470037729, six failure-level annotations
+# were fixture output from passing suites ("homebrew-tap/CHANGELOG.md not
+# found at /tmp/..."), and only "tests/test-xaca-0768-stale-base-bypass.sh
+# exited 1" named the real failure.
+#
+# Results land in globals (no subshell, so the caller can read them all):
+#   CI_CLASS  CI_RUN_ID  CI_JOB_ID  CI_IDS (space-separated)  CI_WHY
+KBPM_CI_ID_RE='^[A-Za-z0-9_.][A-Za-z0-9_.@+-]*(/[A-Za-z0-9_.@+-]+)+\.(sh|zsh|bash|bats|py|js|mjs|cjs|ts)$'
+
+# Trailing source-location suffixes on a path token (sed -E): file:line[:col][:],
+# file:12-14, file:L12, GitHub #L12[C5][-L20[C2]], file(12) / file(12,5) (paren
+# possibly already trimmed), file@12, file,12. A path printed with its location must still name that path.
+KBPM_CI_LOC_SED='s/(:L?[0-9]+(-L?[0-9]+)?)+:?$//; s/#L[0-9]+(C[0-9]+)?(-L?[0-9]+(C[0-9]+)?)?$//; s/\([0-9]+(,[0-9]+)?\)?$//; s/[,@][0-9]+$//'
+
+# Basenames (lower-cased) of repo-wide checkers: they go red because of what
+# a PR ADDED (a test without a .test-counts bump, a CLAUDE.md edit past the
+# size ratchet, one twin of a template pair), so they are always OWN_FAIL.
+# Over-matching only costs a rerun; extend per repo via the environment.
+KBPM_CI_META_RE="${KBPM_CI_META_RE:-(ratchet|parity|mirror|coverage|manifest|(^|[-_.])counts?([-_.]|\$)|executable|exec-bit|undefined-refs|md-size|drift|twin|sync-tap|backtick|no-client|lint|shellcheck)}"
+
+# Changed files that alter how EVERY suite runs (workflows, runners, test
+# deps). A PR touching one owns any red check, whatever the test says.
+KBPM_CI_INFRA_RE="${KBPM_CI_INFRA_RE:-^(\\.github/|scripts/tests/)|(^|/)(run-[A-Za-z-]*suites?(\\.[a-z]+)?|Makefile|package(-lock)?\\.json|requirements[^/]*\\.txt|conftest\\.py|pytest\\.ini|\\.bats-version)\$}"
+
+# stdin: annotation tokens; ENVIRON _KBPM_CI_DIFF: the changed-file list.
+# Prints the changed path a token names ANYWHERE inside it, bounded by
+# non-path characters, so a wrapper never hides it ({"file":"p:12"},
+# file=p:12, |p:12|, (p:12:5), runner-absolute /home/.../p). A path may sit
+# after a "/" (suffix of a longer path); a bare basename may not (that is
+# another dir's file). Bounded, not listed: wrapper shapes are open-ended.
+# Fixture temp dirs are skipped (K388 noise). Never exits early (SIGPIPE).
+KBPM_CI_TOUCH_AWK='
+function bounded(t, n, slash,    i, off, pre, post, L) {
+    L = length(n); off = 0
+    while (L > 0 && (i = index(substr(t, off + 1), n)) > 0) {
+        i += off
+        pre = (i == 1) ? "" : substr(t, i - 1, 1)
+        post = substr(t, i + L, 1)
+        # "." ends the path only when no name char follows (p. vs p.bak).
+        if (post == "." && substr(t, i + L + 1, 1) ~ /[A-Za-z0-9_]/) post = "x"
+        if (pre !~ /[A-Za-z0-9_.@+-]/ && (slash || pre != "/") && post !~ /[A-Za-z0-9_\/-]/) return 1
+        off = i
+    }
+    return 0
+}
+BEGIN { n = split(ENVIRON["_KBPM_CI_DIFF"], a, "\n")
+        for (i = 1; i <= n; i++) { p = a[i]; if (p == "") continue
+            d[p] = 1; b = p; sub(/.*\//, "", b); bn[b] = p } }
+hit == "" && NF {
+    t = $0
+    if (t in d) { hit = t; next }
+    if (t ~ /^\/(tmp|private|var\/folders)\// || index(t, "/tmp.") > 0) next
+    for (p in d) if (bounded(t, p, 1)) { hit = p; break }
+    if (hit == "") for (b in bn) if (bounded(t, b, 0)) { hit = bn[b]; break }
+}
+END { if (hit != "") print hit }'
+
+# stdin: annotation tokens; ENVIRON _KBPM_CI_META_RE. Prints the first
+# repo-relative path (or dot-manifest) token whose basename is a meta suite.
+KBPM_CI_META_AWK='
+hit == "" && (index($0, "/") > 1 || $0 ~ /^\.[A-Za-z]/) {
+    b = $0; sub(/.*\//, "", b)
+    if (tolower(b) ~ ENVIRON["_KBPM_CI_META_RE"]) hit = $0 }
+END { if (hit != "") print hit }'
+
+# stdin: a failing test file's source; ENVIRON _KBPM_CI_DIFF. Prints the
+# first changed path, basename, or stem (>= 4 chars, extension dropped) the
+# source mentions, plus "fixtures/<dir>" for a changed fixture (tests load a
+# fixture dir, then a file by a computed name). Substring match on purpose:
+# over-matching fails closed.
+KBPM_CI_REFS_AWK='
+BEGIN { n = split(ENVIRON["_KBPM_CI_DIFF"], a, "\n")
+        for (i = 1; i <= n; i++) { p = a[i]; if (p == "") continue
+            nd[++k] = p; b = p; sub(/.*\//, "", b); nd[++k] = b
+            s = b; sub(/\.[^.]*$/, "", s); if (length(s) >= 4 && s != b) nd[++k] = s
+            if (match(p, /fixtures\/[^\/]+/)) nd[++k] = substr(p, RSTART, RLENGTH) } }
+hit == "" { for (j = 1; j <= k; j++) if (index($0, nd[j]) > 0) { hit = nd[j]; break } }
+END { if (hit != "") print hit }'
+
+_kbpm_ci_own() { CI_CLASS="OWN_FAIL"; CI_WHY="$1"; return 0; }
+
+# Escapes a check name for embedding as a jq string literal (gh's --jq has
+# no --arg). Only \ and " need escaping; newlines are impossible in a row
+# read by `read -r`.
+_kbpm_jq_str() {
+    printf '"%s"' "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+}
+
+# Prints the conclusion of the NEWEST check run named <name> at <ref>, or
+# nothing. rc != 0 on a gh failure.
+_kbpm_ci_conclusion_at() { # <ref> <check-name>
+    gh api "repos/$REPO/commits/$1/check-runs?per_page=100" \
+        --jq "[.check_runs[] | select(.name == $(_kbpm_jq_str "$2"))] | sort_by(.id) | last | (.conclusion // \"\")" 2>/dev/null
+}
+
+_kbpm_ci_classify() { # <check-name> <bucket> <link>
+    _cc_name="$1"; _cc_bucket="$2"; _cc_link="$3"
+    CI_CLASS=""; CI_RUN_ID=""; CI_JOB_ID=""; CI_IDS=""; CI_WHY=""
+    case "$_cc_link" in
+        */actions/runs/*/job/*) ;;
+        *) _kbpm_ci_own "no_actions_job_link"; return 0 ;;
+    esac
+    CI_RUN_ID="${_cc_link#*/actions/runs/}"; CI_RUN_ID="${CI_RUN_ID%%/*}"
+    CI_JOB_ID="${_cc_link##*/job/}"; CI_JOB_ID="${CI_JOB_ID%%[!0-9]*}"
+    case "$CI_RUN_ID" in ""|*[!0-9]*) _kbpm_ci_own "unparseable_run_id"; return 0 ;; esac
+    case "$CI_JOB_ID" in ""|*[!0-9]*) _kbpm_ci_own "unparseable_job_id"; return 0 ;; esac
+
+    # runner|steps|failed-steps. Capture-first rc; empty is a failure too.
+    _cc_job=$(gh api "repos/$REPO/actions/jobs/$CI_JOB_ID" \
+        --jq '"\(.runner_name // "")|\(.steps // [] | length)|\([.steps // [] | .[] | select(.conclusion == "failure")] | length)"' 2>/dev/null)
+    _cc_rc=$?
+    if [ "$_cc_rc" -ne 0 ] || [ -z "$_cc_job" ]; then _kbpm_ci_own "job_read_failed"; return 0; fi
+    _cc_runner="${_cc_job%%|*}"; _cc_rest="${_cc_job#*|}"
+    _cc_steps="${_cc_rest%%|*}"; _cc_failed="${_cc_rest#*|}"
+    case "$_cc_steps$_cc_failed" in ""|*[!0-9]*) _kbpm_ci_own "job_shape_unreadable"; return 0 ;; esac
+
+    # level<TAB>path<TAB>message, one per annotation. Tabs/newlines inside a
+    # message are flattened so one annotation is always one line.
+    _cc_ann=$(gh api "repos/$REPO/check-runs/$CI_JOB_ID/annotations" --paginate \
+        --jq '.[] | "\(.annotation_level // "")\t\(.path // "")\t\(.message // "" | gsub("[\t\r\n]"; " "))"' 2>/dev/null)
+    _cc_rc=$?
+    if [ "$_cc_rc" -ne 0 ]; then _kbpm_ci_own "annotations_read_failed"; return 0; fi
+
+    # 1. BILLING_NOT_STARTED — first, never rerun.
+    if [ -z "$_cc_runner" ] && [ "$_cc_steps" -eq 0 ] \
+        && printf '%s\n' "$_cc_ann" | grep -i 'job was not started because' >/dev/null; then
+        CI_CLASS="BILLING_NOT_STARTED"; CI_WHY="runner_never_assigned"; return 0
+    fi
+
+    # 2. TIMEOUT_CANCEL — cancel bucket only, with GitHub's own evidence.
+    if [ "$_cc_bucket" = "cancel" ]; then
+        if [ "$_cc_failed" -eq 0 ] \
+            && printf '%s\n' "$_cc_ann" | grep -i 'exceeded the maximum execution time' >/dev/null; then
+            CI_CLASS="TIMEOUT_CANCEL"; CI_WHY="timeout_annotation"; return 0
+        fi
+        _kbpm_ci_own "cancel_without_timeout_evidence"; return 0
+    fi
+    [ "$_cc_bucket" = "fail" ] || { _kbpm_ci_own "bucket_$_cc_bucket"; return 0; }
+
+    # 3. UNRELATED_FAIL — identifiers from failure-level annotations.
+    # A pipeline, not `for t in $var`: unquoted expansion does not word-split
+    # under zsh -f, and globs under bash. One identifier per line, first-seen
+    # order, deduplicated.
+    # Location suffixes (path:12:5, #L12, (12), @12) are stripped on both sides
+    # of the trailing-punctuation trim: "(path:12:5)" only exposes ":12:5"
+    # once the ")" is gone, and "path:12." only once the "." is.
+    _cc_toks=$(printf '%s\n' "$_cc_ann" | awk -F '\t' '$1 == "failure" { $1 = ""; print }' \
+        | tr -s ' \t' '\n\n' \
+        | sed "s/^[\"'(\`<[]*//" | sed -E "$KBPM_CI_LOC_SED" \
+        | sed "s/[]\"'):;,.\`>]*\$//" | sed -E "$KBPM_CI_LOC_SED" \
+        | sed "s/[]\"'):;,.\`>]*\$//" \
+        | awk 'NF && !seen[$0]++')
+    _cc_ids=$(printf '%s\n' "$_cc_toks" | grep -E "$KBPM_CI_ID_RE")
+    CI_IDS=$(printf '%s\n' "$_cc_ids" | tr '\n' ' ' | sed 's/ *$//')
+    [ -n "$_cc_ids" ] || { _kbpm_ci_own "no_failing_identifier"; return 0; }
+
+    _cc_diff=$(gh pr diff "$PR_NUM" --repo "$REPO" --name-only 2>/dev/null)
+    _cc_rc=$?
+    if [ "$_cc_rc" -ne 0 ] || [ -z "$_cc_diff" ]; then _kbpm_ci_own "diff_unreadable"; return 0; fi
+    # XACA-1276-017 shape: at the 3000-file ceiling the list may be truncated,
+    # and a truncated list cannot prove "outside the diff".
+    _cc_nfiles=$(printf '%s\n' "$_cc_diff" | grep -c .)
+    [ "$_cc_nfiles" -lt 3000 ] || { _kbpm_ci_own "diff_at_ceiling"; return 0; }
+    # Any identifier that is also a changed file makes the whole check the
+    # PR's own (grep -Fx: exact whole-line match against the diff list).
+    # grep without -q reads all its input, so the printf never takes SIGPIPE.
+    while IFS= read -r _cc_id; do
+        [ -n "$_cc_id" ] || continue
+        if printf '%s\n' "$_cc_diff" | grep -Fx -- "$_cc_id" >/dev/null; then
+            _kbpm_ci_own "identifier_in_diff:$_cc_id"; return 0
+        fi
+    done <<CC_IDS_EOF
+$_cc_ids
+CC_IDS_EOF
+
+    # "Outside the diff + green on base" cannot prove UNRELATED by itself:
+    # EVERY regression a PR introduces is green on base. Three guards close
+    # the ways a PR breaks a test it did not edit (XACA-1883 review, V1-V5):
+    # (c) — the PR changed CI infrastructure itself.
+    _cc_hit=$(printf '%s\n' "$_cc_diff" | grep -E "$KBPM_CI_INFRA_RE" | awk 'NR == 1')
+    [ -z "$_cc_hit" ] || { _kbpm_ci_own "ci_infra_changed:$_cc_hit"; return 0; }
+    # V5 — ANY path-shaped token (extensionless too, e.g. "scripts/kb-pr-monitor:
+    #      line 40: syntax error") naming a changed file.
+    _cc_hit=$(printf '%s\n' "$_cc_toks" | _KBPM_CI_DIFF="$_cc_diff" awk "$KBPM_CI_TOUCH_AWK")
+    [ -z "$_cc_hit" ] || { _kbpm_ci_own "annotation_names_changed_file:$_cc_hit"; return 0; }
+    # V3/V4 — repo-wide meta suites (ratchets, manifests, parity, coverage)
+    #      fail BECAUSE of what a PR added, from a checker it never touches.
+    _cc_hit=$(printf '%s\n' "$_cc_toks" | _KBPM_CI_META_RE="$KBPM_CI_META_RE" awk "$KBPM_CI_META_AWK")
+    [ -z "$_cc_hit" ] || { _kbpm_ci_own "meta_suite:$_cc_hit"; return 0; }
+    # V1/V2 — an unchanged test that exercises a changed file. Read each
+    #      failing test AT THE PR HEAD; any mention of a changed path, basename
+    #      or stem makes it the PR's own. Unreadable -> OWN (fail closed).
+    case "${HEAD_SHA:-}" in ""|*[!0-9a-fA-F]*) _kbpm_ci_own "head_sha_unknown"; return 0 ;; esac
+    while IFS= read -r _cc_id; do
+        [ -n "$_cc_id" ] || continue
+        _cc_src=$(gh api -H 'Accept: application/vnd.github.raw+json' \
+            "repos/$REPO/contents/$_cc_id?ref=$HEAD_SHA" 2>/dev/null)
+        _cc_rc=$?
+        if [ "$_cc_rc" -ne 0 ] || [ -z "$_cc_src" ]; then
+            _kbpm_ci_own "test_source_unreadable:$_cc_id"; return 0
+        fi
+        _cc_hit=$(printf '%s\n' "$_cc_src" | _KBPM_CI_DIFF="$_cc_diff" awk "$KBPM_CI_REFS_AWK")
+        if [ -n "$_cc_hit" ]; then
+            _kbpm_ci_own "test_references_changed:$_cc_id~$_cc_hit"; return 0
+        fi
+    done <<CC_IDS_EOF
+$_cc_ids
+CC_IDS_EOF
+
+    _cc_base=$(gh api "repos/$REPO/pulls/$PR_NUM" --jq '.base.sha' 2>/dev/null)
+    case "$_cc_base" in ""|*[!0-9a-fA-F]*) _kbpm_ci_own "base_sha_unreadable"; return 0 ;; esac
+    _cc_concl=$(_kbpm_ci_conclusion_at "$_cc_base" "$_cc_name")
+    if [ "$?" -eq 0 ] && [ "$_cc_concl" = "success" ]; then
+        CI_CLASS="UNRELATED_FAIL"; CI_WHY="green_on_base_sha"; return 0
+    fi
+    if [ -n "${PR_BASE:-}" ]; then
+        # A release base (`release/x`) must be one path segment in the URL.
+        _cc_concl=$(_kbpm_ci_conclusion_at "$(printf '%s' "$PR_BASE" | sed 's|/|%2F|g')" "$_cc_name")
+        # Red on the PR's base sha, green on the tip: the fix is upstream.
+        # A --failed rerun on the same head cannot pick it up (it would end
+        # as a predictable 24), so the worker merges the base in instead.
+        if [ "$?" -eq 0 ] && [ "$_cc_concl" = "success" ]; then
+            _kbpm_ci_own "fixed_on_base_tip_update_branch"; return 0
+        fi
+    fi
+    _kbpm_ci_own "not_green_on_base"; return 0
+}
+
+# Durable one-rerun budget, keyed by (repo, pr, head, check). Same layer and
+# validation discipline as _kbpm_ca_*: a restarted monitor must not grant a
+# second rerun, and a state dir that cannot be read means NO auto-rerun.
+_kbpm_ci_rerun_dir() {
+    printf '%s/ci-rerun/%s/%s\n' "$KBPM_STATE_DIR" "$REPO_OWNER" "$REPO_NAME"
+}
+
+_kbpm_ci_rerun_file() { # <head> <check-name>
+    case "$1" in ""|*[!0-9a-fA-F]*) return 1 ;; esac
+    _rf_slug=$(printf '%s' "$2" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-80)
+    _rf_sum=$(printf '%s' "$2" | cksum | awk '{print $1}')
+    [ -n "$_rf_sum" ] || return 1
+    printf '%s/%s.%s.%s-%s\n' "$(_kbpm_ci_rerun_dir)" "$PR_NUM" "$1" "$_rf_slug" "$_rf_sum"
+}
+
+# Tri-state, like _kbpm_ca_read: 0 = record on file (printed), 1 = none and
+# the dir is usable, 2 = could not tell (never "none").
+_kbpm_ci_rerun_read() { # <head> <check-name>
+    _rr_file=$(_kbpm_ci_rerun_file "$1" "$2") || return 2
+    if [ -f "$_rr_file" ]; then
+        cat "$_rr_file" 2>/dev/null && return 0
+        return 2
+    fi
+    mkdir -p "$(_kbpm_ci_rerun_dir)" 2>/dev/null || return 2
+    [ -w "$(_kbpm_ci_rerun_dir)" ] || return 2
+    return 1
+}
+
+# Written BEFORE the rerun is issued: a crash between the two must cost the
+# rerun, never grant a second one.
+_kbpm_ci_rerun_write() { # <head> <check-name> <record>
+    _rw_file=$(_kbpm_ci_rerun_file "$1" "$2") || return 1
+    mkdir -p "$(_kbpm_ci_rerun_dir)" 2>/dev/null || return 1
+    printf '%s\n' "$3" > "$_rw_file" 2>/dev/null || return 1
+    [ -s "$_rw_file" ]
+}
+
+# Reads one key=value field out of a rerun record.
+_kbpm_ci_rec_field() { # <record> <key>
+    printf '%s\n' "$1" | tr ' ' '\n' | sed -n "s/^$2=//p" | head -1
 }
 
 # ── review-round counting (XACA-1299-003) ───────────────────────────────────
@@ -1854,9 +2198,13 @@ while true; do
     # VERIFIED, NOT ASSUMED: `gh pr checks`'s documented exit code 8 for pending
     # is produced ONLY by the plain-text path; in --json mode it returns success
     # regardless. Inspect `bucket`, never the exit code.
-    CHECKS_OUT=$(gh pr checks "$PR_NUM" --repo "$REPO" --json name,bucket --jq '.[] | "\(.name)|\(.bucket)"' 2>&1)
+    # XACA-1883: `link` (third field) carries /actions/runs/<run>/job/<job>,
+    # which the red-check classifier needs. A row without it still parses
+    # (empty third field) and simply classifies OWN_FAIL — fail closed.
+    CHECKS_OUT=$(gh pr checks "$PR_NUM" --repo "$REPO" --json name,bucket,link --jq '.[] | "\(.name)|\(.bucket)|\(.link // "")"' 2>&1)
     CHECKS_RC=$?
     SYNC_TAP_BUCKET=""; CHANGELOG_BUCKET=""; UNSAFE_CHECKS=""; PENDING_CHECKS=""
+    RED_CHECK_ROWS=""
     if [ "$CHECKS_RC" -ne 0 ]; then
         if printf '%s\n' "$CHECKS_OUT" | grep -qi "no checks reported"; then
             # XACA-1159-034: "no checks reported" is AMBIGUOUS — (a) no CI is
@@ -1947,7 +2295,7 @@ while true; do
         CLASSIFIED_CHECKS=0
         # A here-doc, NOT a pipe: a `while` on the right of a pipe runs in a
         # subshell and these accumulators would not survive the loop.
-        while IFS='|' read -r C_NAME C_BUCKET; do
+        while IFS='|' read -r C_NAME C_BUCKET C_LINK; do
             [ -n "$C_NAME" ] || continue
             CLASSIFIED_CHECKS=$((CLASSIFIED_CHECKS + 1))
             # Record the two tap buckets for their bypass-aware arms, but do
@@ -1970,7 +2318,12 @@ while true; do
                 fail|cancel)
                     case "$C_NAME" in
                         sync-tap-drift|tap-changelog-completeness) : ;;   # own arms adjudicate
-                        *) UNSAFE_CHECKS="${UNSAFE_CHECKS}${UNSAFE_CHECKS:+, }$C_NAME ($C_BUCKET)" ;;
+                        # XACA-1883: classified after the loop (see the
+                        # red-check block before the catch-all), never
+                        # silently dropped — every row here ends in
+                        # UNSAFE_CHECKS, a rerun, or CI_FLAKE_REPEAT.
+                        *) RED_CHECK_ROWS="${RED_CHECK_ROWS}${C_NAME}|${C_BUCKET}|${C_LINK}
+" ;;
                     esac ;;
                 # Includes the two tap checks: a PENDING or unreadable tap gate
                 # re-polls like any other. A bypass answers "this failure is
@@ -2076,6 +2429,44 @@ CHECKS_EOF
         printf '%s\n' "tap-changelog-completeness FAILED (bucket=$CHANGELOG_BUCKET) but bypass present — proceeding."
     fi
 
+    # ── XACA-1883: classify every non-tap red row (see _kbpm_ci_classify) ──
+    # Rerunnable classes (TIMEOUT_CANCEL, UNRELATED_FAIL) consult the durable
+    # per-(pr, head, check) budget:
+    #   no record        -> planned for ONE `gh run rerun <run> --failed`
+    #   record, SAME job -> the rerun has not replaced the failed job in gh's
+    #                       answer yet: wait (bounded), never a second rerun
+    #   record, NEW job  -> second red on this head: CI_FLAKE_REPEAT (24)
+    #   unreadable state -> no auto-rerun: BLOCKED like any other red
+    # Everything else (OWN_FAIL, BILLING_NOT_STARTED) goes to UNSAFE_CHECKS
+    # with its class, and the catch-all below blocks BEFORE any rerun is
+    # spent — a PR whose own red is pending a fix does not burn the budget.
+    CI_RERUN_PLAN=""; CI_FLAKE_REPEATS=""; CI_RERUN_WAITING=""
+    while IFS='|' read -r R_NAME R_BUCKET R_LINK; do
+        [ -n "$R_NAME" ] || continue
+        _kbpm_ci_classify "$R_NAME" "$R_BUCKET" "$R_LINK"
+        case "$CI_CLASS" in
+            TIMEOUT_CANCEL|UNRELATED_FAIL)
+                _CI_REC=$(_kbpm_ci_rerun_read "$HEAD_SHA" "$R_NAME")
+                case $? in
+                    0)
+                        if [ "$(_kbpm_ci_rec_field "$_CI_REC" job)" = "$CI_JOB_ID" ]; then
+                            CI_RERUN_WAITING="${CI_RERUN_WAITING}${CI_RERUN_WAITING:+, }$R_NAME (job $CI_JOB_ID)"
+                        else
+                            CI_FLAKE_REPEATS="${CI_FLAKE_REPEATS}${CI_FLAKE_REPEATS:+; }check='$R_NAME' ci_class=$CI_CLASS run=$CI_RUN_ID first_run=$(_kbpm_ci_rec_field "$_CI_REC" run) ids=${CI_IDS:-none}"
+                        fi ;;
+                    1)
+                        CI_RERUN_PLAN="${CI_RERUN_PLAN}${R_NAME}|${CI_CLASS}|${CI_RUN_ID}|${CI_JOB_ID}|${CI_WHY}|${CI_IDS}
+" ;;
+                    *)
+                        UNSAFE_CHECKS="${UNSAFE_CHECKS}${UNSAFE_CHECKS:+, }$R_NAME ($R_BUCKET, ci_class=$CI_CLASS, no auto-rerun: rerun state unreadable under $KBPM_STATE_DIR)" ;;
+                esac ;;
+            *)
+                UNSAFE_CHECKS="${UNSAFE_CHECKS}${UNSAFE_CHECKS:+, }$R_NAME ($R_BUCKET, ci_class=${CI_CLASS:-OWN_FAIL} why=${CI_WHY:-unclassified})" ;;
+        esac
+    done <<RED_ROWS_EOF
+$RED_CHECK_ROWS
+RED_ROWS_EOF
+
     # Catch-all: every OTHER check must land in pass/skipping. Allowlist only
     # the two adjudicated arms above — do NOT extend this by enumerating more
     # names, that rebuilds the denylist this replaces. Before XACA-0822 this
@@ -2084,8 +2475,73 @@ CHECKS_EOF
     if [ -n "$UNSAFE_CHECKS" ]; then
         printf '%s\n' "x Failing/cancelled/timed-out check(s) not covered by a named arm: $UNSAFE_CHECKS"
         printf '%s\n' "  Investigate before merging. Do NOT --admin past these; that is how a red gate ships."
+        case "$UNSAFE_CHECKS" in
+            *BILLING_NOT_STARTED*)
+                printf '%s\n' "  ci_class=BILLING_NOT_STARTED: the job never got a runner (Actions billing). It is NOT rerun."
+                printf '%s\n' "  Apply the billing waiver protocol: run the local CI-equivalent and record it on the PR." ;;
+        esac
+        case "$UNSAFE_CHECKS" in
+            *OWN_FAIL*)
+                printf '%s\n' "  ci_class=OWN_FAIL: treat it as this PR's failure (or one that could not be proven"
+                printf '%s\n' "  unrelated — fail closed). Fix it and push; no automatic rerun was spent." ;;
+        esac
         verdict BLOCKED "unsafe CI check(s): $UNSAFE_CHECKS"
     fi
+    if [ -n "$CI_FLAKE_REPEATS" ]; then
+        printf '%s\n' "x CI check(s) went red AGAIN after their one automatic rerun on $HEAD_SHA: $CI_FLAKE_REPEATS"
+        printf '%s\n' "  NOT proof it is outside this PR: either this PR's regression in a suite it did not edit, or a hard flake. First check whether the failing suite exercises any changed file; fix it if so, else escalate for a follow-up against the owning area."
+        printf '%s\n' "  Do NOT rerun by hand to get past it, and never --admin past a red check."
+        verdict CI_FLAKE_REPEAT "$CI_FLAKE_REPEATS head=$HEAD_SHA"
+    fi
+    if [ -n "$CI_RERUN_PLAN" ]; then
+        CI_RERUN_DONE_RUNS=" "; CI_RERUN_SUMMARY=""
+        while IFS='|' read -r P_NAME P_CLASS P_RUN P_JOB P_WHY P_IDS; do
+            [ -n "$P_NAME" ] || continue
+            # Record FIRST: a crash between record and rerun costs the rerun,
+            # it can never grant a second one.
+            if ! _kbpm_ci_rerun_write "$HEAD_SHA" "$P_NAME" "class=$P_CLASS run=$P_RUN job=$P_JOB why=$P_WHY"; then
+                printf '%s\n' "x could not record the rerun budget for '$P_NAME' under $(_kbpm_ci_rerun_dir) — not rerunning."
+                verdict BLOCKED "unsafe CI check(s): $P_NAME (ci_class=$P_CLASS, no auto-rerun: rerun state unwritable under $KBPM_STATE_DIR)"
+            fi
+            # One `gh run rerun --failed` per RUN: it reruns every failed job
+            # in that run, so a second call for a sibling job is redundant.
+            case "$CI_RERUN_DONE_RUNS" in
+                *" $P_RUN "*) : ;;
+                *)
+                    RERUN_OUT=$(gh run rerun "$P_RUN" --failed --repo "$REPO" 2>&1)
+                    RERUN_RC=$?
+                    if [ "$RERUN_RC" -ne 0 ]; then
+                        printf '%s\n' "x gh run rerun $P_RUN --failed exited $RERUN_RC: $RERUN_OUT"
+                        verdict BLOCKED "ci_rerun_failed check='$P_NAME' ci_class=$P_CLASS run=$P_RUN rc=$RERUN_RC"
+                    fi
+                    CI_RERUN_DONE_RUNS="${CI_RERUN_DONE_RUNS}${P_RUN} " ;;
+            esac
+            printf '%s\n' "ci_rerun: check='$P_NAME' ci_class=$P_CLASS why=$P_WHY run=$P_RUN job=$P_JOB ids=${P_IDS:-none} — ONE automatic 'gh run rerun --failed' issued; a second red on this head is CI_FLAKE_REPEAT."
+            _CI_LOG=$(_kbpm_helpers_run _kb_log_activity ci_rerun "$ITEM_ID" item check "$P_NAME" "" "$P_CLASS run=$P_RUN pr=$PR_NUM head=$HEAD_SHA")
+            _CI_LOG_RC=$(cut -d' ' -f2 "$KBPM_RCFILE" 2>/dev/null)
+            [ "${_CI_LOG_RC:-1}" = "0" ] \
+                || printf '%s\n' "! could not write the ci_rerun activity-log entry for $ITEM_ID (non-blocking): ${_CI_LOG:-<no output>}"
+            CI_RERUN_SUMMARY="${CI_RERUN_SUMMARY}${CI_RERUN_SUMMARY:+; }check='$P_NAME' ci_class=$P_CLASS run=$P_RUN"
+        done <<RERUN_PLAN_EOF
+$CI_RERUN_PLAN
+RERUN_PLAN_EOF
+        CI_RERUN_WAIT_POLLS=0
+        repoll_or_block "$POLL_SECONDS" "ci_rerun issued: $CI_RERUN_SUMMARY"
+        continue
+    fi
+    if [ -n "$CI_RERUN_WAITING" ]; then
+        # gh still answers with the job the rerun replaced. Bounded: a rerun
+        # that never registers must surface, not poll to TIMEOUT.
+        CI_RERUN_WAIT_POLLS=$((${CI_RERUN_WAIT_POLLS:-0} + 1))
+        if [ "$CI_RERUN_WAIT_POLLS" -ge 10 ]; then
+            printf '%s\n' "x the automatic rerun never replaced the failed job after $CI_RERUN_WAIT_POLLS polls: $CI_RERUN_WAITING"
+            verdict BLOCKED "ci_rerun_not_registered: $CI_RERUN_WAITING"
+        fi
+        printf '%s\n' "Waiting for the automatic rerun to replace the failed job (poll $CI_RERUN_WAIT_POLLS/10): $CI_RERUN_WAITING"
+        repoll_or_block "$POLL_SECONDS" "ci_rerun pending registration: $CI_RERUN_WAITING"
+        continue
+    fi
+    CI_RERUN_WAIT_POLLS=0
     if [ -n "$PENDING_CHECKS" ]; then
         printf '%s\n' "CI still running/unresolved on PR #$PR_NUM: $PENDING_CHECKS — re-polling rather than merging on an unfinished build."
         repoll_or_block "$POLL_SECONDS" "CI checks unresolved: $PENDING_CHECKS"
