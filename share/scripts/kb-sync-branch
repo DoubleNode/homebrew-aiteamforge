@@ -1,0 +1,249 @@
+#!/usr/bin/env bash
+# ============================================================================
+# kb-sync-branch -- fast-forward the MAIN checkout's copy of a branch to its
+#                   remote after a merge (XACA-1851)
+# ============================================================================
+# Why this exists: the planner's mandatory "Sync Local Develop Branch" step
+# hard-coded `git checkout develop && git pull origin develop`. Two things were
+# wrong with that: tickets now merge into their RELEASE branch (kb-pr-base),
+# not always develop, and this repo's remote is named `dev-team`, not `origin`.
+# In REL-2026-Q4-071 six tickets marked the step done and the main clone was
+# still 7 commits behind. This tool is the "Sync Local Release Branch" gate and
+# the close-out's local develop sync.
+#
+# Standalone: bash shebang, no bash-4 features (runs under macOS /bin/bash
+# 3.2), never sources kanban-helpers.sh.
+#
+# Rules it enforces (each one is a past incident, not a preference):
+#   * Branch: <BRANCH>, or --item <ID> resolved by kb-pr-base (never a guessed
+#     "develop").
+#   * Remote: --remote, else the branch's upstream (branch.<B>.remote), else the
+#     repo's ONLY remote. Several remotes and no upstream -> refuse. Never a
+#     literal "origin".
+#   * Repo: the MAIN checkout of the repo given by --repo / the cwd. A linked
+#     worktree path resolves to its main checkout.
+#   * Fast-forward ONLY, and the main checkout's branch is NEVER switched:
+#       - main checkout is ON the branch: refuse if tracked files have local
+#         changes, else `merge --ff-only`.
+#       - main checkout is on ANOTHER branch: move the local branch ref forward
+#         in place (compare-and-swap update-ref); the working tree is untouched.
+#       - the branch is checked out in some OTHER worktree: refuse (moving a
+#         ref under a checked-out tree desyncs it).
+#       - local branch has commits the remote does not (diverged): refuse.
+#   * --pr <N>: the PR must be MERGED into exactly this branch; its merge
+#     commit must then be on the synced branch. --expect <commit> does the
+#     same check for an explicit commit.
+#
+# Exit codes:
+#   0  synced (or already current)
+#   1  error (bad repo, unresolvable branch/remote, fetch failed, gh failed)
+#   2  usage error
+#   3  STOPPED for a human: dirty tree on the branch, diverged local branch,
+#      branch checked out in another worktree. Report it; never force past it.
+#   4  the expected / merge commit is NOT on the branch after syncing
+# ============================================================================
+
+usage() {
+    cat <<'USAGE'
+Usage: kb-sync-branch <BRANCH>          [--pr <N>] [--expect <commit>] [--repo <dir>] [--remote <name>]
+       kb-sync-branch --item <ITEM-ID>  [--pr <N>] [--expect <commit>] [--repo <dir>] [--remote <name>]
+       kb-sync-branch -h | --help
+
+Fast-forward the main checkout's local <BRANCH> to <remote>/<BRANCH> after a merge.
+
+  --item <ID>       resolve the branch with kb-pr-base <ID> (the ticket's PR base:
+                    its release branch, else the team integration branch)
+  --pr <N>          require PR #N to be MERGED into <BRANCH>, then verify its merge
+                    commit is on the synced branch (needs gh)
+  --expect <commit> verify <commit> is on the synced branch
+  --repo <dir>      any path inside the repository (default: cwd); a worktree path
+                    resolves to the repository's MAIN checkout
+  --remote <name>   remote to sync from (default: the branch's upstream remote, else
+                    the repository's only remote; never assumes "origin")
+
+It never switches the main checkout's branch, never stashes, never resets, never
+creates a merge commit.
+
+Exit codes: 0 synced/current, 1 error, 2 usage, 3 stopped (dirty tree on the
+branch, diverged branch, branch checked out in another worktree), 4 expected
+commit missing after sync.
+
+Examples:
+  kb-sync-branch --item XACA-1851 --pr 1410     # per-ticket "Sync Local Release Branch"
+  kb-sync-branch develop --expect 1a2b3c4d      # release close-out LOCAL SYNC step
+USAGE
+}
+
+say()  { echo "kb-sync-branch: $*"; }
+die()  { echo "kb-sync-branch: $*" >&2; exit 1; }
+stop() { echo "kb-sync-branch: STOPPED: $*" >&2; exit 3; }
+
+# A hook or test harness that exported these would redirect every `git -C`.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR
+
+BRANCH="" ITEM="" PR="" EXPECT="" REPO="" REMOTE=""
+need_val() { [ "$#" -ge 2 ] && [ -n "$2" ] || { echo "kb-sync-branch: $1 needs a value" >&2; usage >&2; exit 2; }; }
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -h|--help) usage; exit 0 ;;
+        --item)    need_val "$@"; ITEM="$2"; shift ;;
+        --pr)      need_val "$@"; PR="$2"; shift ;;
+        --expect)  need_val "$@"; EXPECT="$2"; shift ;;
+        --repo)    need_val "$@"; REPO="$2"; shift ;;
+        --remote)  need_val "$@"; REMOTE="$2"; shift ;;
+        -*)        echo "kb-sync-branch: unknown option '$1'" >&2; usage >&2; exit 2 ;;
+        *)
+            [ -z "$BRANCH" ] || { echo "kb-sync-branch: more than one branch given" >&2; usage >&2; exit 2; }
+            BRANCH="$1" ;;
+    esac
+    shift
+done
+if [ -n "$ITEM" ] && [ -n "$BRANCH" ]; then
+    echo "kb-sync-branch: give <BRANCH> or --item, not both" >&2; usage >&2; exit 2
+fi
+if [ -z "$ITEM" ] && [ -z "$BRANCH" ]; then
+    usage >&2; exit 2
+fi
+case "$PR" in
+    ''|*[!0-9]*) [ -z "$PR" ] || { echo "kb-sync-branch: --pr must be a PR number" >&2; exit 2; } ;;
+esac
+
+command -v git >/dev/null 2>&1 || die "git not found on PATH"
+
+# --- branch -----------------------------------------------------------------
+if [ -n "$ITEM" ]; then
+    # Prefer the kb-pr-base beside this script (follow symlinks portably: no
+    # `readlink -f` on bash 3.2), so a worktree uses its own copy.
+    SELF="$0"; n=0
+    while [ -L "$SELF" ]; do
+        n=$((n + 1)); [ "$n" -gt 40 ] && die "symlink loop resolving $0"
+        link=$(readlink "$SELF") || die "cannot read symlink $SELF"
+        case "$link" in /*) SELF="$link" ;; *) SELF="$(dirname "$SELF")/$link" ;; esac
+    done
+    SELF_DIR=$(cd "$(dirname "$SELF")" 2>/dev/null && pwd) || die "cannot locate own directory"
+    if [ -x "$SELF_DIR/kb-pr-base" ]; then
+        PRB="$SELF_DIR/kb-pr-base"
+    else
+        PRB=$(command -v kb-pr-base 2>/dev/null) || die "kb-pr-base not found beside $SELF_DIR or on PATH"
+    fi
+    BRANCH=$("$PRB" "$ITEM") || die "kb-pr-base $ITEM failed; cannot tell which branch to sync (not guessing develop)"
+    case "$BRANCH" in ''|*'
+'*) die "kb-pr-base $ITEM returned an unusable branch name" ;; esac
+    say "$ITEM merges into '$BRANCH' (kb-pr-base)"
+fi
+git check-ref-format --branch "$BRANCH" >/dev/null 2>&1 || die "'$BRANCH' is not a valid branch name"
+
+# --- main checkout ----------------------------------------------------------
+[ -n "$REPO" ] || REPO="$PWD"
+[ -d "$REPO" ] || die "--repo '$REPO' is not a directory"
+git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || die "'$REPO' is not inside a git repository"
+WT_LIST=$(git -C "$REPO" worktree list --porcelain 2>/dev/null) || die "cannot list worktrees of '$REPO'"
+# The first record of `worktree list --porcelain` is always the main worktree.
+MAIN=$(printf '%s\n' "$WT_LIST" | sed -n '1s/^worktree //p')
+[ -n "$MAIN" ] && [ -d "$MAIN" ] || die "cannot determine the main checkout of '$REPO'"
+printf '%s\n' "$WT_LIST" | awk 'NR==1,/^$/' | grep -qx 'bare' && die "the main repository at '$MAIN' is bare; nothing to sync"
+
+# Which worktree (if any) has the branch checked out.
+HOLDER=$(printf '%s\n' "$WT_LIST" | awk -v ref="branch refs/heads/$BRANCH" '
+    /^worktree / { wt = substr($0, 10) }
+    $0 == ref    { print wt; exit }')
+
+# --- remote -----------------------------------------------------------------
+if [ -z "$REMOTE" ]; then
+    REMOTE=$(git -C "$MAIN" config --get "branch.$BRANCH.remote" 2>/dev/null)
+    [ "$REMOTE" = "." ] && REMOTE=""     # a local upstream is not a remote
+fi
+if [ -z "$REMOTE" ]; then
+    REMOTES=$(git -C "$MAIN" remote)
+    count=$(printf '%s\n' "$REMOTES" | grep -c .)
+    case "$count" in
+        0) die "'$MAIN' has no git remote" ;;
+        1) REMOTE="$REMOTES" ;;
+        *) die "'$MAIN' has $count remotes ($(printf '%s' "$REMOTES" | tr '\n' ' ')) and '$BRANCH' has no upstream; pass --remote <name>" ;;
+    esac
+fi
+git -C "$MAIN" remote get-url "$REMOTE" >/dev/null 2>&1 || die "remote '$REMOTE' is not configured in '$MAIN'"
+
+# --- PR (optional) ----------------------------------------------------------
+PR_SHA="" PR_STATE="" PR_BASE=""
+if [ -n "$PR" ]; then
+    command -v gh >/dev/null 2>&1 || die "--pr needs gh on PATH"
+    PR_INFO=$(cd "$MAIN" && gh pr view "$PR" --json state,baseRefName,mergeCommit \
+        --jq '[.state, .baseRefName, (.mergeCommit.oid // "")] | join(" ")' 2>/dev/null) \
+        || die "gh pr view $PR failed (run it by hand to see why)"
+    read -r PR_STATE PR_BASE PR_SHA <<EOF
+$PR_INFO
+EOF
+    [ "${PR_STATE-}" = "MERGED" ] || die "PR #$PR is ${PR_STATE:-in an unknown state}, not MERGED; nothing to sync yet"
+    [ "${PR_BASE-}" = "$BRANCH" ] || die "PR #$PR merged into '${PR_BASE-}', not '$BRANCH'; refusing to verify the wrong branch"
+    [ -n "${PR_SHA-}" ] || die "PR #$PR has no merge commit recorded"
+fi
+
+# --- fetch ------------------------------------------------------------------
+RREF="refs/remotes/$REMOTE/$BRANCH"
+git -C "$MAIN" fetch --quiet "$REMOTE" "+refs/heads/$BRANCH:$RREF" \
+    || die "git fetch $REMOTE $BRANCH failed in '$MAIN'"
+RSHA=$(git -C "$MAIN" rev-parse --verify -q "$RREF^{commit}") || die "$REMOTE/$BRANCH not found after fetch"
+
+# --- fast-forward -----------------------------------------------------------
+LREF="refs/heads/$BRANCH"
+LSHA=$(git -C "$MAIN" rev-parse --verify -q "$LREF^{commit}")
+
+if [ -n "$HOLDER" ] && [ "$HOLDER" != "$MAIN" ]; then
+    if [ "$LSHA" = "$RSHA" ]; then
+        say "'$BRANCH' (checked out in $HOLDER) already at $REMOTE/$BRANCH ${RSHA:0:12}"
+    elif git -C "$MAIN" merge-base --is-ancestor "$RSHA" "$LSHA"; then
+        # PR #1410 review advisory: ahead is not behind; nothing to move, so nothing to stop for.
+        say "'$BRANCH' (checked out in $HOLDER) is ahead of $REMOTE/$BRANCH (local commits not pushed); nothing to fast-forward"
+    else
+        stop "'$BRANCH' is checked out in another worktree ($HOLDER) and is behind or diverged from $REMOTE/$BRANCH; sync it there or free it. Not moving a checked-out branch."
+    fi
+elif [ "$HOLDER" = "$MAIN" ]; then
+    # Main checkout is ON the branch: tracked local changes block a fast-forward.
+    if ! git -C "$MAIN" diff --quiet HEAD -- 2>/dev/null || ! git -C "$MAIN" diff --cached --quiet -- 2>/dev/null; then
+        stop "the main checkout '$MAIN' has uncommitted changes to tracked files on '$BRANCH'; commit or move them first. Not stashing, not resetting."
+    fi
+    if [ "$LSHA" = "$RSHA" ]; then
+        say "'$BRANCH' already at $REMOTE/$BRANCH ${RSHA:0:12}"
+    elif git -C "$MAIN" merge-base --is-ancestor "$RSHA" "$LSHA"; then
+        say "'$BRANCH' is ahead of $REMOTE/$BRANCH (local commits not pushed); nothing to fast-forward"
+    elif git -C "$MAIN" merge-base --is-ancestor "$LSHA" "$RSHA"; then
+        git -C "$MAIN" merge --ff-only --quiet "$RSHA" \
+            || stop "fast-forward of '$BRANCH' in '$MAIN' failed (an untracked file in the way?); see git's message above"
+        say "fast-forwarded '$BRANCH' ${LSHA:0:12} -> ${RSHA:0:12} in $MAIN"
+    else
+        stop "local '$BRANCH' and $REMOTE/$BRANCH have diverged in '$MAIN'; reconcile by hand (no merge commit is made here)"
+    fi
+else
+    # Not checked out anywhere: move the ref in place, never switch branches.
+    CUR=$(git -C "$MAIN" symbolic-ref -q --short HEAD 2>/dev/null || echo "a detached HEAD")
+    if [ -z "$LSHA" ]; then
+        git -C "$MAIN" branch --quiet --track "$BRANCH" "$REMOTE/$BRANCH" \
+            || die "could not create local '$BRANCH' from $REMOTE/$BRANCH"
+        say "created local '$BRANCH' at ${RSHA:0:12} tracking $REMOTE/$BRANCH (main checkout stays on $CUR)"
+    elif [ "$LSHA" = "$RSHA" ]; then
+        say "'$BRANCH' already at $REMOTE/$BRANCH ${RSHA:0:12} (main checkout is on $CUR)"
+    elif git -C "$MAIN" merge-base --is-ancestor "$RSHA" "$LSHA"; then
+        say "'$BRANCH' is ahead of $REMOTE/$BRANCH (local commits not pushed); nothing to fast-forward"
+    elif git -C "$MAIN" merge-base --is-ancestor "$LSHA" "$RSHA"; then
+        # Compare-and-swap: refuses if the ref moved since we read it.
+        git -C "$MAIN" update-ref -m "kb-sync-branch: fast-forward to $REMOTE/$BRANCH" "$LREF" "$RSHA" "$LSHA" \
+            || die "could not update '$BRANCH' (it moved while syncing?); re-run"
+        say "fast-forwarded '$BRANCH' ${LSHA:0:12} -> ${RSHA:0:12} in $MAIN (main checkout stays on $CUR; working tree untouched)"
+    else
+        stop "local '$BRANCH' and $REMOTE/$BRANCH have diverged in '$MAIN'; reconcile by hand (no merge commit is made here)"
+    fi
+fi
+
+# --- verify -----------------------------------------------------------------
+verify() {   # <commit> <label>
+    local sha
+    sha=$(git -C "$MAIN" rev-parse --verify -q "$1^{commit}") \
+        || { echo "kb-sync-branch: $2 $1 is not in '$MAIN' even after fetching $REMOTE/$BRANCH" >&2; exit 4; }
+    git -C "$MAIN" merge-base --is-ancestor "$sha" "$LREF" \
+        || { echo "kb-sync-branch: $2 ${sha:0:12} is NOT on local '$BRANCH'" >&2; exit 4; }
+    say "verified: $2 ${sha:0:12} is on local '$BRANCH'"
+}
+[ -z "$PR_SHA" ] || verify "$PR_SHA" "PR #$PR merge commit"
+[ -z "$EXPECT" ] || verify "$EXPECT" "expected commit"
+exit 0

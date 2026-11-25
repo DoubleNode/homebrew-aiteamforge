@@ -2876,6 +2876,33 @@ _kb_release_close_out_lead_ok() {
     return 0
 }
 
+# _kb_co_print_local_sync <work> <repo> <integration> <fallback-sha>   (XACA-1851)
+# After the close-out merged the release into the integration branch, the operator's LOCAL
+# checkout of that branch is still behind. Close-out never touches the local repo (it works in a
+# scratch clone), so this PRINTS the sync as a checklist step: `kb-sync-branch` (fast-forward
+# only, real remote, never switches branches, stops on local changes). The "check" is read-only:
+# rev-parse/merge-base against the local ref, no fetch, so "behind" may just mean "not fetched yet".
+# The expected commit is the integration tip in the scratch clone (it holds the merge), else the
+# released build sha. Per-ticket syncs never touch develop in branch mode; this is where it is synced.
+_kb_co_print_local_sync() {
+    local work="${1-}" repo="${2-}" integ="${3-}" fallback="${4-}" tip="" lsha=""
+    [[ -n "$repo" && -n "$integ" ]] || return 0
+    [[ -n "$work" ]] && tip=$(_kb_co_git -C "$work" rev-parse -q --verify "refs/remotes/origin/${integ}^{commit}" 2>/dev/null)
+    [[ -n "$tip" ]] || tip="$fallback"
+    [[ -n "$tip" ]] || return 0
+    echo ""
+    lsha=$(_kb_co_git -C "$repo" rev-parse -q --verify "refs/heads/${integ}^{commit}" 2>/dev/null)
+    if [[ -n "$lsha" ]] && _kb_co_git -C "$repo" cat-file -e "${tip}^{commit}" 2>/dev/null \
+        && _kb_co_git -C "$repo" merge-base --is-ancestor "$tip" "$lsha" 2>/dev/null; then
+        echo "  LOCAL SYNC: [x] local ${integ} already contains ${tip:0:12}; nothing to do"
+        return 0
+    fi
+    echo "  LOCAL SYNC (XACA-1851): close-out never touches your checkout; local ${integ} does not have ${tip:0:12} yet. Run:"
+    echo "    [ ] kb-sync-branch ${integ} --repo ${(q)repo} --expect ${tip}"
+    echo "        fast-forward only, never switches branches; rc 3 = stopped for you (local changes, diverged, checked out elsewhere), rc 4 = merge not found"
+    return 0
+}
+
 _kb_release_close_out_run() {
     local board_file="${1-}" release_id="${2-}" work="${3-}" dry_run="${4-}" repo="${5-}"
     local cfg_mode rec_mode rj rtype pfx branch bsha bstage bind version mode prod integ tag_name rel_tip first cr targets step ex_tip tgt st archived msg has_rec confirm=""
@@ -3141,6 +3168,7 @@ print(r.release_version(json.load(sys.stdin)))' "$(dirname "$(_kb_release_branch
     rj=$(_kb_release_close_out_release_json "$board_file" "$release_id") || return 1
     if [[ "$(printf '%s' "$rj" | jq -r '.stage // ""')" == "PROD" ]]; then
         echo "Close-out for $release_id complete; release is already at PROD"
+        [[ "$dry_run" == "1" ]] || _kb_co_print_local_sync "$work" "$repo" "$integ" "$bsha"
         # XACA-1725-004: a close-out interrupted after its promote resumes here and still gets the final refresh
         # (idempotent: the publisher updates in place). A COMPLETED close-out never reaches this branch: since XACA-1726
         # _kb_release_close_out_already_done stops it early with 'Already closed out' and a `kb-cr publish-record <REL-ID>`
@@ -3150,6 +3178,7 @@ print(r.release_version(json.load(sys.stdin)))' "$(dirname "$(_kb_release_branch
     fi
     _kb_release_close_out_promote "$release_id" "$confirm" || return 1
     echo "Close-out for $release_id complete: release promoted to PROD"
+    [[ "$dry_run" == "1" ]] || _kb_co_print_local_sync "$work" "$repo" "$integ" "$bsha"
     # XACA-1725-004: the promote's own refresh is bounded and may defer or be lost; the final refresh waits for the lock.
     # It runs even when _KB_CO_CRRECORD_STATUS=published (XACA-1725-017): the promote's Testing Log republish is a
     # background thread and never verified, so this is the only verified Testing Log refresh. Cost: one extra page version.
@@ -8887,6 +8916,11 @@ _kb_sweep_is_framework_title() {
     [[ "$title" == "PR Creation & Test Handoff"* ]] && return 0
     [[ "$title" == "QA Testing & Code Review"* ]] && return 0
     [[ "$title" == "Retrospective"* ]] && return 0
+    # XACA-1851: the planner now emits "Sync Local Release Branch". The OLD title
+    # stays framework forever: existing subitems are never renamed (1,234 on the
+    # academy board alone), so dropping it would flag every open one as residual.
+    [[ "$title" == "Sync Local Release Branch"* ]] && return 0
+    [[ "$title" == "[Debug] Sync Local Release Branch"* ]] && return 0
     [[ "$title" == "Sync Local Develop Branch"* ]] && return 0
     [[ "$title" == "[Debug] Sync Local Develop Branch"* ]] && return 0
     return 1
@@ -9302,8 +9336,8 @@ kb-sweep() {
     while IFS="|" read -r fw_status fw_id fw_added fw_title; do
         [[ -z "$fw_status" ]] && continue
         if _kb_sweep_is_framework_title "$fw_title"; then
-            # XACA-1199 review round 1 (E1): "[Debug] Sync Local Develop
-            # Branch" is added by kb-debug LATE — well after the real
+            # XACA-1199 review round 1 (E1): "[Debug] Sync Local Release
+            # Branch" (formerly "... Develop Branch", XACA-1851) is added by kb-debug LATE — well after the real
             # planning batch, sometimes after genuinely parked work was
             # already added. It stays framework (excluded from the
             # RESIDUAL list itself, same as every other framework title
@@ -17492,7 +17526,7 @@ _kb_reopen_item() {
         "[Debug] PR Creation & Test Handoff"
         "[Debug] QA Testing & Code Review"
         "[Debug] Retrospective and Knowledge Capture"
-        "[Debug] Sync Local Develop Branch"
+        "[Debug] Sync Local Release Branch"   # XACA-1851 (was "... Develop Branch")
     )
 
     # Build a single jq filter that appends all 7 subitems atomically
@@ -19880,7 +19914,7 @@ _kb_build_debug_prompt() {
             prompt+="- PR Creation & Test Handoff\n"
             prompt+="- QA Testing & Code Review\n"
             prompt+="- Retrospective and Knowledge Capture\n"
-            prompt+="- Sync Local Develop Branch\n"
+            prompt+="- Sync Local Release Branch\n"
         fi
     else
         local _debug_planning_gate_section

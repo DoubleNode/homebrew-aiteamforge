@@ -1,7 +1,7 @@
 ---
 name: project-planner
 description: Strategic project planning skill that creates kanban items, subitems, and plan documents WITHOUT executing any implementation. Enforces plan-and-delegate workflow with explicit handoff checkpoint.
-version: 1.12.0
+version: 1.13.0
 author: Captain Nahla Ake (Chancellor, Starfleet Academy)
 company: Starfleet Academy - Chancellor's Office
 project: Dev Team LCARS Infrastructure
@@ -191,7 +191,7 @@ immediately after its class tag: `[Review][Blocking]` / `[Review][Advisory]` (sa
 **close**: `kb-done` still refuses while the subitem is `todo`, exactly as for a blocking
 finding. **Planner-emitted trailing subitems** (`Testing & Debugging`, `PR Creation & Test
 Handoff`, `QA Testing & Code Review`, `[UX] UX/UI Evaluation`, `Retrospective`, `Sync Local
-Develop Branch`) stay **unclassified** — the planner creates them before any PR exists, so
+Release Branch`; legacy title `Sync Local Develop Branch` is equivalent) stay **unclassified** — the planner creates them before any PR exists, so
 it cannot know a finding's severity at creation time, and unclassified resolves BLOCKING
 by design (fail-closed). Only a reviewer/tester/UX-evaluator filing an actual finding
 *after* inspecting a diff may write `[Advisory]`. Full grammar and disposition path:
@@ -680,7 +680,7 @@ Every project MUST include a dedicated **"Retrospective and Knowledge Capture"**
 │  Original planning context: XACA-0222 (Phase 9 completion)               │
 │                                                                             │
 │  Position: SECOND-TO-LAST subitem (after QA Testing & Code Review,         │
-│  before Sync Local Develop Branch)                                         │
+│  before Sync Local Release Branch)                                         │
 │                                                                             │
 │  ⛔ DO NOT skip this subitem for code-related projects                     │
 │  ⛔ DO NOT combine retrospective with implementation or PR subitems        │
@@ -934,40 +934,54 @@ table as "Pending" — those agents review the retrospective in their own sessio
 
 **Pre-Project Knowledge Review (reinforcement):** Before beginning work on any new project, agents SHOULD read both their personal `INDEX.md` and their team's `project/INDEX.md`. This is specified in each agent's persona under "Knowledge Base," and is reinforced here. Use the Tag Index in both files to surface entries relevant to the current work area. This review should happen before Phase 1 (Requirements Analysis) or at the very start of implementation — not after.
 
-**⚠️ MANDATORY: Sync Local Develop Branch Subitem**
+**⚠️ MANDATORY: Sync Local Release Branch Subitem**
 
-Every code-related project MUST include a dedicated **"Sync Local Develop Branch"** subitem as the very last step. This ensures the local develop branch is fully up-to-date after the PR merges, preventing stale branch issues for subsequent work.
+Every code-related project MUST include a dedicated **"Sync Local Release Branch"** subitem as the very last step. Tickets merge into their release branch (the PR base from `scripts/kb-pr-base <ITEM-ID>`: the release branch when the item is in a branch-mode release, else the team integration branch, which is `develop` in trunk mode), so the sync targets that branch, not necessarily `develop`. This keeps the local copy of that branch current after the PR merges, preventing stale branch issues for subsequent work.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│  REQUIRED: Every code-related project MUST have a Sync Local Develop       │
+│  REQUIRED: Every code-related project MUST have a Sync Local Release       │
 │  Branch subitem as the FINAL step                                          │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
-│  Standard Sync Local Develop Branch Subitem:                               │
-│  Title: "Sync Local Develop Branch"                                        │
+│  Standard Sync Local Release Branch Subitem:                               │
+│  Title: "Sync Local Release Branch"                                        │
 │                                                                             │
 │  This subitem MUST verify THREE GATES before calling kb-done:              │
 │                                                                             │
 │  GATE 1 — Worktree is clean                                                │
 │  • From the worktree (or current working dir):                             │
-│      git status --porcelain      # MUST be empty                          │
+│      git status --porcelain      # MUST be empty                           │
 │  • If non-empty: STOP. Investigate and commit, stash, or restore.          │
 │    Uncommitted work has been found stranded on develop in the main repo    │
 │    (see XACA-0347). Do NOT proceed until the tree is clean.                │
 │                                                                             │
 │  GATE 2 — PR is fully merged (not just approved)                           │
 │  • Confirm via the GitHub API:                                             │
-│      gh pr view <N> --json state --jq '.state'   # MUST be "MERGED"       │
+│      gh pr view <N> --json state --jq '.state'   # MUST be "MERGED"        │
 │  • If "OPEN" or "CLOSED" (without merge): STOP and resolve before syncing. │
 │                                                                             │
-│  GATE 3 — Local develop is synced with the merge                           │
-│  • Switch to the main repo (not a worktree):                               │
-│      cd <main-repo-path>                                                   │
-│  • Checkout develop and pull latest:                                       │
-│      git checkout develop && git pull origin develop                       │
-│  • Verify the merged commit is present on local develop:                   │
-│      git log --grep="<ITEM-ID>" -1 --oneline    # must match the merge   │
+│  GATE 3 — Local release branch is synced with the merge                    │
+│  • Run from anywhere in the repo (worktree or main clone):                 │
+│      kb-sync-branch --item <ITEM-ID> --pr <N>      # MUST exit 0           │
+│    (in the dev-team repo itself: scripts/kb-sync-branch --item ...)        │
+│  • The branch is the PR base from `scripts/kb-pr-base <ITEM-ID>`: the      │
+│    release branch for an item in a branch-mode release, else the team      │
+│    integration branch (develop in trunk mode — behaves exactly as before). │
+│  • The tool works on the MAIN checkout, fetches the branch's real remote   │
+│    (never assumes "origin" — this repo's remote is `dev-team`), and        │
+│    fast-forwards ONLY. It never switches the main repo's branch: if the    │
+│    main repo is on that branch it fast-forwards it; otherwise it moves the │
+│    local branch ref in place without touching the working tree.            │
+│  • --pr <N> requires the PR to be MERGED with base == the branch, then     │
+│    verifies its merge commit is on the synced branch (--expect <commit>    │
+│    verifies an explicit commit).                                           │
+│  • Exit codes: 0 synced/already current · 1 error · 2 usage ·              │
+│    3 STOPPED for a human (dirty tree on that branch, local branch          │
+│    diverged, branch checked out in another worktree) · 4 expected/merge    │
+│    commit NOT present after sync.                                          │
+│  • On 3: STOP and report to the user. NEVER switch branches, stash,        │
+│    reset or force. On 4: investigate before proceeding.                    │
 │                                                                             │
 │  Only after ALL THREE GATES pass:                                          │
 │  • Mark the kanban item as done:                                           │
@@ -975,13 +989,18 @@ Every code-related project MUST include a dedicated **"Sync Local Develop Branch
 │                                                                             │
 │  Position: ALWAYS the LAST subitem (after Retrospective)                   │
 │                                                                             │
-│  ⛔ DO NOT skip this subitem — stale local branches cause merge conflicts  │
-│  ⛔ DO NOT mark the task complete without all three gates passing          │
-│  ⛔ DO NOT run `git worktree remove` — agents are forbidden from removing  │
+│  ⛔ DO NOT skip this subitem — stale local branches cause merge conflicts   │
+│  ⛔ DO NOT mark the task complete without all three gates passing           │
+│  ⛔ DO NOT hard-code `git checkout develop && git pull origin develop`      │
+│  ⛔ DO NOT run `git worktree remove` — agents are forbidden from removing   │
 │     or deleting worktrees (standing user rule)                             │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
+
+**Release close-out rule (user decision 2026-11-17):** the per-ticket Sync subitem syncs ONLY the `kb-pr-base` branch, never `develop` in branch mode. The integration branch (`develop`) is synced locally only at release close-out: after `kb-release close-out` merges the release branch into the integration branch and promotes to PROD, it prints a LOCAL SYNC step, `kb-sync-branch <integration> --repo <repo> --expect <sha>`. Close-out itself never touches the local repo, so the operator runs that printed command (same real-remote, fast-forward-only, stop-on-local-changes rules).
+
+**Backward compatibility:** existing subitems titled "Sync Local Develop Branch" (1,234 on the academy board) are NOT renamed. `kb-sweep` treats both titles as framework subitems, and a ticket carrying the old title follows the new gate above.
 
 **Ordering of Mandatory Trailing Subitems:**
 ```
@@ -994,7 +1013,7 @@ Every code-related project MUST include a dedicated **"Sync Local Develop Branch
 │  N-3. QA Testing & Code Review               ← Fourth-to-last (MANDATORY) │
 │  N-2. [UX] UX/UI Evaluation                  ← Third-to-last (IF UI)      │
 │  N-1. Retrospective and Knowledge Capture    ← Second-to-last (MANDATORY) │
-│  N.   Sync Local Develop Branch              ← Always LAST (MANDATORY)    │
+│  N.   Sync Local Release Branch              ← Always LAST (MANDATORY)    │
 │                                                                             │
 │  Notes:                                                                    │
 │  • [UX] is conditionally required only for UI-touching projects           │
@@ -1010,14 +1029,14 @@ Every code-related project MUST include a dedicated **"Sync Local Develop Branch
 │  • UX Expert evaluates UI changes for design/accessibility compliance      │
 │  • Knowledge is captured AFTER the PR is merged and project is complete    │
 │  • PR review feedback is available when writing the retrospective          │
-│  • Local develop branch is fully synced after merge completes              │
+│  • Local release branch (kb-pr-base) is fully synced after merge completes │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Project-Level Exceptions
 
-Not all teams and projects produce code, and not all code projects touch user-facing interfaces. The mandatory trailing subitems (Testing & Debugging, PR Creation & Test Handoff, QA Testing & Code Review, UX/UI Evaluation, Retrospective and Knowledge Capture, Sync Local Develop Branch) apply **only to projects that involve code changes in a git repository**. UX/UI Evaluation is conditional on touching a user-facing interface. The Retrospective and Sync subitems follow the same exception rules as Testing & PR, but even exempt projects are encouraged to include them.
+Not all teams and projects produce code, and not all code projects touch user-facing interfaces. The mandatory trailing subitems (Testing & Debugging, PR Creation & Test Handoff, QA Testing & Code Review, UX/UI Evaluation, Retrospective and Knowledge Capture, Sync Local Release Branch) apply **only to projects that involve code changes in a git repository**. UX/UI Evaluation is conditional on touching a user-facing interface. The Retrospective and Sync subitems follow the same exception rules as Testing & PR, but even exempt projects are encouraged to include them.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -1085,11 +1104,11 @@ Not all teams and projects produce code, and not all code projects touch user-fa
 │  • Testing & Debugging subitem STILL APPLIES if code was changed          │
 │  • [UX] subitem STILL APPLIES if UI was modified (even direct-to-dev)     │
 │  • Retrospective subitem STILL APPLIES                                     │
-│  • Sync Local Develop Branch subitem STILL APPLIES                        │
+│  • Sync Local Release Branch subitem STILL APPLIES                        │
 │                                                                             │
 │  ⚠️ NOTE: This exception does NOT exempt Testing, UX, Retrospective, or  │
 │  Sync — tested code can be committed directly, UX evaluation still needed  │
-│  for UI changes, and local develop must still be synced after commits.    │
+│  for UI changes, and the local branch must still be synced after commits. │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -1134,7 +1153,7 @@ Is this a code-related project?
                   PR Handoff and QA Review skipped
                   UX subitem REQUIRED (if UI-touching, even direct-to-develop)
                   Retrospective subitem REQUIRED
-                  Sync Local Develop Branch subitem REQUIRED
+                  Sync Local Release Branch subitem REQUIRED
                   (minor fixes direct to develop, not in worktree)
 ```
 
@@ -1261,9 +1280,9 @@ Every plan document MUST include:
 | <ITEM-ID>-00(N-3) | QA Testing & Code Review | todo |
 | <ITEM-ID>-00(N-2) | [UX] UX/UI Evaluation | todo |
 | <ITEM-ID>-00(N-1) | Retrospective and Knowledge Capture | todo |
-| <ITEM-ID>-00N | Sync Local Develop Branch | todo |
+| <ITEM-ID>-00N | Sync Local Release Branch | todo |
 
-> ⚠️ **Note:** Testing & Debugging, PR Creation & Test Handoff, QA Testing & Code Review, [UX] UX/UI Evaluation, Retrospective and Knowledge Capture, and Sync Local Develop Branch subitems are MANDATORY for code-related projects.
+> ⚠️ **Note:** Testing & Debugging, PR Creation & Test Handoff, QA Testing & Code Review, [UX] UX/UI Evaluation, Retrospective and Knowledge Capture, and Sync Local Release Branch subitems are MANDATORY for code-related projects.
 > [UX] is conditionally required: required for UI-touching projects, may be skipped or pre-cancelled for non-UI projects.
 > When present, these six subitems must always be the last six, in this order.
 
@@ -1358,7 +1377,7 @@ Found relevant files:
 ✓ XACA-0031-008: PR Creation & Test Handoff (MANDATORY for code changes)
 ✓ XACA-0031-009: QA Testing & Code Review (MANDATORY for code changes)
 ✓ XACA-0031-010: Retrospective and Knowledge Capture (MANDATORY for code changes)
-✓ XACA-0031-011: Sync Local Develop Branch (MANDATORY for code changes)
+✓ XACA-0031-011: Sync Local Release Branch (MANDATORY for code changes)
 
 **Creating plan document...**
 
@@ -1787,7 +1806,7 @@ blind spot. The disclosure belongs in the banner, the heading, and the `Board St
 column belongs to the guard.
 
 Omit the six mandatory trailing subitems (Testing & Debugging, PR Creation & Test Handoff, QA Testing
-& Code Review, `[UX]` UX/UI Evaluation, Retrospective and Knowledge Capture, Sync Local Develop
+& Code Review, `[UX]` UX/UI Evaluation, Retrospective and Knowledge Capture, Sync Local Release
 Branch) and the `⚠️ Note:` block that declares them MANDATORY — they were never created either, and on
 a historical doc that note reads as a live instruction. Reconstruct only the substantive subitems.
 
@@ -2032,7 +2051,7 @@ Include enough detail that:
 │  □ QA Testing & Code Review subitem included (unless exempt)               │
 │  □ [UX] UX/UI Evaluation subitem included (if UI-touching; may pre-cancel) │
 │  □ Retrospective and Knowledge Capture subitem included (unless exempt)    │
-│  □ Sync Local Develop Branch subitem included (unless exempt)             │
+│  □ Sync Local Release Branch subitem included (unless exempt)             │
 │  □ Mandatory subitems are last six (UI projects): Testing, PR Handoff,    │
 │    QA Review, [UX], Retrospective, Sync (in this order)                    │
 │  □ Exceptions verified (non-code teams, non-UI projects, direct-develop)   │
@@ -2071,6 +2090,12 @@ Include enough detail that:
 ---
 
 ## Version History
+
+**v1.13.0** (November 24, 2026) — XACA-1851
+- **Sync Local Develop Branch is now "Sync Local Release Branch"** - tickets merge into their release branch (`scripts/kb-pr-base <ID>`), so syncing `develop` synced the wrong branch (REL-2026-Q4-071: six tickets marked Sync done, main clone 7 commits behind; the old gate also hard-coded the `origin` remote, but this repo's remote is `dev-team`)
+- Gate 3 rewritten around `kb-sync-branch --item <ITEM-ID> --pr <N>` (real remote, fast-forward only, never switches the main repo's branch; exit 3 stops for a human, exit 4 means the merge commit is missing)
+- Release close-out rule: per-ticket Sync never syncs `develop` in branch mode; close-out prints a LOCAL SYNC `kb-sync-branch <integration> --repo <repo> --expect <sha>` step for the operator
+- Existing "Sync Local Develop Branch" subitems are not renamed; `kb-sweep` accepts both titles
 
 **v1.11.0** (June 15, 2026)
 - **XACA-0703 UX/UI Evaluation quality gate (third merge gate)** - Added `[UX] UX/UI Evaluation` as a new protected subitem (merge gate, same as `[Review]`/`[Test]`)
