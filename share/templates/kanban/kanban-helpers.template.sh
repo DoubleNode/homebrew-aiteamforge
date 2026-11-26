@@ -16120,12 +16120,17 @@ kb-run() {
     worktree=$(_kb_get_worktree)
     worktree_branch=$(git branch --show-current 2>/dev/null || echo "")
 
-    # Get window ID for linking
+    # Get window ID for linking. XACA-1819: `context` is resolved HERE; the one in _kb_resolve_run_team is local to
+    # that function, so reading it unset wrote worktreeWindowId=":" (and aborted kb-run under set -u). No context at
+    # all (team derived from the selector) leaves the id empty rather than stamping ":" or "ERROR:unknown".
+    local context
+    context=$(_kb_detect_context 2>/dev/null) || context=""   # XACA-1819
     local rest="${context#*:}"
     local terminal="${rest%%:*}"
     rest="${rest#*:}"
     local window_name="${rest#*:}"
-    window_id=$(_kb_get_window_id "$terminal" "$window_name")
+    window_id=""
+    [[ -n "$context" ]] && window_id=$(_kb_get_window_id "$terminal" "$window_name")
 
     if [[ "$_kb_orch_flag" == "1" ]]; then
         # XACA-1544-001 (PR #1333 r1 B1 + r2): in orchestrated mode the stamp IS this write. cc() is checked first, then
