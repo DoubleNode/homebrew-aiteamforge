@@ -32853,6 +32853,83 @@ kb-release-new-sha() {
     return $?
 }
 
+# Record the DEV deploy: stageSha.DEV = the release branch tip on the remote (XACA-1915, lead only).
+# Usage: kb-release deploy-dev <REL-ID> --reason <text> [--actor <lead>] [--sha <40-hex>]
+# Nothing is deployed: this records that the release branch tip IS the DEV build, so `kb-release test` can run.
+kb-release-deploy-dev() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
+    local release_id="" opt_sha="" opt_reason="" opt_actor=""
+    local usage="Usage: kb-release deploy-dev <release-id> --reason <text> [--actor <lead>] [--sha <40-hex>]"
+
+    while [[ $# -gt 0 ]]; do
+        case "${1-}" in
+            --reason|-r)
+                if [[ $# -lt 2 ]]; then echo "Error: --reason needs a value" >&2; echo "$usage" >&2; return 2; fi
+                opt_reason="${2-}"; shift 2 ;;
+            --actor|--by)
+                if [[ $# -lt 2 ]]; then echo "Error: --actor needs a value" >&2; echo "$usage" >&2; return 2; fi
+                opt_actor="${2-}"; shift 2 ;;
+            --sha)
+                if [[ $# -lt 2 ]]; then echo "Error: --sha needs a value" >&2; echo "$usage" >&2; return 2; fi
+                opt_sha="${2-}"; shift 2 ;;
+            --help|-h)
+                echo "$usage"
+                echo ""
+                echo "Lead only. Record the DEV deploy of a release at stage DEV: the server sets"
+                echo "stageSha.DEV to the release branch tip AS THE REMOTE HAS IT (trunk mode: the"
+                echo "integration branch). --sha is optional and must equal that tip; it states what"
+                echo "the lead is confirming. Nothing is deployed. Refused when the release is not at"
+                echo "DEV, when stageSha.DEV is already recorded (use kb-release new-sha), or when the"
+                echo "remote tip cannot be read. Then run: kb-release test <release-id>"
+                echo ""
+                echo "Exit codes: 0 ok, 1 server/transport, 2 usage/rejected, 3 refused (409),"
+                echo "            4 release not found, 5 not a release lead (403)"
+                return 0 ;;
+            -*)
+                echo "Error: Unknown option: ${1-}" >&2; echo "$usage" >&2; return 2 ;;
+            *)
+                if [[ -z "$release_id" ]]; then
+                    release_id="${1-}"
+                else
+                    echo "Error: Unexpected argument: ${1-}" >&2; echo "$usage" >&2; return 2
+                fi
+                shift ;;
+        esac
+    done
+
+    if [[ -z "$release_id" ]]; then
+        echo "Error: Release ID is required" >&2; echo "$usage" >&2; return 2
+    fi
+    if ! _kb_release_valid_token "$release_id"; then
+        echo "Error: invalid release id: $release_id" >&2; return 2
+    fi
+    if [[ -n "$opt_sha" && ! "$opt_sha" =~ ^[0-9a-fA-F]{40}$ ]]; then
+        echo "Error: --sha must be a full 40-character hex commit id" >&2; echo "$usage" >&2; return 2
+    fi
+    if [[ -z "${opt_reason//[[:space:]]/}" ]]; then
+        echo "Error: --reason is required (why this tip is the DEV build)" >&2; echo "$usage" >&2; return 2
+    fi
+    [[ -z "$opt_actor" ]] && opt_actor=$(_kb_release_default_actor)
+
+    local payload
+    payload=$(jq -n --arg sha "$opt_sha" --arg reason "$opt_reason" --arg actor "$opt_actor" \
+        '{reason: $reason, actor: $actor} + (if $sha == "" then {} else {sha: $sha} end)') || return 1
+
+    _kb_release_api_post "${release_id}/deploy-dev" "$payload" || return 1
+
+    if [[ "$_KB_REL_CODE" == "200" ]]; then
+        local rsha rbranch rsource
+        rsha=$(printf '%s' "$_KB_REL_BODY" | jq -r '.sha // empty' 2>/dev/null)
+        rbranch=$(printf '%s' "$_KB_REL_BODY" | jq -r '.branch // empty' 2>/dev/null)
+        rsource=$(printf '%s' "$_KB_REL_BODY" | jq -r '.source // empty' 2>/dev/null)
+        echo "✓ deploy-dev $release_id: stageSha.DEV = ${rsha:-?}  (${rbranch:-?} tip, ${rsource:-?})"
+        echo "  Next: kb-release test $release_id"
+        return 0
+    fi
+    _kb_release_fail "deploy-dev $release_id"
+    return $?
+}
+
 # XACA-0729: Demote a release back to the PLANNED holding state.
 # Usage: kb-release-plan <release-id> --reason "<why>"
 #
@@ -35626,6 +35703,10 @@ kb-release() {
             # XACA-1347-007: supersede results on a new release-branch commit
             kb-release-new-sha "$@"
             ;;
+        deploy-dev)
+            # XACA-1915: lead records the DEV deploy (stageSha.DEV = remote release branch tip)
+            kb-release-deploy-dev "$@"
+            ;;
         rollback-override)
             # XACA-1349-004: lead-set rollback SHA when the production tag is unknown (spec 13.3)
             kb-release-rollback-override "$@"
@@ -35708,6 +35789,8 @@ kb-release() {
             echo "                                              Interactive manual-provider walkthrough (XACA-1347)"
             echo "  kb-release new-sha <id> <sha> [--reason \"...\"]"
             echo "                                              New commit on the release branch: supersede stale results"
+            echo "  kb-release deploy-dev <id> --reason \"...\" [--actor LEAD] [--sha <tip>]"
+            echo "                                              Lead: record the DEV deploy = remote release branch tip (XACA-1915)"
             echo "  kb-release rollback-override <id> <sha> --reason \"...\" --by LEAD   (or --clear --by LEAD)"
             echo "                                              Set the rollback SHA when the prod tag is unknown (XACA-1349)"
             echo "  kb-release cr-stage <id> [--content-file F] [--step S] [--status] [--skip-notify R --by LEAD]"

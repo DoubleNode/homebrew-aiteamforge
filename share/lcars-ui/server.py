@@ -6395,6 +6395,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             # POST /api/releases/<id>/new-sha — supersede on a new commit (XACA-1347-006, spec 6.5)
             release_id = path[len('/api/releases/'):-len('/new-sha')]
             self.handle_release_new_sha(release_id)
+        elif path.startswith('/api/releases/') and path.endswith('/deploy-dev'):
+            # POST /api/releases/<id>/deploy-dev — lead records the DEV deploy = stageSha.DEV (XACA-1915)
+            release_id = path[len('/api/releases/'):-len('/deploy-dev')]
+            self.handle_release_deploy_dev(release_id)
         elif path.startswith('/api/releases/') and path.endswith('/regress'):
             # POST /api/releases/<id>/regress — the only sanctioned backward move (XACA-1346-006)
             release_id = path[len('/api/releases/'):-len('/regress')]
@@ -11825,6 +11829,117 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             return
         except Exception as e:
             self.send_error(500, f"Error applying new SHA: {e}")
+
+    @staticmethod
+    def _deploy_dev_409(msg, **extra):
+        """A deploy-dev 409 body. `reasons` carries the message too: kb-release's 409 path prints reasons[] only."""
+        return dict({"error": msg, "reasons": [msg]}, **extra)
+
+    def _deploy_dev_refusal(self, release, rcfg, actor):
+        """XACA-1915: (status, payload) when deploy-dev must refuse, else None. Runs in BOTH phases of
+        handle_release_deploy_dev, so a release that changed while the remote was read is refused, never written."""
+        is_lead, lead_reason = self._actor_is_lead(actor, rcfg)
+        if not is_lead:
+            return 403, {"error": "deploy-dev refused: %s" % lead_reason,
+                         "reasonCode": self._lead_reason_code(rcfg)}
+        cur = _release_gate.current_stage(release)
+        if cur != 'DEV':
+            return 409, self._deploy_dev_409("release is at %s: deploy-dev records the DEV deploy and applies "
+                                             "only at stage DEV" % cur)
+        recorded = _release_gate.graded_sha(release, 'DEV')
+        if recorded:
+            # USER DECISION 2 (a): one sanctioned writer per meaning. Replacing a recorded SHA is a supersede.
+            return 409, self._deploy_dev_409(
+                "stageSha.DEV is already recorded (%s); to replace it, run `kb-release new-sha %s <sha>` "
+                "(the supersede path)" % (recorded, release.get('id')), stageSha=recorded)
+        br = release.get('branch')
+        if not isinstance(br, str) or not br.strip():
+            return 409, self._deploy_dev_409("release records no branch: there is no release branch tip to record")
+        return None
+
+    def handle_release_deploy_dev(self, release_id):
+        """POST /api/releases/<id>/deploy-dev (XACA-1915) - a lead records the DEV deploy: stageSha.DEV = the
+        release branch tip AS THE REMOTE HAS IT (trunk mode: release.branch is the integration branch, same rule).
+        Body {"reason": str, "actor": lead, "sha"?: <40hex>}. `sha` is optional and must EQUAL the remote tip
+        (USER DECISION 1 (a): the DEV exit gate grades stageSha.DEV == branch HEAD, so any other SHA would only
+        fail later); it lets the lead state what they are confirming. Nothing is deployed: this only records it.
+
+        Answers: 400 bad body (reason/actor missing or blank, malformed sha), 403 actor not in releaseConfig.leads
+        (fails closed when the list is empty), 404 unknown release, 409 not at DEV / stageSha.DEV already
+        recorded (points to `kb-release new-sha`, USER DECISION 2 (a)) / no branch / remote tip unresolvable
+        ("cannot verify", never guessed) / sha is not the tip / the release changed during the remote read,
+        200 {"ok": true, "sha", "branch", "source": "branch-tip"|"explicit"}. Every refusal writes nothing.
+
+        XACA-1435 lock scope: the remote lookup is network git, so it runs with NO board lock held. Phase A (lock,
+        read only) refuses early; phase B (lock) re-reads and re-validates everything (stage still DEV, stageSha.DEV
+        still unset, branch unchanged) before the one write. Logged as release_deploy_dev."""
+        try:
+            if self._gate_unavailable():
+                return
+            body, err = self._read_release_json_body()
+            if err:
+                return self._send_json_response({"error": err}, status=400)
+            sha, reason, actor = body.get('sha'), body.get('reason'), body.get('actor')
+            if sha is not None and (not isinstance(sha, str) or not re.fullmatch(r'[0-9a-fA-F]{40}', sha)):
+                return self._send_json_response({"error": "'sha' must be a 40-character hex string"}, status=400)
+            if not isinstance(reason, str) or not reason.strip():
+                return self._send_json_response({"error": "a non-empty 'reason' is required"}, status=400)
+            if not isinstance(actor, str) or not actor.strip():
+                return self._send_json_response({"error": "'actor' (the lead) is required"}, status=400)
+            sha = sha.lower() if sha is not None else None
+            actor, reason = actor.strip(), reason.strip()
+            # Phase A: short locked read, nothing written.
+            with self._board_write_transaction():
+                data = self._load_releases_config(_lock_held=True)
+                release = self._find_release_by_id(data, release_id)
+                if not release:
+                    raise _DeferredResponse.json({"error": "Release not found: %s" % release_id}, 404)
+                refusal = self._deploy_dev_refusal(release, self._release_cfg(self._read_board_raw_locked()), actor)
+                if refusal:
+                    raise _DeferredResponse.json(refusal[1], refusal[0])
+                probe = copy.deepcopy(release)
+            # The remote read: network git, NO lock held.
+            tip = self._release_branch_head(probe, LCARS_TEAM)
+            if not isinstance(tip, str) or not re.fullmatch(r'[0-9a-fA-F]{40}', tip):
+                return self._send_json_response(self._deploy_dev_409(
+                    "cannot verify the tip of release branch %r on the remote (no repo, no remote, or the branch is "
+                    "absent); nothing recorded" % probe.get('branch')), status=409)
+            tip = tip.lower()
+            if sha is not None and sha != tip:
+                return self._send_json_response(self._deploy_dev_409(
+                    "sha %s is not the tip of release branch %r on the remote (%s); the DEV exit gate grades "
+                    "stageSha.DEV against that tip, so record the tip (omit --sha)" % (sha, probe.get('branch'), tip),
+                    branchTip=tip), status=409)
+            # Phase B: re-read and re-validate under the lock, then the one write.
+            with self._board_write_transaction():
+                data = self._load_releases_config(_lock_held=True)
+                release = self._find_release_by_id(data, release_id)
+                if not release:
+                    raise _DeferredResponse.json({"error": "Release not found: %s" % release_id}, 404)
+                refusal = self._deploy_dev_refusal(release, self._release_cfg(self._read_board_raw_locked()), actor)
+                if refusal:
+                    raise _DeferredResponse.json(refusal[1], refusal[0])
+                if release.get('branch') != probe.get('branch'):
+                    raise _DeferredResponse.json(self._deploy_dev_409(
+                        "release branch changed from %r to %r while the remote was read; nothing recorded, retry"
+                        % (probe.get('branch'), release.get('branch'))), 409)
+                if not isinstance(release.get('stageSha'), dict):
+                    release['stageSha'] = {}
+                release['stageSha']['DEV'] = tip
+                if not self._save_releases_config(data, _lock_held=True):
+                    raise _DeferredResponse.json({"error": "board write failed"}, 500)
+                snapshot = copy.deepcopy(release)
+            source = 'explicit' if sha is not None else 'branch-tip'
+            self._mirror_release_manifest(snapshot)
+            self._log_release_activity(release_id, 'release_deploy_dev', 'DEV', 'DEV', actor=actor, reason=reason,
+                                       sha=tip, source=source, branch=snapshot.get('branch'))
+            return self._send_json_response({"ok": True, "release": release_id, "stage": "DEV", "sha": tip,
+                                             "branch": snapshot.get('branch'), "source": source})
+        except _DeferredResponse as deferred:
+            deferred.emit(self)
+            return
+        except Exception as e:
+            self.send_error(500, f"Error recording the DEV deploy: {e}")
 
     def handle_release_rollback_override(self, release_id):
         """POST /api/releases/<id>/rollback-override (XACA-1349-004, spec 13.3) - the sanctioned writer of

@@ -188,7 +188,11 @@ def resume_plan(release, *, flow_config, cr_support_enabled, items=None, other_r
             return done("dev-deploy-pending", "offer-dev-deploy",
                         "DEV: every item is completed and either merged or exempted from a PR, but no DEV deploy is recorded."
                         + ("  [%s]" % "; ".join(notes) if notes else ""),   # headline, not lines: exempt items are not "open"
-                        "Offer the DEV deploy from the release branch (the lead confirms), then run the DEV tests.")
+                        "Offer the DEV deploy from the release branch (the lead confirms), then run the DEV tests.",
+                        # XACA-1915: the recorder. It writes stageSha.DEV = the remote branch tip; without it
+                        # `kb-release test` refuses ("release has no stageSha.DEV").
+                        "Record it: kb-release deploy-dev %s --reason \"<why>\" --actor <lead>" % rid,
+                        "Then run:  kb-release test %s" % rid)
     if cur == "CR":
         return _cr_row(release, plan, done, promote_offer, cr, branch_head, flow_config, cr_support_enabled, now)
     if not sha:
