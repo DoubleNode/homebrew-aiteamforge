@@ -33722,6 +33722,8 @@ kb-release-close-out() {
 #   _kb_release_orch_available      the dev-team-only python modules exist (a tap install has none: today's flow, unchanged)
 #   _kb_release_orch_active_run     the open run id of a release, "" when none
 #   _kb_release_orch_open_items     how many assigned items are neither completed nor cancelled
+#   _kb_release_orch_rel_board      the board the release session found the release in (XACA-1866 cross-check)
+#   _kb_release_orch_rel_open/_why  XACA-1866: the one ℹ line naming why coordinator mode was not offered (2+ open items)
 #   _kb_release_orch_settings       coordinator model, worker model, maxParallel, each with its SOURCE (refuses invalid)
 #   _kb_release_orch_precondition   tmux pane + a terminal that is never routed to (coordinatorOnly or empty roles)
 #   _kb_release_orch_entry          mode choice, settings, precondition, gated PLANNED->DEV promote. rc 0 orchestrate,
@@ -33840,6 +33842,40 @@ _kb_release_orch_open_items() {
          | kb_resolve_item_status
          | select(. != "completed" and . != "cancelled" and . != "done")] | length' \
         --arg rel "${2-}" -r 2>/dev/null
+}
+
+# _kb_release_orch_rel_board <kanban_dir> <REL-ID> -> the board the release SESSION resolved the release from: the first
+# *-board.json (sorted) in the kanban dir whose .releases[] carries the id, as release_resume.find_release does. rc 1 when
+# none. XACA-1866: the release is found here independently of the team context, so this is what the entry checks against.
+_kb_release_orch_rel_board() {
+    local kdir="${1-}" rel="${2-}" f
+    [[ -n "$kdir" && -d "$kdir" ]] || return 1
+    for f in "$kdir"/*-board.json(N); do
+        if [[ "$(jq -r --arg rel "$rel" 'any(.releases[]?; .id == $rel)' "$f" 2>/dev/null)" == true ]]; then
+            printf '%s\n' "$f"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# _kb_release_orch_rel_open <kanban_dir> <REL-ID> -> the open-item count on the release's own board when it is 2 or more
+# (the XACA-1834 orchestrate-by-default threshold), rc 0; rc 1 (nothing printed) otherwise. XACA-1866.
+_kb_release_orch_rel_open() {
+    local rb n
+    rb=$(_kb_release_orch_rel_board "${1-}" "${2-}") || return 1
+    n=$(_kb_release_orch_open_items "$rb" "${2-}")
+    [[ "$n" =~ ^[0-9]+$ ]] && (( n >= 2 )) || return 1
+    printf '%s\n' "$n"
+}
+
+# _kb_release_orch_why <REL-ID> <kanban_dir> <reason> <remedy>   (XACA-1866)
+# One ℹ line saying why coordinator mode was not offered, when the release has 2+ open items by the release-dir lookup.
+# Silent otherwise (a 0/1-item release is not offered coordinator mode without a terminal anyway). Always rc 0.
+_kb_release_orch_why() {
+    local n
+    n=$(_kb_release_orch_rel_open "${2-}" "${1-}") || return 0
+    echo "ℹ kb-run: coordinator mode was not offered for ${1-} ($n open items): ${3-}. ${4-}"
 }
 
 # _kb_release_orch_settings <board_file> <REL-ID>
@@ -34097,11 +34133,15 @@ _kb_release_orch_sh_word() {    # _kb_release_orch_sh_quote with backslashes dou
     printf '%s' "${w//\\/\\\\}"
 }
 
-# _kb_release_orch_entry <REL-ID> <team> <stage> <assume_yes> <context>
-# rc 0 orchestrate (promoted when it was PLANNED) | 10 manual: today's flow, and SILENT unless the user asked for
-# coordinator mode | 11 stop, nothing wrong | 12 resume the release's open run | else an error code to return.
+# _kb_release_orch_entry <REL-ID> <team> <stage> <assume_yes> <context> [<kanban_dir>]
+# rc 0 orchestrate (promoted when it was PLANNED) | 10 manual: today's flow | 11 stop, nothing wrong | 12 resume the
+# release's open run | else an error code to return. <kanban_dir> (default _KB_RS_KDIR) is where the release session found
+# the release. XACA-1866: rc 10 is silent only for an explicit manual choice (--no-orchestrate, KB_RELEASE_AUTORUN=0) or a
+# release with fewer than 2 open items; otherwise one ℹ line says why coordinator mode was not offered. A team context
+# whose board is missing, or is not the board the release was found in, is refused (rc 2), never a silent today's flow.
 _kb_release_orch_entry() {
-    local rel="${1-}" team="${2-}" stage="${3-}" yes="${4:-0}" context="${5-}" bf n_open active mode="${_KB_O_MODE-}"
+    local rel="${1-}" team="${2-}" stage="${3-}" yes="${4:-0}" context="${5-}" kdir="${6-${_KB_RS_KDIR-}}"
+    local bf rb why n_rel n_open active mode="${_KB_O_MODE-}"
     if [[ -z "$mode" && -n "${KB_RELEASE_AUTORUN-}" ]]; then
         case "$KB_RELEASE_AUTORUN" in
             1|true|yes|on|auto|orchestrate) mode=orchestrate ;;
@@ -34116,6 +34156,8 @@ _kb_release_orch_entry() {
             echo "✗ kb-run: coordinator mode is not available in this install (kanban-hooks/orchestrator_run_cli.py is dev-team only); use --no-orchestrate" >&2
             return 2
         fi
+        _kb_release_orch_why "$rel" "$kdir" "the orchestrator is not installed here (kanban-hooks/orchestrator_run_cli.py is dev-team only)" \
+            "Running today's flow; run kb-run from a dev-team install to orchestrate, or pass --no-orchestrate to skip this note."
         return 10
     fi
     if [[ "$stage" != "PLANNED" && "$stage" != "DEV" ]]; then
@@ -34127,10 +34169,34 @@ _kb_release_orch_entry() {
         [[ "$mode" == "orchestrate" ]] && echo "ℹ kb-run: $rel is at $stage; coordinator mode applies to PLANNED/DEV only, running today's flow."
         return 10
     fi
-    bf=$(_kb_get_board_file "$team" 2>/dev/null) || bf=""
-    if [[ ! -f "$bf" ]]; then
-        [[ "$mode" == "orchestrate" ]] && { echo "✗ kb-run: no board for team '$team'" >&2; return 1; }
+    # XACA-1866: the release session found $rel in $kdir on its own; the team context only picks the board orchestration
+    # reads. A failed lookup was a SILENT today's flow (M4Mini 2026-11-17: 4 open items, no question). Refuse it instead.
+    bf="" why=""
+    if [[ -z "$team" ]]; then
+        why="team context not detected"
+    else
+        bf=$(_kb_get_board_file "$team" 2>/dev/null) || bf=""
+        [[ -f "$bf" ]] || why="team context '$team' has no board${bf:+ ($bf)}"
+    fi
+    rb=$(_kb_release_orch_rel_board "$kdir" "$rel") || rb=""
+    if [[ -n "$why" ]]; then
+        n_rel=$(_kb_release_orch_rel_open "$kdir" "$rel") || n_rel=""
+        if [[ "$mode" == "orchestrate" || -n "$n_rel" ]]; then
+            echo "✗ kb-run: cannot offer coordinator mode for $rel${n_rel:+ ($n_rel open items)}: $why, but the release session found it in ${rb:-$kdir}." >&2
+            echo "  Run kb-run from the team's own terminal or worktree so its board is found, or pass --no-orchestrate to run today's flow." >&2
+            return 2
+        fi
         return 10
+    fi
+    # The board orchestration would read must be the board the release was found in (else it plans, counts and dispatches
+    # another board's items). Only when the kanban dir is known: a direct caller without one keeps the team board. Gated like
+    # the lookup refusal above: a 0/1-open release is never offered coordinator mode without --orchestrate, so nothing to refuse.
+    if [[ -n "$rb" ]] && ! [[ "$bf" -ef "$rb" ]]; then
+        n_rel=$(_kb_release_orch_rel_open "$kdir" "$rel") || n_rel=""
+        [[ "$mode" == "orchestrate" || -n "$n_rel" ]] || return 10
+        echo "✗ kb-run: cannot offer coordinator mode for $rel: the team board $bf is not the board the release was found in ($rb)." >&2
+        echo "  Run kb-run from the release's team context, or pass --no-orchestrate to run today's flow." >&2
+        return 2
     fi
     # No tty and nobody asked for it. This MUST precede the open-run branch: --yes is not an orchestrate decision, so a
     # no-tty `kb-run REL --yes` must never resume (and launch) a coordinator unattended (XACA-1548 gate round 1): an open
@@ -34138,9 +34204,18 @@ _kb_release_orch_entry() {
     # ORCHESTRATE by default. The plan approval still needs a terminal (XACA-1548), so this default ends in the clear
     # "needs a terminal" refusal below, never in one session that works every ticket. --no-orchestrate opts out.
     if [[ -z "$mode" && ! -t 0 ]]; then
-        [[ -n "$(_kb_release_orch_active_run "$bf" "$rel")" ]] && return 10
+        active=$(_kb_release_orch_active_run "$bf" "$rel")
+        if [[ -n "$active" ]]; then
+            _kb_release_orch_why "$rel" "$kdir" "it has an open orchestrated run ($active), which is never resumed without a terminal" \
+                "Running today's flow; run kb-run $rel in a terminal to resume the run, or pass --no-orchestrate to skip this note."
+            return 10
+        fi
         n_open=$(_kb_release_orch_open_items "$bf" "$rel")
-        if [[ ! "$n_open" =~ ^[0-9]+$ ]] || (( n_open < 2 )); then return 10; fi
+        if [[ ! "$n_open" =~ ^[0-9]+$ ]]; then
+            echo "✗ kb-run: cannot count the open items of $rel on $bf (got '${n_open}'); not guessing a mode. Fix the board, or pass --no-orchestrate to run today's flow." >&2
+            return 1
+        fi
+        (( n_open < 2 )) && return 10
         mode=orchestrate
         echo "ℹ kb-run: $rel has $n_open open items and no terminal: orchestrating by default. --no-orchestrate runs the tickets one at a time in this session."
     fi
@@ -34165,7 +34240,11 @@ _kb_release_orch_entry() {
         return 12
     fi
     n_open=$(_kb_release_orch_open_items "$bf" "$rel")
-    if [[ ! "$n_open" =~ ^[0-9]+$ ]] || (( n_open == 0 )); then
+    if [[ ! "$n_open" =~ ^[0-9]+$ ]]; then
+        echo "✗ kb-run: cannot count the open items of $rel on $bf (got '${n_open}'); not guessing a mode. Fix the board, or pass --no-orchestrate to run today's flow." >&2
+        return 1
+    fi
+    if (( n_open == 0 )); then
         if [[ -n "${_KB_O_APPROVE-}" ]]; then
             echo "✗ kb-run: --approve-plan: $rel has no open items, so there is no plan to approve. Nothing was started." >&2
             return 2
@@ -34772,11 +34851,12 @@ _kb_release_run() {
     fi
 
     # XACA-1548 (EPIC-0072 T7): coordinator mode. After the close-out early-return, before the worktree and the legacy prompt.
-    # --no-orchestrate skips all of it. _kb_release_orch_entry returns 10 (SILENTLY, unless coordinator mode was asked for)
-    # whenever today's flow applies, so the legacy path below runs byte-identically.
+    # --no-orchestrate skips all of it. _kb_release_orch_entry returns 10 whenever today's flow applies, so the legacy path
+    # below runs byte-identically; XACA-1866: with 2+ open items it first says (one ℹ line) why coordinator mode was not
+    # offered, and it refuses a team board that is missing or is not the board _KB_RS_KDIR resolved the release from.
     local _o_orch=0 _o_resume=0 _o_rc=10 _o_wave0=0
     if [[ "$_KB_O_MODE" != "manual" ]]; then
-        _kb_release_orch_entry "$release_id" "$team" "$stage" "$assume_yes" "$context"
+        _kb_release_orch_entry "$release_id" "$team" "$stage" "$assume_yes" "$context" "$_KB_RS_KDIR"
         _o_rc=$?
         case $_o_rc in
             0) _o_orch=1 ;;
