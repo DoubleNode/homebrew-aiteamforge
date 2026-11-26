@@ -812,6 +812,40 @@ _kb_detect_context() {
     echo "${team}:${terminal}:${window_index}:${window_name}"
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# _kb_require_live_cwd (XACA-1867) — refuse to run from a directory that no
+# longer exists. A pane left sitting in a worktree that a release close-out
+# removed keeps its prompt and $PWD, but git says "not a git repository" and
+# team/context detection degrades silently; kb-pr even wrote the board from
+# there. kb-run, kb-pr and kb-done call this right after the XACA-1806 loader.
+#
+#   [[ -d $PWD ]]       the path is gone
+#   [[ . -ef $PWD ]]    the path was removed and RECREATED: the shell still
+#                       holds the deleted inode, so "." and $PWD differ
+#
+# Prints the team's registry working_dir as the cd target when it is known
+# (the repo itself, or for a container-layout team the folder holding it;
+# either is a live place to re-run from) (best effort; never fails because of the lookup). Returns 2 on refusal.
+# ─────────────────────────────────────────────────────────────────────────────
+_kb_require_live_cwd() {
+    if [[ -n "${PWD-}" && -d "$PWD" ]] && [[ . -ef "$PWD" ]]; then
+        return 0
+    fi
+    local _kb_lc_ctx="" _kb_lc_team="" _kb_lc_root=""
+    _kb_lc_ctx=$(_kb_detect_context 2>/dev/null) || _kb_lc_ctx=""
+    _kb_lc_team="${_kb_lc_ctx%%:*}"
+    if [[ -n "$_kb_lc_team" && "$_kb_lc_team" != "ERROR" ]]; then
+        _kb_lc_root=$(_kb_overlay_lookup "$_kb_lc_team" working_dir 2>/dev/null) || _kb_lc_root=""
+    fi
+    printf '%s\n' "kb: current directory no longer exists (removed worktree?): ${PWD:-<unknown>}" >&2
+    if [[ -n "$_kb_lc_root" ]]; then
+        printf '%s\n' "  Fix: cd $_kb_lc_root   (team ${_kb_lc_team}'s registered working_dir), then re-run." >&2
+    else
+        printf '%s\n' "  Fix: cd <repo root>, then re-run." >&2
+    fi
+    return 2
+}
+
 # kb-context-set: explicitly set kanban context for the current shell.
 # Useful for subagent shells, CI runners, and any process without a tmux pane.
 # Usage: kb-context-set <team> [<terminal>]
@@ -5576,6 +5610,7 @@ kb-commit() {
 # Usage: kb-pr
 kb-pr() {
     if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
+    _kb_require_live_cwd || return $?  # XACA-1867
     local _kb_pr_rc=0
     kb-status "pr_review" || _kb_pr_rc=$?
     # XACA-1479-003: apply a recorded manual CI priority to the (now existing) PR.
@@ -9940,6 +9975,7 @@ kb-sweep() {
 # Otherwise, marks the item currently being worked on as completed
 kb-done() {
     if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
+    _kb_require_live_cwd || return $?  # XACA-1867
     local context team terminal window_name board_file window_id
     context=$(_kb_detect_context)
     team="${context%%:*}"
@@ -15787,6 +15823,7 @@ _kb_batch_run() {
 # Run a task from backlog - launch Claude Code with todo plan and worktree setup
 kb-run() {
     if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
+    _kb_require_live_cwd || return $?  # XACA-1867
     _kb_ensure_jq || return 1
     # XACA-1834: a list (kb-run A,B or kb-run A B) is a batch coordinator; one selector runs below as before.
     if _kb_item_list_args "$@"; then _kb_batch_run "$@"; return $?; fi
