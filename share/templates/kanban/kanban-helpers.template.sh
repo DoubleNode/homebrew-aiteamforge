@@ -2000,6 +2000,14 @@ _kb_co_postgate_scan() {
     return 0
 }
 
+# XACA-1858: _kb_co_allowlist_pattern_ok <pattern>: rc 0 when <pattern> is a plain per-segment glob (XACA-1578-020/021):
+# letters, digits, . _ - + @ , % space, `*` and `?` only, "/" between segments, no empty segment. The ONE copy of the rule:
+# the close-out (_kb_co_postgate_docs_only) and its writer (kb-release close-out-allowlist) both call it.
+_kb_co_allowlist_pattern_ok() {
+    local _seg_re='^[A-Za-z0-9._*?+@,% -]+(/[A-Za-z0-9._*?+@,% -]+)*$'
+    [[ "${1-}" =~ $_seg_re ]]
+}
+
 # _kb_co_postgate_docs_only: see the header above.
 _kb_co_postgate_docs_only() {
     local work="${1-}" stage="${2-}" tip="${3-}" c fp raw rc subj files_json acc_json="[]"
@@ -2014,10 +2022,11 @@ _kb_co_postgate_docs_only() {
     # segment. Anything else (groups, classes, `|`, `~`, `#` ...) would be a zsh `bad pattern` abort or a cross-`/` group
     # mid-close-out, so it is refused up front with a reason instead. No `=` either: a segment starting with `=` is zsh
     # EQUALS (command-path) expansion and aborts the match (XACA-1578-021).
-    local _seg_re='^[A-Za-z0-9._*?+@,% -]+(/[A-Za-z0-9._*?+@,% -]+)*$' _pat
+    # The rule itself lives in _kb_co_allowlist_pattern_ok (XACA-1858), shared with `kb-release close-out-allowlist`.
+    local _pat
     if [[ "${pargs[1]-}" != "--none" ]]; then
         for _pat in "${pargs[@]}"; do
-            [[ "$_pat" =~ $_seg_re ]] || { _KB_CO_ERR="post-gate check: allowlist pattern '${_pat}' (releaseConfig.closeOut.postGateDocsAllowlist) is not a plain per-segment glob (letters, digits, . _ - + @ , % space, * and ? only, no empty segment); refusing"; return 1; }
+            _kb_co_allowlist_pattern_ok "$_pat" || { _KB_CO_ERR="post-gate check: allowlist pattern '${_pat}' (releaseConfig.closeOut.postGateDocsAllowlist) is not a plain per-segment glob (letters, digits, . _ - + @ , % space, * and ? only, no empty segment); refusing"; return 1; }
         done
     fi
     [[ -n "$work" ]] || { _KB_CO_ERR="post-gate check: no repository given"; return 1; }
@@ -35153,6 +35162,277 @@ kb-release-orchestration() {
     return 0
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# XACA-1858: kb-release close-out-allowlist [show | set <pattern>... | add <pattern>... | remove <pattern>... | reset | none]
+#                                           [--team T] [--actor NAME]
+# The one writer of releaseConfig.closeOut.postGateDocsAllowlist: the paths a post-gate commit may touch and still be
+# accepted by the close-out (XACA-1578), so a team never needs an Academy hand-edit of its board. Every pattern written
+# passes the SAME validator the close-out runs (_kb_co_allowlist_pattern_ok), so a bad pattern is refused when it is
+# written, not at tag time. `**` is refused here as well: the close-out accepts it, but it matches ONE segment (it reads
+# as "recursive" and is not). Stored semantics, exactly as _kb_co_docs_allowlist reads them:
+#   key absent = the default (RELNOTES*); [] = accept nothing (the release tip must equal stageSha); else the globs.
+# add / remove start from the EFFECTIVE list (absent -> RELNOTES*); remove accepts any stored entry, valid or not, so a
+# bad hand-edit can be cleaned up. Writes go through the locked _kb_jq_update with a compare-and-swap on the old value,
+# and each change is logged (before, after, actor) to the team's activity log under target releaseConfig.closeOut.
+# Any writer may change it (XACA-1858-001 decision a): the actor is recorded, not checked.
+# Exit: 0 ok (incl. no change), 1 board/write error, 2 usage or invalid pattern,
+#       3 refused (releaseConfig / closeOut is not an object, or add/remove on a malformed stored value;
+#         show: the close-out would refuse the stored value -- non-object layer, malformed value or an invalid entry).
+_KB_CO_ALLOWLIST_DEFAULT='RELNOTES*'
+
+# _kb_release_coa_pattern_check <pattern>: rc 0 when <pattern> may be written; else prints the reason to stderr, rc 1.
+_kb_release_coa_pattern_check() {
+    local p="${1-}"
+    if ! _kb_co_allowlist_pattern_ok "$p"; then
+        echo "Error: ${(q+)p} is not a plain per-segment glob: use letters, digits, . _ - + @ , % space, * and ? only," >&2
+        echo "       '/' between segments, and no empty segment (no leading, trailing or doubled '/')" >&2
+        return 1
+    fi
+    if [[ "$p" == *'**'* ]]; then
+        echo "Error: ${(q+)p} contains '**', which is NOT recursive here: '*' never crosses '/', so it matches one segment." >&2
+        echo "       List each depth instead (e.g. docs/* and docs/*/*)" >&2
+        return 1
+    fi
+    return 0
+}
+
+# _kb_release_coa_state <board>: one line of JSON describing the stored value:
+#   {"state":"absent"} | {"state":"set","list":[...]} | {"state":"malformed","raw":"<json>"} | {"state":"bad","why":"..."}
+# "bad" = releaseConfig or releaseConfig.closeOut is not an object (nothing can be written without a hand review).
+# rc 1 when the board is unreadable.
+_kb_release_coa_state() {
+    # NB never jq's `//` here: it treats `false` like null, while the close-out (`== null`) refuses a stored false
+    # (XACA-1858 review round 1). Each layer is tested for null explicitly.
+    _kb_jq_read "${1-}" '.releaseConfig as $rc
+        | if $rc == null then {state: "absent"}
+          elif ($rc | type) != "object" then {state: "bad", why: ("releaseConfig is " + ($rc | tojson) + ", not an object")}
+          else $rc.closeOut as $co
+            | if $co == null then {state: "absent"}
+              elif ($co | type) != "object" then {state: "bad", why: ("releaseConfig.closeOut is " + ($co | tojson) + ", not an object")}
+              else $co.postGateDocsAllowlist as $a
+                | if $a == null then {state: "absent"}
+                  elif ($a | type) == "array" and all($a[]; type == "string" and length > 0 and (test("\n") | not)) then {state: "set", list: $a}
+                  else {state: "malformed", raw: ($a | tojson)} end
+              end
+          end' -c
+}
+
+# _kb_release_coa_refused_by_closeout <state-json>: rc 0 when the close-out would refuse the stored value (a non-object
+# layer, a malformed value, or an entry that fails _kb_co_allowlist_pattern_ok); `show` then exits 3.
+_kb_release_coa_refused_by_closeout() {
+    local st="${1-}" s p
+    s=$(printf '%s' "$st" | jq -r '.state')
+    [[ "$s" == "bad" || "$s" == "malformed" ]] && return 0
+    [[ "$s" == "set" ]] || return 1
+    while IFS= read -r p; do
+        [[ -z "$p" ]] && continue
+        _kb_co_allowlist_pattern_ok "$p" || return 0
+    done <<<"$(printf '%s' "$st" | jq -r '.list[]')"
+    return 1
+}
+
+# The stored value as JSON text ("null" = absent), read with explicit type tests (no `//`, see above). Shared by the
+# `old` read and the compare-and-swap, so both see exactly the same thing.
+_KB_COA_CUR_JQ='(if (.releaseConfig | type) == "object" and (.releaseConfig.closeOut | type) == "object"
+    then .releaseConfig.closeOut.postGateDocsAllowlist else null end) | tojson'
+
+# _kb_release_coa_print <state-json>: the human summary of a state, one pattern per line (invalid entries flagged).
+_kb_release_coa_print() {
+    local st="${1-}" s p n
+    s=$(printf '%s' "$st" | jq -r '.state')
+    case "$s" in
+        absent)
+            echo "  default (key absent): ${_KB_CO_ALLOWLIST_DEFAULT}" ;;
+        set)
+            n=$(printf '%s' "$st" | jq -r '.list | length')
+            if [[ "$n" == 0 ]]; then
+                echo "  none ([]): no post-gate commit is accepted; the release tip must equal stageSha"
+            else
+                echo "  set ($n pattern$([[ "$n" == 1 ]] || echo s)):"
+                while IFS= read -r p; do
+                    if _kb_co_allowlist_pattern_ok "$p"; then
+                        echo "    $p"
+                    else
+                        echo "    $p   <- INVALID: the close-out refuses this list (fix with set / remove)"
+                    fi
+                done <<<"$(printf '%s' "$st" | jq -r '.list[]')"
+            fi ;;
+        malformed)
+            echo "  MALFORMED: $(printf '%s' "$st" | jq -r '.raw') (the close-out refuses it; fix with set, none or reset)" ;;
+        *)
+            echo "  REFUSED: $(printf '%s' "$st" | jq -r '.why // "unreadable"')" ;;
+    esac
+}
+
+kb-release-close-out-allowlist() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
+    local usage="Usage: kb-release close-out-allowlist [show | set <pattern>... | add <pattern>... | remove <pattern>... | reset | none] [--team T] [--actor NAME]"
+    local op="" team="" actor="" have_actor=0 p
+    local -a pats
+    while (( $# > 0 )); do
+        case "${1-}" in
+            --team|--actor|--by)
+                if [[ $# -lt 2 || -z "${2-}" ]]; then echo "Error: ${1-} needs a value" >&2; echo "$usage" >&2; return 2; fi
+                if [[ "${1-}" == "--team" ]]; then team="${2-}"; else actor="${2-}"; have_actor=1; fi
+                shift 2 ;;
+            --help|-h)
+                echo "$usage"
+                echo ""
+                echo "Show or edit releaseConfig.closeOut.postGateDocsAllowlist: the repo-relative paths a commit made AFTER"
+                echo "the gated build may touch and still be accepted by 'kb-release close-out' (the tag stays on stageSha)."
+                echo "  show (default)        the stored value and what the close-out will use"
+                echo "  set <pattern>...      replace the list with these patterns"
+                echo "  add <pattern>...      add patterns to the effective list (key absent: starts from ${_KB_CO_ALLOWLIST_DEFAULT})"
+                echo "  remove <pattern>...   remove stored entries (exact text; removing the last one leaves [] = accept nothing)"
+                echo "  reset                 delete the key: back to the default, ${_KB_CO_ALLOWLIST_DEFAULT}"
+                echo "  none                  store []: accept NO post-gate commit (the release tip must equal stageSha)"
+                echo "Patterns are globs matched PER PATH SEGMENT: '*' and '?' never cross '/', so RELNOTES* is root-level"
+                echo "only and docs/* is one level deep (add docs/*/* for two). Allowed: letters, digits, . _ - + @ , %"
+                echo "space, * and ?; no empty segment; no '**' (it is not recursive). Quote patterns so the shell"
+                echo "does not expand them. A leading '-' is always read as an option, never a pattern."
+                echo "--team defaults to this session's team. --actor (default \$USER) is recorded in the activity log."
+                echo ""
+                echo "Examples:"
+                echo "  kb-release close-out-allowlist show --team academy"
+                echo "  kb-release close-out-allowlist add 'Handhelds/CHANGELOG.md' --team academy"
+                echo "  kb-release close-out-allowlist set 'RELNOTES*' 'CHANGELOG.md' 'docs/*' --team academy"
+                echo "  kb-release close-out-allowlist reset --team academy"
+                echo ""
+                echo "Exit codes: 0 ok (incl. no change), 1 board/write error, 2 usage or invalid pattern,"
+                echo "            3 refused (releaseConfig/closeOut not an object, or add/remove on a malformed list;"
+                echo "              show: the close-out would refuse the stored value)"
+                return 0 ;;
+            -*)
+                echo "Error: Unknown option: ${1-}" >&2; echo "$usage" >&2; return 2 ;;
+            *)
+                if [[ -z "$op" ]]; then op="${1-}"; else pats+=("${1-}"); fi
+                shift ;;
+        esac
+    done
+    [[ -z "$op" ]] && op="show"
+    case "$op" in
+        show|reset|none)
+            (( ${#pats} == 0 )) || { echo "Error: $op takes no patterns" >&2; echo "$usage" >&2; return 2; } ;;
+        set|add|remove)
+            (( ${#pats} > 0 )) || { echo "Error: $op needs at least one pattern" >&2; echo "$usage" >&2; return 2; } ;;
+        *)
+            echo "Error: unknown operation: $op (show|set|add|remove|reset|none)" >&2; echo "$usage" >&2; return 2 ;;
+    esac
+    if [[ "$op" == "show" ]] && (( have_actor )); then
+        echo "Error: --actor only applies to a change" >&2; echo "$usage" >&2; return 2
+    fi
+    [[ -n "$actor" ]] || actor="${USER:-unknown}"
+    if [[ "$op" == "set" || "$op" == "add" ]]; then
+        for p in "${pats[@]}"; do _kb_release_coa_pattern_check "$p" || return 2; done
+    fi
+
+    if [[ -z "$team" ]]; then
+        local ctx
+        ctx=$(_kb_detect_context 2>/dev/null); team="${ctx%%:*}"
+    fi
+    if [[ -z "$team" ]] || ! _kb_release_valid_token "$team"; then
+        echo "Error: no valid team (got '${team}'): pass --team" >&2; return 2
+    fi
+    local bf
+    # _kb_terminals_board_file honors the KB_BOARD_FILE scratch override in both helper copies.
+    bf=$(_kb_terminals_board_file "$team") || { echo "Error: no board for team '$team'" >&2; return 1; }
+    [[ -n "$bf" && -f "$bf" ]] || { echo "Error: board not found: $bf" >&2; return 1; }
+
+    local st s
+    st=$(_kb_release_coa_state "$bf") && [[ -n "$st" ]] || { echo "Error: cannot read the board: $bf" >&2; return 1; }
+    s=$(printf '%s' "$st" | jq -r '.state')
+
+    if [[ "$op" == "show" ]]; then
+        echo "Close-out post-gate docs allowlist (releaseConfig.closeOut.postGateDocsAllowlist), team $team:"
+        _kb_release_coa_print "$st"
+        _kb_release_coa_refused_by_closeout "$st" && return 3
+        return 0
+    fi
+
+    if [[ "$s" == "bad" ]]; then
+        echo "Error: refused: $(printf '%s' "$st" | jq -r '.why'): review the board by hand first" >&2; return 3
+    fi
+    if [[ "$s" == "malformed" && ( "$op" == "add" || "$op" == "remove" ) ]]; then
+        echo "Error: refused: the stored value is malformed ($(printf '%s' "$st" | jq -r '.raw')); replace it with set, none or reset" >&2
+        return 3
+    fi
+
+    # old / new as JSON: the stored value ("null" = key absent) and the value to store ("null" = delete the key).
+    local old new base pj
+    old=$(_kb_jq_read "$bf" "$_KB_COA_CUR_JQ" -r) \
+        || { echo "Error: cannot read the board: $bf" >&2; return 1; }
+    if [[ "$s" == "absent" ]]; then
+        base=$(jq -nc --arg d "$_KB_CO_ALLOWLIST_DEFAULT" '[$d]')
+    else
+        base=$(printf '%s' "$st" | jq -c '.list // []')
+    fi
+    pj=$(printf '%s\0' "${pats[@]}" | jq -Rsc 'split("\u0000") | .[:-1]') || { echo "Error: cannot encode the patterns" >&2; return 1; }
+    local missing=""
+    case "$op" in
+        reset) new="null" ;;
+        none)  new="[]" ;;
+        set)   new=$(jq -nc --argjson p "$pj" 'reduce $p[] as $x ([]; if any(.[]; . == $x) then . else . + [$x] end)') ;;
+        add)   new=$(jq -nc --argjson b "$base" --argjson p "$pj" 'reduce $p[] as $x ($b; if any(.[]; . == $x) then . else . + [$x] end)') ;;
+        remove)
+            missing=$(jq -nr --argjson b "$base" --argjson p "$pj" '$p[] | select(. as $x | $b | any(.[]; . == $x) | not)')
+            new=$(jq -nc --argjson b "$base" --argjson p "$pj" '$b - $p') ;;
+    esac
+    [[ -n "$new" ]] || { echo "Error: cannot build the new list" >&2; return 1; }
+    [[ -n "$missing" ]] && printf 'Note: not in the list (nothing to remove): %s\n' "$(printf '%s' "$missing" | tr '\n' ' ')"
+    # add/remove on an absent key whose result is exactly the default would only materialise it: keep the key absent.
+    if [[ "$s" == "absent" && ( "$op" == "add" || "$op" == "remove" ) && "$new" == "$base" ]]; then new="null"; fi
+
+    if [[ "$(jq -nc --argjson a "$old" '$a')" == "$(jq -nc --argjson a "$new" '$a')" ]]; then
+        echo "releaseConfig.closeOut.postGateDocsAllowlist unchanged (team $team): no change"
+        _kb_release_coa_print "$st"
+        return 0
+    fi
+
+    # Compare-and-swap: refuse when the stored value changed since it was read (a concurrent writer), so this
+    # write never silently drops someone else's edit.
+    # The layers must still be null-or-object at write time too (a concurrent writer could have made one `false`).
+    local filter='
+        def obj_or_new: if . == null then {} elif type == "object" then . else error("not an object") end;
+        if (.releaseConfig | type) as $t | ($t != "null" and $t != "object")
+           or ((.releaseConfig | type) == "object" and ((.releaseConfig.closeOut | type) as $c | $c != "null" and $c != "object"))
+        then error("releaseConfig / releaseConfig.closeOut is no longer an object") else . end
+        | if ('"$_KB_COA_CUR_JQ"') != $old
+          then error("releaseConfig.closeOut.postGateDocsAllowlist changed since it was read") else . end
+        | if $new == "null" then
+            (if (.releaseConfig | type) == "object" and (.releaseConfig.closeOut | type) == "object"
+             then del(.releaseConfig.closeOut.postGateDocsAllowlist) else . end)
+          else .releaseConfig = ((.releaseConfig | obj_or_new) | .closeOut = ((.closeOut | obj_or_new) | .postGateDocsAllowlist = ($new | fromjson)))
+          end'
+    if ! _kb_jq_update "$bf" "$filter" --arg old "$old" --arg new "$new"; then
+        echo "Error: board write failed (or the list changed since it was read; re-run): $bf" >&2; return 1
+    fi
+
+    local disp_old="$old" disp_new="$new"
+    [[ "$old" == "null" ]] && disp_old="absent (default ${_KB_CO_ALLOWLIST_DEFAULT})"
+    [[ "$new" == "null" ]] && disp_new="absent (default ${_KB_CO_ALLOWLIST_DEFAULT})"
+    # Activity: not an item, so it is logged as target releaseConfig.closeOut in the team's kanban/activity dir
+    # (KB_ACTIVITY_DIR, the test override, still wins).
+    KB_ACTIVITY_DIR="${KB_ACTIVITY_DIR:-${bf:h}/activity}" \
+        _kb_log_activity "field_update" "releaseConfig.closeOut" "config" "postGateDocsAllowlist" "$disp_old" "$disp_new" \
+        "kb-release close-out-allowlist $op; team=$team; actor=$actor"
+
+    echo "✓ releaseConfig.closeOut.postGateDocsAllowlist (team $team): $disp_old -> $disp_new"
+    if [[ "$op" == "remove" && "$new" == "[]" ]]; then
+        echo "Note: the list is now empty: no post-gate commit is accepted. Use reset to restore the default (${_KB_CO_ALLOWLIST_DEFAULT})."
+    fi
+    st=$(_kb_release_coa_state "$bf") && _kb_release_coa_print "$st"
+    # Read it back through the close-out's own reader, so what was written is what the close-out will use.
+    local _KB_CO_ERR="" ; local -a _KB_CO_ALLOW_ARGS
+    if ! _kb_co_docs_allowlist "$bf"; then
+        echo "Error: the close-out cannot read the stored list: ${_KB_CO_ERR}" >&2; return 1
+    fi
+    for p in "${_KB_CO_ALLOW_ARGS[@]}"; do
+        [[ "$p" == "--none" ]] && break
+        _kb_co_allowlist_pattern_ok "$p" || { echo "Warning: the close-out will refuse the stored entry ${(q+)p}; fix it with set or remove" >&2; }
+    done
+    return 0
+}
+
 kb-release() {
     if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local subcmd="${1-}"
@@ -35254,6 +35534,10 @@ kb-release() {
             # XACA-0729: demote all platforms back to PLANNED holding state
             kb-release-plan "$@"
             ;;
+        close-out-allowlist|closeout-allowlist)
+            # XACA-1858: show/set releaseConfig.closeOut.postGateDocsAllowlist (validated with the close-out's own rule)
+            kb-release-close-out-allowlist "$@"
+            ;;
         close-out)
             # XACA-1353-004: PROD close-out (tag, merges, delete branch, kb-cr close, gated promote to PROD)
             kb-release-close-out "$@"
@@ -35305,6 +35589,8 @@ kb-release() {
             echo "                                              GAMMA failure: record rollback, hold CR, regress to DEV, notify, re-publish (XACA-1349)"
             echo "  kb-release close-out <id> [--repo-dir PATH] [--dry-run]"
             echo "                                              PROD close-out: tag, merge to production + integration, delete branch, kb-cr close, promote (XACA-1353)"
+            echo "  kb-release close-out-allowlist [show|set <pat>...|add <pat>...|remove <pat>...|reset|none] [--team T] [--actor NAME]"
+            echo "                                              Show/set the paths a post-gate commit may touch at close-out (XACA-1858)"
             echo "  kb-release resume <id> [--repo-dir PATH] [--json]"
             echo "                                              What a release session resumes with, from the record (XACA-1350)"
             echo "  kb-release plan-run <id> [--repo-dir PATH] [--max-parallel N] [--terminals-json FILE] [--json]"

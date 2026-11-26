@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1858: kb-release close-out-allowlist sets the post-gate docs allowlist (XACA-1858)
+- Tap files updated in this publish: `share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1867: kb-run/kb-pr/kb-done refuse from a vanished working directory (XACA-1867)
 - Tap files updated in this publish: `share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1819: kb-run stamps worktreeWindowId as <terminal>:<window> (XACA-1819)
