@@ -31332,6 +31332,7 @@ kb-release-show() {
 #                                      [--status <s>] [--type feature|bugfix|hotfix|maintenance]
 #                                      [--project <s>] [--tags <a,b,c>]
 #                                      [--platform-version <plat>=<ver>] (repeatable)
+#                                      [--allow-version-regression] (XACA-1859: audited guard override)
 kb-release-edit() {
     if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local release_id=""
@@ -31339,6 +31340,8 @@ kb-release-edit() {
     # Track which fields were set by the caller (absent = do not include in payload)
     local set_name=0 set_short_title=0 set_target_date=0 set_status=0
     local set_type=0 set_project=0 set_tags=0
+    # XACA-1859: edit runs the same version guard as create; this is its audited override.
+    local allow_regression=0
     local val_name="" val_short_title="" val_target_date="" val_status=""
     local val_type="" val_project="" val_tags=""
     # Platform versions: accumulate as "plat=ver" entries, newline-separated
@@ -31377,6 +31380,9 @@ kb-release-edit() {
                 ;;
             --tags)
                 val_tags="${2-}"; set_tags=1; shift 2
+                ;;
+            --allow-version-regression)
+                allow_regression=1; shift
                 ;;
             --platform-version)
                 pv="${2-}"
@@ -31419,6 +31425,9 @@ kb-release-edit() {
                 echo "  --platform-build <plt>=<num>     Update build number for a platform (repeatable)"
                 echo "  --build-number <plt>=<num>       Alias for --platform-build"
                 echo "  --version-code <plt>=<num>       Alias for --platform-build (Android versionCode)"
+                echo "  --allow-version-regression       Accept a version at/below the last shipped one or held by"
+                echo "                                   another live release (audited). Cancelled/completed releases"
+                echo "                                   and '-cancelled' versions never hold a version."
                 echo ""
                 echo "  --platform-version and --platform-build for the same platform are merged:"
                 echo "    --platform-version ios=2.10.0 --platform-build ios=42"
@@ -31511,6 +31520,8 @@ kb-release-edit() {
         json_payload=$(printf '%s' "$json_payload" | jq --arg v "$val_type" '. + {type: $v}')
     [[ $set_project -eq 1 ]] && \
         json_payload=$(printf '%s' "$json_payload" | jq --arg v "$val_project" '. + {project: $v}')
+    [[ $allow_regression -eq 1 ]] && \
+        json_payload=$(printf '%s' "$json_payload" | jq '. + {allowVersionRegression: true}')
 
     # Tags: split comma-separated string into a JSON array
     if [[ $set_tags -eq 1 ]]; then
@@ -31608,7 +31619,14 @@ kb-release-edit() {
         return 1
     else
         echo "Error: Failed to update release (HTTP $http_code)"
-        [[ -n "$body" ]] && echo "  $body"
+        # XACA-1859: a version-guard refusal is a JSON {error: ...}; print its sentence, not the raw body.
+        local err_msg=""
+        err_msg=$(printf '%s' "$body" | jq -r '.error // empty' 2>/dev/null)
+        if [[ -n "$err_msg" ]]; then
+            echo "  $err_msg"
+        elif [[ -n "$body" ]]; then
+            echo "  $body"
+        fi
         return 1
     fi
 }

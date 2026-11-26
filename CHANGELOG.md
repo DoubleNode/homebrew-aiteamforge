@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1859: Cancelled releases free their version; kb-release edit runs the version guard (XACA-1859)
+- Tap files updated in this publish: `share/kanban-hooks/release_gate.py`,`share/kanban-hooks/release_schema.py` `share/lcars-ui/server.py`,`share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1915: kb-release deploy-dev records the DEV deploy (XACA-1915)
 - Tap files updated in this publish: `share/kanban-hooks/release_resume.py`,`share/lcars-ui/server.py` `share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1875: Close a finished worker's lane window from the monitor (XACA-1875)

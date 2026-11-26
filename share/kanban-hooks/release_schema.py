@@ -24,6 +24,65 @@ _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 _STR_FIELDS = ("id", "ts", "env", "sha", "test", "runBy")
 _NULLABLE_STR = ("parent", "supersededBy")
 
+# XACA-1859: ONE answer to "does this release still hold its version numbers?", shared by the server's
+# create/edit version guard and the gate's PLANNED version-uniqueness check so the three never disagree.
+# A release in a terminal status is finished (shipped or abandoned) and holds nothing; shipped versions
+# stay protected by the server's monotonic "at or below last shipped" check, not by holding.
+TERMINAL_RELEASE_STATUSES = ("completed", "cancelled", "closed", "released", "archived", "retired")
+# A '-cancelled' version suffix is a tombstone: a team renamed an abandoned release's version (e.g.
+# 1.6.0 -> 1.6.0-cancelled, the XACA-1602 workaround) precisely so the number is free again.
+_VERSION_TOMBSTONE_RE = re.compile(r"-cancell?ed\Z", re.IGNORECASE)
+
+
+def is_terminal_release_status(status):
+    """True for a finished release status (case/space-insensitive); unknown or missing -> False (live)."""
+    return isinstance(status, str) and status.strip().lower() in TERMINAL_RELEASE_STATUSES
+
+
+def is_tombstoned_version(version):
+    """True when a version string carries the '-cancelled' tombstone suffix ('1.6.0-cancelled')."""
+    return isinstance(version, str) and bool(_VERSION_TOMBSTONE_RE.search(version.strip()))
+
+
+def release_holds_version(release, version):
+    """True when `release` still holds `version`: the release is not in a terminal status and the
+    version is not tombstoned. Callers decide what 'the same version' means; this only says whether
+    the holder counts."""
+    if not isinstance(release, dict) or is_terminal_release_status(release.get("status")):
+        return False
+    return not is_tombstoned_version(version)
+
+
+# XACA-1859 (PR #1438 advisories 020/021): version EQUALITY for holding, shared with the gate. Same grammar as
+# lcars-ui/server.py _REL_VERSION_RE (pinned equal by tests/test_xaca1859_release_version_holders.py): '1.6' and
+# '1.6.0' and '1.6.0-rc1' are the same number, so create, edit and promote agree on what collides.
+_VERSION_KEY_RE = re.compile(r"^(\d+)\.(\d+)(?:\.(\d+))?(?:-[A-Za-z0-9.+]+)?$")
+
+
+def release_version_key(version):
+    """'1.6' / '1.6.0' / '1.6.0-rc1' -> (1, 6, 0); None when not a parseable version string."""
+    if not isinstance(version, str):
+        return None
+    m = _VERSION_KEY_RE.match(version.strip())
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3) or 0)) if m else None
+
+
+def stored_version_key(version):
+    """release_version_key for a version already STORED on a record: also accepts a leading 'v'/'V'
+    ('v1.6.0' -> (1, 6, 0)), because legacy/hand-edited records carry it and such a release must still hold
+    its number (PR #1438 advisory 022). New input stays strict: create/edit refuse 'v1.6.0' (XACA-1649)."""
+    if isinstance(version, str):
+        version = version.strip()
+        if version[:1] in ("v", "V"):
+            version = version[1:]
+    return release_version_key(version)
+
+
+def release_status_label(release):
+    """Human label for a holder in refusal text: its real status, never an assumed 'open'."""
+    status = release.get("status") if isinstance(release, dict) else None
+    return status.strip() if isinstance(status, str) and status.strip() else "no status set"
+
 
 def release_defaults():
     """Fresh migration-safe defaults for the spec 6.1 release additions."""

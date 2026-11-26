@@ -2273,6 +2273,14 @@ def _release_version_tuple(value):
     return (int(m.group(1)), int(m.group(2)), int(m.group(3) or 0)) if m else None
 
 
+def _release_stored_version_tuple(value):
+    """_release_version_tuple for a version STORED on a record: a leading 'v'/'V' is tolerated so a legacy
+    'v1.6.0' still holds / sets the shipped floor (XACA-1859, PR #1438 advisory 022). New input stays strict."""
+    if isinstance(value, str) and value.strip()[:1] in ('v', 'V'):
+        value = value.strip()[1:]
+    return _release_version_tuple(value)
+
+
 def _release_version_str(t):
     return "%d.%d.%d" % t
 
@@ -2301,25 +2309,43 @@ def _release_ships_platform(release, platform):
     return stage == 'PROD' or plat.get('environment') == 'PROD'
 
 
-def _release_version_baseline(team, platform, board_releases, archived_releases):
+def _release_holds_version(release, version):
+    """XACA-1859: the shared holder predicate (release_schema.release_holds_version). Fails closed - an
+    unavailable schema module means every unshipped board release holds, the pre-1859 behaviour."""
+    if _release_schema is None:
+        return True
+    return _release_schema.release_holds_version(release, version)
+
+
+def _release_holder_label(release):
+    if _release_schema is None:
+        return (release.get('status') if isinstance(release, dict) else None) or "no status set"
+    return _release_schema.release_status_label(release)
+
+
+def _release_version_baseline(team, platform, board_releases, archived_releases, exclude_id=None):
     """-> (shipped, held). shipped = (tuple, release_id) of the highest PROD version for the platform over
-    board + archive, or None. held = {tuple: release_id} of versions held by unshipped BOARD releases
-    (any status: a cancelled release still holds its version, XACA-1602). Archived non-PROD releases are
-    ignored: archiving dropped them and their versions are junk."""
+    board + archive, or None. held = {tuple: (release_id, status_label)} of versions held by unshipped BOARD
+    releases that still hold them (XACA-1859: a terminal-status release or a '-cancelled' tombstoned version
+    holds nothing - release_schema.release_holds_version, shared with the gate). Archived non-PROD releases
+    are ignored: archiving dropped them and their versions are junk. exclude_id skips one release (the
+    release being edited must not collide with itself)."""
     shipped, held = None, {}
     for is_board, releases in ((True, board_releases), (False, archived_releases)):
         for rel in releases or []:
             if not isinstance(rel, dict) or rel.get('team') not in (None, '', team):
                 continue
+            if exclude_id is not None and rel.get('id') == exclude_id:
+                continue
             plat = (rel.get('platforms') or {}).get(platform) if isinstance(rel.get('platforms'), dict) else None
-            t = _release_version_tuple(plat.get('version')) if isinstance(plat, dict) else None
+            t = _release_stored_version_tuple(plat.get('version')) if isinstance(plat, dict) else None
             if t is None:
                 continue
             if _release_ships_platform(rel, platform):
                 if shipped is None or t > shipped[0]:
                     shipped = (t, rel.get('id'))
-            elif is_board:
-                held.setdefault(t, rel.get('id'))
+            elif is_board and _release_holds_version(rel, plat.get('version')):
+                held.setdefault(t, (rel.get('id'), _release_holder_label(rel)))
     return shipped, held
 
 
@@ -2372,7 +2398,7 @@ def _resolve_default_release_version(release_type, shipped, held, file_version):
     return "1.0.0", 'initial'
 
 
-def _guard_release_version(platform, value, origin, shipped, held, default, allow_override):
+def _guard_release_version(platform, value, origin, shipped, held, default, allow_override, release_id=None):
     """Monotonic guard. -> (error_message_or_None, overridden). Refuses a version at/below last shipped or
     held by an open release; a malformed value is refused even with the override (cannot be compared)."""
     t = _release_version_tuple(value)
@@ -2382,7 +2408,8 @@ def _guard_release_version(platform, value, origin, shipped, held, default, allo
     if shipped and t <= shipped[0]:
         problem = "is at or below the last shipped version %s (%s)" % (_release_version_str(shipped[0]), shipped[1])
     elif t in held:
-        problem = "is already held by open release %s" % held[t]
+        # XACA-1859: name the holder's real status (a cancelled release used to be called "open").
+        problem = "is already held by release %s (status: %s)" % held[t]
     else:
         return None, False
     if allow_override:
@@ -2390,7 +2417,8 @@ def _guard_release_version(platform, value, origin, shipped, held, default, allo
     # The text is shown verbatim in the LCARS Create/Edit Release modals AND by the CLI, so it names no
     # payload field; the remedy is chosen by where the value came from.
     src = {'name': "taken from the release name/short title", 'inherited': "inherited from the release's "
-           "existing platforms", 'explicit': "requested", 'default': "computed"}.get(origin, origin)
+           "existing platforms", 'explicit': "requested", 'default': "computed", 'edit': "requested",
+           'edit-title': "synced from the short title"}.get(origin, origin)
     if origin == 'name':
         remedy = ("Remove the version from the name/short title to use %s, or set it from the CLI: "
                   "kb-release create --platform-version %s=<version> (override: --allow-version-regression)."
@@ -2401,6 +2429,16 @@ def _guard_release_version(platform, value, origin, shipped, held, default, allo
                   "(kb-release edit <release-id> --platform-version <platform>=<version>), then add the "
                   "platform. The CLI has no version-regression override for adding a platform."
                   % default)
+    elif origin == 'edit-title':
+        # XACA-1859 (PR #1438 UX advisory 019): the LCARS Edit Release modal reaches this via a vX.Y.Z short
+        # title, so lead with the field the user just typed, then the CLI with the real release id.
+        remedy = ("Change or remove the version in the short title to use %s, or from the CLI: kb-release edit "
+                  "%s --platform-version %s=%s (override: --allow-version-regression)."
+                  % (default, release_id or "<release-id>", platform, default))
+    elif origin == 'edit':
+        # XACA-1859: kb-release edit is guarded too, and has its own override.
+        remedy = ("Use kb-release edit %s --platform-version %s=%s, or override with "
+                  "--allow-version-regression." % (release_id or "<release-id>", platform, default))
     else:
         remedy = ("Use kb-release create --platform-version %s=%s, or override with "
                   "--allow-version-regression." % (platform, default))
@@ -9535,19 +9573,21 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         and no fallback to '1.0.0' - the caller's default-version rule applies instead."""
         return _release_version_label(name)
 
-    def _plan_release_version(self, data, archived, platform, release_type, requested, origin, allow_override):
+    def _plan_release_version(self, data, archived, platform, release_type, requested, origin, allow_override,
+                              exclude_id=None):
         """Resolve + guard one platform's version. -> (version, source, overridden, error_payload).
 
         requested is None -> the computed default; else the explicit/name/inherited value, guarded.
         error_payload is a 400 body (or None): the CALLER raises it as a _DeferredResponse, because the
         deferred-raise invariant (test_xaca0890) wants every raiser to own its `except _DeferredResponse`."""
-        shipped, held = _release_version_baseline(LCARS_TEAM, platform, data.get('releases'), archived)
+        shipped, held = _release_version_baseline(LCARS_TEAM, platform, data.get('releases'), archived,
+                                                  exclude_id=exclude_id)
         default, source = _resolve_default_release_version(
             release_type, shipped, held, _read_release_version_file(LCARS_TEAM, platform))
         if requested is None:
             requested, origin = default, source
         err, overridden = _guard_release_version(
-            platform, requested, origin, shipped, held, default, allow_override)
+            platform, requested, origin, shipped, held, default, allow_override, release_id=exclude_id)
         if err:
             return requested, origin, False, {"error": err, "platform": platform, "defaultVersion": default}
         return requested, origin, overridden, None
@@ -12308,6 +12348,12 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     if post_data['status'] == 'released':
                         raise _DeferredResponse.error(409, "status 'released' is set only by the PROD close-out, not by release update; for a release already closed out at PROD, run `kb-release reconcile-closeout %s` (dry-run first)" % release_id)
 
+                # XACA-1859: snapshot what the release held BEFORE this edit, so the version guard below only
+                # judges versions this request changes (same value = no-op) or a terminal -> live reactivation.
+                _versions_before = {pn: (p.get('version') if isinstance(p, dict) else None)
+                                    for pn, p in (release.get('platforms') or {}).items()}
+                _was_terminal = not _release_holds_version(release, None)
+
                 # Update allowed fields
                 allowed_fields = ['name', 'shortTitle', 'targetDate', 'status', 'type', 'project']  # XACA-0050: Added shortTitle
                 for field in allowed_fields:
@@ -12350,18 +12396,47 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                                 if key in updates:
                                     release['platforms'][platform][key] = updates[key]
 
+                # XACA-1859: edit runs the SAME guard as create (_plan_release_version: shipped floor, live
+                # holders via release_schema.release_holds_version, allowVersionRegression override, audited).
+                # Judged: every platform whose version this request changes (explicit platforms.version or the
+                # shortTitle sync), or all of them when a terminal release is reactivated. Skipped: the release
+                # stays terminal or the new value is a '-cancelled' tombstone (it then holds nothing), the value
+                # is cleared, or the platform already shipped (editing a shipped record is a data fix).
+                overridden_platforms = []
+                allow_override = post_data.get('allowVersionRegression') is True
+                archived_releases = None
+                _explicit = {pn for pn, u in (post_data.get('platforms') or {}).items()
+                             if isinstance(u, dict) and 'version' in u} if isinstance(post_data.get('platforms'), dict) else set()
+                if _release_holds_version(release, None):
+                    for pn, plat in (release.get('platforms') or {}).items():
+                        new_v = plat.get('version') if isinstance(plat, dict) else None
+                        if new_v == _versions_before.get(pn) and not _was_terminal:
+                            continue
+                        if new_v in (None, '') or not _release_holds_version(release, new_v):
+                            continue
+                        if _release_ships_platform(release, pn):
+                            continue
+                        if archived_releases is None:
+                            archived_releases = self._load_archived_releases(LCARS_TEAM)
+                        _v, _src, overridden, version_error = self._plan_release_version(
+                            data, archived_releases, pn, release.get('type'), new_v,
+                            'edit' if pn in _explicit else 'edit-title', allow_override, exclude_id=release_id)
+                        if version_error:
+                            raise _DeferredResponse.json(version_error, 400)
+                        if overridden:
+                            overridden_platforms.append(pn)
+
                 # Add new platforms if requested (cannot remove existing ones).
                 # XACA-1649: a new platform inherits the release's version when its existing platforms all
                 # agree (release_branches needs a single version), else gets the computed default. The
                 # monotonic guard (+ allowVersionRegression override) applies to the new platform only.
-                overridden_platforms = []
                 if 'addPlatforms' in post_data:
                     existing_platforms = release.get('platforms', {})
                     existing_versions = {p.get('version') for p in existing_platforms.values()
                                          if isinstance(p, dict)}
                     inherited = (existing_versions.pop() if len(existing_versions) == 1 else None) or None
-                    allow_override = post_data.get('allowVersionRegression') is True
-                    archived_releases = self._load_archived_releases(LCARS_TEAM)
+                    if archived_releases is None:
+                        archived_releases = self._load_archived_releases(LCARS_TEAM)
                     for platform in post_data['addPlatforms']:
                         if platform not in existing_platforms:
                             # XACA-1346: a new platform MIRRORS the release's current stage. A fixed

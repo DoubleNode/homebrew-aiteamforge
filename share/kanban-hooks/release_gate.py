@@ -72,6 +72,7 @@ whose data is absent is UNMET ("cannot verify"), never assumed satisfied.
 from datetime import datetime, timezone
 
 from release_schema import STAGES  # single source of truth (XACA-1346-003); re-exported here
+from release_schema import release_holds_version, release_status_label, stored_version_key  # XACA-1859
 from release_closeout import first_incomplete as _closeout_first_incomplete, binding_gap as _closeout_binding_gap, close_out_binding as _closeout_binding, _valid_sha  # pure stdlib (XACA-1353-004)
 
 # GAMMA is deliberately NOT here: it follows flowConfig, EXCEPT that it is forced on when crSupport is on
@@ -884,13 +885,23 @@ def _exit_conditions(release, cur, cr_on, ctx):
                 r.append("PLANNED: malformed entry in context.other_releases")
                 continue
             same_id = bool(release.get("id")) and o.get("id") == release.get("id")
-            if o is release or same_id or o.get("status") == "completed":
+            if o is release or same_id:
                 continue
             op = o.get("platforms") if isinstance(o.get("platforms"), dict) else {}
             for pn, ver in mine:
                 theirs = op.get(pn)
-                if isinstance(theirs, dict) and theirs.get("version") == ver:
-                    r.append("PLANNED: version %s on %s already used by open release %s" % (ver, pn, o.get("id")))
+                # XACA-1859 (folds XACA-1602): the shared predicate decides whether the other release still
+                # holds its version (terminal status or '-cancelled' tombstone -> it does not).
+                # Equality is the parsed version (PR #1438 advisories 020/021), as in the server guard: '1.6',
+                # '1.6.0' and '1.6.0-rc1' collide. Unparseable strings fall back to exact string equality.
+                if not isinstance(theirs, dict) or not release_holds_version(o, theirs.get("version")):
+                    continue
+                mine_k, theirs_k = stored_version_key(ver), stored_version_key(theirs.get("version"))
+                same = (mine_k == theirs_k) if (mine_k is not None and theirs_k is not None) \
+                    else theirs.get("version") == ver
+                if same:
+                    r.append("PLANNED: version %s on %s already used by release %s (status: %s)"
+                             % (ver, pn, o.get("id"), release_status_label(o)))
     if cur == "DEV":
         if not release.get("branch"):
             r.append("DEV: release has no branch recorded (spec 4.1)")
