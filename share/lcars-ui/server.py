@@ -9996,12 +9996,14 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
                 # XACA-1346: mirror the release-level stage state (board is authoritative).
                 # tests[] is deliberately NOT mirrored (large, append-only, board-only).
-                for _k in ('stage', 'stages', 'stageSha', 'rollbackSha', 'rollbackShaSource',
+                for _k in ('stage', 'stages', 'stageSha', 'rollbackSha', 'rollbackShaSource', 'branchHistory',
                            'rollbackShaOverride', 'rollbackShaOverrideUsed', 'branch', 'branchBaseSha', 'closeOut', 'closeOutHistory'):
                     if _k in release:
                         manifest[_k] = release[_k]
-                    elif _k == 'rollbackShaOverride':
-                        manifest.pop(_k, None)   # consumed or cleared: the mirror must not keep it
+                    elif _k in ('rollbackShaOverride', 'branch', 'branchBaseSha'):
+                        # consumed or cleared (XACA-1884: a demote to PLANNED clears the branch): the mirror must
+                        # not keep it
+                        manifest.pop(_k, None)
 
                 # Marker so readers know this file is a derived mirror.
                 manifest['_source'] = 'board.releases[] (authoritative); this manifest is a mirror — do not edit by hand'
@@ -11258,12 +11260,35 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 # after the board lock was released; it never raises and never changes the response.
                 self._refresh_release_cr_record(release_id, LCARS_TEAM, 'assumed-approval-stamp')
 
+    @staticmethod
+    def _clear_branch_on_planned(release, from_stage, reason, actor, now):
+        """XACA-1884: a release that lands on PLANNED gives up its recorded branch.
+
+        The PLANNED->DEV promote cuts only when no branch is recorded, so a branch left behind by a demote made
+        the re-promote skip the cut (cut=null) even when the branch never reached the remote. The old values are
+        archived to the append-only release.branchHistory and the keys removed; the re-promote's cut then adopts
+        a branch still at the integration tip or refuses one that diverged (release_branches.cut_release_branch).
+        Mutates `release` in the caller's locked write. Returns {branch, branchBaseSha} when it cleared one."""
+        if release.get('stage') != 'PLANNED':
+            return None
+        old_branch, old_base = release.get('branch'), release.get('branchBaseSha')
+        release.pop('branch', None)
+        release.pop('branchBaseSha', None)
+        if not old_branch and not old_base:
+            return None
+        if not isinstance(release.get('branchHistory'), list):
+            release['branchHistory'] = []
+        release['branchHistory'].append({"branch": old_branch or None, "branchBaseSha": old_base or None,
+                                         "fromStage": from_stage, "clearedAt": now,
+                                         "reason": reason, "actor": actor})
+        return {"branch": old_branch or None, "branchBaseSha": old_base or None}
+
     def _regress_release_core(self, release_id, to, reason, actor, reconcile_ok=False, reset_status=False):
         """Shared backward-move path for /regress and /plan. Regress rules are ALWAYS enforced
         (no report mode). Returns (status, payload). Logs every outcome for a known release.
         Decides inside the lock and RETURNS (never raises a deferred response, never writes to
         the socket): the caller sends the response after the lock is released."""
-        written, applied_sha = False, None
+        written, applied_sha, cleared_branch = False, None, None
         with self._board_write_transaction():
             data = self._load_releases_config(_lock_held=True)
             release = self._find_release_by_id(data, release_id)
@@ -11280,6 +11305,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 # XACA-0729 heal: release-level stage is already PLANNED but a platform drifted.
                 plats = release.get('platforms') if isinstance(release.get('platforms'), dict) else {}
                 if any(isinstance(p, dict) and p.get('environment') != 'PLANNED' for p in plats.values()):
+                    reasons = []
+                elif release.get('branch') or release.get('branchBaseSha'):
+                    # XACA-1884: a PLANNED release still carrying a branch (stranded by a demote before the fix)
+                    # is healed the same way, so `kb-release plan` can clear it (_clear_branch_on_planned below).
                     reasons = []
             co_archived = False
             if not reasons and release.get('closeOut') is not None:
@@ -11299,6 +11328,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                                                      if _release_supersede is not None else None))
                 if pend_err:
                     return pend_err
+                cleared_branch = self._clear_branch_on_planned(release, cur, reason, actor, now)
                 if reset_status:
                     release['status'] = "in_progress"
                 if not self._save_releases_config(data, _lock_held=True):
@@ -11310,6 +11340,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         logctx = dict(actor=actor, reason=reason, reasons=reasons)
         if written and co_archived:
             logctx['closeOutArchived'] = True
+        if written and cleared_branch:
+            logctx['clearedBranch'] = cleared_branch
         landed = to
         if written and applied_sha:
             # Round 3: applying pendingSha can restart EARLIER than requested (onNewSha); report and

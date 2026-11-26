@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1884: Demote to PLANNED clears the release branch so re-promote re-cuts (XACA-1884)
+- Tap files updated in this publish: `share/kanban-hooks/release_branches.py`,`share/lcars-ui/index.html` `share/lcars-ui/js/lcars.js`,`share/lcars-ui/server.py` `share/lcars-ui/tests/test-xaca-1549-orchestration-panel.js`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1873: release planner Wave 0 gap classification (XACA-1873, PR 1/3)
 - Tap files updated in this publish: `share/kanban-hooks/orchestrator_routing.py`,`share/kanban-hooks/release_orchestrator.py`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1880: kb-nudge wake channel, GATE_STALE backstop, worker stall protocol (XACA-1880, PR 3/3)

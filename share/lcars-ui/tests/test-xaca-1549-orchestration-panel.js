@@ -352,7 +352,9 @@ const KIND_CASES = {
     token_budget: [{ scope: 'item', item: 'XACA-7', used: 1200, limit: 1000, signature: 'sig' }, ['scope=item', 'item=XACA-7', 'used=1200', 'limit=1000', 'OVER BUDGET']],
     // send_token_summary: totals/coordinator are objects and must be skipped, never dumped
     token_summary: [{ totals: { model: 'm', input: 1, cacheCreate: 2, cacheRead: 3, output: 4, turns: 5 }, total: 10, coordinator: { model: null, input: 0, cacheCreate: 0, cacheRead: 0, output: 0, turns: 0 },
-        complete: false, unattributed: 2, modelMismatch: 1, items: 3 }, ['total=10', 'complete=false', 'unattributed=2', 'modelMismatch=1', 'items=3']]
+        complete: false, unattributed: 2, modelMismatch: 1, items: 3 }, ['total=10', 'complete=false', 'unattributed=2', 'modelMismatch=1', 'items=3']],
+    // XACA-1880 kb-nudge: {item, text, actor, pane}; rendered by the default branch (item only)
+    nudge: [{ item: 'XACA-7', text: 'wake up', actor: 'academy:chancellor', pane: 'engineering:2' }, ['item=XACA-7']]
 };
 check('table covers every ledger kind', Object.getOwnPropertyNames(KIND_CASES).sort(), pyKinds.slice().sort());
 function escHtmlText(t) { return t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }

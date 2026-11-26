@@ -12417,7 +12417,7 @@ function orchTicketCardHtml(t, now, tokenEntry, badgeTexts) {
 
 // Mirror of kanban-hooks/release_orchestrator.py LEDGER_KINDS (the ledger envelope is {ts, run, kind, ...fields}).
 const ORCH_EVENT_KINDS = ['run_start', 'dispatch', 'state', 'question', 'answer', 'stall', 'crash', 'failed', 'done',
-    'verdict', 'run_end', 'lane', 'model_mismatch', 'token_budget', 'token_summary'];
+    'verdict', 'run_end', 'lane', 'model_mismatch', 'token_budget', 'token_summary', 'nudge'];
 
 function orchStr(v) {
     return (typeof v === 'string' || typeof v === 'number') ? String(v) : '';

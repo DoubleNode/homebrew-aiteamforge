@@ -532,6 +532,29 @@ def integration_branch_name(board):
         return "the integration branch"
 
 
+def _archived_base(release, branch):
+    """XACA-1884: the branchBaseSha of the release's LATEST branchHistory entry when that entry recorded `branch`
+    (a demote to PLANNED archives the recorded branch there and clears it). None otherwise. Only the latest entry
+    counts: an older one was already superseded by a later cut."""
+    hist = release.get("branchHistory") if isinstance(release, dict) else None
+    last = hist[-1] if isinstance(hist, list) and hist else None
+    if not isinstance(last, dict) or last.get("branch") != branch:
+        return None
+    base = last.get("branchBaseSha")
+    return base if isinstance(base, str) and _SHA.fullmatch(base) else None
+
+
+def _local_commit(git, sha):
+    return git("cat-file", "-e", sha + "^{commit}", ok=(0, 1, 128)).returncode == 0
+
+
+def _is_ancestor(git, ancestor, tip):
+    """True only when git PROVES `ancestor` is in `tip`'s history; a missing object (rc 128) is False."""
+    if not _local_commit(git, ancestor):
+        return False
+    return git("merge-base", "--is-ancestor", ancestor, tip, ok=(0, 1, 128)).returncode == 0
+
+
 def cut_release_branch(release, board, repo_root, *, dry_run=False, run=subprocess.run):
     """Cut (or, in trunk mode, resolve) the release branch. Returns {"branch","branchBaseSha"}.
 
@@ -560,10 +583,19 @@ def cut_release_branch(release, board, repo_root, *, dry_run=False, run=subproce
     if existing:
         if existing == src_sha:
             return {"branch": branch, "branchBaseSha": existing}
+        archived = _archived_base(release, branch)
         if dry_run:
+            # no fetch: adopt only when both commits are already local and the ancestry is provable
+            if archived and _local_commit(git, existing) and _is_ancestor(git, archived, existing):
+                return {"branch": branch, "branchBaseSha": archived}
             raise RuntimeError("branch %r already exists at %s (%s is at %s); a dry-run cannot "
                                "verify its history without fetching" % (branch, existing, src, src_sha))
         git("fetch", "--", remote, src, branch)   # objects for BOTH tips, so the ancestry checks cannot rc-128
+        if archived and _is_ancestor(git, archived, existing):
+            # XACA-1884: the branch this release recorded before a demote to PLANNED, still carrying the base it
+            # was cut at. Ticket PRs merge into it, so it is normally AHEAD of (or diverged from) the integration
+            # branch; re-adopt it with its original base instead of refusing.
+            return {"branch": branch, "branchBaseSha": archived}
         if git("merge-base", "--is-ancestor", existing, src_sha, ok=(0, 1)).returncode != 0:
             if git("merge-base", "--is-ancestor", src_sha, existing, ok=(0, 1)).returncode == 0:
                 raise RuntimeError("branch %r already exists with commits %r lacks (its tip %s is ahead of %s); "
