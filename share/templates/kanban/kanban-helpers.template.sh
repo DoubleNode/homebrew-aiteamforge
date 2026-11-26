@@ -16836,10 +16836,32 @@ _kb_orch_resolve_effort() {
 # A freelance team id is freelance-<group>-<project>, but no per-team scripts exist: every project's terminals are
 # built by the ONE shared set freelance/scripts/freelance-<terminal>-startup.sh, driven by freelance-startup.sh
 # <GROUP> <PROJECT>. Bare "freelance" is not parametric (it has no project). Main Event is not parametric either:
-# it has its own mainevent-<terminal>-startup.sh, whose USE_WORKTREE block still refuses (follow-up, see CHANGELOG).
+# it has its own mainevent-<terminal>-startup.sh. Since XACA-1889 _kb_orch_startup_core gives team mainevent (and
+# only it) the guard family "mainevent", so its USE_WORKTREE block is accepted; see _kb_orch_guard_family.
 _kb_orch_parametric_family() {
     [[ "${1-}" =~ ^freelance-[a-z0-9][a-z0-9_-]*$ ]] && { echo freelance; return 0; }
     return 1
+}
+
+# _kb_orch_guard_family <family> -> the EXACT guard line of that family's setup_window block (XACA-1889), rc 1 if
+# none. One row per family; a family is assigned by TEAM in _kb_orch_startup_core (freelance-<g>-<p> teams on the
+# shared freelance script, team mainevent on its own mainevent-<terminal>-startup.sh), never by matching a pattern,
+# so a look-alike block in another team's script still refuses. Every guarded block must hold exactly
+# wt-project <family> / wt-dev / onscreen, and is never replayed.
+_kb_orch_guard_family() {
+    case "${1-}" in
+        freelance) printf '%s\n' 'if [ -n "$GROUPID" ] && [ -n "$PROJECTID" ]; then' ;;
+        mainevent) printf '%s\n' 'if [[ "$USE_WORKTREE" == "true" ]]; then' ;;
+        *) return 1 ;;
+    esac
+}
+
+# _kb_orch_session_absent_note <team> -> extra SESSION_ABSENT text for that team (XACA-1889), empty for the rest.
+# A Main Event terminal launched with MAINEVENT_PROJECT_DIR runs in mainevent-<project>-<terminal>, not the
+# mainevent-<terminal> session kb-dispatch targets. Routing those is out of scope (USER DECISION 2a): say so.
+_kb_orch_session_absent_note() {
+    [[ "${1-}" == mainevent ]] || return 0
+    printf '%s' "; project-scoped Main Event sessions (mainevent-<project>-<terminal>) are not dispatchable yet (follow-up XACA-1995)"
 }
 
 # _kb_orch_startup_script <team> <terminal> -> path of that terminal's startup script (rc 1 if none).
@@ -16862,9 +16884,10 @@ _kb_orch_startup_script() {
     return 1
 }
 
-# _kb_orch_parametric_values <family> <team>   (XACA-1877)
-# A shared family script cannot say where ITS project lives: its SESSION_DIRECTORY is $FREELANCE_PROJECT_DIR, set
-# by the launcher. The team registry can: teams[<team>].working_dir is the project container. freelance-startup.sh
+# _kb_orch_parametric_values <family> <team>   (XACA-1877; any guard family since XACA-1889)
+# A guard-family script cannot say where ITS project lives: its SESSION_DIRECTORY is $FREELANCE_PROJECT_DIR (or,
+# for mainevent, $MAINEVENT_PROJECT_DIR inside an if/else), set by the launcher, which kb-dispatch cannot see.
+# The team registry can: teams[<team>].working_dir is the project container. freelance-startup.sh
 # opens /Users/Shared/Development/<G>/<P>/develop, which equals <working_dir>/develop only BY CONVENTION (kb-freelance
 # --working-dir accepts any path; every live fleet entry measured 2026-11-18 follows it). The lane therefore uses
 # the registry, the one source keyed by team id, and refuses when <working_dir>/develop is missing. Read the registry
@@ -16921,10 +16944,13 @@ _kb_orch_assignment() {
 #   . ~/.zshrc_${SESSION_TYPE}_${SESSION_NAME}
 #   . $KANBAN_HELPERS
 #   . <...>-banner.sh <args>          (decorative; NOT replayed; must not chain anything)
-# Anything else (the mainevent wt-project/wt-dev block, a missing step, an altered step) refuses.
+# Anything else (a guarded block on a team without a guard family, a missing step, an altered step) refuses.
 # PARAMETRIC teams (XACA-1877, _kb_orch_parametric_family) run the shared family script, whose form is:
 #   cd "$SESSION_DIRECTORY" ; . ~/.zshrc_${SESSION_TYPE}_${SESSION_NAME} ; [. $KANBAN_HELPERS] ; . <banner>
 #   if [ -n "$GROUPID" ] && [ -n "$PROJECTID" ]; then  wt-project freelance ; wt-dev ; onscreen  fi
+# Team mainevent (XACA-1889) runs its OWN mainevent-<terminal>-startup.sh, whose form is the four core steps then
+#   if [[ "$USE_WORKTREE" == "true" ]]; then  wt-project mainevent ; wt-dev ; onscreen  fi
+# and whose SESSION_DIRECTORY is set inside an if/else on $MAINEVENT_PROJECT_DIR, so it is a guard family too.
 # The guarded block must be EXACTLY those three steps and is NOT replayed: wt-project + wt-dev only export the WT_*
 # worktree context and cd to the project's develop/ worktree (the lane cds there directly), and onscreen is display
 # only; kb-run derives its repo and team itself. Identity is <family>-<terminal>; DIR/helpers come from the registry.
@@ -16940,6 +16966,9 @@ _kb_orch_startup_core() {
     # Family rules never apply to a parametric team's OWN <team>-<term>-startup.sh (which _kb_orch_startup_script
     # prefers): that script is judged by the core rules and its own values, exactly as on develop (XACA-1877-015).
     [[ "${script##*/}" == "${team}-${term}-startup.sh" ]] && fam=""
+    # XACA-1889: team mainevent on its own mainevent-<terminal>-startup.sh is the "mainevent" guard family. Keyed by
+    # team AND script name, so neither a mainevent-<project> team nor another team's look-alike block qualifies.
+    [[ "$team" == mainevent && "${script##*/}" == "mainevent-${term}-startup.sh" ]] && fam=mainevent
     if ! grep -qE '^setup_window\(\)[[:space:]]*\{' "$script"; then
         _KB_ORCH_BOOT_REASON="$(basename "$script") defines no setup_window()"
         return 1
@@ -16953,7 +16982,11 @@ _kb_orch_startup_core() {
     local -a payloads guarded
     payloads=() guarded=()
     # The family guard, matched as an exact string (never a pattern). in_g: inside it; seen_g: it appeared.
-    local g_open='if [ -n "$GROUPID" ] && [ -n "$PROJECTID" ]; then' in_g=0 seen_g=0
+    local g_open="" in_g=0 seen_g=0
+    if [[ -n "$fam" ]] && ! g_open=$(_kb_orch_guard_family "$fam"); then
+        _KB_ORCH_BOOT_REASON="no guard line is registered for family ${fam}"
+        return 1
+    fi
     body=$(awk '/^setup_window\(\)[[:space:]]*\{/ { f = 1; next } f && /^}/ { exit } f { print }' "$script")
     while IFS= read -r line; do
         line="${line#"${line%%[![:space:]]*}"}"
@@ -16989,6 +17022,11 @@ _kb_orch_startup_core() {
         return 1
     fi
     local p1 p2 p3 p4 bstep=4
+    # The mainevent form always carries its . $KANBAN_HELPERS step (the freelance one may omit it).
+    if [[ "$fam" == mainevent ]] && (( ${#payloads[@]} != 4 )); then
+        _KB_ORCH_BOOT_REASON="setup_window has ${#payloads[@]} send-keys steps, the mainevent form has 4"
+        return 1
+    fi
     if [[ -n "$fam" ]]; then
         # The family form has no kanban-helpers step; one is tolerated in the core position (3 of 4).
         if (( ${#payloads[@]} == 4 )) && [[ "${payloads[@]:2:1}" == '. $KANBAN_HELPERS' ]]; then
@@ -16999,6 +17037,7 @@ _kb_orch_startup_core() {
             return 1
         fi
         p1="${payloads[@]:0:1}" p2="${payloads[@]:1:1}" p3='. $KANBAN_HELPERS' p4="${payloads[@]:2:1}" bstep=3
+        [[ "$fam" == mainevent ]] && bstep=4   # its . $KANBAN_HELPERS step is mandatory, so the banner is step 4
     else
         if (( ${#payloads[@]} != 4 )); then
             _KB_ORCH_BOOT_REASON="setup_window has ${#payloads[@]} send-keys steps, the core form has 4"
@@ -17369,7 +17408,7 @@ kb-dispatch() {
         _kb_dispatch_refuse NO_ROLES "${terminal} has no roles (never dispatchable)"; return 3
     fi
     if [[ "$t_state" != "present" ]]; then
-        _kb_dispatch_refuse SESSION_ABSENT "tmux session ${session} does not exist; the dispatcher never starts one"; return 3
+        _kb_dispatch_refuse SESSION_ABSENT "tmux session ${session} does not exist; the dispatcher never starts one$(_kb_orch_session_absent_note "$team")"; return 3
     fi
 
     # ── duplicate window, anywhere on the server ─────────────────────────────
