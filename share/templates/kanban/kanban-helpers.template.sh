@@ -17193,16 +17193,20 @@ _kb_dispatch_ledger() {
 # XACA-1829: EVERY outcome reached after the run check (the run is the release's active, open run) is ledgered here, so no
 # exit path can forget it and the coordinator's own wave-2+ dispatches reach orchestrator_monitor (DISPATCH_FAILED, 15).
 _kb_dispatch_result() {
-    local _o="${1-}" _r="${2-}" _d="${3-}" _obs="${4:-null}" _ts _obj=""
+    local _o="${1-}" _r="${2-}" _d="${3-}" _obs="${4:-null}" _ts _obj="" _pane=""
     _ts=$(_kb_get_timestamp)
+    # XACA-1875: the pane id of the window this dispatch created is the identity proof orchestrator_monitor needs before it
+    # closes a finished worker's window. Only outcomes that come after _kb_open_lane_window (which resets the variable) carry it.
+    [[ "$_o" == DISPATCHED || "$_o" == DISPATCH_FAILED ]] && _pane="${_KB_ORCH_PANE-}"
     if (( want_json || ${_kbd_run_checked:-0} )); then
         _obj=$(jq -cn --arg item "$item" --arg terminal "$terminal" --arg session "$session" --arg window "$window" \
             --arg model "$model" --arg run "$run" --arg outcome "$_o" --arg reason "$_r" --arg detail "$_d" \
-            --argjson observed "$_obs" --arg ts "$_ts" \
+            --argjson observed "$_obs" --arg ts "$_ts" --arg pane "$_pane" \
             '{item: $item, terminal: $terminal, session: (if $session == "" then null else $session end),
               window: $window, model: (if $model == "" then null else $model end), run: $run, outcome: $outcome,
               reason: (if $reason == "" then null else $reason end),
-              observed: (($observed // {}) + (if $detail == "" then {} else {detail: $detail} end)), ts: $ts}') || _obj=""
+              observed: (($observed // {}) + (if $detail == "" then {} else {detail: $detail} end)), ts: $ts}
+             + (if $pane == "" then {} else {pane: $pane} end)') || _obj=""
     fi
     if (( ${_kbd_run_checked:-0} )) && [[ -n "$_obj" ]]; then
         _kb_dispatch_ledger "$board_file" "$run" "$_obj" "${_KB_ORCH_MODEL_SOURCE-}" "${resume:-0}"
@@ -17226,6 +17230,7 @@ _kb_dispatch_refuse() {
 # Exit: 0 DISPATCHED | 2 usage | 3 REFUSED (no window created) | 4 DISPATCH_FAILED (window left open).
 # --json prints exactly one object (the XACA-1546 ledger contract):
 #   {item, terminal, session, window, model, run, outcome, reason, observed, ts}
+# plus `pane` (the created window's %N pane id) on DISPATCHED and DISPATCH_FAILED (XACA-1875: the monitor's window-close proof).
 kb-dispatch() {
     if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local item="" terminal="" run="" team="" cli_model="" coord="" deadline="${KB_DISPATCH_DEADLINE:-90}" want_json=0 resume=0

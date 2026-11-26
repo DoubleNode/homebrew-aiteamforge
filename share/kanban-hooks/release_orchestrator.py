@@ -379,6 +379,9 @@ KIND_QUESTION, KIND_ANSWER, KIND_STALL = "question", "answer", "stall"
 KIND_CRASH, KIND_FAILED, KIND_DONE = "crash", "failed", "done"
 KIND_VERDICT, KIND_RUN_END = "verdict", "run_end"
 KIND_LANE = "lane"          # a lane slot changed hands: {item, lane, action: "assign" | "free"} (XACA-1546-011)
+# XACA-1875: orchestrator_monitor also writes lane events for a finished item's window (lane = the item's last assigned
+# lane, or null): action "window_closed" {item, lane, pane, window} and "window_close_deferred" {item, lane, pane, window,
+# reason: busy | dialog | unconfirmed | unreadable, tailHash}. Lane-slot readers must filter on assign/free.
 # XACA-1808 token telemetry: model_mismatch {item, expected, observed, signature}, token_budget {scope, item?, used, limit,
 # signature} (both appended ONCE per signature by the monitor), token_summary {run totals} (appended at ALL_DONE).
 KIND_MODEL_MISMATCH, KIND_TOKEN_BUDGET, KIND_TOKEN_SUMMARY = "model_mismatch", "token_budget", "token_summary"

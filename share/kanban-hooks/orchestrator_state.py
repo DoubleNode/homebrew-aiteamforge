@@ -93,6 +93,39 @@ PANE_GONE = "<pane-gone>"
 
 SHELL_COMMANDS = frozenset(("zsh", "bash", "sh", "dash", "fish", "ksh", "tcsh"))
 
+# XACA-1875 (shared with 1880-002's ITEM_AT_PROMPT): the Claude Code screen strings that say a pane is NOT idle. Extended
+# regexes, matched case-insensitively on a capture-pane tail. These rows MUST equal the dialog/busy rows of kb-nudge's
+# _KB_NUDGE_PANE_PATTERNS in kanban-helpers.sh (tests/test_xaca1875_window_close.py enforces it), so a Claude Code UI
+# change is one edit in each table, caught by that test if only one moves.
+PANE_PATTERNS = {
+    "dialog": ("Enter to select", "Esc to cancel", r"Do you want to proceed\?", "Do you want to (make this edit|create|allow)",
+               "About to (merge|cut)", "at (low|medium) effort"),
+    "busy": ("esc to interrupt",),
+}
+
+
+def tail_hash(text):
+    """A short stable hash of a capture-pane tail (trailing blank lines and trailing spaces ignored)."""
+    import hashlib
+    lines = [ln.rstrip() for ln in str(text).splitlines()]
+    while lines and not lines[-1]:
+        lines.pop()
+    return hashlib.sha256("\n".join(lines).encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def pane_idle(tail_now, prev_hash):
+    """XACA-1875 USER DECISION 1(a), pure -> (idle, reason). reason: unreadable (no tail), busy (a turn is running),
+    dialog (an interactive prompt is open), unconfirmed (first sighting, or the tail changed since prev_hash), idle (the
+    same quiet tail on two consecutive polls). Busy and dialog win over the hash comparison."""
+    if tail_now is None:
+        return False, "unreadable"
+    for cls in ("busy", "dialog"):
+        if any(re.search(p, tail_now, re.I) for p in PANE_PATTERNS[cls]):
+            return False, cls
+    if not prev_hash or tail_hash(tail_now) != prev_hash:
+        return False, "unconfirmed"
+    return True, "idle"
+
 # kb-pr-monitor terminal-failure verdicts: name -> exit code
 FAILED_VERDICTS = {"CONFLICT": 20, "UX_REOPEN": 21, "BLOCKED": 22, "CI_FLAKE_REPEAT": 24, "PR_CLOSED": 30, "TIMEOUT": 31}
 

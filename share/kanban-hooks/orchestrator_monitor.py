@@ -109,6 +109,17 @@ event stamped more than clock_skew_seconds in the future never suppresses.
 LANE SYNC: after recording transitions, every in-flight item (neither QUEUED nor DONE/CANCELLED) holding no lane is given the
 lowest free lane (assign_lane), so lanes[] is right even when nothing assigned one at dispatch. SLOT_FREE capacity separately
 counts in-flight items (orchestrator_state.compute_slot_free), mirroring kb-dispatch's max(open lanes, stamped open items).
+WINDOW CLOSE (XACA-1875; write polls only, never status / resume --dry-run / read_only, never a Wave 0 run): after the lane
+sync, a finished item's lane window <team>-<terminal>:<ITEM> is closed (`kill-window -t <pane id>`, ctx.tmux_kill) only when
+ALL hold: (a) derived state DONE or CANCELLED; (b) board status completed or cancelled; (c) a window named EXACTLY <ITEM> (a
+<ITEM>~crashed-* window is never touched); (d) that window has exactly one pane and its id equals the `pane` of the item's
+latest DISPATCHED ledger event (no `pane` recorded = no identity proof = kept); (e) the pane is idle
+(orchestrator_state.pane_idle: no busy marker, no dialog, and the same capture-pane tail hash on two consecutive polls; the
+previous hash is read from the ledger, so `--once` polls and restarts behave the same); (f) no activeWindows row
+<terminal>:<ITEM> is still working on an in_progress item. Ledger: lane action=window_closed {item, lane, pane, window} per
+close; lane action=window_close_deferred {item, lane, pane, reason, tailHash} only when the item's reason or tail hash
+changed, so a busy pane is ledgered once, not every poll. A kill-window / capture-pane failure is a warning, never a verdict;
+the close step never changes which verdict is picked.
 ALL_DONE and TIMEOUT are never suppressed. `--once` never suppresses (it reports the top condition) EXCEPT the two WARN-ONLY
 verdicts (MODEL_MISMATCH, TOKEN_BUDGET, XACA-1808-014): those honour the signature-keyed suppression above (ledger verdict
 events + --repeat-after) even under --once, so each is delivered ONCE per signature per repeat window and the next condition
@@ -189,7 +200,9 @@ _SHA_RE = re.compile(r"^[0-9a-fA-F]{7,64}$")
 NOT_LOGGED = ("PENDING", "USAGE", "HELP", "STATUS", "NO_ACTIVE_RUN")
 PRE_RUNNING = ("QUEUED", "DISPATCHING", "UNKNOWN")
 
-TMUX_FORMAT = "#{session_name}\t#{window_name}\t#{pane_current_command}"
+TMUX_FORMAT = "#{session_name}\t#{window_name}\t#{pane_current_command}\t#{pane_id}"   # pane_id: XACA-1875
+_PANE_ID_RE = re.compile(r"^%[0-9]+$")
+CAPTURE_LINES = 15                 # XACA-1875: capture-pane -S -15, the tail pane_idle compares between polls
 
 
 class UsageError(Exception):
@@ -221,6 +234,29 @@ def real_tmux(env=None):
         rc, out, err = _run(base + ["list-panes", "-a", "-F", TMUX_FORMAT], timeout=20)
         if rc != 0:
             raise RuntimeError("tmux list-panes rc=%d: %s" % (rc, one_line(err)[:200]))
+        return out
+    return fn
+
+
+def real_tmux_kill(env=None):
+    """XACA-1875 -> callable(pane_id) closing the window that holds that pane; raises RuntimeError on failure."""
+    base = shlex.split((env or os.environ).get("KB_ORCH_TMUX") or "tmux")
+
+    def fn(pane):
+        rc, _out, err = _run(base + ["kill-window", "-t", pane], timeout=20)
+        if rc != 0:
+            raise RuntimeError("tmux kill-window -t %s rc=%d: %s" % (pane, rc, one_line(err)[:200]))
+    return fn
+
+
+def real_tmux_capture(env=None):
+    """XACA-1875 -> callable(pane_id) returning the pane's last CAPTURE_LINES lines; raises RuntimeError on failure."""
+    base = shlex.split((env or os.environ).get("KB_ORCH_TMUX") or "tmux")
+
+    def fn(pane):
+        rc, out, err = _run(base + ["capture-pane", "-p", "-t", pane, "-S", "-%d" % CAPTURE_LINES], timeout=20)
+        if rc != 0:
+            raise RuntimeError("tmux capture-pane -t %s rc=%d: %s" % (pane, rc, one_line(err)[:200]))
         return out
     return fn
 
@@ -365,7 +401,7 @@ class Ctx(object):
                  repeat_after=DEFAULT_REPEAT_AFTER, interval=DEFAULT_INTERVAL, timeout=DEFAULT_TIMEOUT,
                  tmux=None, gh=None, clock=None, sleep=None, env=None, repo_root=None, stderr=None, out=None,
                  tokens_interval=None, projects_dir=None, worktrees_root=None, msg=None, token_cache=None, inbox=None,
-                 reviews=None, commit_time=None):
+                 reviews=None, commit_time=None, tmux_kill=None, tmux_capture=None):
         self.release_id = release_id
         self.run = run
         self.board = board
@@ -377,6 +413,9 @@ class Ctx(object):
         self.timeout = timeout
         self.env = dict(os.environ) if env is None else env
         self.tmux = tmux or real_tmux(self.env)
+        # XACA-1875: callable(pane) -> kill that pane's window / its capture-pane tail. Only write polls call them.
+        self.tmux_kill = tmux_kill or real_tmux_kill(self.env)
+        self.tmux_capture = tmux_capture or real_tmux_capture(self.env)
         self.gh = gh or real_gh(self.env)
         self.msg = msg or real_msg(self.env)
         # XACA-1880-003: callable(repo, pr) -> review rows / callable(repo, sha) -> committer date (GATE_STALE); tests inject fakes.
@@ -600,19 +639,28 @@ def latest_dispatch_attempts(events):
 
 # ------------------------------------------------------------------ inputs
 def parse_panes(text):
+    """-> [(session, window, command, pane_id)]. A 3-column row (older format / fixtures) gets pane_id None."""
     rows = []
     for line in text.splitlines():
         parts = line.split("\t")
         if len(parts) >= 3:
-            rows.append((parts[0], parts[1], parts[2].strip()))
+            pid = parts[3].strip() if len(parts) >= 4 else ""
+            rows.append((parts[0], parts[1], parts[2].strip(), pid if _PANE_ID_RE.match(pid) else None))
     return rows
+
+
+def pane_ids_for(rows, session, window):
+    """XACA-1875: the pane ids of the window named EXACTLY `window` in `session` (rows None = tmux unreadable -> None)."""
+    if rows is None:
+        return None
+    return [r[3] for r in rows if r[0] == session and r[1] == window and r[3]]
 
 
 def pane_for(rows, session, window):
     """None-safe: rows None = tmux unreadable -> None; no match -> PANE_GONE; else a non-shell command wins."""
     if rows is None:
         return None
-    cmds = [c for s, w, c in rows if s == session and w == window]
+    cmds = [r[2] for r in rows if r[0] == session and r[1] == window]
     if not cmds:
         return ostate.PANE_GONE
     for c in cmds:
@@ -705,7 +753,7 @@ def gather(ctx, rel, board, board_file, run, orch, events):
                 coord, one_line(exc)[:200]))
     return {"now": now, "team": team, "thresholds": th, "sources": sources, "items": items, "windows": windows,
             "panes": panes, "prs": prs, "terminals": terminals, "dispatches": dispatches, "run": run, "inbox": inbox,
-            "repo": repo}
+            "repo": repo, "pane_rows": pane_rows}
 
 
 def gate_scan(reviews, head):
@@ -1222,6 +1270,100 @@ def _sync_lanes(ctx, board_file, kdir, run, orch, states, now, lines, wave0=Fals
     return changed
 
 
+CLOSE_STATES = frozenset(("DONE", "CANCELLED"))
+CLOSE_STATUSES = frozenset(("completed", "cancelled"))
+
+
+def _dispatched_pane(events, iid):
+    """The `pane` of the item's LATEST DISPATCHED ledger event, or None (none recorded: a pre-XACA-1875 dispatch)."""
+    pane = None
+    for ev in events or []:
+        d = ev.get("dispatch") if ev.get("kind") == ro.KIND_DISPATCH and ev.get("item") == iid else None
+        if isinstance(d, dict) and d.get("outcome") == "DISPATCHED":
+            p = d.get("pane")
+            pane = p if isinstance(p, str) and _PANE_ID_RE.match(p) else None
+    return pane
+
+
+def _last_lane_event(events, iid, action):
+    last = None
+    for ev in events or []:
+        if ev.get("kind") == ro.KIND_LANE and ev.get("item") == iid and ev.get("action") == action:
+            last = ev
+    return last
+
+
+def _close_finished_windows(ctx, kdir, run, orch, states, g, events, board, lines):
+    """XACA-1875 (see WINDOW CLOSE in the module docstring). Closes each finished item's own, idle lane window; every
+    guard that fails keeps the window. Never raises for a tmux or ledger problem and never touches the verdict."""
+    rows = g.get("pane_rows")
+    team = g.get("team")
+    if rows is None or not team:
+        return
+    backlog = {i.get("id"): i for i in (board or {}).get("backlog") or [] if isinstance(i, dict)}
+    wins = {w.get("id"): w for w in (board or {}).get("activeWindows") or [] if isinstance(w, dict)}
+    for iid in sorted(states):
+        if (states.get(iid) or {}).get("state") not in CLOSE_STATES:                       # (a)
+            continue
+        term = (g.get("terminals") or {}).get(iid)
+        if not term:
+            continue
+        session = "%s-%s" % (team, term)
+        target = "%s:%s" % (session, iid)
+        panes = pane_ids_for(rows, session, iid)                                            # (c) exact name only
+        if not panes:
+            continue                                   # no such window (already closed, or never opened): nothing to say
+        it = backlog.get(iid)
+        if not it or ostate.resolve_item_status(it) not in CLOSE_STATUSES:                 # (b)
+            lines.append("window close: %s kept (board status is not completed/cancelled)" % target)
+            continue
+        want = _dispatched_pane(events, iid)
+        if want is None:                                                                     # (d) USER DECISION 3
+            lines.append("window close: %s kept (no dispatched pane id recorded for this run)" % target)
+            continue
+        if panes != [want]:
+            lines.append("window close: %s kept (panes %s are not this run's dispatched pane %s)" % (
+                target, ",".join(panes), want))
+            continue
+        row = wins.get("%s:%s" % (term, iid))                                               # (f)
+        other = row.get("workingOnId") if isinstance(row, dict) else None
+        if isinstance(other, str) and other and other != iid:
+            o_it = backlog.get(other)
+            if o_it is None or ostate.resolve_item_status(o_it) not in CLOSE_STATUSES:
+                lines.append("window close: %s kept (its window row is working on %s)" % (target, other))
+                continue
+        try:                                                                                 # (e) USER DECISION 1
+            tail = ctx.tmux_capture(want)
+        except Exception as exc:  # noqa: BLE001 -- an unreadable pane is "not idle", never a crash
+            ctx.warn("window close: cannot capture %s (%s); kept" % (want, one_line(exc)[:200]))
+            tail = None
+        prev = _last_lane_event(events, iid, "window_close_deferred")
+        prev_hash = prev.get("tailHash") if prev and prev.get("pane") == want else None
+        idle, why = ostate.pane_idle(tail, prev_hash)
+        lane = (_last_lane_event(events, iid, "assign") or {}).get("lane")
+        if not idle:
+            h = ostate.tail_hash(tail) if tail is not None else None
+            if not (prev and prev.get("pane") == want and prev.get("reason") == why and prev.get("tailHash") == h):
+                try:
+                    ro.ledger_append(kdir, run, ro.KIND_LANE, now=g.get("now"), item=iid, lane=lane, pane=want,
+                                     action="window_close_deferred", reason=why, tailHash=h, window=target)
+                except ro.LedgerError as exc:
+                    ctx.warn("window close: cannot ledger the deferral of %s (%s)" % (target, exc))
+            lines.append("window close: %s deferred (%s)" % (target, why))
+            continue
+        try:
+            ctx.tmux_kill(want)
+        except Exception as exc:  # noqa: BLE001 -- a failed kill is a warning, never a verdict
+            ctx.warn("window close: kill-window %s (%s) failed: %s" % (target, want, one_line(exc)[:200]))
+            continue
+        try:
+            ro.ledger_append(kdir, run, ro.KIND_LANE, now=g.get("now"), item=iid, lane=lane, pane=want,
+                             action="window_closed", window=target)
+        except ro.LedgerError as exc:
+            ctx.warn("window close: %s closed but the ledger append failed (%s)" % (target, exc))
+        lines.append("window close: %s closed (pane %s, item %s)" % (target, want, states[iid]["state"]))
+
+
 def derive(ctx, orch, run, g, events, board, kdir):
     """Every tracked item's derived state: orchestrator_wave0 lanes for a Wave 0 run, else orchestrator_state."""
     if ow0.is_wave0(orch):
@@ -1260,6 +1402,8 @@ def reconcile(ctx, read_only):
         board_file, kdir, board, rel, run, orch = _summary_after(ctx)     # re-read: since/lanes are now current
     if not read_only and _sync_lanes(ctx, board_file, kdir, run, orch, states, g["now"], lines, wave0):
         board_file, kdir, board, rel, run, orch = _summary_after(ctx)
+    if not read_only and not wave0:        # XACA-1875: a planning lane never finishes its item, so it is never closed here
+        _close_finished_windows(ctx, kdir, run, orch, states, g, events, board, lines)
     return {"board_file": board_file, "kdir": kdir, "board": board, "rel": rel, "run": run, "orch": orch, "events": events,
             "g": g, "states": states, "lines": lines, "changes": changes}
 
