@@ -12475,6 +12475,7 @@ function orchEventDetails(ev) {
             break;
         case 'plan_lane':                       // XACA-1873 Wave 0: {item, action: done|failed, reason?}
             add('item', ev.item); add('action', ev.action);
+            alert = orchStr(ev.action) === 'failed';   // a failed planning lane is flagged like a REFUSED dispatch; reason is added below
             break;
         case 'verdict':
             add('verdict', ev.verdict); add('item', ev.item); add('detail', ev.detail);
@@ -12514,8 +12515,9 @@ function orchEventsHtml(events, total) {
         const det = orchEventDetails(evShape);
         const extra = det.parts.map(escapeHtml).join(' ');
         // A failed/refused dispatch is the only place the panel shows it: flag it in TEXT as well as style.
+        const flag = kind === 'token_budget' ? 'OVER BUDGET' : (kind === 'plan_lane' ? 'PLAN FAILED' : 'NOT DISPATCHED');
         return '<li class="orch-event' + (det.alert ? ' orch-event-alert' : '') + '"><time class="orch-event-ts">' + escapeHtml(ev.ts || '') + '</time> ' +
-            (det.alert ? '<span class="orch-event-flag">' + (kind === 'token_budget' ? 'OVER BUDGET' : 'NOT DISPATCHED') + '</span> ' : '') +
+            (det.alert ? '<span class="orch-event-flag">' + flag + '</span> ' : '') +
             '<span class="orch-event-kind">' + escapeHtml(kind) + '</span> ' +
             '<span class="orch-event-extra">' + extra + '</span></li>';
     }).join('');

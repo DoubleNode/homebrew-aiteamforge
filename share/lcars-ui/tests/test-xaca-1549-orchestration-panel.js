@@ -375,6 +375,15 @@ truthy('DISPATCHED shows its outcome, no alert', dOk.indexOf('outcome=DISPATCHED
 truthy('REFUSED shows outcome + nested reason + text alert', dRef.indexOf('outcome=REFUSED') !== -1 && dRef.indexOf('reason=LANES_FULL') !== -1 && dRef.indexOf('NOT DISPATCHED') !== -1 && dRef.indexOf('orch-event-alert') !== -1);
 truthy('DISPATCH_FAILED shows outcome + nested reason + text alert', dFail.indexOf('outcome=DISPATCH_FAILED') !== -1 && dFail.indexOf('reason=DEADLINE') !== -1 && dFail.indexOf('NOT DISPATCHED') !== -1);
 truthy('the three dispatch outcomes render pairwise different', dOk !== dRef && dRef !== dFail && dOk !== dFail);
+// XACA-1873-026/-027: a failed Wave 0 planning lane is alert-styled and text-flagged like a REFUSED dispatch, with its reason;
+// a done lane stays routine.
+const planRow = (action, reason) => sandbox.orchEventsHtml([{ ts: 't', run: 'RUN-1', kind: 'plan_lane', item: 'X-1', action: action, reason: reason }], 1);
+const pFail = planRow('failed', 'crashed, user said leave it'), pDone = planRow('done');
+truthy('plan_lane failed is alert-styled with the PLAN FAILED flag and its reason', pFail.indexOf('orch-event-alert') !== -1 &&
+    pFail.indexOf('<span class="orch-event-flag">PLAN FAILED</span>') !== -1 && pFail.indexOf('reason=crashed, user said leave it') !== -1 &&
+    pFail.indexOf('NOT DISPATCHED') === -1);
+truthy('plan_lane done stays routine (no alert, no flag)', pDone.indexOf('action=done') !== -1 && pDone.indexOf('orch-event-alert') === -1 &&
+    pDone.indexOf('orch-event-flag') === -1);
 const longQ = sandbox.orchEventsHtml([{ ts: 't', kind: 'question', item: 'X-1', question: 'q'.repeat(500) }], 1);
 truthy('only token_budget gets the OVER BUDGET flag; others do not', sandbox.orchEventsHtml([{ ts: 't', kind: 'model_mismatch', item: 'X' }], 1).indexOf('OVER BUDGET') === -1 &&
     sandbox.orchEventsHtml([{ ts: 't', kind: 'token_budget', scope: 'run', used: 2, limit: 1 }], 1).indexOf('OVER BUDGET') !== -1);

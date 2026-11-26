@@ -1,8 +1,8 @@
 """
 orchestrator_run_cli.py -- the shell-out boundary for coordinator mode in `kb-run <REL-ID>` (XACA-1548, EPIC-0072 T7).
 
-Stdlib only, py3.9-safe. dev-team-only (kanban-hooks/*.py is not mirrored to the tap): the bash side checks that this file
-exists before it offers coordinator mode, so a tap install degrades to today's single-session flow.
+Stdlib only, py3.9-safe. kanban-hooks/*.py is mirrored to the tap by sync-tap.sh's glob. The bash side still checks that
+this file exists before it offers coordinator mode, so an install without it degrades to today's single-session flow.
 
 Thin on purpose. Every rule lives in release_orchestrator.py (planner, ledger, summary writer); this module only adds the
 four things the shell cannot do with jq alone:

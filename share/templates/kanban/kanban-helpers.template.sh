@@ -15539,7 +15539,7 @@ _kb_item_list_args() {
     while (( $# > 0 )); do
         _a="$1"; shift
         case "$_a" in
-            --delta|--round|--max-parallel|--exclude|--model|--worker-model|--effort|--orchestrated|--coordinator|--approve-plan)
+            --delta|--round|--max-parallel|--exclude|--model|--worker-model|--effort|--orchestrated|--coordinator|--approve-plan|--plan-lane)
                 _KB_LIST_FLAGS+=("$_a")
                 if (( $# > 0 )); then _KB_LIST_FLAGS+=("$1"); shift; fi ;;
             -*) _KB_LIST_FLAGS+=("$_a") ;;
@@ -15798,6 +15798,7 @@ kb-run() {
     # XACA-1547-003: --resume (with --orchestrated) relaunches a CRASHED worker of the same run. Read by _kb_orch_check and
     # _kb_set_item_orchestration through zsh dynamic scope; local here, so it never leaks into a later kb-run.
     local _KB_ORCH_RESUME=0
+    local _kb_plan_run=""   # XACA-1873: --plan-lane <RUN-ID>, a Wave 0 planning lane (_kb_run_plan_lane)
     # XACA-1548: coordinator-mode flags of a RELEASE session, passed through to _kb_release_run untouched.
     local -a _kb_rel_flags=()
     while (( $# > 0 )); do
@@ -15818,16 +15819,29 @@ kb-run() {
                     return 1
                 fi
                 _kb_rel_flags+=("$1" "$2"); shift 2 ;;
-            --orchestrated|--coordinator)
+            --orchestrated|--coordinator|--plan-lane)
                 if (( $# < 2 )) || [[ -z "${2-}" || "${2-}" == -* ]]; then
                     echo "Error: kb-run $1 needs a value" >&2
                     return 1
                 fi
-                if [[ "$1" == "--orchestrated" ]]; then _kb_orch_run="$2"; _kb_orch_flag=1; else _kb_orch_coord="$2"; fi
+                case "$1" in
+                    --orchestrated) _kb_orch_run="$2"; _kb_orch_flag=1 ;;
+                    --plan-lane) _kb_plan_run="$2" ;;
+                    *) _kb_orch_coord="$2" ;;
+                esac
                 shift 2 ;;
             *) [[ -z "$selector" ]] && selector="$1"; shift ;;
         esac
     done
+    if [[ -n "$_kb_plan_run" ]]; then
+        # XACA-1873: a planning lane is its own path (no worktree, no points gate, no zero-subitem refusal).
+        if [[ "$_kb_orch_flag" == "1" || "$_KB_ORCH_RESUME" == "1" || ${#_kb_rel_flags[@]} -gt 0 || -z "$selector" || "$selector" == REL-* ]]; then
+            echo "Error: kb-run --plan-lane <RUN-ID> takes one item and only --yes / --coordinator" >&2
+            return 1
+        fi
+        _kb_run_plan_lane "$selector" "$_kb_plan_run" "$_kb_orch_coord" "$_kb_yes"
+        return $?
+    fi
     if [[ -n "$_kb_orch_coord" && "$_kb_orch_flag" != "1" ]]; then
         echo "Error: kb-run --coordinator is only valid with --orchestrated <RUN-ID>" >&2
         return 1
@@ -15867,6 +15881,8 @@ kb-run() {
         echo "              item.orchestration and adds the worker rules to the prompt. Normally sent by kb-dispatch."
         echo "  --resume    with --orchestrated: relaunch a crashed worker of that run (in_progress item, same runId);"
         echo "              keeps the worktree and dispatchedAt, bumps orchestration.resumeCount (XACA-1547)."
+        echo "  --plan-lane <RUN-ID>   Wave 0 planning lane (XACA-1873): cwd <kanban>/plans/<id>/, no worktree; the item"
+        echo "              stays todo. Normally sent by kb-dispatch --plan."
         echo "Launches Claude Code with task details and auto-creates worktree."
         echo "Use 'kb-backlog list' to see available items"
         echo "Example: kb-run XFRE-0001"
@@ -16368,7 +16384,9 @@ _kb_orch_check() {
 # completed/cancelled item or steal another run's item). The write carries a per-call claim nonce that is read back;
 # if a concurrent stamp won the race (or the item moved off todo meanwhile), the CAS was a no-op and this refuses.
 # On success: item.orchestration = existing object + {runId, coordinator, dispatchedAt, claim}, status in_progress,
-# startedAt //= now. rc 1 (board unchanged by this call) on any refusal.
+# startedAt //= now; any Wave 0 `phase` is dropped. Mode "plan" (XACA-1873, _KB_ORCH_PLAN=1 from kb-run --plan-lane) adds
+# phase "wave0" and leaves status / startedAt alone (a planning lane keeps its item todo). rc 1 (board unchanged by this
+# call) on any refusal.
 _kb_set_item_orchestration() {
     local board_file="${1-}" item_id="${2-}" run="${3-}" coord="${4-}"
     # Optional 5-7: kb-run's worktree, branch and window id. When given (kb-run always passes 7 args), kb-run's
@@ -16379,6 +16397,7 @@ _kb_set_item_orchestration() {
     coord="$_KB_ORCH_COORDINATOR"
     local ts nonce got mode="new"
     [[ "${_KB_ORCH_RESUME:-0}" == "1" ]] && mode="resume"
+    [[ "${_KB_ORCH_PLAN:-0}" == "1" ]] && mode="plan"     # XACA-1873 Wave 0: kb-run --plan-lane
     ts=$(_kb_get_timestamp)
     nonce="${ts}-$$-${RANDOM}${RANDOM}"
     # XACA-1547-003: mode "resume" CASes on (in_progress AND orchestration.runId == run) instead of todo, keeps runId and
@@ -16396,8 +16415,9 @@ _kb_set_item_orchestration() {
                     | .orchestration = (if $mode == "resume"
                         then $base + {coordinator: $coord, claim: $nonce, resumedAt: $ts,
                                       resumeCount: ((if ($base.resumeCount | type) == "number" then $base.resumeCount else 0 end) + 1)}
-                        else $base + {runId: $run, coordinator: $coord, dispatchedAt: $ts, claim: $nonce} end)
-                    | .status = "in_progress" | .startedAt //= $ts | .updatedAt = $ts
+                        elif $mode == "plan" then $base + {runId: $run, phase: "wave0", coordinator: $coord, dispatchedAt: $ts, claim: $nonce}
+                        else ($base | del(.phase)) + {runId: $run, coordinator: $coord, dispatchedAt: $ts, claim: $nonce} end)
+                    | (if $mode == "plan" then . else .status = "in_progress" | .startedAt //= $ts end) | .updatedAt = $ts
                     | if $withwt == "1" then .activelyWorking = true | .workStartedAt = $ts | .worktree = $wt
                         | .worktreeBranch = $wtb | .worktreeWindowId = $wid else . end
                 else . end) |
@@ -16419,7 +16439,9 @@ _kb_set_item_orchestration() {
         return 1
     fi
     _KB_ORCH_COORDINATOR="$coord"
-    if [[ "$mode" == "resume" ]]; then
+    if [[ "$mode" == "plan" ]]; then
+        echo "✓ Wave 0 planning lane: run $run, coordinator $coord (status stays todo)"
+    elif [[ "$mode" == "resume" ]]; then
         echo "✓ Orchestrated worker RESUMED: run $run, coordinator $coord"
     else
         echo "✓ Orchestrated worker: run $run, coordinator $coord"
@@ -16471,6 +16493,129 @@ _kb_orchestrated_worker_rules() {
     r+="- **Never** run \`kb-release promote\`, change a release stage, or touch another ticket's PR.\n"
     r+="\nStart now: build the todo list, delegate the subitems, and carry the ticket through merge and \`kb-done\`."
     printf '%s' "$r"
+}
+
+# _kb_build_plan_lane_prompt <item_id> <run_id> <coordinator> <mode> <gaps> <title> <plan_dir> <repo>   (XACA-1873, Wave 0)
+# The whole prompt of a Wave 0 planning lane (kb-run --plan-lane). GAP-DRIVEN (advisory XACA-1873-021): <gaps> is the
+# summary's space-separated gap codes for this item and <mode> its full|repair; the prompt names them and gives per-gap
+# instructions, and it NEVER lets the planner overwrite an existing plan doc or existing subitems (extend / repair in place,
+# fill only the listed gaps; UNESTIMATED alone = estimate only). Prints literal \n for `echo -e`; values are escaped here.
+_kb_build_plan_lane_prompt() {
+    local id="${1-}" run="${2-}" coord="${3-}" mode="${4-}" gaps="${5-}" title="${6-}" pdir="${7-}" repo="${8-}" r="" g
+    title="${title//\\/\\\\}" pdir="${pdir//\\/\\\\}" repo="${repo//\\/\\\\}"
+    r+="# Wave 0 planning lane: [${id}] ${title}\n\n"
+    r+="You are a PLANNING lane of release-orchestrator run ${run} (coordinator ${coord}). Nobody is watching this window: do NOT wait for approval. Your only output is the plan for ${id}: plan doc, subitems and estimate. You build nothing.\n"
+    r+="- Planning dir (your cwd, write the plan doc here): ${pdir}\n"
+    [[ -n "$repo" ]] && r+="- Repository (READ ONLY): ${repo}\n"
+    r+="- Mode: ${mode:-full}\n- Gaps to fill: ${gaps:-none listed}\n"
+    r+="\n## Never overwrite (XACA-1873-021)\n"
+    r+="Never overwrite an existing plan doc and never replace, rename, renumber or cancel existing subitems. Extend or repair in place and fill ONLY the gaps listed above; everything else that already exists stays exactly as it is. Read the item first (\`kb-backlog show ${id}\`) and any existing plan doc (\`${id}_*.md\` in the planning dir).\n"
+    r+="\n## Per gap\n"
+    if [[ "$gaps" == "UNESTIMATED" ]]; then
+        r+="- **UNESTIMATED only: estimate only.** Do not create or edit the plan doc or any subitem. Read the item, its plan doc and its subitems, then set realistic developer hours: \`kb-backlog points ${id} <hours>\`.\n"
+    else
+        for g in ${=gaps}; do
+            case "$g" in
+                NO_PLAN_DOC) r+="- **NO_PLAN_DOC:** write \`${id}_plan.md\` in the planning dir. Line 1 is the canonical marker \`<!-- plan_doc: canonical -->\`, then the H1, then these sections: \`## Summary\`, \`## Requirements\`, \`## Design\`, \`## Files to Modify\`, \`## Implementation Order\`, \`## Subitems\`, \`## Verification\`.\n" ;;
+                NO_SUBITEMS) r+="- **NO_SUBITEMS:** add the implementation subitems with \`kb-backlog sub add ${id} \"<title>\"\`, in implementation order, then the standard trailing subitems the /plan-project rules require (\`Testing & Debugging\`, \`PR Creation & Test Handoff\`, \`QA Testing & Code Review\`, \`[UX] UX/UI Evaluation\` when the work touches UI, \`Retrospective and Knowledge Capture\`, \`Sync Local Develop Branch\`).\n" ;;
+                UNESTIMATED) r+="- **UNESTIMATED:** set realistic developer hours: \`kb-backlog points ${id} <hours>\`.\n" ;;
+                NO_PATHS|UNPARSED_PATHS) r+="- **${g}:** repair ONLY the \`## Files to Modify\` section of the existing plan doc: one concrete repo-relative path per bullet (for example \`kanban-hooks/foo.py\`), no globs, no absolute paths, no prose-only bullets. Leave every other section untouched.\n" ;;
+                *) r+="- **${g}:** not a planning gap this lane can fill; report it with \`kb-orch-plan-done ${id} --failed \"${g}\"\`.\n" ;;
+            esac
+        done
+        [[ "$mode" == "repair" ]] && r+="- **Repair mode:** the plan doc exists. Touch only what the gaps above name.\n"
+    fi
+    r+="\n## Rules\n"
+    r+="- Follow the /plan-project rules for anything you write: concrete Files to Modify, subitems in implementation order with the standard trailing ones, an estimate in developer hours.\n"
+    r+="- **Research by reading code only.** Never edit code, never create a branch, a worktree or a commit, never run \`kb-backlog sub start/done\`, \`kb-pick\` or \`kb-run\`, never touch another ticket.\n"
+    r+="- **A human choice is not yours to make.** Add a \`[USER DECISION] <question>\` subitem, then run \`kb-ask \"<question>\" [--options a|b]\` as a BACKGROUND Bash command (run_in_background; it waits up to 1800s). Exit 0 = the answer is on stdout: write it into the plan and complete that subitem. 3 or 130 = no answer yet: leave the decision open and PARK (end your turn; re-check with \`kb-ask --wait --timeout 10\` at the start of every later turn). 4/5/6/7/8 = you cannot ask: stop and report. On a timeout leave the \`[USER DECISION]\` subitem open; never guess.\n"
+    r+="\n## Finish\n"
+    r+="When every listed gap is filled, run \`kb-orch-plan-done ${id}\`. If you cannot fill them, run \`kb-orch-plan-done ${id} --failed \"<reason>\"\`. The coordinator re-checks the board and the plan doc, so a \`done\` with a gap still open is reported INCOMPLETE.\n"
+    r+="\nStart now."
+    printf '%s' "$r"
+}
+
+# kb-orch-plan-done <ITEM> [--failed "<reason>"]   (XACA-1873, Wave 0)
+# A planning lane's end: appends one plan_lane event {item, action: done|failed, reason?} to the item's run ledger via
+# release_orchestrator.py ledger-hook. Unlike the best-effort _kb_orch_ledger_hook this is STRICT: it refuses (rc 1) an
+# item with no Wave 0 stamp and returns the module's failure, because a lost `done` strands the lane.
+kb-orch-plan-done() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
+    local item="" action="done" reason="" team board_file hdir py st rc=0
+    while (( $# > 0 )); do
+        case "$1" in
+            --failed) if (( $# < 2 )) || [[ -z "${2-}" ]]; then echo "kb-orch-plan-done: --failed needs a reason" >&2; return 2; fi
+                      action="failed" reason="$2"; shift 2 ;;
+            -h|--help) echo "Usage: kb-orch-plan-done <ITEM> [--failed \"<reason>\"]   (end a Wave 0 planning lane)"; return 0 ;;
+            -*) echo "kb-orch-plan-done: unknown option '$1'" >&2; return 2 ;;
+            *) [[ -n "$item" ]] && { echo "kb-orch-plan-done: one item" >&2; return 2; }; item="$1"; shift ;;
+        esac
+    done
+    if [[ ! "$item" =~ ^[A-Z][A-Z0-9]*-[0-9]+$ ]]; then echo "kb-orch-plan-done: '${item}' is not an item id" >&2; return 2; fi
+    team=$(_kb_resolve_run_team "$item" 2>/dev/null) || team=""
+    board_file=$(_kb_get_board_file "$team" 2>/dev/null) || board_file=""
+    [[ -n "$board_file" && -f "$board_file" ]] || { echo "kb-orch-plan-done: no board for team '${team}'" >&2; return 1; }
+    st=$(_kb_jq_read "$board_file" '[.backlog[]? | select(.id == $id) | .orchestration // {} | objects | .phase // ""] | first // ""' \
+        --arg id "$item" -r 2>/dev/null) || st=""
+    if [[ "$st" != "wave0" ]]; then
+        echo "kb-orch-plan-done: [$item] carries no Wave 0 stamp (item.orchestration.phase is '${st}'); not a planning lane" >&2
+        return 1
+    fi
+    hdir="$(_kb_board_settings_script 2>/dev/null)" && hdir="$(dirname "$hdir")" || hdir=""
+    py="$hdir/release_orchestrator.py"
+    [[ -f "$py" ]] || { echo "kb-orch-plan-done: release_orchestrator.py not found" >&2; return 1; }
+    local -a f=(--field "action=${action}")
+    [[ -n "$reason" ]] && f+=(--field "reason=${reason}")
+    python3 "$py" ledger-hook --board "$board_file" --item "$item" --kind plan_lane "${f[@]}" >/dev/null </dev/null || rc=$?
+    if (( rc != 0 )); then echo "kb-orch-plan-done: ledger append failed (rc $rc)" >&2; return 1; fi
+    echo "✓ ${item}: planning lane ${action}${reason:+ (${reason})}"
+}
+
+# _kb_run_plan_lane <item> <run> <coordinator> <yes>   (XACA-1873, Wave 0; kb-run <ID> --plan-lane <RUN>)
+# A planning lane: cwd <kanban_dir>/plans/<ID>/ (created), never a worktree, a branch or a promote. Skips _kb_require_points
+# and the XACA-1845 zero-subitem refusal (filling those gaps is the lane's job). Stamps item.orchestration with
+# {runId, phase:"wave0", coordinator, dispatchedAt, claim} via the _kb_set_item_orchestration CAS; the status stays todo.
+_kb_run_plan_lane() {
+    local _KB_ORCH_PLAN=1   # read by _kb_set_item_orchestration through zsh dynamic scope
+    local sel="${1-}" run="${2-}" coord="${3-}" team board_file item_id title row mode gaps pdir repo
+    team=$(_kb_resolve_run_team "$sel")
+    board_file=$(_kb_get_board_file "$team") || return 1
+    [[ -f "$board_file" ]] || { echo "Error: No kanban board found for team '$team'" >&2; return 1; }
+    local idx
+    idx=$(_kb_resolve_selector "$board_file" "$sel")
+    [[ "$idx" == "-1" ]] && { echo "Error: Item not found: $sel" >&2; return 1; }
+    item_id=$(_kb_jq_read "$board_file" ".backlog[$idx].id // empty" -r)
+    title=$(_kb_jq_read "$board_file" ".backlog[$idx].title // empty" -r)
+    _kb_orch_run_valid "$run" || { echo "Error: --plan-lane: '$run' is not a run id" >&2; return 1; }
+    row=$(_kb_jq_read "$board_file" '([.releases[]? | select(.id == $rel) | .orchestration] | first // {}) as $o
+        | if ($o.phase // "") != "wave0" then "NOT_WAVE0"
+          elif ($o.items // {} | has($id) | not) then "UNTRACKED"
+          else [($o.items[$id].mode // "full"), ($o.items[$id].gaps // [] | join(" "))] | @tsv end' \
+        --arg rel "$(_kb_orch_run_release "$run")" --arg id "$item_id" -r 2>/dev/null) || row="NOT_WAVE0"
+    case "$row" in
+        NOT_WAVE0) echo "Error: --plan-lane: $run is not a Wave 0 run (release.orchestration.phase)" >&2; return 1 ;;
+        UNTRACKED) echo "Error: --plan-lane: [$item_id] is not a Wave 0 row of $run" >&2; return 1 ;;
+    esac
+    IFS=$'\t' read -r mode gaps <<<"$row"
+    _kb_orch_check "$board_file" "$item_id" "$run" "$coord" || return 1
+    pdir="$(dirname "$board_file")/plans/${item_id}"
+    mkdir -p "$pdir" && cd "$pdir" || { echo "Error: --plan-lane: cannot enter $pdir" >&2; return 1; }
+    repo=$(git -C "$(dirname "$board_file")" rev-parse --show-toplevel 2>/dev/null) || repo=""
+    local prompt
+    # XACA-1128: the prompt is emitted via `echo -e` (zsh expands backslashes). The builder escapes title, pdir and
+    # repo itself, so pass those RAW (escaping them here too doubles every backslash); only the id is escaped here,
+    # once, because the builder does not escape it.
+    local _kb_pl_id="${item_id//\\/\\\\}"
+    prompt=$(_kb_build_plan_lane_prompt "$_kb_pl_id" "$run" "$_KB_ORCH_COORDINATOR" "$mode" "$gaps" "$title" "$pdir" "$repo")
+    _kb_ensure_cc_function "kb-run" || return 1
+    _kb_set_item_orchestration "$board_file" "$item_id" "$run" "$_KB_ORCH_COORDINATOR" || return 1
+    kb-plan "$title"
+    _kb_set_working_on "$item_id" "DEV"
+    export CC_SESSION_NAME="${item_id}: plan"
+    echo -e "$prompt" | \cc
+    local rc=$?
+    unset CC_SESSION_NAME
+    return $rc
 }
 
 # _kb_orch_lead_key <board> <release>   (XACA-1836 review; XACA-1844 aliases)
@@ -16879,6 +17024,8 @@ _kb_orch_type() {
 _kb_open_lane_window() {
     local sess="${1-}" item="${2-}" run="${3-}" coord="${4-}" model="${5-}" resume_flag=""
     [[ "${6-}" == "resume" ]] && resume_flag=" --resume"     # XACA-1547-003
+    local launch="kb-run ${item} --yes --orchestrated ${run} --coordinator ${coord}"
+    [[ "${6-}" == "plan" ]] && launch="kb-run ${item} --yes --plan-lane ${run} --coordinator ${coord}"   # XACA-1873
     _KB_ORCH_PANE="" _KB_ORCH_OPEN_REASON=""
     local pane
     pane=$(tmux new-window -d -P -F '#{pane_id}' -t "=${sess}:" -n "$item" -c "$_KB_ORCH_BOOT_DIR" 2>&1) || {
@@ -16911,7 +17058,7 @@ _kb_open_lane_window() {
         _KB_ORCH_OPEN_REASON="SHELL_NOT_READY: the pane left its shell during bootstrap"
         return 1
     fi
-    _kb_orch_type "$pane" "kb-run ${item} --yes --orchestrated ${run} --coordinator ${coord}${resume_flag}" || {
+    _kb_orch_type "$pane" "${launch}${resume_flag}" || {
         _KB_ORCH_OPEN_REASON="SEND_FAILED: kb-run line"
         return 1
     }
@@ -16992,6 +17139,7 @@ _kb_dispatch_refuse() {
 kb-dispatch() {
     if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local item="" terminal="" run="" team="" cli_model="" coord="" deadline="${KB_DISPATCH_DEADLINE:-90}" want_json=0 resume=0
+    local plan=0   # XACA-1873: --plan, a Wave 0 planning lane
     local _kbd_run_checked=0   # XACA-1829: set once $run is proven the release's active, open run; gates the ledger write
     if [[ "${1-}" == "-h" || "${1-}" == "--help" || $# -eq 0 ]]; then
         echo "Usage: kb-dispatch <ITEM> --terminal <name> --run <RUN-ID> [--team T] [--model M|inherit]"
@@ -17001,6 +17149,8 @@ kb-dispatch() {
         echo "--resume (XACA-1547): relaunch a CRASHED worker of <RUN-ID>: the item must be in_progress in that run;"
         echo "  a leftover <ITEM> window whose panes are all at a shell is renamed <ITEM>~crashed-<HHMMSS> (kept, never"
         echo "  killed); a live one refuses WORKER_ALIVE. The lane cap is not re-checked (the item already holds its slot)."
+        echo "--plan (XACA-1873): a Wave 0 planning lane of a phase-wave0 run: 'kb-run <ITEM> --yes --plan-lane <RUN-ID>'; the"
+        echo "  item stays todo. Re-dispatch only with no live window (a dead one is set aside like --resume) and no 'done' event."
         echo "Exit: 0 DISPATCHED, 2 usage, 3 REFUSED (no window created), 4 DISPATCH_FAILED (window left open)."
         [[ $# -eq 0 ]] && return 2
         return 0
@@ -17009,6 +17159,7 @@ kb-dispatch() {
         case "$1" in
             --json) want_json=1; shift ;;
             --resume) resume=1; shift ;;
+            --plan) plan=1; shift ;;
             --terminal|--run|--team|--model|--coordinator|--deadline)
                 if (( $# < 2 )) || [[ -z "${2-}" ]]; then echo "kb-dispatch: $1 needs a value" >&2; return 2; fi
                 case "$1" in
@@ -17027,6 +17178,7 @@ kb-dispatch() {
     if [[ ! "$terminal" =~ ^[a-z0-9][a-z0-9_]*$ ]]; then echo "kb-dispatch: --terminal <name> is required ([a-z0-9_], no '-')" >&2; return 2; fi
     if ! _kb_orch_run_valid "$run"; then echo "kb-dispatch: --run '$run' is not RUN-<REL-ID>-<yyyymmddThhmmss>" >&2; return 2; fi
     if [[ ! "$deadline" =~ ^[1-9][0-9]*$ ]]; then echo "kb-dispatch: --deadline must be a positive integer" >&2; return 2; fi
+    if (( plan && resume )); then echo "kb-dispatch: --plan and --resume are exclusive" >&2; return 2; fi
 
     local rel session="" window="$item" model="" reason="" detail="" observed="null" outcome
     rel=$(_kb_orch_run_release "$run")
@@ -17049,15 +17201,22 @@ kb-dispatch() {
           | if ($o | type) != "object" or ($o.activeRunId // "") != $run or ($o.closedAt // null) != null then "NOT_ACTIVE"
             else [ ((if $o.maxParallel == null then 2 else $o.maxParallel end)
                     | if type == "number" and . >= 1 and . <= $maxpar and . == floor then tostring else "BAD" end),
-                   ($o.coordinator // "" | if type == "object" then (.address // "") else . end | if type == "string" then . else "" end)
+                   ($o.coordinator // "" | if type == "object" then (.address // "") else . end | if type == "string" then . else "" end),
+                   ($o.phase // "-" | tostring)
                  ] | @tsv end end' --arg rel "$rel" --arg run "$run" --argjson maxpar "$_KB_ORCH_MAXPAR_MAX" -r 2>/dev/null) || runinfo="NO_RELEASE"
     case "$runinfo" in
         NO_RELEASE) _kb_dispatch_refuse RUN_NOT_ACTIVE "release $rel is not on the ${team} board"; return 3 ;;
         NOT_ACTIVE) _kb_dispatch_refuse RUN_NOT_ACTIVE "$run is not the active, open run of $rel (release.orchestration.activeRunId)"; return 3 ;;
     esac
     _kbd_run_checked=1   # XACA-1829: from here on every outcome is ledgered (once, by _kb_dispatch_result)
-    local max_par run_coord
-    IFS=$'\t' read -r max_par run_coord <<<"$runinfo"
+    local max_par run_coord run_phase
+    IFS=$'\t' read -r max_par run_coord run_phase <<<"$runinfo"
+    # XACA-1873: a Wave 0 run takes only --plan lanes, and --plan only a Wave 0 run.
+    if (( plan )) && [[ "$run_phase" != "wave0" ]]; then
+        _kb_dispatch_refuse RUN_NOT_WAVE0 "$run is not a Wave 0 run; --plan dispatches a planning lane of one"; return 3
+    elif (( ! plan )) && [[ "$run_phase" == "wave0" ]]; then
+        _kb_dispatch_refuse RUN_IS_WAVE0 "$run is a Wave 0 run; dispatch its planning lanes with --plan"; return 3
+    fi
     if [[ "$max_par" == "BAD" ]]; then
         _kb_dispatch_refuse CONFIG_INVALID "release.orchestration.maxParallel must be an integer from 1 to ${_KB_ORCH_MAXPAR_MAX}"; return 3
     fi
@@ -17099,6 +17258,23 @@ kb-dispatch() {
     if [[ "$irel" != "$rel" ]]; then
         _kb_dispatch_refuse ITEM_WRONG_RELEASE "$item is assigned to '${irel:-no release}', not $rel"; return 3
     fi
+    # XACA-1873: Wave 0 ledger facts. `done` = the item was planned in this run (never re-dispatched); `ended` = items whose
+    # planning lane already reported done/failed: their todo stamps are not open lanes. preclaim = the confirmation baseline.
+    local ended="[]" preclaim=""
+    if (( plan )); then
+        local li hdir
+        hdir="$(_kb_board_settings_script 2>/dev/null)" && hdir="$(dirname "$hdir")" || hdir=""
+        li=$(python3 "$hdir/orchestrator_wave0.py" lane-info --kanban-dir "$(dirname "$board_file")" --run "$run" --item "$item" 2>/dev/null </dev/null) || li=""
+        if ! jq -e 'has("done") and has("ended")' <<<"$li" >/dev/null 2>&1; then
+            _kb_dispatch_refuse CONFIG_INVALID "cannot read the Wave 0 ledger of $run"; return 3
+        fi
+        if [[ "$(jq -r '.done' <<<"$li")" == "true" ]]; then
+            _kb_dispatch_refuse PLAN_DONE "$item already reported its plan done in $run"; return 3
+        fi
+        ended=$(jq -c '.ended' <<<"$li")
+        preclaim=$(_kb_jq_read "$board_file" '[.backlog[]? | select(.id == $id) | .orchestration // {} | objects | .claim // ""] | first // ""' \
+            --arg id "$item" -r 2>/dev/null)
+    fi
 
     # ── open lanes (defence in depth behind the coordinator's own cap) ───────
     # XACA-1862: the item's OWN lane and OWN run stamp are not "another open lane". A demoted occupant (lanes[] still names
@@ -17108,8 +17284,9 @@ kb-dispatch() {
         ([.releases[]? | select(.id == $rel) | .orchestration.lanes // [] | .[]? | objects | select(.current != null)
             | select((.current | if type == "object" then .id else . end) != $id)] | length) as $l
         | ([.backlog[]? | select(.id != $id) | select(((.orchestration // {}) | if type == "object" then .runId else null end) == $run)
+            | select(.id as $x | $ended | index($x) | not)
             | kb_resolve_item_status | select(. != "completed" and . != "cancelled" and . != "done")] | length) as $s
-        | [$l, $s] | max' --arg rel "$rel" --arg run "$run" --arg id "$item" -r 2>/dev/null) || open_lanes=""
+        | [$l, $s] | max' --arg rel "$rel" --arg run "$run" --arg id "$item" --argjson ended "$ended" -r 2>/dev/null) || open_lanes=""
     if [[ ! "$open_lanes" =~ ^[0-9]+$ ]]; then
         _kb_dispatch_refuse CONFIG_INVALID "cannot count open lanes for $run"; return 3
     fi
@@ -17150,7 +17327,7 @@ kb-dispatch() {
         _kb_dispatch_refuse DUPLICATE_WINDOW "cannot list tmux windows to rule out a duplicate"; return 3
     fi
     if grep -qxF -- "$item" <<<"$wins"; then
-        if (( ! resume )); then
+        if (( ! resume && ! plan )); then
             _kb_dispatch_refuse DUPLICATE_WINDOW "a window named ${item} already exists"; return 3
         fi
         # XACA-1547-003: the crashed worker's own window. Only a window in THIS terminal's session whose every pane sits at
@@ -17181,7 +17358,7 @@ kb-dispatch() {
         if ! tmux rename-window -t "=${session}:${item}" "$aside" 2>/dev/null; then
             _kb_dispatch_refuse DUPLICATE_WINDOW "could not set the crashed window ${session}:${item} aside"; return 3
         fi
-        echo "ℹ kb-dispatch --resume: crashed window kept as ${session}:${aside}" >&2
+        echo "ℹ kb-dispatch: crashed window kept as ${session}:${aside}" >&2
     fi
 
     # ── model (XACA-1544-012) ────────────────────────────────────────────────
@@ -17198,7 +17375,7 @@ kb-dispatch() {
     fi
 
     # ── open + bootstrap (a window exists from here on; it is never killed) ──
-    if ! _kb_open_lane_window "$session" "$item" "$run" "$coord" "$model" "$( (( resume )) && echo resume)"; then
+    if ! _kb_open_lane_window "$session" "$item" "$run" "$coord" "$model" "$( (( resume )) && echo resume; (( plan )) && echo plan)"; then
         local why="${_KB_ORCH_OPEN_REASON%%:*}" tail=""
         [[ -n "$_KB_ORCH_PANE" ]] && tail=$(tmux capture-pane -p -t "$_KB_ORCH_PANE" -S -20 2>/dev/null)
         observed=$(jq -cn --arg pane "$_KB_ORCH_PANE" --arg tail "$tail" '{pane: $pane, paneTail: $tail}')
@@ -17223,13 +17400,19 @@ kb-dispatch() {
             | {status: ($it | kb_resolve_item_status),
                runId: (($it.orchestration // {}) | if type == "object" then .runId else null end),
                resumeCount: (($it.orchestration // {}) | if type == "object" then (.resumeCount // 0) else 0 end),
+               phase: (($it.orchestration // {}) | if type == "object" then .phase else null end),
+               claim: (($it.orchestration // {}) | if type == "object" then .claim else null end),
                windowRow: ($w != null), windowItem: ($w.workingOnId // null)}' \
             --arg id "$item" --arg wid "$wid" -c 2>/dev/null) || state=""
         # XACA-1547-003: a resume is confirmed only by resumeCount moving past its pre-dispatch value: the crashed worker's
         # in_progress status and window row already satisfy the rest, so without it a resume would confirm instantly.
+        # XACA-1873: a planning lane never flips status; its proof is a FRESH wave0 stamp (claim moved) plus the window row.
         if [[ -n "$state" ]] && jq -e --arg run "$run" --arg id "$item" --argjson resume "$resume" --argjson base "$resume_base" \
-            '.status == "in_progress" and .runId == $run and .windowRow and .windowItem == $id
-             and ($resume == 0 or ((.resumeCount | type) == "number" and .resumeCount > $base))' <<<"$state" >/dev/null 2>&1; then
+            --argjson plan "$plan" --arg preclaim "$preclaim" \
+            'if $plan == 1 then .status == "todo" and .runId == $run and .phase == "wave0" and .claim != null
+                 and .claim != $preclaim and .windowRow and .windowItem == $id
+             else .status == "in_progress" and .runId == $run and .windowRow and .windowItem == $id
+             and ($resume == 0 or ((.resumeCount | type) == "number" and .resumeCount > $base)) end' <<<"$state" >/dev/null 2>&1; then
             # XACA-1808: every confirmed dispatch records the model it used, so the monitor can prove (MODEL_MISMATCH) that the
             # setting took effect. XACA-1829: written by _kb_dispatch_result like every other post-run-check outcome (the
             # nested object carries model, modelSource, terminal and resume; model is also lifted to the top level).

@@ -77,8 +77,9 @@ re-plan after WAVE0_DONE refuses its ticket.
 RESUME (XACA-1547; a coordinator that starts on a release with an active run calls this BEFORE anything else)
    0  RESUMED           rehydrated from the ledger, reconciled (the same derive-and-record step as a watch poll), optionally
                         re-attached (--coordinator: summary + every open item's orchestration.coordinator), and reported.
-                        Per item: action live|closed|crashed|queued|failed|unknown, redispatch dispatch|resume|never; every
-                        in-flight item is "never". Appends ONE ledger `verdict` event, verdict RESUMED (not logged on --dry-run)
+                        Per item: action live|closed|crashed|queued|failed|unknown, redispatch dispatch|resume|never (a Wave 0
+                        run: plan|never, i.e. `kb-dispatch <ID> --plan`); every in-flight item is "never". Appends ONE
+                        ledger `verdict` event, verdict RESUMED (not logged on --dry-run)
    4  NO_ACTIVE_RUN     no active open run on the release: start a new one
    2  USAGE             as for watch; a corrupt ledger is USAGE (fail closed), never a partial resume
 
@@ -1359,6 +1360,9 @@ RESUME_ACTION = {
     "INCOMPLETE": "failed",                                # XACA-1873: a Wave 0 lane that ended with gaps open
 }
 RESUME_REDISPATCH = {"queued": "dispatch", "crashed": "resume"}     # every other action: "never"
+# XACA-1873: a Wave 0 (planning) lane is never handed to the execution-worker commands. Both a queued row and a crashed
+# lane are re-dispatched with `kb-dispatch <ID> --plan` (which sets a dead window aside the way --resume does).
+RESUME_REDISPATCH_WAVE0 = {"queued": "plan", "crashed": "plan"}
 
 
 def resume(ctx, coordinator=None, dry_run=False):
@@ -1369,7 +1373,8 @@ def resume(ctx, coordinator=None, dry_run=False):
         looking is recorded now (an item merged meanwhile becomes DONE and frees its lane; a dead worker becomes CRASHED);
       3 re-attach: with --coordinator, re-point the run at the new address (summary + every open item's stamp);
       4 report per item: state, action (live / closed / crashed / queued / failed / unknown) and redispatch (dispatch / resume
-        / never). An in-flight item is ALWAYS "never": resume never re-dispatches running work (plan requirement 9);
+        / never; a Wave 0 run reports plan / never). An in-flight item is ALWAYS "never": resume never re-dispatches
+        running work (plan requirement 9);
       5 append ONE `verdict` event, verdict RESUMED (no new ledger kind: LCARS and ticket-lamp already render verdicts).
     --dry-run computes everything and writes nothing. Returns a Result (RESUMED / NO_ACTIVE_RUN / USAGE)."""
     try:
@@ -1402,13 +1407,14 @@ def resume(ctx, coordinator=None, dry_run=False):
     except ro.LedgerError as exc:
         return Result("USAGE", ctx.run, None, "ledger/summary write refused: %s" % exc)
     items, counts = {}, {}
+    redispatch = RESUME_REDISPATCH_WAVE0 if ow0.is_wave0(orch) else RESUME_REDISPATCH
     for iid in sorted(states):
         st = states[iid]["state"]
         action = RESUME_ACTION.get(st, "unknown")
         h = hist["items"].get(iid) or {}
         pq = (g["items"].get(iid) or {}).get("pendingQuestion")
         row = {"state": st, "before": before.get(iid), "ledgerState": h.get("ledgerState"), "action": action,
-               "redispatch": RESUME_REDISPATCH.get(action, "never"), "terminal": g["terminals"].get(iid),
+               "redispatch": redispatch.get(action, "never"), "terminal": g["terminals"].get(iid),
                "detail": states[iid]["detail"], "dispatches": h.get("dispatches", 0),
                "pendingQuestion": ({"threadId": pq.get("threadId"), "coordinator": pq.get("coordinator")}
                                    if isinstance(pq, dict) and pq else None)}
