@@ -7,6 +7,9 @@ Stdlib only, py3.9-safe, NO I/O in the library functions, deterministic. Importe
   classify(item, plan_doc_paths)  -> which KIND of work is this ticket? ("code" | "test" | "docs" | "ui")
   role_fit(kind, terminals)       -> which terminals may take it? (input = `kb-terminals status --json` terminals[])
 
+XACA-1873 Wave 0 planning lanes: plan_fit(terminals, roles) (any role matches) and resolve_plan_roles(board)
+(releaseConfig.orchestration.planRoles, default ["code"], an invalid value raises).
+
 CLASSIFICATION PRECEDENCE (first level that yields ANY match wins; lower levels are not consulted):
 
   1. Title prefix  -- the most explicit statement of intent. "Test:" / "[Test]" / "QA:", "Docs:" / "[Docs]",
@@ -194,6 +197,42 @@ def role_fit(kind, terminals):
         return []
     return sorted((t for t in terminals if _eligible(kind, t)),
                   key=lambda t: (t["lane_windows"], t["name"]))
+
+
+DEFAULT_PLAN_ROLES = ("code",)
+
+
+def _check_roles(roles, what):
+    """`roles` must be a non-empty list of KINDS strings; ValueError otherwise (never a silent default)."""
+    if not isinstance(roles, list) or not roles or not all(isinstance(r, str) and r in KINDS for r in roles):
+        raise ValueError("%s must be a non-empty list of roles from %s, got %r" % (what, ", ".join(KINDS), roles))
+    out = []
+    for r in roles:
+        if r not in out:
+            out.append(r)
+    return out
+
+
+def plan_fit(terminals, roles):
+    """XACA-1873 Wave 0: terminals eligible for a planning lane = those eligible (same fail-closed rules as role_fit)
+    for ANY role in `roles`; least-loaded first (lane_windows, then name). ValueError on a bad `roles`. The planning
+    lane kind is "plan", deliberately NOT one of KINDS: a terminal never declares it, planRoles picks the seats."""
+    roles = _check_roles(list(roles) if isinstance(roles, tuple) else roles, "plan roles")
+    if not isinstance(terminals, list):
+        return []
+    return sorted((t for t in terminals if any(_eligible(r, t) for r in roles)),
+                  key=lambda t: (t["lane_windows"], t["name"]))
+
+
+def resolve_plan_roles(board):
+    """XACA-1873: board releaseConfig.orchestration.planRoles, default ["code"] when absent or null (also when
+    `orchestration` is the legacy bare hotspots list). A present but invalid value RAISES ValueError: a typo must not
+    silently route planning lanes to the default seats."""
+    rc = board.get("releaseConfig") if isinstance(board, dict) else None
+    o = rc.get("orchestration") if isinstance(rc, dict) else None
+    if not isinstance(o, dict) or o.get("planRoles") is None:
+        return list(DEFAULT_PLAN_ROLES)
+    return _check_roles(o["planRoles"], "releaseConfig.orchestration.planRoles")
 
 
 def _load(path):

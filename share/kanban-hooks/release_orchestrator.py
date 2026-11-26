@@ -27,6 +27,7 @@ The layers stay separate and individually callable:
   check_readiness(...)  -> per-item refusal reasons                           (XACA-1543-003)
   build_waves(...)      -> DAG + conflict-aware wave packing, cycle refusal   (XACA-1543-002)
   assign_terminals(...) -> terminal/persona/kind per scheduled item           (XACA-1543-004)
+  classify_gaps(...)    -> Wave 0 (planning lane) or not, per ticket; assign_wave0 routes the lanes (XACA-1873)
   plan(...)             -> the whole run plan (the ONLY function that reads files / imports the contention module)
   format_plan(plan)     -> human render
 
@@ -106,6 +107,10 @@ NO_TERMINAL = "NO_TERMINAL"
 NO_PATHS = "NO_PATHS"
 UNPARSED_PATHS = "UNPARSED_PATHS"
 HOTSPOTS_CONFIG_INVALID = "HOTSPOTS_CONFIG_INVALID"
+# XACA-1873 Wave 0: readiness codes / plan() warnings that a planning lane can fix. Anything else is HARD.
+PLANNING_GAP_CODES = (UNESTIMATED, NO_SUBITEMS, NO_PLAN_DOC)
+PLANNING_GAP_WARNINGS = (NO_PATHS, UNPARSED_PATHS)
+WAVE0_KIND = "plan"
 
 
 class PlanError(Exception):
@@ -170,6 +175,25 @@ def check_readiness(item, release_item_ids, board, kanban_dir, repo_root=None, f
         elif st != "completed":
             out.append(_reason(BLOCKED_OUTSIDE_RELEASE, "%s is outside the release and %s (not completed)" % (b, st or "backlog")))
     return out
+
+
+def classify_gaps(codes, warnings=(), has_plan_doc=False):
+    """XACA-1873: is this ticket a Wave 0 (planning) ticket? Pure. `codes` = its refusal codes (readiness plus any
+    CYCLE / BLOCKER_REFUSED), `warnings` = its plan() warning codes. -> None, or {"gaps": [codes], "mode"}.
+
+    HARD CODE WINS: any refusal code outside PLANNING_GAP_CODES (BLOCKED_OUTSIDE_RELEASE, CYCLE, BLOCKER_REFUSED, or a
+    code added later) keeps the ticket refused. A refused ticket whose codes are ALL gap codes -> mode "full" (write the
+    whole plan). A scheduled ticket (no codes) carrying a gap warning -> "repair" when it has a plan doc (fix only its
+    `## Files to Modify`), else "full"."""
+    codes = list(codes or ())
+    if any(c not in PLANNING_GAP_CODES for c in codes):
+        return None
+    gapw = [w for w in PLANNING_GAP_WARNINGS if w in (warnings or ())]
+    if codes:
+        return {"gaps": codes + gapw, "mode": "full"}
+    if gapw:
+        return {"gaps": gapw, "mode": "repair" if has_plan_doc else "full"}
+    return None
 
 
 # ---------------------------------------------------------------- 002: DAG + waves
@@ -306,6 +330,33 @@ def assign_terminals(waves, items, terminals, paths_by_item=None):
             used[best["name"]] = used.get(best["name"], 0) + 1
             out[iid] = {"terminal": best["name"], "persona": best.get("developer"), "kind": kind}
     return out
+
+
+def assign_wave0(entries, terminals, roles, max_parallel):
+    """XACA-1873 Wave 0 lanes. `entries` = [(item, classify_gaps result)] in dispatch order. -> (rows, warnings).
+
+    No contention pass: a planning lane writes only plans/<ID>/ and the board. Eligibility is routing.plan_fit(roles).
+    OVERFLOW (more gap tickets than maxParallel): every ticket stays in the list, nothing is dropped. The first
+    maxParallel rows carry `lane` 1..maxParallel and are dispatched at once; the rest carry lane None (QUEUED) and are
+    taken in list order by whichever lane frees first, the same SLOT_FREE refill the execution lanes use. A fixed
+    second "wave" was rejected: one slow plan would idle every other lane. Terminals are spread per group of
+    maxParallel rows, the way assign_terminals spreads a wave."""
+    fit = routing.plan_fit(terminals, roles)
+    rows, warns, used = [], [], {}
+    for n, (it, g) in enumerate(entries):
+        if n % max_parallel == 0:
+            used = {}
+        row = {"id": it["id"], "title": it.get("title"), "gaps": g["gaps"], "mode": g["mode"], "kind": WAVE0_KIND,
+               "lane": n + 1 if n < max_parallel else None, "terminal": None, "persona": None}
+        if fit:
+            best = min(fit, key=lambda t: (used.get(t["name"], 0), t["lane_windows"], t["name"]))
+            used[best["name"]] = used.get(best["name"], 0) + 1
+            row["terminal"], row["persona"] = best["name"], best.get("developer")
+        else:
+            warns.append({"id": it["id"], "code": NO_TERMINAL,
+                          "text": "no eligible terminal for a planning lane (planRoles: %s)" % ", ".join(roles)})
+        rows.append(row)
+    return rows, warns
 
 
 # ================================================================ LEDGER (XACA-1546-001)
@@ -1124,12 +1175,21 @@ def _hotspot_config(board):
     return None, "releaseConfig.orchestration must be an object with a `hotspots` list, got %s (ignored)" % type(o).__name__
 
 
-def plan(release_id, kanban_dir, repo_root=None, terminals=None, max_parallel=None, contention=None, loaded=None):
+def plan(release_id, kanban_dir, repo_root=None, terminals=None, max_parallel=None, contention=None, loaded=None,
+         wave0=False):
     """The whole read-only run plan for a release. `terminals` = parsed terminals[] (None -> no terminals: every item gets
     NO_TERMINAL). `contention` = module-like with extract_paths/find_plan_doc/load_hotspots/predict (default: the real
     orchestrator_contention, imported here so the pure layers above never need it). `loaded` = an in-memory
     (board, release) pair used instead of reading the release from kanban_dir: XACA-1853 plans a batch that is not
-    minted yet (`kb-run A,B --plan-only`), so the dry plan and the post-mint plan run the very same rules."""
+    minted yet (`kb-run A,B --plan-only`), so the dry plan and the post-mint plan run the very same rules.
+
+    `wave0` (XACA-1873, opt-in, CLI --wave0): tickets that classify_gaps accepts leave `refused` / `waves` for a `wave0`
+    list (assign_wave0), and their in-release dependants leave BLOCKER_REFUSED for `waitingOnWave0`
+    [{id, title, waitingOn}]. Hard refusals are decided FIRST, by a build_waves pass that treats gap tickets as live
+    items, so a gap ticket behind a hard refusal (or on a cycle) stays refused. Both keys are OMITTED when empty, so a
+    plan with no gaps is byte-identical to the pre-1873 plan, and so is its XACA-1853 hash (canonical_plan reads only
+    waves / refused / maxParallel). Off by default: until the coordinator runs Wave 0 (PR 3), callers keep today's
+    refusals. An invalid releaseConfig.orchestration.planRoles is a PlanError when there is a Wave 0 to route."""
     if contention is None:
         import orchestrator_contention as contention
     kanban_dir = os.path.abspath(kanban_dir)   # a relative dir must not depend on cwd vs repo_root (NO_PLAN_DOC for all)
@@ -1182,9 +1242,36 @@ def plan(release_id, kanban_dir, repo_root=None, terminals=None, max_parallel=No
     closed = contention.predict_closed(reports, hotspots)
     conflicts, no_paths, unparsed_by_item = closed["conflicts"], set(closed["no_paths"]), closed["unparsed"]
 
-    pre = set(refused_reasons) | cancelled
+    gaps, hard = {}, {}   # XACA-1873: id -> classify_gaps result; id -> hard CYCLE/BLOCKER_REFUSED reasons
+    if wave0:
+        gap_ids = {i for i, why in refused_reasons.items() if classify_gaps([r["code"] for r in why])}
+        live = sched_items + [dict(by_id[i], blockedBy=[b for b in _blockers(by_id[i]) if b not in completed])
+                              for i in sorted(gap_ids)]
+        hard = build_waves(live, [], max_parallel, refused=(set(refused_reasons) - gap_ids) | cancelled)["refused"]
+        for iid in sorted(by_id):
+            codes = [r["code"] for r in refused_reasons.get(iid, []) + hard.get(iid, [])]
+            warns = [c for c, hit in ((NO_PATHS, iid in no_paths), (UNPARSED_PATHS, bool(unparsed_by_item.get(iid))))
+                     if hit]
+            g = classify_gaps(codes, warns, has_plan_doc=iid not in refused_reasons)
+            if g:
+                gaps[iid] = g
+            elif iid in gap_ids:
+                refused_reasons[iid] = refused_reasons[iid] + hard.get(iid, [])   # hard code wins
+        if set(gaps) - gap_ids:   # repair tickets leave the candidates: recompute contention without them
+            closed = contention.predict_closed({k: v for k, v in reports.items() if k not in gaps}, hotspots)
+            conflicts, no_paths, unparsed_by_item = closed["conflicts"], set(closed["no_paths"]), closed["unparsed"]
+        sched_items = [s for s in sched_items if s["id"] not in gaps]
+        refused_reasons = {k: v for k, v in refused_reasons.items() if k not in gaps}
+    pre = set(refused_reasons) | cancelled | set(gaps)
     res = build_waves(sched_items, conflicts, max_parallel, refused=pre)
-    refused_reasons.update(res["refused"])
+    waiting = set()
+    for k, v in res["refused"].items():
+        if k in hard:
+            refused_reasons[k] = hard[k]
+        elif wave0:
+            waiting.add(k)   # blocked only by Wave 0 tickets (anything hard is in `hard`)
+        else:
+            refused_reasons[k] = v
     assign = assign_terminals(res["waves"], by_id, terminals or [], paths_by_item)
     waves, warnings = [], []
     for n, wave in enumerate(res["waves"], 1):
@@ -1203,16 +1290,44 @@ def plan(release_id, kanban_dir, repo_root=None, terminals=None, max_parallel=No
         if unparsed_by_item.get(iid):
             warnings.append({"id": iid, "code": UNPARSED_PATHS,
                              "text": "unresolved path-like tokens: %s" % ", ".join(unparsed_by_item[iid])})
+    lanes = []
+    if gaps:
+        try:
+            roles = routing.resolve_plan_roles(board)
+        except ValueError as exc:
+            raise PlanError(str(exc))
+        lanes, lane_warns = assign_wave0([(by_id[i], gaps[i]) for i in sorted(gaps, key=lambda i: _order_key(by_id[i]))],
+                                         terminals or [], roles, max_parallel)
+        warnings.extend(lane_warns)
     if cfg_invalid:
         warnings.append({"id": release_id, "code": HOTSPOTS_CONFIG_INVALID, "text": cfg_invalid})
     refused = [{"id": i, "title": by_id[i].get("title"), "reasons": refused_reasons[i]} for i in sorted(refused_reasons)]
-    return {"release": release_id, "maxParallel": max_parallel, "waves": waves, "refused": refused,
-            "skipped": sorted(skipped, key=lambda s: s["id"]), "warnings": warnings,
-            "cycles": res["cycles"], "contention": conflicts}
+    out = {"release": release_id, "maxParallel": max_parallel, "waves": waves, "refused": refused,
+           "skipped": sorted(skipped, key=lambda s: s["id"]), "warnings": warnings,
+           "cycles": res["cycles"], "contention": conflicts}
+    if lanes:
+        out["wave0"] = lanes
+    if waiting:
+        out["waitingOnWave0"] = [{"id": i, "title": by_id[i].get("title"),
+                                  "waitingOn": sorted(b for b in _blockers(by_id[i]) if b in gaps or b in waiting)}
+                                 for i in sorted(waiting)]
+    return out
 
 
-def format_plan(plan_):
+def format_plan(plan_, still_refused=None):
+    """Human render. XACA-1873: a "Wave 0 (planning)" section (plus "Waiting on Wave 0") when the plan has a `wave0`
+    key, and a "Still refused after Wave 0" section when `still_refused` (refused[] rows from the post-Wave-0 re-plan)
+    is non-empty. Without either the text is unchanged."""
     out = ["Release %s  maxParallel %s" % (plan_["release"], plan_["maxParallel"])]
+    if plan_.get("wave0"):
+        out.extend(["", "Wave 0 (planning)"])
+        for r in plan_["wave0"]:
+            tgt = ("%s (%s)" % (r["terminal"], r["persona"] or "-")) if r["terminal"] else "NO TERMINAL"
+            out.append("  %s  %s  %s  -> %s  [%s]  %s" % (r["id"], r["mode"], ("lane %d" % r["lane"]) if r["lane"] else
+                                                         "queued", tgt, ", ".join(r["gaps"]), r["title"]))
+    if plan_.get("waitingOnWave0"):
+        out.extend(["", "Waiting on Wave 0 (planned again after it)"])
+        out.extend("  %s  waits on %s  %s" % (r["id"], ", ".join(r["waitingOn"]), r["title"]) for r in plan_["waitingOnWave0"])
     for w in plan_["waves"]:
         out.append("")
         out.append("Wave %d" % w["wave"])
@@ -1225,6 +1340,11 @@ def format_plan(plan_):
     if plan_["refused"]:
         out.extend(["", "Refused"])
         for r in plan_["refused"]:
+            out.append("  %s  %s" % (r["id"], r["title"]))
+            out.extend("    %s: %s" % (x["code"], x["text"]) for x in r["reasons"])
+    if still_refused:
+        out.extend(["", "Still refused after Wave 0"])
+        for r in still_refused:
             out.append("  %s  %s" % (r["id"], r["title"]))
             out.extend("    %s: %s" % (x["code"], x["text"]) for x in r["reasons"])
     if plan_["skipped"]:
@@ -1285,6 +1405,7 @@ def main(argv=None):
     pp.add_argument("--terminals-json")
     pp.add_argument("--max-parallel", type=int)
     pp.add_argument("--json", action="store_true")
+    pp.add_argument("--wave0", action="store_true", help="XACA-1873: move planning-gap tickets to a wave0 list")
     la = sub.add_parser("ledger-append", help="append one event to a run ledger (XACA-1546-001)")
     la.add_argument("--kanban-dir", required=True)
     la.add_argument("--run", required=True)
@@ -1331,7 +1452,7 @@ def main(argv=None):
         else:
             _b, rel = _load_board(kdir, args.release)
             terms = _terminals_from_helpers(kdir, rel.get("team"))
-        result = plan(args.release, kdir, args.repo_root or DEFAULT_REPO_ROOT, terms, args.max_parallel)
+        result = plan(args.release, kdir, args.repo_root or DEFAULT_REPO_ROOT, terms, args.max_parallel, wave0=args.wave0)
     except (PlanError, OSError, ValueError, ImportError) as exc:
         # One voice with the kb-release shell wrapper: "Error: ..." plus a next step where there is one (XACA-1543-031).
         msg = str(exc)

@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1873: release planner Wave 0 gap classification (XACA-1873, PR 1/3)
+- Tap files updated in this publish: `share/kanban-hooks/orchestrator_routing.py`,`share/kanban-hooks/release_orchestrator.py`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1880: kb-nudge wake channel, GATE_STALE backstop, worker stall protocol (XACA-1880, PR 3/3)
 - Tap files updated in this publish: `share/kanban-hooks/orchestrator_monitor.py`,`share/kanban-hooks/orchestrator_state.py` `share/kanban-hooks/release_orchestrator.py`,`share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1883: kb-pr-monitor bounded auto-rerun of CI failures unrelated to the PR (XACA-1883)
