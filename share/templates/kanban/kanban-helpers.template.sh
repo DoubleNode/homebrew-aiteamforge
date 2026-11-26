@@ -15805,7 +15805,7 @@ kb-run() {
         case "$1" in
             --yes|-y) _kb_yes=1; shift ;;
             --resume) _KB_ORCH_RESUME=1; shift ;;
-            --orchestrate|--no-orchestrate|--force-coordinator-pane|--plan-only) _kb_rel_flags+=("$1"); shift ;;
+            --orchestrate|--no-orchestrate|--force-coordinator-pane|--plan-only|--start-only) _kb_rel_flags+=("$1"); shift ;;
             --max-parallel=*|--exclude=*|--model=*|--worker-model=*|--effort=*|--approve-plan=*)
                 # The `=` spelling must never fall into the selector catch-all below: that silently dropped the cap or the exclusion.
                 if [[ -z "${1#*=}" || "${1#*=}" == -* ]]; then
@@ -16527,8 +16527,8 @@ _kb_build_plan_lane_prompt() {
     fi
     r+="\n## Rules\n"
     r+="- Follow the /plan-project rules for anything you write: concrete Files to Modify, subitems in implementation order with the standard trailing ones, an estimate in developer hours.\n"
-    r+="- **Research by reading code only.** Never edit code, never create a branch, a worktree or a commit, never run \`kb-backlog sub start/done\`, \`kb-pick\` or \`kb-run\`, never touch another ticket.\n"
-    r+="- **A human choice is not yours to make.** Add a \`[USER DECISION] <question>\` subitem, then run \`kb-ask \"<question>\" [--options a|b]\` as a BACKGROUND Bash command (run_in_background; it waits up to 1800s). Exit 0 = the answer is on stdout: write it into the plan and complete that subitem. 3 or 130 = no answer yet: leave the decision open and PARK (end your turn; re-check with \`kb-ask --wait --timeout 10\` at the start of every later turn). 4/5/6/7/8 = you cannot ask: stop and report. On a timeout leave the \`[USER DECISION]\` subitem open; never guess.\n"
+    r+="- **Research by reading code only.** Never edit code, never create a branch, a worktree or a commit, never run \`kb-backlog sub start\`, \`kb-pick\` or \`kb-run\`, never touch another ticket. The ONE \`kb-backlog sub done\` you may run closes a \`[USER DECISION]\` subitem that kb-ask answered (next rule); never complete any other subitem.\n"
+    r+="- **A human choice is not yours to make.** Add a \`[USER DECISION] <question>\` subitem, then run \`kb-ask \"<question>\" [--options a|b]\` as a BACKGROUND Bash command (run_in_background; it waits up to 1800s). Exit 0 = the answer is on stdout: write it into the plan and complete that subitem with \`kb-backlog sub done <ID> <subitem index>\` (0-based; the exception the rule above names). 3 or 130 = no answer yet: leave the decision open and PARK (end your turn; re-check with \`kb-ask --wait --timeout 10\` at the start of every later turn). 4/5/6/7/8 = you cannot ask: stop and report. On a timeout leave the \`[USER DECISION]\` subitem open; never guess.\n"
     r+="\n## Finish\n"
     r+="When every listed gap is filled, run \`kb-orch-plan-done ${id}\`. If you cannot fill them, run \`kb-orch-plan-done ${id} --failed \"<reason>\"\`. The coordinator re-checks the board and the plan doc, so a \`done\` with a gap still open is reported INCOMPLETE.\n"
     r+="\nStart now."
@@ -33482,8 +33482,8 @@ kb-release-resume() {
 # Exit: 0 plan computed | 1 error (unknown release, kb-terminals unavailable) | 2 usage
 kb-release-plan-run() {
     if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
-    local release_id="" opt_repo="" opt_json=0 opt_max="" opt_terms=""
-    local usage="Usage: kb-release plan-run <release-id> [--repo-dir <path>] [--max-parallel N] [--terminals-json FILE] [--json]"
+    local release_id="" opt_repo="" opt_json=0 opt_max="" opt_terms="" opt_w0=0
+    local usage="Usage: kb-release plan-run <release-id> [--repo-dir <path>] [--max-parallel N] [--terminals-json FILE] [--wave0] [--json]"
     while [[ $# -gt 0 ]]; do
         case "${1-}" in
             --repo-dir|--max-parallel|--terminals-json)
@@ -33495,6 +33495,7 @@ kb-release-plan-run() {
                 esac
                 shift 2 ;;
             --json) opt_json=1; shift ;;
+            --wave0) opt_w0=1; shift ;;   # XACA-1873: planning-gap tickets go to a `wave0` list instead of `refused`
             --help|-h)
                 echo "$usage"
                 echo ""
@@ -33527,6 +33528,7 @@ kb-release-plan-run() {
     local args=(plan --release "$release_id" --kanban-dir "$_KB_RS_KDIR" --repo-root "$repo")
     [[ -n "$opt_max" ]] && args+=(--max-parallel "$opt_max")
     [[ -n "$opt_terms" ]] && args+=(--terminals-json "$opt_terms")
+    (( opt_w0 )) && args+=(--wave0)
     (( opt_json )) && args+=(--json)
     python3 "$hooks_dir/release_orchestrator.py" "${args[@]}"
 }
@@ -33692,6 +33694,97 @@ _kb_release_orch_active_run() {
     _kb_jq_read "${1-}" '[.releases[]? | select(.id == $rel) | .orchestration
         | select(type == "object" and (.activeRunId // "") != "" and (.closedAt // null) == null) | .activeRunId] | first // ""' \
         --arg rel "${2-}" -r 2>/dev/null
+}
+
+# _kb_release_orch_wave0_closed <board_file> <REL-ID> -> the id of the release's CLOSED Wave 0 run that no execution run has
+# consumed yet (XACA-1873; the execution start drops `phase`), else nothing. Wave 0 then already ran for this plan: the
+# re-plan must not run it again, and any gap left is "still refused after Wave 0".
+_kb_release_orch_wave0_closed() {
+    _kb_jq_read "${1-}" '[.releases[]? | select(.id == $rel) | (.orchestration // {})
+        | select(.phase == "wave0" and (.closedAt // "") != "" and (.activeRunId // "") != "") | .activeRunId] | first // empty' \
+        --arg rel "${2-}" -r
+}
+
+# _kb_release_orch_wave0_plan <REL-ID> <board_file> -> plan-run --wave0 JSON with the lead's --exclude ids dropped from wave0.
+_kb_release_orch_wave0_plan() {
+    local ex raw out
+    ex=$(printf '%s\n' "${_KB_O_EXCL[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))') || return 1
+    # Two captured steps, each with its own status (no pipefail: in `plan-run | jq` the status would be jq's).
+    raw=$(kb-release-plan-run "${1-}" --max-parallel "$_KB_O_MAXPAR_R" --wave0 --json </dev/null) || return 1
+    out=$(jq -c --argjson ex "$ex" 'if type == "object" and has("waves") then .wave0 = [(.wave0 // [])[] | select(.id as $i | $ex | index($i) | not)]
+            else error("kb-release plan-run printed no plan object") end' <<<"$raw") || return 1
+    [[ -n "$out" ]] || return 1
+    printf '%s\n' "$out"
+}
+
+# _kb_release_orch_meta -> the run summary's models block (coordinator + worker, each with its source) as compact JSON.
+_kb_release_orch_meta() {
+    jq -cn --arg cm "$_KB_O_CMODEL" --arg cs "$_KB_O_CSRC" --arg wm "$_KB_O_WMODEL_R" --arg ws "$_KB_O_WSRC" \
+        --arg ce "$_KB_O_CEFFORT" --arg ces "$_KB_O_CESRC" --arg ms "$_KB_O_MAXSRC" \
+        '{models: {coordinator: {model: $cm, source: $cs, effort: $ce, effortSource: $ces}, worker: {model: $wm, source: $ws}}, maxParallelSource: $ms}'
+}
+
+# _kb_release_orch_dispatch_one <item> <terminal> <run> <team> <coordinator> <tmpdir> <hooks_dir> [kb-dispatch args...]
+# One wave-1 / Wave 0 dispatch and its summary line. XACA-1829: kb-dispatch ledgers every outcome it returns an object for
+# itself, so only the synthetic NO_RESULT (it printed no object: it died before it could write) is appended here.
+_kb_release_orch_dispatch_one() {
+    local iid="${1-}" term="${2-}" run="${3-}" team="${4-}" coord="${5-}" tmpd="${6-}" hooks="${7-}" out drc
+    shift 7
+    out=$(kb-dispatch "$iid" --terminal "$term" --run "$run" --team "$team" --coordinator "$coord" "$@" --json 2>"$tmpd/disp.err" </dev/null)
+    drc=$?
+    if ! jq -e 'type == "object"' <<<"$out" >/dev/null 2>&1; then
+        out=$(jq -cn --arg item "$iid" --arg terminal "$term" --arg run "$run" --arg err "$(cat "$tmpd/disp.err" 2>/dev/null)" --arg rc "$drc" \
+            '{item: $item, terminal: $terminal, run: $run, outcome: "DISPATCH_FAILED", reason: "NO_RESULT", observed: {detail: ("kb-dispatch rc " + $rc + ": " + $err)}}')
+        python3 "$hooks/release_orchestrator.py" ledger-append --kanban-dir "$_KB_RS_KDIR" --run "$run" --kind dispatch \
+            --field "item=$iid" --json-field "dispatch=$out" >/dev/null 2>"$tmpd/ledger.err" </dev/null \
+            || echo "  ⚠ run-ledger append failed for $iid: $(cat "$tmpd/ledger.err")" >&2
+    fi
+    echo "  $(jq -r '"\(.item) -> \(.outcome)\(if .reason then " (" + .reason + ")" else "" end) via \(.terminal)"' <<<"$out" 2>/dev/null)"
+}
+
+# _kb_release_orch_wave0_start <REL-ID> <team> <board_file> <coordinator>   (XACA-1873, Wave 0)
+# Mints the Wave 0 (planning) run from the plan's wave0 rows and dispatches lanes 1..maxParallel with kb-dispatch --plan; the
+# queued rows wait for SLOT_FREE. Writes no stage, branch or worktree. Publishes _KB_O_RUN. rc 0 | 1 error.
+_kb_release_orch_wave0_start() {
+    local rel="${1-}" team="${2-}" bf="${3-}" coord="${4-}" hooks cli tmpd plan_file meta run iid term
+    _KB_O_RUN=""
+    hooks=$(dirname "$(_kb_board_settings_script)") || return 1
+    cli="$hooks/orchestrator_run_cli.py"
+    tmpd=$(mktemp -d "${TMPDIR:-/tmp}/kb-orch-w0.XXXXXX") || { echo "✗ kb-run: cannot create a temp dir" >&2; return 1; }
+    plan_file="$tmpd/plan.json"
+    if ! _kb_release_orch_wave0_plan "$rel" "$bf" >"$plan_file" || ! meta=$(_kb_release_orch_meta); then
+        echo "✗ kb-run: cannot build the Wave 0 plan; nothing started" >&2; rm -r -f "$tmpd"; return 1
+    fi
+    run=$(python3 "$cli" start --phase wave0 --board "$bf" --kanban-dir "$_KB_RS_KDIR" --release "$rel" --plan-file "$plan_file" \
+        --coordinator "$coord" --max-parallel "$_KB_O_MAXPAR_R" --meta-json "$meta") || {
+        echo "✗ kb-run: could not start the Wave 0 run; nothing dispatched" >&2; rm -r -f "$tmpd"; return 1; }
+    _KB_O_RUN="$run"
+    echo "✓ Wave 0 run started: $run  (planning only; coordinator $coord, max parallel $_KB_O_MAXPAR_R)"
+    while IFS=$'\t' read -r iid term; do
+        [[ -n "$iid" ]] || continue
+        if [[ -z "$term" ]]; then
+            echo "  ⚠ $iid: no planning terminal fits it (planRoles); left QUEUED for the coordinator to report"
+            continue
+        fi
+        _kb_release_orch_dispatch_one "$iid" "$term" "$run" "$team" "$coord" "$tmpd" "$hooks" --plan
+    done < <(jq -r '.wave0[] | select(.lane != null) | [.id, (.terminal // "")] | @tsv' "$plan_file")
+    rm -r -f "$tmpd"
+    return 0
+}
+
+# _kb_release_orch_wave0_rules <REL-ID> <RUN-ID> <team> <coordinator> -> the coordinator prompt block of a Wave 0 run.
+_kb_release_orch_wave0_rules() {
+    local rel="${1-}" run="${2-}" team="${3-}" coord="${4-}"
+    printf '%s\n' "## Wave 0 (planning) run (XACA-1873)" \
+        "Run ${run} is a WAVE 0 run: its lanes PLAN unplanned tickets (plan doc, subitems, estimate) and build nothing. Monitor it like an execution run, with these differences:" \
+        "- Dispatch a planning lane ONLY with \`kb-dispatch <ID> --terminal <name> --run ${run} --team ${team} --coordinator ${coord} --plan --json\` (a plain dispatch into this run refuses RUN_IS_WAVE0)." \
+        "- A lane ends with the planner's \`kb-orch-plan-done\`. A lane reported done with gaps still open is INCOMPLETE: tell the user; never write the plan yourself." \
+        "- ITEM_CRASHED: ask the user before re-dispatching it with \`--plan\`. Planner questions arrive as QUESTION_PENDING; a user-owned decision goes to the user." \
+        "- WAVE0_DONE (exit 0: read the NAME) means the monitor closed this Wave 0 run. Then, in THIS session:" \
+        "  1. Run \`kb-run ${rel} --plan-only\`. It re-plans (Wave 0 never runs twice), renders the generated plans, the execution waves and a \"Still refused after Wave 0\" section, and prints PLAN-HASH with the approve line." \
+        "  2. Show that output to the user and ask with AskUserQuestion whether to approve it. Never approve it yourself." \
+        "  3. On yes, run the printed approve line with \`--start-only\` added (keep its \`--yes\` for a PLANNED release): \`kb-run ${rel} --approve-plan <PLAN-HASH> --start-only\`. It promotes when needed, starts the execution run and dispatches wave 1 WITHOUT launching another coordinator, and prints the new run id. Continue in this session as that run's coordinator, under the rules above, monitoring the NEW run id." \
+        "  4. rc 4 = the plans changed after the view (a stale hash): repeat from step 1. On no: stop; nothing is dispatched and the release stays as it is."
 }
 
 # _kb_release_orch_open_items <board_file> <REL-ID> -> count of assigned items that are not completed/cancelled.
@@ -34053,16 +34146,50 @@ _kb_release_orch_entry() {
         fi
         [[ "$mode" == "manual" ]] && return 10
     fi
-    # A NEW run always ends at the plan approval, which --yes / KB_ASSUME_YES never skip and which needs a terminal. Without
-    # one the run cannot start, so refuse HERE, before the irreversible PLANNED->DEV promote (XACA-1548 gate round 1).
-    # XACA-1853: --approve-plan <hash> IS the approval (checked against the recomputed plan), so it needs no terminal.
-    if [[ ! -t 0 && -z "${_KB_O_APPROVE-}" ]]; then
+    # A NEW run ends at the plan approval, which needs a terminal (--yes / KB_ASSUME_YES never skip it), so without one and
+    # without --yes nothing can start: refuse HERE, before the plan, the promote or anything else (XACA-1548 gate round 1).
+    # XACA-1853: --approve-plan <hash> IS the approval. XACA-1873: a no-tty --yes run goes on to the Wave 0 check below.
+    if [[ ! -t 0 && -z "${_KB_O_APPROVE-}" && "$yes" != 1 && "${KB_ASSUME_YES:-}" != 1 ]]; then
         echo "✗ kb-run: coordinator mode needs a terminal for the plan approval (--yes and KB_ASSUME_YES do not skip it). Nothing promoted, nothing dispatched; run kb-run interactively, or use --no-orchestrate." >&2
         echo "  Without a terminal: kb-run $rel --plan-only, show the plan to the user, then kb-run $rel --approve-plan <PLAN-HASH>." >&2
         return 2
     fi
     _kb_release_orch_monitor_preflight || return 1
     _kb_release_orch_precondition "$team" "$context" || return 1
+    # XACA-1873 Wave 0 (decision Q1 = b): tickets whose only refusals are planning gaps (UNESTIMATED, NO_SUBITEMS,
+    # NO_PLAN_DOC, or a plan doc without parseable Files to Modify) are planned FIRST, in planning-only lanes, before the
+    # promote and before the plan approval. A [Y/n] confirm that --yes skips: Wave 0 writes plan docs, subitems and points
+    # only (never code, a branch or the stage), so a no-tty --yes run may run it. Once per plan: after a closed Wave 0 run
+    # the re-plan skips it, and any gap left is reported "Still refused after Wave 0". rc 13 = launch the Wave 0 coordinator.
+    if [[ -z "$(_kb_release_orch_wave0_closed "$bf" "$rel")" ]]; then
+        local w0_out w0_ids _kb_w0_rc
+        # Two steps, each with its own status: in `probe | jq` the status is jq's, and jq on empty input exits 0, so a failed
+        # probe would read as "no Wave 0" and skip it (and the --approve-plan refusal below) silently (review round 1).
+        if ! w0_out=$(_kb_release_orch_wave0_plan "$rel" "$bf") || ! w0_ids=$(jq -r '[.wave0[].id] | join(" ")' <<<"$w0_out"); then
+            echo "✗ kb-run: kb-release plan-run failed while checking for unplanned tickets; nothing started" >&2
+            return 1
+        fi
+        if [[ -n "$w0_ids" ]]; then
+            if [[ -n "${_KB_O_APPROVE-}" ]]; then
+                echo "✗ kb-run: --approve-plan: $rel has ticket(s) that need Wave 0 planning first ($w0_ids); a plan hash cannot approve tickets that have no plan yet. Nothing was started." >&2
+                echo "  Run kb-run $rel (with --yes when there is no terminal) to plan them; the approval follows Wave 0." >&2
+                return 2
+            fi
+            echo "Wave 0: ${#${(z)w0_ids}} ticket(s) have no full plan yet: $w0_ids"
+            echo "  Planning lanes (up to ${_KB_O_MAXPAR_R} at once) write only their plan doc, subitems and estimate; no code, no promote."
+            _kb_confirm_launch kb-run "Plan them now in Wave 0, before the execution plan and its approval? [Y/n]: " "$yes"
+            _kb_w0_rc=$?
+            if (( _kb_w0_rc == 2 )); then return 2
+            elif (( _kb_w0_rc != 0 )); then echo "Cancelled. Nothing planned, promoted or dispatched."; return 11; fi
+            return 13
+        fi
+    fi
+    # No Wave 0 to run: a no-tty --yes run still cannot pass the approval, so refuse before the irreversible promote.
+    if [[ ! -t 0 && -z "${_KB_O_APPROVE-}" ]]; then
+        echo "✗ kb-run: coordinator mode needs a terminal for the plan approval (--yes and KB_ASSUME_YES do not skip it). Nothing promoted, nothing dispatched; run kb-run interactively, or use --no-orchestrate." >&2
+        echo "  Without a terminal: kb-run $rel --plan-only, show the plan to the user, then kb-run $rel --approve-plan <PLAN-HASH>." >&2
+        return 2
+    fi
     if [[ "$stage" == "PLANNED" && -n "${_KB_O_APPROVE-}" ]]; then
         # The promote is irreversible: check the approved hash BEFORE it, not only after it (rc 4 = stale, nothing done).
         _kb_release_orch_start "$rel" "$team" "$bf" "" check || return $?
@@ -34103,7 +34230,11 @@ _kb_release_orch_start() {
     plan_raw="$tmpd/plan-raw.json" plan_file="$tmpd/plan.json"
     local ans arg n_flag_excl=${#excl[@]}
     while :; do
-        kb-release-plan-run "$rel" --max-parallel "$maxpar" --json >"$plan_raw" </dev/null || {
+        # XACA-1873: only --plan-only asks for the Wave 0 split (so the view shows the tickets Wave 0 would plan). An
+        # approval never runs with Wave 0 pending (the entry sends it to Wave 0 first), so its plan-run is unchanged.
+        local -a w0=()
+        [[ "$how" == plan-only && -z "$(_kb_release_orch_wave0_closed "$bf" "$rel")" ]] && w0=(--wave0)
+        kb-release-plan-run "$rel" --max-parallel "$maxpar" ${w0[@]+"${w0[@]}"} --json >"$plan_raw" </dev/null || {
             echo "✗ kb-run: kb-release plan-run failed; nothing dispatched" >&2; rm -r -f "$tmpd"; return 1; }
         if (( ${#excl[@]} > 0 )); then
             xa=()
@@ -34121,12 +34252,13 @@ _kb_release_orch_start() {
             cp "$plan_raw" "$plan_file"
         fi
         if [[ -n "$how" ]]; then
-            h=$(_kb_orch_plan_hash "$cli" "$plan_file" --board "$bf" --release "$rel") || {
+            h=$(_kb_orch_plan_hash "$cli" "$plan_file" --board "$bf" --release "$rel" --kanban-dir "$_KB_RS_KDIR") || {
                 echo "✗ kb-run: cannot hash the plan; nothing started, nothing dispatched" >&2; rm -r -f "$tmpd"; return 1; }
             if [[ "$how" == "check" && "$h" == "${_KB_O_APPROVE-}" ]]; then rm -r -f "$tmpd"; return 0; fi
         fi
         echo "═════════════ RELEASE RUN PLAN: $rel ═════════════"
-        python3 "$cli" render --plan-file "$plan_file" || { rm -r -f "$tmpd"; return 1; }
+        python3 "$cli" render --plan-file "$plan_file" --board "$bf" --release "$rel" --kanban-dir "$_KB_RS_KDIR" || {
+            rm -r -f "$tmpd"; return 1; }
         if [[ "$how" == "plan-only" ]] || [[ -n "$how" && "$h" != "${_KB_O_APPROVE-}" ]]; then
             echo "─────────────────────────────────────"
             local vrc
@@ -34162,11 +34294,8 @@ _kb_release_orch_start() {
         esac
     done
     # ── approved: from here on we write ───────────────────────────────────────────────────────────────
-    local meta run iid term out drc
-    meta=$(jq -cn --arg cm "$_KB_O_CMODEL" --arg cs "$_KB_O_CSRC" --arg wm "$_KB_O_WMODEL_R" --arg ws "$_KB_O_WSRC" \
-        --arg ce "$_KB_O_CEFFORT" --arg ces "$_KB_O_CESRC" --arg ms "$_KB_O_MAXSRC" \
-        '{models: {coordinator: {model: $cm, source: $cs, effort: $ce, effortSource: $ces}, worker: {model: $wm, source: $ws}}, maxParallelSource: $ms}') || {
-        rm -r -f "$tmpd"; return 1; }
+    local meta run iid term
+    meta=$(_kb_release_orch_meta) || { rm -r -f "$tmpd"; return 1; }
     if [[ "$how" == "approve" ]]; then
         # XACA-1853: the run summary records HOW it was approved, and the exact plan hash the human approved.
         meta=$(jq -c --arg ph "$h" '. + {approvedVia: "plan-hash", planHash: $ph}' <<<"$meta") || { rm -r -f "$tmpd"; return 1; }
@@ -34186,18 +34315,7 @@ _kb_release_orch_start() {
         # Only a CLI-flag model is passed: any other layer is resolved identically by kb-dispatch itself, and passing it would
         # beat a per-item item.orchestration.model override.
         [[ "$_KB_O_WSRC" == --* ]] && margs=(--model "$_KB_O_WMODEL_R")
-        out=$(kb-dispatch "$iid" --terminal "$term" --run "$run" --team "$team" --coordinator "$coord" ${margs[@]+"${margs[@]}"} --json 2>"$tmpd/disp.err" </dev/null)
-        drc=$?
-        # XACA-1829: kb-dispatch ledgers every outcome it returns an object for itself, so only the synthetic NO_RESULT (it
-        # printed no object: it died before it could write) is appended here. Appending both would double every event.
-        if ! jq -e 'type == "object"' <<<"$out" >/dev/null 2>&1; then
-            out=$(jq -cn --arg item "$iid" --arg terminal "$term" --arg run "$run" --arg err "$(cat "$tmpd/disp.err" 2>/dev/null)" --arg rc "$drc" \
-                '{item: $item, terminal: $terminal, run: $run, outcome: "DISPATCH_FAILED", reason: "NO_RESULT", observed: {detail: ("kb-dispatch rc " + $rc + ": " + $err)}}')
-            python3 "$hooks/release_orchestrator.py" ledger-append --kanban-dir "$_KB_RS_KDIR" --run "$run" --kind dispatch \
-                --field "item=$iid" --json-field "dispatch=$out" >/dev/null 2>"$tmpd/ledger.err" </dev/null \
-                || echo "  ⚠ run-ledger append failed for $iid: $(cat "$tmpd/ledger.err")" >&2
-        fi
-        echo "  $(jq -r '"\(.item) -> \(.outcome)\(if .reason then " (" + .reason + ")" else "" end) via \(.terminal)"' <<<"$out" 2>/dev/null)"
+        _kb_release_orch_dispatch_one "$iid" "$term" "$run" "$team" "$coord" "$tmpd" "$hooks" ${margs[@]+"${margs[@]}"}
     done < <(jq -r '.waves[0].items[] | [.id, (.terminal // "")] | @tsv' "$plan_file")
     rm -r -f "$tmpd"
     return 0
@@ -34225,13 +34343,15 @@ _kb_release_orch_prompt_ctx() {
         | .[]' --arg rel "$rel" --arg run "$run" --arg team "$team" --arg coord "$coord" -r
 }
 
-# _kb_release_orch_coordinate <REL-ID> <team> <name> <stage> <plan_text> <assume_yes> <resume 0|1> <context>
-# Starts the run (or re-attaches to the open one) and launches the coordinator session. The model rides ANTHROPIC_MODEL and the
+# _kb_release_orch_coordinate <REL-ID> <team> <name> <stage> <plan_text> <assume_yes> <resume 0|1> <context> [wave0 0|1]
+# Starts the run (or re-attaches to the open one) and launches the coordinator session. XACA-1873: wave0=1 starts the Wave 0
+# (planning) run instead; --start-only (_KB_O_STARTONLY, with --approve-plan) starts the run and launches nothing, because the
+# calling coordinator session (the Wave 0 one) carries on as its coordinator. The model rides ANTHROPIC_MODEL and the
 # effort rides CLAUDE_CODE_EFFORT_LEVEL for this one launch (cc() forwards no extra arguments on its persona path, but it does
 # pass the environment; XACA-1836-004 measured the env var reaching the request's output_config.effort). "inherit" sets nothing.
 _kb_release_orch_coordinate() {
     local rel="${1-}" team="${2-}" name="${3-}" stage="${4-}" plan_text="${5-}" yes="${6:-0}" resume="${7:-0}" context="${8-}"
-    local bf term coord run rc
+    local wave0="${9:-0}" bf term coord run rc
     bf=$(_kb_get_board_file "$team") || return 1
     term="${context#*:}"; term="${term%%:*}"
     coord="${team}:${term}"
@@ -34242,6 +34362,9 @@ _kb_release_orch_coordinate() {
         rc=$?
         if (( rc == 2 )); then return 2
         elif (( rc != 0 )); then echo "Cancelled. Coordinator not started."; return 0; fi
+    elif (( wave0 )); then
+        _kb_release_orch_wave0_start "$rel" "$team" "$bf" "$coord" || return $?
+        run="$_KB_O_RUN"
     else
         local _how=""
         [[ -n "${_KB_O_APPROVE-}" ]] && _how="approve"
@@ -34249,6 +34372,13 @@ _kb_release_orch_coordinate() {
         rc=$?
         if (( rc == 11 )); then return 0; elif (( rc != 0 )); then return $rc; fi
         run="$_KB_O_RUN"
+        if (( ${_KB_O_STARTONLY:-0} )); then
+            echo "✓ --start-only: run $run started and wave 1 dispatched; no coordinator launched. The calling session coordinates it: monitor $run."
+            return 0
+        fi
+    fi
+    if [[ "$(_kb_jq_read "$bf" '[.releases[]? | select(.id == $rel) | .orchestration.phase] | first // ""' --arg rel "$rel" -r 2>/dev/null)" == wave0 ]]; then
+        plan_text+=$'\n\n'"$(_kb_release_orch_wave0_rules "$rel" "$run" "$team" "$coord")"
     fi
     local ctx cmodel ceffort
     if ! ctx=$(_kb_release_orch_prompt_ctx "$bf" "$rel" "$run" "$team" "$coord") || [[ -z "$ctx" ]]; then
@@ -34480,6 +34610,7 @@ _kb_release_run() {
     _KB_O_MODE="" _KB_O_MAXPAR="" _KB_O_MODEL="" _KB_O_WMODEL="" _KB_O_EFFORT="" _KB_O_FORCE=0 _KB_O_RUN=""
     _KB_O_EXCL=()
     _KB_O_PLANONLY=0 _KB_O_APPROVE="" _KB_O_NEEDYES=0   # XACA-1853
+    _KB_O_STARTONLY=0   # XACA-1873: --start-only (with --approve-plan) starts the approved run in the calling coordinator session
     if (( $# > 2 )); then
         shift 2
         while (( $# > 0 )); do
@@ -34506,6 +34637,7 @@ _kb_release_run() {
                     if [[ -z "${2-}" ]]; then echo "Error: kb-run: --effort needs a level (an empty value is refused, never defaulted)" >&2; return 2; fi
                     _KB_O_EFFORT="$2"; shift 2 ;;
                 --plan-only) _KB_O_PLANONLY=1; shift ;;
+                --start-only) _KB_O_STARTONLY=1; shift ;;
                 --approve-plan)
                     if [[ -z "${2-}" ]]; then echo "Error: kb-run: --approve-plan needs the PLAN-HASH that --plan-only printed" >&2; return 2; fi
                     _KB_O_APPROVE="$2"; shift 2 ;;
@@ -34514,6 +34646,10 @@ _kb_release_run() {
         done
     fi
     _kb_orch_plan_flags_valid "$_KB_O_PLANONLY" "$_KB_O_APPROVE" || return 2
+    if (( _KB_O_STARTONLY )) && [[ -z "$_KB_O_APPROVE" ]]; then
+        echo "Error: kb-run: --start-only needs --approve-plan <PLAN-HASH> (it starts an approved run in the calling coordinator session)" >&2
+        return 2
+    fi
     if (( _KB_O_PLANONLY )) || [[ -n "$_KB_O_APPROVE" ]]; then
         if [[ "$_KB_O_MODE" == "manual" ]]; then
             echo "Error: kb-run: --plan-only / --approve-plan are coordinator mode; they contradict --no-orchestrate" >&2; return 2
@@ -34584,19 +34720,20 @@ _kb_release_run() {
     # XACA-1548 (EPIC-0072 T7): coordinator mode. After the close-out early-return, before the worktree and the legacy prompt.
     # --no-orchestrate skips all of it. _kb_release_orch_entry returns 10 (SILENTLY, unless coordinator mode was asked for)
     # whenever today's flow applies, so the legacy path below runs byte-identically.
-    local _o_orch=0 _o_resume=0 _o_rc=10
+    local _o_orch=0 _o_resume=0 _o_rc=10 _o_wave0=0
     if [[ "$_KB_O_MODE" != "manual" ]]; then
         _kb_release_orch_entry "$release_id" "$team" "$stage" "$assume_yes" "$context"
         _o_rc=$?
         case $_o_rc in
             0) _o_orch=1 ;;
             12) _o_orch=1; _o_resume=1 ;;
+            13) _o_orch=1; _o_wave0=1 ;;   # XACA-1873: Wave 0 first; nothing was promoted
             10) ;;
             11) return 0 ;;
             *) return $_o_rc ;;
         esac
     fi
-    if (( _o_orch && ! _o_resume )) && [[ "$stage" == "PLANNED" ]]; then
+    if (( _o_orch && ! _o_resume && ! _o_wave0 )) && [[ "$stage" == "PLANNED" ]]; then
         # The gated promote moved the release (and cut its branch): reload what the rest of this function reads.
         plan_json=$(python3 "$resume_cli" plan --release "$release_id" --kanban-dir "$_KB_RS_KDIR" --json) || {
             echo "✗ kb-run: cannot reload release $release_id after the DEV promote" >&2; return 1; }
@@ -34656,7 +34793,7 @@ _kb_release_run() {
     printf '%s\n' "$plan_text"
     echo "─────────────────────────────────────"
     if (( _o_orch )); then
-        _kb_release_orch_coordinate "$release_id" "$team" "$name" "$stage" "$plan_text" "$assume_yes" "$_o_resume" "$context"
+        _kb_release_orch_coordinate "$release_id" "$team" "$name" "$stage" "$plan_text" "$assume_yes" "$_o_resume" "$context" "$_o_wave0"
         return $?
     fi
     _kb_confirm_launch kb-run "Start the release session? [Y/n]: " "$assume_yes"
