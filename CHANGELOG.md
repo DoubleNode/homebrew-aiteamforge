@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1929: kb-tap-release cuts a release made only of tap-only commits (XACA-1929)
+- Tap files updated in this publish: `share/scripts/kb-tap-release`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1889: kb-dispatch bootstraps Main Event lanes (XACA-1889)
 - Tap files updated in this publish: `share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1879: Self-bootstrap wt-* and kb-init-team-guard in Claude Code snapshot shells (XACA-1879)

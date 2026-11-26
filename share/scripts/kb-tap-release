@@ -172,7 +172,13 @@ Preconditions (all checked before any mutation, including --dry-run):
   9.  sync-tap drift is direction-classified (XACA-1112): CANONICAL-AHEAD or
       DIVERGED drift always blocks. TAP-AHEAD-only drift also blocks UNLESS
       --tap-ahead-release "<reason>" is given.
-  10. CHANGELOG [Unreleased] section is non-empty.
+  10. CHANGELOG [Unreleased] section is non-empty, OR every tap commit since
+      v<VERSION> is a tap-only edit ('Tap-Only-Edit: intentional', the
+      --push-tap-edit rule). Tap-only commits get no [Unreleased] line from the
+      publisher, so the cut records them: one bullet per commit, built from its
+      subject, written into the new [X.Y.Z] section (XACA-1929). An empty
+      [Unreleased] with nothing to release, or with any other commit in the range
+      (a hand push, a merge), still refuses.
   11. VERSION and Formula tag agree; standalone Formula version line is optional (per XACA-0394).
   12. Computed new version tag does not already exist.
 
@@ -365,6 +371,78 @@ EOF
   echo "${major}.${minor}.${patch}"
 }
 
+# ─── tap-only commits since the last release (XACA-1929) ─────────────────────
+# A tap-only change (pushed by --push-tap-edit, trailer 'Tap-Only-Edit: intentional')
+# has no canonical file, so the publisher never writes an [Unreleased] line for it,
+# and --push-tap-edit refuses CHANGELOG.md (publisher-staged). Its release notes are
+# therefore written HERE, by the cut, which already owns the CHANGELOG promotion: no
+# new writer of the tap CHANGELOG, and no hand-edit path. The entry is built from the
+# commit's own subject (the only human sentence that exists for it), normalised the way
+# the publisher normalises outer subjects (sync-tap.sh _pub_normalize_subject).
+#
+# toe_scan <tap_dir> <base_ref> <unreleased_text>
+#   Walks <base_ref>..HEAD. A commit is a VALID tap-only edit when it is not a merge and
+#   carries exactly one 'Tap-Only-Edit: intentional' trailer (git interpret-trailers;
+#   the same rule pte_check_commit enforces at push time). For each valid commit it
+#   appends one bullet to $TOE_ENTRIES_FILE, unless every ticket id in its subject is
+#   already named in <unreleased_text> (no duplicate notes).
+#   Sets TOE_VALID (count of valid commits) and TOE_BAD (one "<sha>: <why>" line per
+#   commit that is NOT a valid tap-only edit). Returns 2 when the range is unreadable.
+toe_scan() {
+  local tap="$1" base="$2" unrel="$3"
+  local shas sha short subj trailers n_key nparents text ids id first all_listed listed_ids
+  # Whole ids, extracted once (as sync-tap.sh _pub_write_tap_changelog does), and matched with
+  # -x below. A substring test would read XACA-192 as "listed" when [Unreleased] names XACA-1929
+  # and silently drop its release note (PR #1433 review).
+  listed_ids="$(grep -oE 'XACA-[0-9]+' <<<"$unrel" | sort -u || true)"
+  TOE_VALID=0
+  TOE_BAD=""
+  : > "$TOE_ENTRIES_FILE"
+  shas="$(git -C "$tap" rev-list --reverse "${base}..HEAD" 2>/dev/null)" || return 2
+  for sha in $shas; do
+    short="$(git -C "$tap" rev-parse --short=10 "$sha")"
+    subj="$(git -C "$tap" log -1 --format=%s "$sha")"
+    nparents="$(git -C "$tap" rev-list --parents -n 1 "$sha" | wc -w | tr -d '[:space:]')"
+    if [ "$nparents" -gt 2 ]; then
+      TOE_BAD="${TOE_BAD}${short}: merge commit (${subj})
+"
+      continue
+    fi
+    trailers="$(git -C "$tap" log -1 --format=%B "$sha" | git interpret-trailers --parse 2>/dev/null || true)"
+    n_key="$(printf '%s\n' "$trailers" | grep -ciE '^Tap-Only-Edit[[:space:]]*:' || true)"
+    # Same rule as pte_check_commit. Spelled with -e on purpose: test-xaca-1170-041's MB11
+    # mutates the FIRST plain `grep -Fxq '...' <<<"$trailers"` in this file, which must stay
+    # pte_check_commit's.
+    if ! grep -Fxq -e 'Tap-Only-Edit: intentional' <<<"$trailers" || [ "$n_key" -ne 1 ]; then
+      TOE_BAD="${TOE_BAD}${short}: no single 'Tap-Only-Edit: intentional' trailer (${subj})
+"
+      continue
+    fi
+    TOE_VALID=$((TOE_VALID + 1))
+    text="$(printf '%s\n' "$subj" \
+      | sed -E 's/ \(#[0-9]+\)[[:space:]]*$//' \
+      | sed -E 's/^[A-Za-z]+(\([A-Za-z0-9_-]+\))?!?: +//')"
+    ids="$(printf '%s\n' "$subj" | grep -oE 'XACA-[0-9]+' || true)"
+    if [ -n "$ids" ]; then
+      all_listed=1
+      for id in $ids; do
+        if ! grep -qxF "$id" <<<"$listed_ids"; then all_listed=0; break; fi
+      done
+      if [ "$all_listed" -eq 1 ]; then
+        continue
+      fi
+      first="${ids%%$'\n'*}"   # first line, no pipe: pipefail + head = SIGPIPE (XACA-1404)
+      case "$text" in
+        "$first"*) printf -- '- %s (tap-only edit %s)\n' "$text" "$short" >> "$TOE_ENTRIES_FILE" ;;
+        *)         printf -- '- %s: %s (tap-only edit %s)\n' "$first" "$text" "$short" >> "$TOE_ENTRIES_FILE" ;;
+      esac
+    else
+      printf -- '- %s (tap-only edit %s)\n' "$text" "$short" >> "$TOE_ENTRIES_FILE"
+    fi
+  done
+  return 0
+}
+
 # ─── python3 CHANGELOG footer rewriter ───────────────────────────────────────
 # Embedded as a heredoc to avoid multi-line bash regex fragility.
 # Called as: python3 <(cat <<'PYEOF' ...) <changelog_path> <old_version> <new_version>
@@ -381,6 +459,7 @@ FOOTER_SCRIPT=$(mktemp "${TMPDIR:-/tmp}/kb-tap-release-footer.XXXXXX")
 # XACA-1170-056: every path the cleanup trap removes is initialised HERE, before the trap is
 # installed, so a value inherited from the caller's environment can never be deleted by it.
 KTR_CFG_TMP=""; DRIFT_RECORDS_FILE=""
+TOE_ENTRIES_FILE=""
 PTE_MAP_FILE=""; PTE_DIRS_FILE=""; PTE_FILES_FILE=""; PTE_SHAS_FILE=""; PTE_OFFENCES_FILE=""; PTE_SYNC_ROOT=""
 
 # XACA-1122-008: this trap now has TWO jobs. It is the `always()`-equivalent
@@ -396,6 +475,7 @@ _kb_tap_release_cleanup() {
   rm -f "$FOOTER_SCRIPT"
   # XACA-1170-055: function-scoped temp files registered here so SIGTERM cannot strand them.
   rm -f "${KTR_CFG_TMP:-}" "${DRIFT_RECORDS_FILE:-}"
+  rm -f "${TOE_ENTRIES_FILE:-}"   # XACA-1929: precondition 10's tap-only entries
   # XACA-1170-041: --push-tap-edit temp files (function is defined later; absent on other paths).
   if type _pte_cleanup >/dev/null 2>&1; then _pte_cleanup; fi
   if [ "${KB_TAP_LOCK_ACQUIRED:-0}" -eq 1 ]; then
@@ -1397,7 +1477,9 @@ push_tap_edit_main() {
   echo "    git commit -m \"chore: Bump homebrew-tap gitlink to ${PTE_HEAD}\" \\"
   echo "               -m \"Tap-only edit pushed by kb-tap-release --push-tap-edit (no dev-team canonical).\""
   echo "    # changelog: the tap-changelog-completeness gate SKIPS commits carrying 'Tap-Only-Edit: intentional'"
-  echo "    # (yours do), so no homebrew-tap/CHANGELOG.md entry is needed. dev-team still wants its own fragment:"
+  echo "    # (yours do), so no homebrew-tap/CHANGELOG.md entry is needed: the next release cut records each"
+  echo "    # tap-only commit's SUBJECT as its release note (XACA-1929), even when [Unreleased] is empty."
+  echo "    # dev-team still wants its own fragment:"
   echo "    #   scripts/kb-changelog new <ITEM-ID>   (or a 'Changelog-Skip: <reason>' trailer)"
   echo "    git push -u dev-team HEAD && gh pr create --base develop ...   # then kb-pr-monitor as usual"
   exit 0
@@ -1761,10 +1843,37 @@ lines = [l.strip() for l in block.splitlines() if l.strip()]
 print('\n'.join(lines))
 PYEOF
   )"
+  # XACA-1929: tap-only commits since v<VERSION> are recorded by the cut itself (see toe_scan).
+  TOE_ENTRIES_FILE="$(mktemp "${TMPDIR:-/tmp}/kb-tap-release-toe.XXXXXX")"
+  TOE_VALID=0; TOE_BAD=""; TOE_SCAN_RC=0; TOE_BASE=""
+  TOE_CUR="$(tr -d '[:space:]' < "${TAP_DIR}/VERSION" 2>/dev/null || true)"
+  if [ -n "$TOE_CUR" ] && git -C "$TAP_DIR" rev-parse -q --verify "refs/tags/v${TOE_CUR}^{commit}" >/dev/null 2>&1; then
+    TOE_BASE="v${TOE_CUR}"
+    toe_scan "$TAP_DIR" "$TOE_BASE" "$UNRELEASED_CONTENT" || TOE_SCAN_RC=$?
+  fi
+  TOE_N="$(grep -c . "$TOE_ENTRIES_FILE" || true)"
   if [ -n "$UNRELEASED_CONTENT" ]; then
     check_pass "CHANGELOG [Unreleased] section has content."
+    if [ -z "$TOE_BASE" ]; then
+      echo "    WARN: tag v${TOE_CUR:-?} not found locally, so tap-only commits since the last release cannot be read; none will be recorded."
+    elif [ "$TOE_SCAN_RC" -ne 0 ]; then
+      echo "    WARN: could not read ${TOE_BASE}..HEAD in the tap; no tap-only entries will be recorded."
+    elif [ "$TOE_N" -gt 0 ]; then
+      echo "    + ${TOE_N} tap-only commit(s) since ${TOE_BASE} will be recorded in the release section:"
+      sed 's/^/        /' "$TOE_ENTRIES_FILE"
+    fi
+  elif [ -z "$TOE_BASE" ]; then
+    check_fail "CHANGELOG [Unreleased] section is empty, and tag v${TOE_CUR:-?} was not found locally, so the tap-only commits since the last release cannot be read. Fetch tags (git -C homebrew-tap fetch origin --tags) and re-run."
+  elif [ "$TOE_SCAN_RC" -ne 0 ]; then
+    check_fail "CHANGELOG [Unreleased] section is empty, and ${TOE_BASE}..HEAD could not be read in the tap. Refusing to guess what this release contains."
+  elif [ -n "$TOE_BAD" ]; then
+    check_fail "CHANGELOG [Unreleased] section is empty, and commit(s) since ${TOE_BASE} are not tap-only edits, so they would ship with no release notes. Only publisher entries or 'Tap-Only-Edit: intentional' commits (kb-tap-release --push-tap-edit) can be released from an empty [Unreleased]:"
+    printf '%s' "$TOE_BAD" | sed 's/^/        /'
+  elif [ "$TOE_VALID" -eq 0 ]; then
+    check_fail "CHANGELOG [Unreleased] section is empty and nothing was committed since ${TOE_BASE}. Add release notes before cutting."
   else
-    check_fail "CHANGELOG [Unreleased] section is empty. Add release notes before cutting."
+    check_pass "CHANGELOG [Unreleased] section is empty, but every commit since ${TOE_BASE} is a tap-only edit; ${TOE_N} entry/entries will be recorded in the release section:"
+    sed 's/^/        /' "$TOE_ENTRIES_FILE"
   fi
 else
   check_fail "homebrew-tap/CHANGELOG.md not found."
@@ -1841,6 +1950,10 @@ TODAY="$(date +%Y-%m-%d)"
 if [ "$DRY_RUN" -eq 1 ]; then
   echo "[DRY-RUN] Would compute: ${CUR_VERSION} -> ${NEW_VERSION} (${LEVEL})"
   echo "[DRY-RUN] Would edit:    homebrew-tap/CHANGELOG.md   (promote [Unreleased] -> [${NEW_VERSION}] - ${TODAY})"
+  if [ -s "${TOE_ENTRIES_FILE:-}" ]; then
+    echo "[DRY-RUN] Would record:  $(grep -c . "$TOE_ENTRIES_FILE") tap-only entry/entries in [${NEW_VERSION}] (XACA-1929):"
+    sed 's/^/[DRY-RUN]                /' "$TOE_ENTRIES_FILE"
+  fi
   echo "[DRY-RUN] Would edit:    homebrew-tap/CHANGELOG.md   (footer: insert [${NEW_VERSION}] compare line; update [Unreleased] anchor)"
   echo "[DRY-RUN] Would edit:    homebrew-tap/VERSION        (${CUR_VERSION} -> ${NEW_VERSION})"
   echo "[DRY-RUN] Would edit:    homebrew-tap/Formula/aiteamforge.rb  (tag + version -> ${NEW_VERSION})"
@@ -1885,12 +1998,16 @@ echo ""
 #   ## [NEW_VERSION] - DATE
 # Use python3 for reliable editing.
 
-python3 - "$TAP_CHANGELOG" "$NEW_VERSION" "$TODAY" <<'PYEOF'
+# XACA-1929: the tap-only entries toe_scan collected (empty file = none) are appended to
+# the promoted block, so they land in [NEW_VERSION] and [Unreleased] restarts empty.
+TAP_ONLY_FOLD_FILE="$TOE_ENTRIES_FILE"
+python3 - "$TAP_CHANGELOG" "$NEW_VERSION" "$TODAY" "$TAP_ONLY_FOLD_FILE" <<'PYEOF'
 import sys, re
 
 path       = sys.argv[1]
 new_ver    = sys.argv[2]
 today      = sys.argv[3]
+fold_path  = sys.argv[4]
 
 with open(path) as fh:
     content = fh.read()
@@ -1901,8 +2018,24 @@ if count != 1:
     print("Error: expected exactly 1 '## [Unreleased]' line in CHANGELOG.md; found {}.".format(count), file=sys.stderr)
     sys.exit(1)
 
-replacement = "## [Unreleased]\n\n## [{}] - {}".format(new_ver, today)
-new_content = re.sub(r'^## \[Unreleased\]', replacement, content, count=1, flags=re.MULTILINE)
+entries = ""
+if fold_path:
+    with open(fold_path) as fh:
+        entries = fh.read().strip("\n")
+
+# The [Unreleased] body runs to the next version heading or the footer link block.
+head = re.search(r'^## \[Unreleased\][^\n]*\n?', content, re.MULTILINE)
+start = head.end()
+nxt = re.search(r'^(## \[|\[Unreleased\]:)', content[start:], re.MULTILINE)
+end = start + nxt.start() if nxt else len(content)
+body = content[start:end].strip("\n")
+
+section = "## [Unreleased]\n\n## [{}] - {}\n".format(new_ver, today)
+parts = [p for p in (body, entries) if p]
+if parts:
+    section += "\n" + "\n".join(parts) + "\n"
+section += "\n"
+new_content = content[:head.start()] + section + content[end:]
 
 with open(path, "w") as fh:
     fh.write(new_content)
@@ -1914,6 +2047,8 @@ verify_count = len(re.findall(r'^## \[Unreleased\]', verify, re.MULTILINE))
 if verify_count != 1:
     print("Error: post-edit verification failed — found {} [Unreleased] lines.".format(verify_count), file=sys.stderr)
     sys.exit(1)
+if entries:
+    print("CHANGELOG.md: recorded {} tap-only entry/entries in [{}] (XACA-1929)".format(len(entries.splitlines()), new_ver))
 
 print("CHANGELOG.md: promoted [Unreleased] -> [{}] - {}".format(new_ver, today))
 PYEOF
