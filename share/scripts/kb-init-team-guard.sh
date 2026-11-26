@@ -74,6 +74,72 @@ if [[ "${_KB_INIT_TEAM_GUARD_LOADED:-0}" == "1" ]]; then
 fi
 _KB_INIT_TEAM_GUARD_LOADED=1
 
+# ── XACA-1879: self-bootstrap guard for snapshot-shaped shells ───────────────
+# The XACA-1806 pattern from kanban-helpers.sh, applied to this file. Claude
+# Code's `!` / Bash-tool shells are rebuilt from a snapshot that keeps only
+# functions whose names do NOT start with `_` (and no non-exported variables),
+# so kb_ensure_team_initialized arrives but its _kb_* / _kbitg_* helpers do not.
+#   * kb_ensure_team_initialized calls kbitg_ensure_loaded first. Fast path: the
+#     sentinel _kbitg_loaded_sentinel (LAST definition in this file) exists.
+#   * Otherwise it re-sources this file once, quietly, from kbitg_helpers_path:
+#     a public printer generated at source time with this file's absolute path
+#     baked in as a literal. The double-source flag is cleared first (it may
+#     have survived where the functions did not).
+#   * No recursion: _KBITG_BOOTSTRAPPING is set (never exported) while this
+#     file loads. This block sits AFTER the double-source return above, so an
+#     early return never leaves that flag set.
+# The guard must never call a _-prefixed function. The path capture must stay
+# at the top level (zsh's ${(%):-%x} only names the sourced file there).
+# Ratchet: tests/test-xaca-1879-sibling-snapshot-guards.sh.
+_KBITG_BOOTSTRAPPING=1
+
+# _kbitg_bs_define <absolute path> — source-time only; eval-defines the printer.
+_kbitg_bs_define() {
+    local _kbitg_bs_q
+    _kbitg_bs_q="$(printf '%q' "${1-}")"
+    eval "kbitg_helpers_path() { printf '%s\\n' ${_kbitg_bs_q}; }"
+}
+
+# kbitg_ensure_loaded — see the XACA-1879 block above.
+kbitg_ensure_loaded() {
+    if typeset -f _kbitg_loaded_sentinel >/dev/null 2>&1; then
+        return 0
+    fi
+    if [[ -n "${_KBITG_BOOTSTRAPPING-}" ]]; then
+        return 0
+    fi
+    local _kbitg_eh_path=""
+    if typeset -f kbitg_helpers_path >/dev/null 2>&1; then
+        _kbitg_eh_path="$(kbitg_helpers_path)"
+    fi
+    if [[ -z "$_kbitg_eh_path" || ! -r "$_kbitg_eh_path" ]]; then
+        printf '%s\n' "kb-guard: the team-init guard is not fully loaded in this shell and ${_kbitg_eh_path:-its path} is missing or unreadable - source kb-init-team-guard.sh" >&2
+        return 1
+    fi
+    local _KBITG_BOOTSTRAPPING=1
+    unset _KB_INIT_TEAM_GUARD_LOADED
+    # shellcheck source=/dev/null  # path is baked at source time (XACA-1879)
+    source "$_kbitg_eh_path" >/dev/null 2>&1
+    if ! typeset -f _kbitg_loaded_sentinel >/dev/null 2>&1; then
+        printf '%s\n' "kb-guard: re-sourcing $_kbitg_eh_path did not finish loading the team-init guard - source it manually to see the error" >&2
+        return 1
+    fi
+    return 0
+}
+
+if [[ -n "${ZSH_VERSION-}" ]]; then
+    # shellcheck disable=SC2296,SC2298  # zsh-only branch
+    _kbitg_bs_self="${${(%):-%x}:a}"
+else
+    _kbitg_bs_self="${BASH_SOURCE[0]-}"
+    case "$_kbitg_bs_self" in
+        ''|/*) ;;
+        *) _kbitg_bs_self="${PWD%/}/${_kbitg_bs_self}" ;;
+    esac
+fi
+_kbitg_bs_define "$_kbitg_bs_self"
+unset _kbitg_bs_self
+
 # ── Colour helpers (safe: no-op if terminal lacks colour support) ─────────────
 _kbitg_red()    { printf '\033[0;31m%s\033[0m\n' "$*" >&2; }
 _kbitg_yellow() { printf '\033[0;33m%s\033[0m\n' "$*" >&2; }
@@ -435,6 +501,7 @@ PYEOF
 #   KB_INIT_TEAM_BIN         — Override path to kb-init-team (default: auto-locate)
 #
 kb_ensure_team_initialized() {
+    if typeset -f kbitg_ensure_loaded >/dev/null 2>&1; then kbitg_ensure_loaded || return $?; fi  # XACA-1879
     local team_id="${1:?kb_ensure_team_initialized: team-id argument is required}"
     local kanban_dir="${2:?kb_ensure_team_initialized: kanban-dir argument is required}"
 
@@ -470,7 +537,11 @@ kb_ensure_team_initialized() {
         # *-startup.sh caller is #!/bin/zsh), so fall back to zsh's prompt-
         # expansion %x (file of the source currently executing) then $0. (XACA-0548)
         local _self _guard_dir
-        if [ -n "${BASH_SOURCE:-}" ]; then
+        # XACA-1879: the baked printer first. In a snapshot shell this body is
+        # the SNAPSHOT's copy, so BASH_SOURCE / %x would name the snapshot file.
+        if typeset -f kbitg_helpers_path >/dev/null 2>&1; then
+            _self="$(kbitg_helpers_path)"
+        elif [ -n "${BASH_SOURCE:-}" ]; then
             _self="${BASH_SOURCE[0]}"
         elif [ -n "${ZSH_VERSION:-}" ]; then
             _self="${(%):-%x}"
@@ -573,3 +644,10 @@ kb_ensure_team_initialized() {
         return 2
     fi
 }
+
+# XACA-1879: load-complete sentinel for kbitg_ensure_loaded (top of file).
+# MUST stay the last definition in this file.
+_kbitg_loaded_sentinel() {
+    :
+}
+unset _KBITG_BOOTSTRAPPING

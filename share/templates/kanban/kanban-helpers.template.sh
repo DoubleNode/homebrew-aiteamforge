@@ -18263,6 +18263,9 @@ _kb_offer_worktree_cleanup() {
     local wt_class
     # _wt_classify_branch lives in worktree-helpers.sh; it is sourced in every
     # terminal that sources kanban-helpers.sh (both files are in the same startup chain).
+    # XACA-1879: in a snapshot shell only its public guard survived; reload first so
+    # the offer is not skipped silently.
+    if typeset -f wt_ensure_helpers_loaded >/dev/null 2>&1; then wt_ensure_helpers_loaded >/dev/null 2>&1 || true; fi
     if ! command -v _wt_classify_branch &>/dev/null; then
         return 0
     fi

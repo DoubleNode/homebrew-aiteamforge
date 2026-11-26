@@ -2,6 +2,96 @@
 # Git Worktree Helper Functions
 # Provides easy worktree management for iOS, Firebase, and Android development
 
+# ─────────────────────────────────────────────────────────────────────────────
+# XACA-1879: self-bootstrap guard for snapshot-shaped shells (the XACA-1806
+# pattern from kanban-helpers.sh, applied to this file).
+#
+# PROBLEM: Claude Code's `!` commands and Bash tool run in a shell rebuilt from
+# a SNAPSHOT that keeps every function whose name does NOT start with `_` and
+# drops the rest, plus every non-exported variable. wt, wt-* arrive intact; the
+# _wt_* / _detect_* helpers they call do not ("command not found:
+# _wt_get_main_branch").
+#
+# FIX: every public wt / wt-* definition starts with
+#     if typeset -f wt_ensure_helpers_loaded >/dev/null 2>&1; then
+#         wt_ensure_helpers_loaded || return $?; fi
+# The guard is public, so it survives the snapshot. It finds this file through
+# wt_helpers_path, a one-line printer generated at source time with THIS
+# file's absolute path baked in as a literal (a variable would be dropped).
+#   * Fast path: _wt_helpers_loaded_sentinel (the LAST definition in this
+#     file) exists -> return 0.
+#   * Otherwise source the baked path once, quietly. Sourcing resets the
+#     dynamic WT_* defaults and re-runs _detect_worktree, so the guard saves
+#     every non-empty EXPORTED WT_* / CURRENT_WORKTREE value first and restores
+#     it after: an inherited project context survives the reload, while an
+#     inherited EMPTY value does not mask what the reload detects from $PWD.
+#   * No recursion: _WT_HELPERS_BOOTSTRAPPING is set (never exported) for the
+#     whole duration of any source of this file.
+# GOTCHAS: the path capture MUST stay at the top level (zsh's ${(%):-%x} only
+# names the sourced file there). The guard must never call a _-prefixed
+# function. Ratchet: tests/test-xaca-1879-sibling-snapshot-guards.sh.
+# ─────────────────────────────────────────────────────────────────────────────
+_WT_HELPERS_BOOTSTRAPPING=1
+
+# _wt_bs_define <absolute path>
+# Source-time only. Generates the public printer wt_helpers_path with <path>
+# baked in as a quoted literal (the eval stays inside this function so the
+# file's top level stays plain for the XACA-1207 top-level scanner).
+_wt_bs_define() {
+    local _wt_bs_q
+    _wt_bs_q="$(printf '%q' "${1-}")"
+    eval "wt_helpers_path() { printf '%s\\n' ${_wt_bs_q}; }"
+}
+
+# wt_ensure_helpers_loaded — see the XACA-1879 header above. Must never call a
+# _-prefixed function: those are exactly what is missing when it runs.
+wt_ensure_helpers_loaded() {
+    if typeset -f _wt_helpers_loaded_sentinel >/dev/null 2>&1; then
+        return 0
+    fi
+    if [[ -n "${_WT_HELPERS_BOOTSTRAPPING-}" ]]; then
+        return 0
+    fi
+    local _wt_eh_path=""
+    if typeset -f wt_helpers_path >/dev/null 2>&1; then
+        _wt_eh_path="$(wt_helpers_path)"
+    fi
+    if [[ -z "$_wt_eh_path" || ! -r "$_wt_eh_path" ]]; then
+        printf '%s\n' "wt: worktree helpers are not fully loaded in this shell and ${_wt_eh_path:-their path} is missing or unreadable - source worktree-helpers.sh" >&2
+        return 1
+    fi
+    # Save the exported project context; sourcing resets it (see header).
+    local _wt_eh_keep="" _wt_eh_n="" _wt_eh_v=""
+    for _wt_eh_n in $(env | sed -n -e 's/^\(WT_[A-Za-z0-9_]*\)=.*/\1/p' -e 's/^\(CURRENT_WORKTREE\)=.*/\1/p'); do
+        eval "_wt_eh_v=\"\${${_wt_eh_n}-}\""
+        # An empty value is "no context": let the reload's detection win.
+        [[ -n "$_wt_eh_v" ]] || continue
+        _wt_eh_keep="${_wt_eh_keep}export ${_wt_eh_n}=$(printf '%q' "$_wt_eh_v");"
+    done
+    local _WT_HELPERS_BOOTSTRAPPING=1
+    # shellcheck source=/dev/null  # path is baked at source time (XACA-1879)
+    source "$_wt_eh_path" >/dev/null 2>&1
+    eval "$_wt_eh_keep"
+    if ! typeset -f _wt_helpers_loaded_sentinel >/dev/null 2>&1; then
+        printf '%s\n' "wt: re-sourcing $_wt_eh_path did not finish loading the worktree helpers - source it manually to see the error" >&2
+        return 1
+    fi
+    return 0
+}
+
+if [[ -n "${ZSH_VERSION-}" ]]; then
+    # shellcheck disable=SC2296,SC2298  # zsh-only branch
+    _wt_bs_self="${${(%):-%x}:a}"
+else
+    _wt_bs_self="${BASH_SOURCE[0]-}"
+    case "$_wt_bs_self" in
+        ''|/*) ;;
+        *) _wt_bs_self="${PWD%/}/${_wt_bs_self}" ;;
+    esac
+fi
+_wt_bs_define "$_wt_bs_self"
+unset _wt_bs_self
+
 # ═══════════════════════════════════════════════════════════════
 # Project Configurations
 # ═══════════════════════════════════════════════════════════════
@@ -480,6 +570,7 @@ export WT_PROJECT=""
 
 # Set current project context
 wt-project() {
+    if typeset -f wt_ensure_helpers_loaded >/dev/null 2>&1; then wt_ensure_helpers_loaded || return $?; fi  # XACA-1879
     local project="$1"
 
     case "$project" in
@@ -789,6 +880,7 @@ wt-project() {
 
 # Create new worktree with branch
 wt-new() {
+    if typeset -f wt_ensure_helpers_loaded >/dev/null 2>&1; then wt_ensure_helpers_loaded || return $?; fi  # XACA-1879
     # Check if project context is set
     if [ -z "$WT_PROJECT" ] || [ -z "$WT_MAIN" ]; then
         echo "❌ No project context set"
@@ -932,6 +1024,7 @@ wt-new() {
 
 # Switch to existing worktree
 wt() {
+    if typeset -f wt_ensure_helpers_loaded >/dev/null 2>&1; then wt_ensure_helpers_loaded || return $?; fi  # XACA-1879
     # Check if project context is set
     if [ -z "$WT_PROJECT" ] || [ -z "$WT_DIR" ]; then
         echo "❌ No project context set"
@@ -989,6 +1082,7 @@ wt() {
 
 # List all worktrees
 wt-list() {
+    if typeset -f wt_ensure_helpers_loaded >/dev/null 2>&1; then wt_ensure_helpers_loaded || return $?; fi  # XACA-1879
     # Check if project context is set
     if [ -z "$WT_PROJECT" ] || [ -z "$WT_DIR" ]; then
         echo ""
@@ -1062,6 +1156,7 @@ wt-list() {
 
 # Show detailed status of all worktrees
 wt-status() {
+    if typeset -f wt_ensure_helpers_loaded >/dev/null 2>&1; then wt_ensure_helpers_loaded || return $?; fi  # XACA-1879
     # Check if project context is set
     if [ -z "$WT_PROJECT" ] || [ -z "$WT_DIR" ]; then
         echo ""
@@ -1153,6 +1248,7 @@ wt-status() {
 
 # Sync current worktree with main branch
 wt-sync() {
+    if typeset -f wt_ensure_helpers_loaded >/dev/null 2>&1; then wt_ensure_helpers_loaded || return $?; fi  # XACA-1879
     local current_wt="$CURRENT_WORKTREE"
 
     if [ -z "$current_wt" ]; then
@@ -1195,6 +1291,7 @@ wt-sync() {
 
 # Sync all worktrees with main branch
 wt-sync-all() {
+    if typeset -f wt_ensure_helpers_loaded >/dev/null 2>&1; then wt_ensure_helpers_loaded || return $?; fi  # XACA-1879
     local main_branch=$(_wt_get_main_branch)
     echo "🔄 Syncing all worktrees with $main_branch..."
     echo ""
@@ -1241,6 +1338,7 @@ wt-sync-all() {
 
 # Finish current worktree (after PR merged)
 wt-finish() {
+    if typeset -f wt_ensure_helpers_loaded >/dev/null 2>&1; then wt_ensure_helpers_loaded || return $?; fi  # XACA-1879
     # Check if project context is set
     if [ -z "$WT_PROJECT" ] || [ -z "$WT_DIR" ]; then
         echo "❌ No project context set"
@@ -1593,6 +1691,7 @@ wt-finish() {
 # Handle PR merged workflow - complete cleanup after external PR merge
 # Use this when inside Claude Code and the PR has been merged externally
 wt-pr-merged() {
+    if typeset -f wt_ensure_helpers_loaded >/dev/null 2>&1; then wt_ensure_helpers_loaded || return $?; fi  # XACA-1879
     # Check if project context is set
     if [ -z "$WT_PROJECT" ] || [ -z "$WT_DIR" ]; then
         echo "❌ No project context set"
@@ -1687,6 +1786,9 @@ wt-pr-merged() {
         # Adding a new personal-org team only needs a new case there. `legal` was
         # latently missing from this list before consolidation; now covered.
         finance|legal|medical|dns)
+            # XACA-1879: the _kb_* helpers live in kanban-helpers.sh; reload them
+            # first in a snapshot shell (their public guard survives the snapshot).
+            if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi
             board_file=$(_kb_get_board_file "$(_kb_template_to_instance "$WT_PROJECT")") ;;
     esac
 
@@ -1843,6 +1945,7 @@ with open('$board_file', 'w') as f:
 
 # Clean up merged worktrees
 wt-cleanup() {
+    if typeset -f wt_ensure_helpers_loaded >/dev/null 2>&1; then wt_ensure_helpers_loaded || return $?; fi  # XACA-1879
     local main_branch=$(_wt_get_main_branch)
     echo "🧹 Cleaning up merged worktrees..."
     echo ""
@@ -1937,6 +2040,7 @@ wt-cleanup() {
 
 # Show current worktree info
 wt-current() {
+    if typeset -f wt_ensure_helpers_loaded >/dev/null 2>&1; then wt_ensure_helpers_loaded || return $?; fi  # XACA-1879
     local mode="$1"
 
     local main_branch=$(_wt_get_main_branch)
@@ -2011,6 +2115,7 @@ wt-current() {
 
 # Quick switch to main repository
 wt-dev() {
+    if typeset -f wt_ensure_helpers_loaded >/dev/null 2>&1; then wt_ensure_helpers_loaded || return $?; fi  # XACA-1879
     # Check if project context is set
     if [ -z "$WT_PROJECT" ] || [ -z "$WT_MAIN" ]; then
         echo "❌ No project context set"
@@ -2195,6 +2300,7 @@ _detect_worktree
 # ============================================================================
 
 wt-help() {
+    if typeset -f wt_ensure_helpers_loaded >/dev/null 2>&1; then wt_ensure_helpers_loaded || return $?; fi  # XACA-1879
     cat << 'EOF'
 
 📚 Git Worktree Helper Commands
@@ -2269,3 +2375,10 @@ echo "✅ Git worktree helpers loaded!"
 echo "   Current project: $WT_PROJECT"
 echo "   Type 'wt-help' for usage information"
 echo "   Type 'wt-project status' to see project details"
+# XACA-1879: load-complete sentinel for wt_ensure_helpers_loaded (top of file).
+# MUST stay the last definition in this file: its presence means "every helper
+# above is defined in this shell".
+_wt_helpers_loaded_sentinel() {
+    :
+}
+unset _WT_HELPERS_BOOTSTRAPPING
