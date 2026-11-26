@@ -4,7 +4,8 @@ Stdlib only, py3.9-safe. dev-team-only: kanban-hooks/*.py is not mirrored to the
 
 SYNOPSIS
   kb-release-orchestrate watch  <REL-ID> [--run RUN] [--once] [--interval S=30] [--timeout S=3600] [--repeat-after S=1800]
-                                [--stall-seconds N] [--dispatch-seconds N] [--board FILE] [--kanban-dir DIR] [--repo owner/repo]
+                                [--stall-seconds N] [--dispatch-seconds N] [--gate-stale-seconds N] [--board FILE]
+                                [--kanban-dir DIR] [--repo owner/repo]
   kb-release-orchestrate status <REL-ID> [--json] [--run RUN] [--tokens] [same input flags]   (READ-ONLY, never writes)
   kb-release-orchestrate resume <REL-ID> [--coordinator team:terminal] [--json] [--dry-run] [same input flags]   (XACA-1547)
   kb-release-orchestrate tokens <RUN-ID> [--json] [--since ISO] [--board FILE] [--kanban-dir DIR] [--projects-dir DIR]
@@ -50,6 +51,18 @@ EXIT CODES / VERDICTS (stdout's LAST line is ALWAYS `VERDICT: <NAME> run=<RUN|->
   17  MODEL_MISMATCH    WARN-ONLY (XACA-1808): a worker session observed a model that does not match the model its dispatch
                         recorded (the live proof that the model setting took effect). Detail names item, expected, observed.
                         XACA-1836: also the COORDINATOR session vs run meta models.coordinator.model, as item=coordinator.
+  18  GATE_STALE        (XACA-1880-003, S7; a coordinator-side backstop to kb-pr-monitor's XACA-1876 STALE_APPROVAL) an
+                        in-flight item's OPEN PR has a gate bot (EXACT login ds9-tester-bot[bot] / ai-security-review-bot[bot],
+                        never user.type) whose latest APPROVED/CHANGES_REQUESTED review is on a commit other than the PR head,
+                        NO such review of the head, and thresholds.gate_stale_seconds (default 3600 = kb-pr-monitor's 60 min;
+                        KB_ORCH_GATE_STALE_SECONDS / gateStaleSeconds / --gate-stale-seconds) have passed since
+                        max(head commit's committer date, that bot's stale review). A bot that never reviewed is "not launched
+                        yet", not stale; COMMENTED reviews are ignored. Detail: `<ITEM>: pr=<N> head=<sha8>
+                        stale_bots=<login>@<sha8>[,...] age=<s>; relaunch: kb-run-review <ITEM> --yes --delta <old sha>`
+                        (kb-run-test for the tester; no --delta after CHANGES_REQUESTED, which re-runs in full). Reviews are
+                        read ONLY for items with an OPEN PR (`gh api --paginate .../reviews --jq`, ctx.reviews), and the head
+                        commit's date only when a bot is stale (ctx.commit_time). Either read failing is a warning and NO
+                        verdict, never a crash and never a false GATE_STALE. watch only: status / resume never read reviews.
   31  TIMEOUT           watch: --timeout elapsed with nothing actionable
 
 RESUME (XACA-1547; a coordinator that starts on a release with an active run calls this BEFORE anything else)
@@ -61,9 +74,10 @@ RESUME (XACA-1547; a coordinator that starts on a release with an active run cal
    2  USAGE             as for watch; a corrupt ledger is USAGE (fail closed), never a partial resume
 
 PRIORITY when several hold (highest first): QUESTION_PENDING(11) > ITEM_CRASHED(13) > ITEM_FAILED(14) > DISPATCH_FAILED(15)
-  > ITEM_STALLED(12) > MODEL_MISMATCH(17) > TOKEN_BUDGET(16) > SLOT_FREE(10) > ALL_DONE(0). Ties within a verdict: lowest wave,
-  then item id. (A question beats a crash because the answer is collected on resume; SLOT_FREE is lowest so a coordinator
-  handles trouble before new work. The two telemetry warnings sit just above SLOT_FREE: a coordinator must see "the model is
+  > ITEM_STALLED(12) > GATE_STALE(18) > MODEL_MISMATCH(17) > TOKEN_BUDGET(16) > SLOT_FREE(10) > ALL_DONE(0). Ties within a
+  verdict: lowest wave, then item id. (A question beats a crash because the answer is collected on resume; SLOT_FREE is lowest
+  so a coordinator handles trouble before new work. GATE_STALE is trouble, but its worker may still be running, so it sits
+  just below ITEM_STALLED. The two telemetry warnings sit just above SLOT_FREE: a coordinator must see "the model is
   wrong" / "budget blown" BEFORE it dispatches more work, but never ahead of a worker that is actually in trouble.)
 
 UNKNOWN is never silently waited on forever, and one tmux hiccup must not fire a verdict: UNKNOWN only becomes ITEM_STALLED
@@ -73,7 +87,8 @@ UNKNOWN, and the summary is re-read after this poll's writes, so a fresh UNKNOWN
 REPEAT SUPPRESSION (stops the coordinator busy-looping on a condition it already escalated). Every emitted verdict is appended
 to the ledger as kind "verdict" {item, verdict, signature, detail}. signature = verdict | item | the evidence that would change
 if the situation changed: QUESTION_PENDING threadId (channel=kb-msg: `msg=<message id>`); ITEM_CRASHED the derived detail; ITEM_FAILED PR number + state + detail;
-DISPATCH_FAILED the dispatch event's ts + reason; ITEM_STALLED the lastActivity value (or the UNKNOWN `since`); SLOT_FREE the
+DISPATCH_FAILED the dispatch event's ts + reason; ITEM_STALLED the lastActivity value (or the UNKNOWN `since`); GATE_STALE
+`pr=<N>|head=<full sha>|stale=<login>@<full old sha>,...` (a new push or a fresh review changes it); SLOT_FREE the
 free-lane set + eligible ids; MODEL_MISMATCH `expected=<id>|observed=<bad ids>` (stable per item and cause: new token counts never
 change it); TOKEN_BUDGET `item|limit=<N>` or `run|limit=<N>` (stable per scope and limit: raising the budget and blowing the new
 one is a NEW condition, merely growing past the same limit is not). In `watch` WITHOUT --once, a condition is suppressed while the latest verdict event WITH THE SAME
@@ -151,10 +166,15 @@ TELEMETRY_VERDICTS = ("MODEL_MISMATCH", "TOKEN_BUDGET")   # warn-only; never blo
 EXIT = {
     "ALL_DONE": 0, "HELP": 0, "STATUS": 0, "RESUMED": 0, "USAGE": 2, "PENDING": 3, "NO_ACTIVE_RUN": 4,
     "SLOT_FREE": 10, "QUESTION_PENDING": 11, "ITEM_STALLED": 12, "ITEM_CRASHED": 13, "ITEM_FAILED": 14,
-    "DISPATCH_FAILED": 15, "TOKEN_BUDGET": 16, "MODEL_MISMATCH": 17, "TIMEOUT": 31,
+    "DISPATCH_FAILED": 15, "TOKEN_BUDGET": 16, "MODEL_MISMATCH": 17, "GATE_STALE": 18, "TIMEOUT": 31,
 }
-PRIORITY = ("QUESTION_PENDING", "ITEM_CRASHED", "ITEM_FAILED", "DISPATCH_FAILED", "ITEM_STALLED", "MODEL_MISMATCH",
-            "TOKEN_BUDGET", "SLOT_FREE", "ALL_DONE")
+PRIORITY = ("QUESTION_PENDING", "ITEM_CRASHED", "ITEM_FAILED", "DISPATCH_FAILED", "ITEM_STALLED", "GATE_STALE",
+            "MODEL_MISMATCH", "TOKEN_BUDGET", "SLOT_FREE", "ALL_DONE")
+# XACA-1880-003: the two gate bots, by EXACT login (both are user.type "Bot": a type filter would let one gate's review
+# satisfy the other). (role, login, relaunch command)
+GATE_BOTS = (("tester", "ds9-tester-bot[bot]", "kb-run-test"), ("reviewer", "ai-security-review-bot[bot]", "kb-run-review"))
+GATE_REVIEW_STATES = ("APPROVED", "CHANGES_REQUESTED")     # COMMENTED neither passes nor blocks a gate
+_SHA_RE = re.compile(r"^[0-9a-fA-F]{7,64}$")
 NOT_LOGGED = ("PENDING", "USAGE", "HELP", "STATUS", "NO_ACTIVE_RUN")
 PRE_RUNNING = ("QUEUED", "DISPATCHING", "UNKNOWN")
 
@@ -200,13 +220,55 @@ def real_gh(env=None):
 
     def fn(repo, branch):
         rc, out, err = _run(base + ["pr", "list", "--repo", repo, "--head", branch, "--state", "all",
-                                    "--json", "number,state,mergedAt,isDraft"], timeout=60)
+                                    "--json", "number,state,mergedAt,isDraft,headRefOid"], timeout=60)
         if rc != 0:
             raise RuntimeError("gh pr list rc=%d: %s" % (rc, one_line(err)[:200]))
         try:
             return json.loads(out)
         except ValueError as exc:
             raise RuntimeError("gh pr list returned non-JSON: %s" % exc)
+    return fn
+
+
+def real_reviews(env=None):
+    """XACA-1880-003 -> callable(repo, pr_number) -> list of {login, state, commit_id, submitted_at}; raises RuntimeError on
+    any failure. ALL pages (`gh api --paginate`), flattened by --jq to one compact object per line, parsed here: the gh JSON
+    never passes through a shell variable."""
+    base = shlex.split((env or os.environ).get("KB_ORCH_GH") or "gh")
+    jq = ".[] | {login: .user.login, state: .state, commit_id: .commit_id, submitted_at: .submitted_at}"
+
+    def fn(repo, pr):
+        if not isinstance(pr, int) or isinstance(pr, bool):
+            raise RuntimeError("PR number must be an int, got %r" % (pr,))
+        rc, out, err = _run(base + ["api", "--paginate", "repos/%s/pulls/%d/reviews" % (repo, pr), "--jq", jq], timeout=60)
+        if rc != 0:
+            raise RuntimeError("gh api reviews rc=%d: %s" % (rc, one_line(err)[:200]))
+        rows = []
+        for line in out.splitlines():
+            if not line.strip():
+                continue
+            try:
+                rec = json.loads(line)
+            except ValueError as exc:
+                raise RuntimeError("gh api reviews returned non-JSON: %s" % exc)
+            if not isinstance(rec, dict):
+                raise RuntimeError("gh api reviews returned a non-object row")
+            rows.append(rec)
+        return rows
+    return fn
+
+
+def real_commit_time(env=None):
+    """XACA-1880-003 -> callable(repo, sha) -> the commit's committer date (ISO string); raises RuntimeError on any failure."""
+    base = shlex.split((env or os.environ).get("KB_ORCH_GH") or "gh")
+
+    def fn(repo, sha):
+        if not isinstance(sha, str) or not _SHA_RE.match(sha):
+            raise RuntimeError("not a commit sha: %r" % (sha,))
+        rc, out, err = _run(base + ["api", "repos/%s/commits/%s" % (repo, sha), "--jq", ".commit.committer.date"], timeout=60)
+        if rc != 0:
+            raise RuntimeError("gh api commit rc=%d: %s" % (rc, one_line(err)[:200]))
+        return out.strip()
     return fn
 
 
@@ -291,7 +353,8 @@ class Ctx(object):
     def __init__(self, release_id, run=None, board=None, kanban_dir=None, repo=None, cli_thresholds=None,
                  repeat_after=DEFAULT_REPEAT_AFTER, interval=DEFAULT_INTERVAL, timeout=DEFAULT_TIMEOUT,
                  tmux=None, gh=None, clock=None, sleep=None, env=None, repo_root=None, stderr=None, out=None,
-                 tokens_interval=None, projects_dir=None, worktrees_root=None, msg=None, token_cache=None, inbox=None):
+                 tokens_interval=None, projects_dir=None, worktrees_root=None, msg=None, token_cache=None, inbox=None,
+                 reviews=None, commit_time=None):
         self.release_id = release_id
         self.run = run
         self.board = board
@@ -305,6 +368,9 @@ class Ctx(object):
         self.tmux = tmux or real_tmux(self.env)
         self.gh = gh or real_gh(self.env)
         self.msg = msg or real_msg(self.env)
+        # XACA-1880-003: callable(repo, pr) -> review rows / callable(repo, sha) -> committer date (GATE_STALE); tests inject fakes.
+        self.reviews = reviews or real_reviews(self.env)
+        self.commit_time = commit_time or real_commit_time(self.env)
         # XACA-1808: None disables token telemetry (programmatic callers / pre-1808 tests); the CLI passes the interval.
         self.tokens_interval = tokens_interval
         self.projects_dir = otok.projects_dir_from(projects_dir, self.env)
@@ -627,7 +693,90 @@ def gather(ctx, rel, board, board_file, run, orch, events):
             ctx.warn("cannot read the coordinator inbox of %s (%s); kb-msg escalations are not visible" % (
                 coord, one_line(exc)[:200]))
     return {"now": now, "team": team, "thresholds": th, "sources": sources, "items": items, "windows": windows,
-            "panes": panes, "prs": prs, "terminals": terminals, "dispatches": dispatches, "run": run, "inbox": inbox}
+            "panes": panes, "prs": prs, "terminals": terminals, "dispatches": dispatches, "run": run, "inbox": inbox,
+            "repo": repo}
+
+
+def gate_scan(reviews, head):
+    """XACA-1880-003, pure (kb-pr-monitor _kbpm_stale_scan semantics) -> {role: {status, login, sha, state, submitted_at}}.
+    status: current (an APPROVED/CHANGES_REQUESTED review on head), stale (none on head, but an earlier one exists: sha /
+    state / submitted_at are the LATEST by submitted_at), never (that bot never reviewed: not launched yet, NOT stale).
+    Matched by EXACT login only."""
+    out = {}
+    for role, login, _cmd in GATE_BOTS:
+        rv = [r for r in reviews if isinstance(r, dict) and r.get("login") == login and r.get("state") in GATE_REVIEW_STATES]
+        if not rv:
+            out[role] = {"status": "never", "login": login}
+        elif any(r.get("commit_id") == head for r in rv):
+            out[role] = {"status": "current", "login": login}
+        else:
+            last = sorted(rv, key=lambda r: r.get("submitted_at") or "")[-1]
+            out[role] = {"status": "stale", "login": login, "sha": last.get("commit_id") or "-", "state": last.get("state"),
+                         "submitted_at": last.get("submitted_at")}
+    return out
+
+
+def gather_gates(ctx, g, states):
+    """XACA-1880-003 -> g["gates"] = {item: {pr, head, scan, head_time}} for in-flight items with an OPEN PR. Only those
+    items cost an API call (reviews); the head commit's date is read only when a bot is stale. A read failure is a warning
+    and NO entry (no verdict), never a crash and never a false GATE_STALE. An OPEN PR row without a usable headRefOid
+    (a gh that did not return it) is skipped: without the head there is no staleness to judge."""
+    gates, repo = {}, g.get("repo")
+    for iid, pr in sorted((g.get("prs") or {}).items()):
+        if (states.get(iid) or {}).get("state") in NOT_IN_FLIGHT + (None,) or not repo:
+            continue
+        if not isinstance(pr, dict) or pr.get("error") or str(pr.get("state") or "").upper() != "OPEN":
+            continue
+        head, num = pr.get("headRefOid"), pr.get("number")
+        if not isinstance(head, str) or not _SHA_RE.match(head) or not isinstance(num, int):
+            continue
+        try:
+            scan = gate_scan(list(ctx.reviews(repo, num) or []), head)
+        except Exception as exc:  # noqa: BLE001 -- an unreadable reviews list is not evidence anything is stuck
+            ctx.warn("%s: cannot read the reviews of PR #%s (%s); GATE_STALE not evaluated" % (iid, num, one_line(exc)[:200]))
+            continue
+        row = {"pr": num, "head": head, "scan": scan, "head_time": None}
+        if any(v["status"] == "stale" for v in scan.values()):
+            try:
+                row["head_time"] = ctx.commit_time(repo, head)
+            except Exception as exc:  # noqa: BLE001
+                ctx.warn("%s: cannot read the date of head %s of PR #%s (%s); GATE_STALE not evaluated" % (
+                    iid, head[:8], num, one_line(exc)[:200]))
+                continue
+        gates[iid] = row
+    g["gates"] = gates
+    return gates
+
+
+def gate_conditions(g, th, add):
+    """XACA-1880-003, pure given g["gates"]: one GATE_STALE per item whose stale bot(s) passed gate_stale_seconds. A bot's
+    window starts at max(head commit date, its stale review): the head's committer date approximates the push, and a review
+    submitted after it on the old commit only became stale then. An unparseable date never fires."""
+    now, limit = g["now"], th["gate_stale_seconds"]
+    for iid, row in sorted((g.get("gates") or {}).items()):
+        head_t = ostate.parse_ts(row.get("head_time")) if row.get("head_time") else None
+        if head_t is None:
+            continue
+        fired = []
+        for role, login, cmd in GATE_BOTS:
+            b = row["scan"].get(role) or {}
+            if b.get("status") != "stale":
+                continue
+            sub_t = ostate.parse_ts(b.get("submitted_at")) if b.get("submitted_at") else None
+            anchor = max(head_t, sub_t) if sub_t is not None else head_t
+            age = int((now - anchor).total_seconds())
+            if age >= limit:
+                old = b.get("sha") or "-"
+                relaunch = "%s %s --yes" % (cmd, iid)
+                if b.get("state") == "APPROVED" and _SHA_RE.match(old):
+                    relaunch += " --delta %s" % old
+                fired.append((login, old, age, relaunch))
+        if fired:
+            stale = ",".join("%s@%s" % (lg, old) for lg, old, _a, _r in fired)
+            add("GATE_STALE", iid, "pr=%s|head=%s|stale=%s" % (row["pr"], row["head"], stale),
+                "%s: pr=%s head=%s stale_bots=%s age=%ds; relaunch: %s" % (
+                    iid, row["pr"], row["head"][:8], ",".join("%s@%s" % (lg, old[:8]) for lg, old, _a, _r in fired),
+                    min(a for _l, _o, a, _r in fired), "; ".join(r for _l, _o, _a, r in fired)))
 
 
 # ------------------------------------------------------------------ conditions
@@ -790,6 +939,7 @@ def build_conditions(orch, states, g, events, th):
             "%s: channel=kb-msg msg=%s thread=%s age=%s%s; %s" % (
                 iid, rec["id"][:8], rec.get("thread_id"), "%ds" % age if age is not None else "unknown",
                 " attribution=ambiguous" if wm["ambiguous"] else "", one_line(rec.get("body") or "")[:120]))
+    gate_conditions(g, th, add)          # XACA-1880-003: needs g["gates"] (gather_gates); absent = nothing to judge
     return conds
 
 
@@ -1093,6 +1243,7 @@ def _poll(ctx, once, read_only):
     g, states, lines, changes = r["g"], r["states"], r["lines"], r["changes"]
     lines.extend(lane_lines(orch))
     th = g["thresholds"]
+    gather_gates(ctx, g, states)         # XACA-1880-003: watch polls only (status / resume never pay the reviews calls)
     conds = build_conditions(orch, states, g, events, th)
     if ctx.tokens_interval is not None:
         tokens, budgets = token_step(ctx, board_file, kdir, board, run, orch, events, g, changes, read_only)
@@ -1457,6 +1608,7 @@ def build_parser():
         p.add_argument("--run")
         p.add_argument("--stall-seconds")
         p.add_argument("--dispatch-seconds")
+        p.add_argument("--gate-stale-seconds")
         p.add_argument("--board")
         p.add_argument("--kanban-dir")
         p.add_argument("--repo")
@@ -1491,7 +1643,7 @@ def build_parser():
 
 
 USAGE_TEXT = ("usage: kb-release-orchestrate watch <REL-ID> [--run RUN] [--once] [--interval S] [--timeout S] [--repeat-after S] "
-              "[--stall-seconds N] [--dispatch-seconds N] [--board FILE] [--kanban-dir DIR] [--repo owner/repo]\n"
+              "[--stall-seconds N] [--dispatch-seconds N] [--gate-stale-seconds N] [--board FILE] [--kanban-dir DIR] [--repo owner/repo]\n"
               "       kb-release-orchestrate status <REL-ID> [--json] [--tokens] [--run RUN] [same input flags]\n"
               "       kb-release-orchestrate resume <REL-ID> [--coordinator team:terminal] [--json] [--dry-run] [same input flags]\n"
               "         (resume exit: 0 RESUMED, 4 NO_ACTIVE_RUN, 2 usage / corrupt ledger)\n"
@@ -1529,6 +1681,8 @@ def main(argv=None, **overrides):
             cli["stall_seconds"] = args.stall_seconds
         if args.dispatch_seconds is not None:
             cli["dispatch_seconds"] = args.dispatch_seconds
+        if args.gate_stale_seconds is not None:
+            cli["gate_stale_seconds"] = args.gate_stale_seconds
         kw = dict(run=args.run, board=args.board, kanban_dir=args.kanban_dir, repo=args.repo, cli_thresholds=cli)
         if args.cmd == "watch":
             kw.update(interval=_num("--interval", args.interval), timeout=_num("--timeout", args.timeout),

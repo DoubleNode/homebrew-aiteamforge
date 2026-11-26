@@ -84,6 +84,9 @@ DEFAULT_THRESHOLDS = {
     "stall_seconds": 900,        # RUNNING with no activity this long -> STALLED
     "dispatch_seconds": 300,     # dispatched but not started / no window row yet this long -> STALLED / CRASHED
     "clock_skew_seconds": 120,   # a lastActivity this far in the future is untrustworthy -> UNKNOWN
+    # XACA-1880-003: a lane PR gate whose latest review is on a non-HEAD commit, with no review of HEAD this long after the
+    # head commit / that stale review -> the monitor's GATE_STALE (matches kb-pr-monitor KBPM_STALE_APPROVAL_MINUTES=60)
+    "gate_stale_seconds": 3600,
 }
 
 PANE_GONE = "<pane-gone>"
@@ -371,12 +374,14 @@ THRESHOLD_ENV = {
     "stall_seconds": "KB_ORCH_STALL_SECONDS",
     "dispatch_seconds": "KB_ORCH_DISPATCH_SECONDS",
     "clock_skew_seconds": "KB_ORCH_CLOCK_SKEW_SECONDS",
+    "gate_stale_seconds": "KB_ORCH_GATE_STALE_SECONDS",
 }
 # config-file (board JSON) spelling -> internal key
 THRESHOLD_CONFIG_KEYS = {
     "stallSeconds": "stall_seconds",
     "dispatchSeconds": "dispatch_seconds",
     "clockSkewSeconds": "clock_skew_seconds",
+    "gateStaleSeconds": "gate_stale_seconds",
 }
 _NUM_RE = re.compile(r"^[+]?(\d+(\.\d*)?|\.\d+)$")
 
@@ -423,10 +428,11 @@ def resolve_thresholds(cli=None, env=None, release_orch=None, team_orch=None):
     """Pure. -> (thresholds, sources, warnings).
 
     LAYERS, highest priority first (each key is taken from the first layer that SETS it):
-      cli          dict with the internal keys stall_seconds / dispatch_seconds / clock_skew_seconds
+      cli          dict with the internal keys stall_seconds / dispatch_seconds / clock_skew_seconds / gate_stale_seconds
       env          dict (the caller passes a copy of the process environment; this function never reads it itself):
-                   KB_ORCH_STALL_SECONDS / KB_ORCH_DISPATCH_SECONDS / KB_ORCH_CLOCK_SKEW_SECONDS
-      release      `release.orchestration` block, thresholds {stallSeconds, dispatchSeconds, clockSkewSeconds}
+                   KB_ORCH_STALL_SECONDS / KB_ORCH_DISPATCH_SECONDS / KB_ORCH_CLOCK_SKEW_SECONDS / KB_ORCH_GATE_STALE_SECONDS
+      release      `release.orchestration` block, thresholds {stallSeconds, dispatchSeconds, clockSkewSeconds,
+                   gateStaleSeconds (XACA-1880-003)}
       team         team `releaseConfig.orchestration` block, same shape
       defaults     DEFAULT_THRESHOLDS
     `sources` maps every key to "cli" | "env" | "release" | "team" | "default".

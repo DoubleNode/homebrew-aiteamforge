@@ -331,6 +331,9 @@ KIND_LANE = "lane"          # a lane slot changed hands: {item, lane, action: "a
 # XACA-1808 token telemetry: model_mismatch {item, expected, observed, signature}, token_budget {scope, item?, used, limit,
 # signature} (both appended ONCE per signature by the monitor), token_summary {run totals} (appended at ALL_DONE).
 KIND_MODEL_MISMATCH, KIND_TOKEN_BUDGET, KIND_TOKEN_SUMMARY = "model_mismatch", "token_budget", "token_summary"
+# XACA-1880-005 kb-nudge: one sanctioned, audited one-line user turn typed into a worker's own idle pane {item, text, actor,
+# pane}. Written BEFORE the keys are sent (an unaudited nudge cannot happen); refusals are not ledgered.
+KIND_NUDGE = "nudge"
 # kind -> fields that must be present (fail closed: an event the summariser cannot attribute is refused at write time).
 LEDGER_KINDS = {
     KIND_RUN_START: (), KIND_DISPATCH: ("item", "dispatch"), KIND_STATE: ("item", "from", "to"),
@@ -338,6 +341,7 @@ LEDGER_KINDS = {
     KIND_FAILED: ("item",), KIND_DONE: ("item",), KIND_VERDICT: (), KIND_RUN_END: (),
     KIND_LANE: ("item", "lane", "action"),
     KIND_MODEL_MISMATCH: ("item",), KIND_TOKEN_BUDGET: (), KIND_TOKEN_SUMMARY: (),
+    KIND_NUDGE: ("item", "text", "actor", "pane"),
 }
 _RESERVED_FIELDS = ("ts", "run", "kind")
 

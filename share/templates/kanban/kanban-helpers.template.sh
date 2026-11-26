@@ -16444,7 +16444,9 @@ _kb_headless_worker_rules() {
     r+="- **Full normal flow.** Stay on this worktree branch. Work the subitems (\`kb-backlog sub start/done\`). Run lint and tests. Open the PR against the branch this worktree was cut from (\`develop\`, or the item's release branch when it has one), then \`kb-pr\`. Launch BOTH gates yourself, each in its OWN background Bash call: \`kb-run-test ${id} --yes\` and \`kb-run-review ${id} --yes\` (add \`kb-run-ux ${id} --yes\` if the diff touches UI). Then run \`kb-pr-monitor --pr <N> --item ${id}\`. On GATES_PASSED: \`kb-sweep ${id}\`, then \`kb-done\`.\n"
     r+="- **Order.** This flow overrides step 6 of the delegation workflow above: \`kb-done\` comes only after GATES_PASSED and \`kb-sweep\`, never as soon as the subitems are complete.\n"
     r+="- **Questions: stop, never guess.** There is no coordinator, so \`kb-ask\` is not available (rc 4). For a user-owned decision (scope, product behaviour, anything destructive or outward-facing), or anything you cannot resolve with confidence, stop and end your turn with the question as your final message.\n"
-    r+="- **Monitor verdicts.** 10/11/12/13 are retried per the normal rules (13 STALE_APPROVAL: no fix push, re-launch each \`stale_bots=\` gate per its \`*_mode=\` hint). 21 UX_REOPEN is self-serve: re-open the \`[UX]\` subitem, run \`kb-run-ux ${id} --yes\`, then re-run the monitor. If it ends 20 CONFLICT, 22 BLOCKED, 24 CI_FLAKE_REPEAT, 30 PR_CLOSED or 31 TIMEOUT, stop and report the VERDICT line; do not retry.\n"
+    r+="- **Monitor verdicts.** 10/11/12/13 are retried per the normal rules. After any 10/11/12 fix push, re-launch BOTH gates: the named one in full, the other per its \`*_mode=\` hint (13 STALE_APPROVAL: no fix push, re-launch each \`stale_bots=\` gate per its \`*_mode=\` hint). 21 UX_REOPEN is self-serve: re-open the \`[UX]\` subitem, run \`kb-run-ux ${id} --yes\`, then re-run the monitor. If it ends 20 CONFLICT, 22 BLOCKED, 24 CI_FLAKE_REPEAT, 30 PR_CLOSED or 31 TIMEOUT, stop and report the VERDICT line; do not retry.\n"
+    r+="- **Every wait has a deadline.** Run suites under \`timeout\` (full shell suite \`timeout 60m\`, bats \`timeout 20m\`). Prefer targeted suites (the changed files' tests plus related ones); run the full suite once, before the PR. On a timeout, stop and report; do not rerun blindly.\n"
+    r+="- **Git hygiene.** Set work aside with a temporary WIP commit, never \`git stash\` (the stash stack is shared by every worktree and session). Restore a file by rewriting it or \`git show HEAD:<path> > <path>\`, never \`git checkout -- <path>\`. Destructive git only on genuine need, and stop and ask first.\n"
     r+="- **Never** run \`kb-release promote\`, change a release stage, or touch another ticket's PR.\n"
     r+="\nStart now: build the todo list, delegate the subitems, and carry the ticket through merge and \`kb-done\`."
     printf '%s' "$r"
@@ -16458,10 +16460,14 @@ _kb_orchestrated_worker_rules() {
     r+="\n\n## Orchestrated worker rules (run ${run}, coordinator ${coord})\n"
     r+="You were dispatched by the release coordinator. Nobody is watching this window: do NOT wait for approval. Work the ticket all the way through.\n"
     r+="- **Full normal flow.** Stay on this worktree branch. Work the subitems (\`kb-backlog sub start/done\`). Run lint and tests. Open the PR against the release branch, then \`kb-pr\`. Launch BOTH gates yourself, each in its OWN background Bash call: \`kb-run-test ${id} --yes\` and \`kb-run-review ${id} --yes\` (add \`kb-run-ux ${id} --yes\` if the diff touches UI). Then run \`kb-pr-monitor --pr <N> --item ${id}\`. On GATES_PASSED: \`kb-sweep ${id}\`, then \`kb-done\`.\n"
-    r+="- **Questions: ask, never guess.** For anything you cannot resolve with confidence, and ALWAYS for a user-owned decision (scope, product behaviour, anything destructive or outward-facing), run \`kb-ask \"<question>\" [--options a|b]\`. Run kb-ask as a BACKGROUND Bash command (run_in_background): the Bash tool kills a foreground command after 600s and kb-ask waits up to 1800s. Act on its exit code: 0 = the answer is on stdout; 3 or 130 = no answer yet, so PARK (stop and end your turn; the question stays pending for the coordinator); 4/5/6/7/8 = you cannot ask, so stop and report.\n"
+    r+="- **Questions: ask, never guess.** For anything you cannot resolve with confidence, and ALWAYS for a user-owned decision (scope, product behaviour, anything destructive or outward-facing), run \`kb-ask \"<question>\" [--options a|b]\`. Run kb-ask as a BACKGROUND Bash command (run_in_background): the Bash tool kills a foreground command after 600s and kb-ask waits up to 1800s. Act on its exit code: 0 = the answer is on stdout; 3 or 130 = no answer yet, so PARK (stop and end your turn; the question stays pending for the coordinator); 4/5/6/7/8 = you cannot ask, so stop and report. Anything that expects a reply goes through kb-ask, never \`kb-msg\` (kb-msg is for pings; nobody answers it).\n"
+    r+="- **A late answer still binds.** After rc 3/130, run \`kb-ask --wait --timeout 10\` once more before you park, and again at the start of every later turn until it returns 0 or 9.\n"
     r+="- **Milestone pings.** \`kb-msg send ${coord} \"${id}: <milestone>\"\` when the PR is opened (include the number), on each gate verdict, when merged, and when done.\n"
     r+="- **Freeze orders.** Right before merging, run \`kb-msg inbox --all\`. If the coordinator or the lead has ordered a freeze or hold, do not merge: park and say so.\n"
-    r+="- **Escalate, do not retry.** If kb-pr-monitor ends 20 CONFLICT, 21 UX_REOPEN, 22 BLOCKED, 24 CI_FLAKE_REPEAT, 30 PR_CLOSED or 31 TIMEOUT, stop, \`kb-msg send ${coord}\` the VERDICT line, and park. Only 10/11/12/13 are retried, per the normal rules (13 STALE_APPROVAL: no fix push, re-launch each \`stale_bots=\` gate per its \`*_mode=\` hint).\n"
+    r+="- **Escalate, do not retry.** If kb-pr-monitor ends 20 CONFLICT, 21 UX_REOPEN, 22 BLOCKED, 24 CI_FLAKE_REPEAT, 30 PR_CLOSED or 31 TIMEOUT, stop, \`kb-msg send ${coord}\` the VERDICT line, and park. Only 10/11/12/13 are retried, per the normal rules. After any 10/11/12 fix push, re-launch BOTH gates: the named one in full, the other per its \`*_mode=\` hint (13 STALE_APPROVAL: no fix push, re-launch each \`stale_bots=\` gate per its \`*_mode=\` hint).\n"
+    r+="- **Every wait has a deadline.** Run suites under \`timeout\` (full shell suite \`timeout 60m\`, bats \`timeout 20m\`). Prefer targeted suites (the changed files' tests plus related ones); run the full suite once, before the PR. On a timeout, kb-ask; do not rerun blindly.\n"
+    r+="- **Git hygiene.** Set work aside with a temporary WIP commit, never \`git stash\` (the stash stack is shared by every worktree and session). Restore a file by rewriting it or \`git show HEAD:<path> > <path>\`, never \`git checkout -- <path>\`. Destructive git only on genuine need, and kb-ask first.\n"
+    r+="- **Effort dialog at merge (lead decision, XACA-1880-004).** Never try to change your own effort level. After kb-pr-monitor returned GATES_PASSED on the current head and the freeze check was clean, kb-msg the coordinator \"<ITEM-ID>: GATES_PASSED, freeze clean, merging\" and run the merge. If an effort dialog appears, leave it: the coordinator (or the user) answers it. Tap release cuts, \`--push-tap-edit\` / \`--push-only\`, any commit that moves the homebrew-tap gitlink, and \`gh variable set TAP_PUBLISHER_ENABLED\`: kb-ask the coordinator first.\n"
     r+="- **Never** run \`kb-release promote\`, change a release stage, or touch another ticket's PR.\n"
     r+="\nStart now: build the todo list, delegate the subitems, and carry the ticket through merge and \`kb-done\`."
     printf '%s' "$r"
@@ -17241,6 +17247,312 @@ kb-dispatch() {
         "no in_progress flip + activeWindows row ${wid} within ${deadline}s; window ${session}:${item} left open for inspection" \
         "$observed"
     return 4
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+# kb-nudge <ITEM> "<text>"   (XACA-1880-005, plan Layer C)
+# The ONE sanctioned way to type into an orchestrated worker's pane: a single-line user turn that wakes an idle worker
+# (S3 an unanswered kb-msg, S5 a hung background command, S7 a stale gate). It refuses unless ALL of these hold:
+#   - the item is in_progress and stamped with its release's ACTIVE, open run (item.orchestration.runId == activeRunId);
+#   - the target is the run's own dispatched pane: the LATEST DISPATCHED ledger event names the session, and exactly one
+#     pane sits in the window named exactly <ITEM> there (a renamed <ITEM>~crashed-* window never matches);
+#   - that pane runs Claude (not a bare shell) and is idle at its prompt: no turn running, no interactive dialog (S4
+#     dialogs stay human-only), and an EMPTY input line, so it never clobbers what a person is typing;
+#   - the text is one non-empty line, at most $_KB_NUDGE_MAX_LEN characters, with no control characters, no leading
+#     / ! # ? (a slash command, bash mode, memory mode or the shortcuts panel is not a nudge), no trailing \
+#     (Claude Code reads backslash+Enter as a newline, so the nudge would sit unsubmitted and wedge the input line),
+#     and no @-mention as the first or last word (the file autocomplete is open at Enter, which would pick a file).
+# Every nudge is appended to the run ledger (kind "nudge" {item, text, actor, pane}) BEFORE the keys are sent; a ledger
+# failure refuses, so an unaudited nudge cannot happen. Refusals are reported on stderr and not ledgered (nothing
+# happened to the worker). Test seams: KB_ORCH_TMUX (a tmux command, like orchestrator_monitor.py) and KB_BOARD_FILE.
+# ═════════════════════════════════════════════════════════════════════════════
+
+# THE pane-pattern table (plan risk "pane-pattern brittleness"): every Claude Code screen string kb-nudge relies on lives
+# HERE and nowhere else, so a Claude Code UI change is a one-table edit. "<class>|<value>":
+#   dialog  extended regex, case-insensitive, on the bottom lines: an interactive dialog is open -> refuse
+#   busy    extended regex, case-insensitive, on the bottom lines: a turn is running -> refuse
+#   marker  literal prefix of the input line (after any frame characters)
+#   frame   literal character stripped around the input line (box sides and corners, non-breaking space)
+#   rule    literal character that, repeated 3+ times, draws the input box's border (ends a multi-line input)
+_KB_NUDGE_PANE_PATTERNS=(
+    'dialog|Enter to select'
+    'dialog|Esc to cancel'
+    'dialog|Do you want to proceed\?'
+    'dialog|Do you want to (make this edit|create|allow)'
+    'dialog|About to (merge|cut)'
+    'dialog|at (low|medium) effort'
+    'busy|esc to interrupt'
+    'marker|❯'
+    'marker|>'
+    'frame|│'
+    'frame|╭'
+    'frame|╮'
+    'frame|╰'
+    'frame|╯'
+    "frame|"$'\xc2\xa0'
+    'rule|─'
+    'rule|━'
+)
+_KB_NUDGE_MAX_LEN=400
+_KB_NUDGE_SCAN_LINES=12
+
+_kb_nudge_tmux() {
+    if [[ -n "${KB_ORCH_TMUX:-}" ]]; then ${=KB_ORCH_TMUX} "$@"; else tmux "$@"; fi
+}
+
+# _kb_nudge_patterns <class> -> the table's values for one class, one per line.
+_kb_nudge_patterns() {
+    local e
+    for e in "${_KB_NUDGE_PANE_PATTERNS[@]}"; do
+        [[ "${e%%|*}" == "${1-}" ]] && print -r -- "${e#*|}"
+    done
+}
+
+# _kb_nudge_strip <text> -> the text without leading/trailing spaces and frame characters.
+_kb_nudge_strip() {
+    local s="${1-}" f changed=1
+    local -a frames
+    frames=("${(@f)$(_kb_nudge_patterns frame)}")
+    while (( changed )); do
+        changed=0
+        for f in " " $'\t' "${frames[@]}"; do
+            [[ -z "$f" ]] && continue
+            if [[ "$s" == "$f"* ]]; then s="${s#"$f"}"; changed=1; fi
+            if [[ "$s" == *"$f" ]]; then s="${s%"$f"}"; changed=1; fi
+        done
+    done
+    print -r -- "$s"
+}
+
+# _kb_nudge_pane_state <screen> -> rc 0 idle with an empty input line; otherwise prints "<REASON>\t<detail>" and returns
+# 5 (BUSY / NOT_AT_PROMPT), 6 (DIALOG) or 7 (INPUT_NOT_EMPTY). Pure: reads only its argument and the table.
+_kb_nudge_pane_state() {
+    local screen="${1-}" line re s m r i n start prompt_at=0 rest
+    local -a lines bottom dialogs busys markers rules
+    setopt localoptions nocasematch
+    lines=("${(@f)screen}")
+    n=${#lines[@]}
+    while (( n > 0 )) && [[ -z "$(_kb_nudge_strip "${lines[$n]}")" ]]; do (( n-- )); done
+    (( n == 0 )) && { print -r -- "NOT_AT_PROMPT"$'\t'"the pane shows nothing"; return 5; }
+    start=$(( n - _KB_NUDGE_SCAN_LINES + 1 )); (( start < 1 )) && start=1
+    bottom=("${(@)lines[$start,$n]}")
+    dialogs=("${(@f)$(_kb_nudge_patterns dialog)}")
+    busys=("${(@f)$(_kb_nudge_patterns busy)}")
+    markers=("${(@f)$(_kb_nudge_patterns marker)}")
+    rules=("${(@f)$(_kb_nudge_patterns rule)}")
+    for line in "${bottom[@]}"; do
+        for re in "${dialogs[@]}"; do
+            [[ -n "$re" && "$line" =~ $re ]] && { print -r -- "DIALOG"$'\t'"$(_kb_nudge_strip "$line")"; return 6; }
+        done
+    done
+    for line in "${bottom[@]}"; do
+        for re in "${busys[@]}"; do
+            [[ -n "$re" && "$line" =~ $re ]] && { print -r -- "BUSY"$'\t'"a turn is running: $(_kb_nudge_strip "$line")"; return 5; }
+        done
+    done
+    # The input line is the LAST bottom line that starts with a prompt marker (earlier ones are transcript echoes).
+    for (( i = ${#bottom[@]}; i >= 1; i-- )); do
+        s=$(_kb_nudge_strip "${bottom[$i]}")
+        for m in "${markers[@]}"; do
+            if [[ -n "$m" && ( "$s" == "$m" || "$s" == "$m "* || "$s" == "$m"$'\xc2\xa0'* ) ]]; then
+                prompt_at=$i; rest="${s#"$m"}"; break 2
+            fi
+        done
+    done
+    (( prompt_at )) || { print -r -- "NOT_AT_PROMPT"$'\t'"no Claude input line in the last ${_KB_NUDGE_SCAN_LINES} lines"; return 5; }
+    rest=$(_kb_nudge_strip "$rest")
+    [[ -n "$rest" ]] && { print -r -- "INPUT_NOT_EMPTY"$'\t'"the input line holds: ${rest[1,60]}"; return 7; }
+    # A multi-line input continues below the marker line until the box border.
+    for (( i = prompt_at + 1; i <= ${#bottom[@]}; i++ )); do
+        s=$(_kb_nudge_strip "${bottom[$i]}")
+        for r in "${rules[@]}"; do
+            [[ -n "$r" && "$s" == "$r$r$r"* ]] && break 2
+        done
+        [[ -n "$s" ]] && { print -r -- "INPUT_NOT_EMPTY"$'\t'"the input continues: ${s[1,60]}"; return 7; }
+    done
+    return 0
+}
+
+# _kb_nudge_ledger <kanban_dir> <run> <item> <text> <actor> <pane> -> rc 0 appended; rc 1 + $_KB_NUDGE_LEDGER_ERR.
+# Never creates a ledger (start_run owns that).
+_kb_nudge_ledger() {
+    local kd="${1-}" run="${2-}" hdir py err rc=0
+    _KB_NUDGE_LEDGER_ERR=""
+    hdir="$(_kb_board_settings_script 2>/dev/null)" && hdir="$(dirname "$hdir")" || hdir=""
+    py="$hdir/release_orchestrator.py"
+    if [[ -z "$hdir" || ! -f "$py" ]]; then _KB_NUDGE_LEDGER_ERR="release_orchestrator.py not found"; return 1; fi
+    if [[ ! -f "$kd/orchestration/${run}.jsonl" ]]; then _KB_NUDGE_LEDGER_ERR="no ledger for run ${run}"; return 1; fi
+    err="$(python3 "$py" ledger-append --kanban-dir "$kd" --run "$run" --kind nudge --field "item=${3-}" \
+        --field "text=${4-}" --field "actor=${5-}" --field "pane=${6-}" 2>&1 >/dev/null </dev/null)" || rc=$?
+    (( rc == 0 )) || { _KB_NUDGE_LEDGER_ERR="${err:-rc=$rc}"; return 1; }
+    return 0
+}
+
+# kb-nudge <ITEM> "<text>" [--team T] [--dry-run]
+kb-nudge() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
+    local item="" text="" team="" dry=0 a
+    local -a pos
+    pos=()
+    while (( $# > 0 )); do
+        case "$1" in
+            -h|--help)
+                cat <<'USAGE'
+kb-nudge — wake an orchestrated worker with ONE audited line typed into its own idle pane (XACA-1880)
+
+Usage: kb-nudge <ITEM> "<one line>" [--team T] [--dry-run]
+
+Refused unless the item is in_progress in its release's active run, the pane is the run's own dispatched
+<team>-<terminal>:<ITEM> window (never a ~crashed one), Claude is idle at its prompt with an EMPTY input line and no
+dialog open, and the text is one line (max 400 chars, no control characters, no leading / ! # ?, no trailing \, no @word first or last).
+Every nudge is written to the run ledger (kind "nudge") before it is sent. --dry-run runs every check and sends nothing.
+
+Exit codes:
+  0  NUDGED (or --dry-run: every check passed)     5  PANE_BUSY: a turn is running / no idle prompt line
+  2  usage, or the text is not one valid line       6  PANE_DIALOG: an interactive dialog is open (a human answers it)
+  3  NOT_IN_RUN: board/item/run check failed        7  INPUT_NOT_EMPTY: someone is typing in the pane
+  4  NO_PANE: no dispatched pane, or no Claude      8  LEDGER_FAILED: nothing was sent
+     running in it                                  9  SEND_FAILED: ledgered, keys may be partly delivered
+USAGE
+                return 0 ;;
+            --dry-run) dry=1; shift ;;
+            --team) team="${2-}"; shift 2 2>/dev/null || shift ;;
+            --) shift; pos+=("$@"); break ;;
+            -*) echo "kb-nudge: unknown option '$1' (try: kb-nudge --help)" >&2; return 2 ;;
+            *) pos+=("$1"); shift ;;
+        esac
+    done
+    if (( ${#pos[@]} != 2 )); then
+        echo "Usage: kb-nudge <ITEM> \"<one line>\" [--team T] [--dry-run]" >&2
+        return 2
+    fi
+    item="${pos[1]}" text="${pos[2]}"
+    if [[ ! "$item" =~ ^[A-Z][A-Z0-9]*-[0-9]+$ ]]; then
+        echo "kb-nudge: '$item' is not an item id" >&2; return 2
+    fi
+    # ── the text: one line, bounded, nothing the prompt would treat as a command ──
+    local trimmed
+    trimmed="${text#"${text%%[![:space:]]*}"}"; trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+    if [[ -z "$trimmed" ]]; then echo "kb-nudge: REFUSED TEXT_INVALID: the text is empty" >&2; return 2; fi
+    if [[ "$text" == *[[:cntrl:]]* ]]; then
+        echo "kb-nudge: REFUSED TEXT_INVALID: the text must be ONE line with no control characters" >&2; return 2
+    fi
+    if (( ${#text} > _KB_NUDGE_MAX_LEN )); then
+        echo "kb-nudge: REFUSED TEXT_INVALID: ${#text} characters (max ${_KB_NUDGE_MAX_LEN})" >&2; return 2
+    fi
+    case "${trimmed[1]}" in
+        /|'!'|'#'|'?') echo "kb-nudge: REFUSED TEXT_INVALID: a leading '${trimmed[1]}' would be a Claude command or shortcut, not a message" >&2; return 2 ;;
+    esac
+    # Claude Code reads backslash+Enter as "insert a newline": the nudge would be ledgered but never submitted (XACA-1880-025).
+    if [[ "$trimmed" == *'\' ]]; then
+        echo "kb-nudge: REFUSED TEXT_INVALID: a trailing backslash makes Enter insert a newline instead of submitting" >&2; return 2
+    fi
+    # An @word opens the file-mention autocomplete; as the first or the last word it is still open at Enter (XACA-1880-025).
+    if [[ "${trimmed[1]}" == '@' || "${trimmed##* }" == '@'* ]]; then
+        echo "kb-nudge: REFUSED TEXT_INVALID: an @-mention as the first or last word leaves file autocomplete open, so Enter would not submit" >&2; return 2
+    fi
+    text="$trimmed"
+    _kb_ensure_jq || return 3
+
+    # ── item in_progress in its release's active, open run ───────────────────
+    local board_file
+    [[ -z "$team" ]] && team=$(_kb_get_team_from_code "$item" 2>/dev/null)
+    board_file=$(_kb_get_board_file "$team" 2>/dev/null) || board_file=""
+    if [[ -z "$board_file" || ! -f "$board_file" ]]; then
+        echo "kb-nudge: REFUSED NOT_IN_RUN: cannot resolve the board for $item (pass --team)" >&2; return 3
+    fi
+    local info istat run active closed bteam
+    info=$(_kb_jq_read "$board_file" "${_KB_ITEM_STATUS_JQ_DEFS}"'
+        ([.backlog[]? | select(.id == $id)] | first) as $it
+        | (($it.orchestration // {}) | if type == "object" then (.runId // "") else "" end) as $run
+        | ([.releases[]? | select((.orchestration | type) == "object" and .orchestration.activeRunId == $run and $run != "")]
+           | first | .orchestration) as $o
+        | [($it | if . == null then "MISSING" else kb_resolve_item_status end), $run,
+           ($o.activeRunId // ""), (if $o.closedAt then "closed" else "open" end), (.team // "")] | join("\u001f")' \
+        --arg id "$item" -r 2>/dev/null) || info=""
+    IFS=$'\x1f' read -r istat run active closed bteam <<<"$info"
+    if [[ -z "$info" || "$istat" == MISSING ]]; then
+        echo "kb-nudge: REFUSED NOT_IN_RUN: $item is not on the board ($board_file)" >&2; return 3
+    fi
+    if [[ "$istat" != in_progress ]]; then
+        echo "kb-nudge: REFUSED NOT_IN_RUN: $item is ${istat:-?}, not in_progress" >&2; return 3
+    fi
+    if [[ -z "$run" ]] || ! _kb_orch_run_valid "$run"; then
+        echo "kb-nudge: REFUSED NOT_IN_RUN: $item carries no orchestration.runId (not an orchestrated worker)" >&2; return 3
+    fi
+    if [[ "$active" != "$run" || "$closed" != open ]]; then
+        echo "kb-nudge: REFUSED NOT_IN_RUN: $item's run $run is not its release's active, open run" >&2; return 3
+    fi
+
+    # ── the run's own dispatched pane ────────────────────────────────────────
+    local kd ledger disp sess term win
+    kd="$(dirname "$board_file")"
+    ledger="$kd/orchestration/${run}.jsonl"
+    if [[ ! -f "$ledger" ]]; then
+        echo "kb-nudge: REFUSED NO_PANE: no ledger for run $run" >&2; return 4
+    fi
+    disp=$(jq -R -r --arg id "$item" 'fromjson? | select(.kind == "dispatch" and .item == $id and .dispatch.outcome == "DISPATCHED")
+        | .dispatch | [(.session // ""), (.terminal // ""), (.window // "")] | join("\u001f")' "$ledger" 2>/dev/null | tail -1)
+    IFS=$'\x1f' read -r sess term win <<<"$disp"
+    [[ -z "$sess" && -n "$term" && -n "$bteam" ]] && sess="${bteam}-${term}"
+    [[ -z "$win" ]] && win="$item"
+    if [[ -z "$disp" || -z "$sess" ]]; then
+        echo "kb-nudge: REFUSED NO_PANE: run $run has no DISPATCHED event for $item" >&2; return 4
+    fi
+    if [[ "$win" != "$item" ]]; then
+        echo "kb-nudge: REFUSED NO_PANE: the dispatched window is '$win', not '$item'" >&2; return 4
+    fi
+    local rows p_sess p_win p_id p_cmd pane="" pane_cmd="" hits=0 sh
+    if ! rows=$(_kb_nudge_tmux list-panes -a -F '#{session_name}'$'\t''#{window_name}'$'\t''#{pane_id}'$'\t''#{pane_current_command}' 2>/dev/null); then
+        echo "kb-nudge: REFUSED NO_PANE: cannot list tmux panes" >&2; return 4
+    fi
+    while IFS=$'\t' read -r p_sess p_win p_id p_cmd; do
+        [[ "$p_sess" == "$sess" && "$p_win" == "$item" ]] || continue
+        hits=$((hits + 1)); pane="$p_id"; pane_cmd="$p_cmd"
+    done <<<"$rows"
+    if (( hits == 0 )); then
+        echo "kb-nudge: REFUSED NO_PANE: no window ${sess}:${item} (a crashed worker is ITEM_CRASHED, not a nudge)" >&2; return 4
+    fi
+    if (( hits > 1 )); then
+        echo "kb-nudge: REFUSED NO_PANE: ${sess}:${item} has ${hits} panes; refusing to guess which one is the worker" >&2; return 4
+    fi
+    for sh in "${_KB_ORCH_SHELLS[@]}"; do
+        if [[ "$pane_cmd" == "$sh" ]]; then
+            echo "kb-nudge: REFUSED NO_PANE: ${sess}:${item} ($pane) is at a shell; Claude is not running there" >&2; return 4
+        fi
+    done
+
+    # ── idle at the Claude prompt, empty input line, no dialog ──────────────
+    local screen why prc=0
+    if ! screen=$(_kb_nudge_tmux capture-pane -p -t "$pane" 2>/dev/null); then
+        echo "kb-nudge: REFUSED NO_PANE: cannot capture $pane" >&2; return 4
+    fi
+    why=$(_kb_nudge_pane_state "$screen") || prc=$?
+    if (( prc != 0 )); then
+        local -A label
+        label=(5 PANE_BUSY 6 PANE_DIALOG 7 INPUT_NOT_EMPTY)
+        echo "kb-nudge: REFUSED ${label[$prc]:-PANE_BUSY} (${why%%$'\t'*}): ${why#*$'\t'}" >&2
+        return "$prc"
+    fi
+
+    if (( dry )); then
+        echo "DRY-RUN OK: would nudge ${item} -> ${sess}:${item} (${pane}): ${text}"
+        return 0
+    fi
+
+    # ── audit first, then type ───────────────────────────────────────────────
+    local self actor
+    self=$(_kb_msg_self 2>/dev/null)
+    if [[ -n "${self%% *}" && "${self##* }" != agent ]]; then actor="${self%% *}:${self##* }"; else actor="user:${USER:-unknown}"; fi
+    if ! _kb_nudge_ledger "$kd" "$run" "$item" "$text" "$actor" "$pane"; then
+        echo "kb-nudge: REFUSED LEDGER_FAILED: ${_KB_NUDGE_LEDGER_ERR}; nothing was sent" >&2; return 8
+    fi
+    if ! { _kb_nudge_tmux send-keys -t "$pane" -l -- "$text" 2>/dev/null && _kb_nudge_tmux send-keys -t "$pane" Enter 2>/dev/null; }; then
+        echo "kb-nudge: SEND_FAILED: the nudge is in the ledger but tmux send-keys to $pane failed (keys may be partly delivered)" >&2
+        return 9
+    fi
+    echo "NUDGED: ${item} -> ${sess}:${item} (${pane}) by ${actor}"
+    return 0
 }
 
 # Work on a task without creating a worktree - for when you're already in the right place
@@ -33903,7 +34215,8 @@ _kb_release_orch_prompt_rules() {
     r+="| QUESTION_PENDING (11) | Run \`kb-ask list\`. If the plan docs or release context answer it, reply with \`kb-answer <thread-id-prefix or ITEM-ID> \"<answer>\"\`. If it is a decision that belongs to the user (scope, risk, spend, a stage promote, anything irreversible), ask the user with AskUserQuestion, then relay their answer with \`kb-answer\`. Never guess a user-owned decision. |\n"
     r+="| QUESTION_PENDING (11), detail says \`channel=kb-msg\` | A worker wrote to you by \`kb-msg\`, not kb-ask, so \`kb-answer\` does not apply (XACA-1864). Read it with \`kb-msg read <msg id from the detail>\` (that marks it read and clears the verdict). If it asks for something, answer with \`kb-msg reply <msg id> \"<answer>\"\` (same user-owned-decision rule as above); a milestone ping needs only the read. Then start the monitor again. |\n"
     r+="| SLOT_FREE (10) | FIRST run \`kb-msg inbox --all\` and obey any freeze or hold order (dispatch nothing while one is in force; say so). Then dispatch the item the verdict names: \`kb-dispatch <ITEM> --terminal <T> --run ${run} --coordinator <your team:terminal above>\` (add the model flag from the settings above when it names one). The terminal is the one shown for that item in the plan or by \`kb-release plan-run ${rel}\`; never choose your own terminal. Never exceed the max-parallel cap. Check the dispatch result and report a REFUSED or DISPATCH_FAILED outcome to the user. |\n"
-    r+="| ITEM_STALLED (12) | Read the worker's pane tail (\`tmux capture-pane -p -t <session>:<ITEM> -S -40\`), ping it with \`kb-msg send\`, and tell the user if it is still stalled after the next verdict. Do not type into its pane. |\n"
+    r+="| ITEM_STALLED (12) | Read the worker's pane tail (\`tmux capture-pane -p -t <session>:<ITEM> -S -40\`). Never type into its pane except through \`kb-nudge <ITEM> \"<one line>\"\`: it is the only wake channel (\`kb-msg\` never wakes an idle worker), it refuses a busy pane, an open dialog or a non-empty input line, and it ledgers every nudge. Tell the user if it is still stalled after the next verdict. |\n"
+    r+="| GATE_STALE (18) | A lane PR has a gate whose latest review is on an older commit, and nobody has reviewed HEAD within the window (S7). Read the worker's pane tail. If it is not already relaunching that gate, \`kb-nudge <ITEM> \"<gate> is stale on HEAD <sha8>: run <relaunch command from the detail>\"\`. Never launch gates or merge for it. Tell the user if the same detail fires again after the next window. |\n"
     r+="| ITEM_CRASHED (13) | Show the user the XACA-1547 remedy in the verdict detail (\`kb-dispatch <ITEM> --terminal <T> --run ${run} --resume\`) and run it only if they agree. |\n"
     r+="| ITEM_FAILED (14) | Report to the user: the PR closed unmerged or the worker's \`kb-pr-monitor\` ended in a terminal verdict. Do not retry it yourself. |\n"
     r+="| DISPATCH_FAILED (15) | Report to the user with the detail (window, reason, pane tail). Do not re-dispatch the same item until they decide. |\n"
@@ -33922,7 +34235,7 @@ _kb_release_orch_prompt_rules() {
     fi
     r+="### Never\n"
     r+="- Never read diffs, PR files, CI logs or test output yourself: ask the worker with \`kb-msg\` and keep only its answer. Your context must stay small for the whole run.\n"
-    r+="- Never merge a PR, run \`kb-done\`, cancel a protected [Review]/[Test]/[UX] subitem, or edit anything inside a worker's worktree or pane. Workers own their tickets through merge.\n"
+    r+="- Never merge a PR, run \`kb-done\`, cancel a protected [Review]/[Test]/[UX] subitem, or edit anything inside a worker's worktree or pane (the one sanctioned pane input is \`kb-nudge\`). Workers own their tickets through merge.\n"
     r+="- Never promote past DEV: DEV->QA is the lead's deliberate call (the Release session rules below still apply).\n"
     r+="- Never dispatch into your own terminal, never exceed the cap, never ignore a freeze order, and never edit board or release JSON.\n"
     r+="- Never call \`close_run\` (or any release_orchestrator function) by hand: abandon a run only with \`kb-release handoff ${rel} --cancel --reason \"<why>\"\`, on the user's decision.\n"
