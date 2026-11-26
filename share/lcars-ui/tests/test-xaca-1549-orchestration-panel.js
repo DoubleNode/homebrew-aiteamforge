@@ -346,6 +346,8 @@ const KIND_CASES = {
     verdict: [{ item: 'XACA-7', verdict: 'ITEM_FAILED', signature: 'sig', detail: 'PR #9 closed' }, ['verdict=ITEM_FAILED', 'item=XACA-7', 'detail=PR #9 closed']],
     run_end: [{ outcome: 'complete', detail: 'all merged' }, ['outcome=complete', 'detail=all merged']],
     lane: [{ item: 'XACA-7', lane: 'lane-2', action: 'assign' }, ['item=XACA-7', 'lane=lane-2', 'action=assign']],
+    // XACA-1873 Wave 0 planning lane end: reason rides the generic tail
+    plan_lane: [{ item: 'XACA-7', action: 'failed', reason: 'no access' }, ['item=XACA-7', 'action=failed', 'reason=no access']],
     // orchestrator_monitor MODEL_MISMATCH: fields {item, expected, observed (list)} + the ledger's own signature
     model_mismatch: [{ item: 'XACA-7', expected: 'claude-fable-5-2', observed: ['claude-a', 'claude-b'], signature: 'sig' }, ['item=XACA-7', 'expected=claude-fable-5-2', 'observed=claude-a, claude-b']],
     // TOKEN_BUDGET: {scope, item, used, limit}; flagged in text

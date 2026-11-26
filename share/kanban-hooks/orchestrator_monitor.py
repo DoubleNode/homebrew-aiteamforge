@@ -1,6 +1,6 @@
 """XACA-1546-003: the release orchestrator monitor (EPIC-0072). Logic behind `scripts/kb-release-orchestrate`.
 
-Stdlib only, py3.9-safe. dev-team-only: kanban-hooks/*.py is not mirrored to the tap (like `kb-release plan-run`).
+Stdlib only, py3.9-safe. kanban-hooks/*.py is mirrored to the tap by sync-tap.sh's glob.
 
 SYNOPSIS
   kb-release-orchestrate watch  <REL-ID> [--run RUN] [--once] [--interval S=30] [--timeout S=3600] [--repeat-after S=1800]
@@ -64,6 +64,15 @@ EXIT CODES / VERDICTS (stdout's LAST line is ALWAYS `VERDICT: <NAME> run=<RUN|->
                         commit's date only when a bot is stale (ctx.commit_time). Either read failing is a warning and NO
                         verdict, never a crash and never a false GATE_STALE. watch only: status / resume never read reviews.
   31  TIMEOUT           watch: --timeout elapsed with nothing actionable
+   0  WAVE0_DONE        (XACA-1873, a Wave 0 run only) every planning lane is terminal (DONE / INCOMPLETE / FAILED /
+                        CANCELLED); the run is closed with close_run outcome=wave0. Shares 0 with ALL_DONE: read the NAME.
+
+WAVE 0 (XACA-1873). A run whose summary has `phase: "wave0"` is a planning run: watch / status / resume derive each lane with
+orchestrator_wave0.derive_lane (ledger plan_lane events + board stamp + window row + tmux; NO gh call) instead of
+orchestrator_state, and reuse SLOT_FREE (the next QUEUED row takes a freed lane), QUESTION_PENDING, ITEM_STALLED,
+ITEM_CRASHED (the offer is `kb-dispatch <ID> --plan ...`; a crashed lane keeps its lane) and DISPATCH_FAILED. ALL_DONE never
+fires for it; WAVE0_DONE does. A lane that ends INCOMPLETE / FAILED raises no verdict of its own: it frees its lane, and the
+re-plan after WAVE0_DONE refuses its ticket.
 
 RESUME (XACA-1547; a coordinator that starts on a release with an active run calls this BEFORE anything else)
    0  RESUMED           rehydrated from the ledger, reconciled (the same derive-and-record step as a watch poll), optionally
@@ -153,6 +162,7 @@ if _HERE not in sys.path:
 
 import orchestrator_state as ostate  # noqa: E402
 import orchestrator_tokens as otok  # noqa: E402
+import orchestrator_wave0 as ow0  # noqa: E402
 import release_orchestrator as ro  # noqa: E402
 
 DEFAULT_REPO_ROOT = os.path.dirname(_HERE)
@@ -166,10 +176,10 @@ TELEMETRY_VERDICTS = ("MODEL_MISMATCH", "TOKEN_BUDGET")   # warn-only; never blo
 EXIT = {
     "ALL_DONE": 0, "HELP": 0, "STATUS": 0, "RESUMED": 0, "USAGE": 2, "PENDING": 3, "NO_ACTIVE_RUN": 4,
     "SLOT_FREE": 10, "QUESTION_PENDING": 11, "ITEM_STALLED": 12, "ITEM_CRASHED": 13, "ITEM_FAILED": 14,
-    "DISPATCH_FAILED": 15, "TOKEN_BUDGET": 16, "MODEL_MISMATCH": 17, "GATE_STALE": 18, "TIMEOUT": 31,
+    "DISPATCH_FAILED": 15, "TOKEN_BUDGET": 16, "MODEL_MISMATCH": 17, "GATE_STALE": 18, "TIMEOUT": 31, "WAVE0_DONE": 0,
 }
 PRIORITY = ("QUESTION_PENDING", "ITEM_CRASHED", "ITEM_FAILED", "DISPATCH_FAILED", "ITEM_STALLED", "GATE_STALE",
-            "MODEL_MISMATCH", "TOKEN_BUDGET", "SLOT_FREE", "ALL_DONE")
+            "MODEL_MISMATCH", "TOKEN_BUDGET", "SLOT_FREE", "ALL_DONE", "WAVE0_DONE")
 # XACA-1880-003: the two gate bots, by EXACT login (both are user.type "Bot": a type filter would let one gate's review
 # satisfy the other). (role, login, relaunch command)
 GATE_BOTS = (("tester", "ds9-tester-bot[bot]", "kb-run-test"), ("reviewer", "ai-security-review-bot[bot]", "kb-run-review"))
@@ -665,7 +675,7 @@ def gather(ctx, rel, board, board_file, run, orch, events):
         session = "%s-%s" % (team, term) if (team and term) else None
         panes[iid] = pane_for(pane_rows, session, iid) if session else (None if pane_rows is None else ostate.PANE_GONE)
         status = ostate.resolve_item_status(it) if it else None
-        if it is None or status in ("completed", "cancelled"):
+        if it is None or status in ("completed", "cancelled") or ow0.is_wave0(orch):   # XACA-1873: a plan lane has no PR
             prs[iid] = None
         else:
             if not repo and repo_err is None:
@@ -909,7 +919,7 @@ def build_conditions(orch, states, g, events, th):
         elif st == "CRASHED":
             # XACA-1547-003: the detail carries the re-dispatch offer; the signature keeps keying on the derived detail only.
             add("ITEM_CRASHED", iid, res["detail"], "%s: %s; %s" % (
-                iid, res["detail"], crash_offer(iid, (g.get("terminals") or {}).get(iid), g.get("run"))))
+                iid, res["detail"], crash_offer(iid, (g.get("terminals") or {}).get(iid), g.get("run"), ow0.is_wave0(orch))))
         elif st == "FAILED":
             add("ITEM_FAILED", iid, "pr=%s:%s:%s" % (sig.get("pr_number"), sig.get("pr_state"), res["detail"]),
                 "%s: %s" % (iid, res["detail"]))
@@ -1084,9 +1094,10 @@ def token_step(ctx, board_file, kdir, board, run, orch, events, g, changes, read
 def send_token_summary(ctx, kdir, orch, run, rep, lines):
     """Append the ledger `token_summary` and tell the lead. A kb-msg failure is warned about and changes nothing else."""
     t = rep["tokens"]
+    phase = {"phase": orch["phase"]} if orch.get("phase") else {}     # XACA-1873: a Wave 0 run's summary is tagged
     ro.ledger_append(kdir, run, ro.KIND_TOKEN_SUMMARY, now=ctx.clock(), totals=t["run"], total=otok.total_of(t["run"]),
                      coordinator=t["coordinator"], complete=t["complete"], unattributed=t["unattributed"],
-                     modelMismatch=len(t["modelMismatch"]), items=len(t["perItem"]))
+                     modelMismatch=len(t["modelMismatch"]), items=len(t["perItem"]), **phase)
     lead = orch.get("lead") or orch.get("coordinator")
     if isinstance(lead, dict):          # kanban-helpers.sh accepts the coordinator as "team:terminal" or {address}
         lead = lead.get("address")
@@ -1158,7 +1169,7 @@ def poll(ctx, once=False, read_only=False):
         return Result("USAGE", ctx.run, None, "ledger/summary write refused: %s" % exc)
 
 
-def _sync_lanes(ctx, board_file, kdir, run, orch, states, now, lines):
+def _sync_lanes(ctx, board_file, kdir, run, orch, states, now, lines, wave0=False):
     """LEVEL-TRIGGERED lane sync (PR #1343 review): every in-flight item (state neither QUEUED nor DONE/CANCELLED) that
     holds no lane gets the lowest free one via assign_lane, so lanes[] - which ticket-lamp shows and kb-dispatch's
     LANES_FULL counts - reflects reality even when nothing called assign_lane at dispatch time. Items are taken in plan
@@ -1167,6 +1178,7 @@ def _sync_lanes(ctx, board_file, kdir, run, orch, states, now, lines):
     worker) has its lane nulled via free_lane. record_state frees on the QUEUED edge, but a summary that already says QUEUED
     sees no transition again, and a held lane both fills kb-dispatch's cap and hides the item from SLOT_FREE (rule 3b).
     This sync is the only assigner and assigns only non-QUEUED items, so a QUEUED occupant is always stale.
+    wave0 (XACA-1873): a terminal planning lane (orchestrator_wave0.TERMINAL) is freed too, and never assigned.
     Returns True iff a lane was assigned or freed."""
     laned = set()
     changed = False
@@ -1175,9 +1187,13 @@ def _sync_lanes(ctx, board_file, kdir, run, orch, states, now, lines):
         cid = cur.get("id") if isinstance(cur, dict) else cur
         if not (isinstance(cid, str) and cid):
             continue
+        st = (states.get(cid) or {}).get("state")
+        free = wave0 and st in ow0.TERMINAL    # a finished planning lane
         if (states.get(cid) or {}).get("state") == "QUEUED":
+            free = True
+        if free:
             try:
-                n = ro.free_lane(board_file, kdir, ctx.release_id, run, cid, now=now, require_unclaimed=True)
+                n = ro.free_lane(board_file, kdir, ctx.release_id, run, cid, now=now, require_unclaimed=st == "QUEUED")
             except ro.LedgerError as exc:
                 lines.append("lane sync: cannot free %s (%s)" % (cid, exc))
                 laned.add(cid)
@@ -1185,7 +1201,7 @@ def _sync_lanes(ctx, board_file, kdir, run, orch, states, now, lines):
             if n is None:                   # claimed under the lock since the snapshot (XACA-1862-014): keep it
                 laned.add(cid)
                 continue
-            lines.append("lane sync: %s is QUEUED, lane %s freed" % (cid, n))
+            lines.append("lane sync: %s is %s, lane %s freed" % (cid, st, n))
             changed = True
             continue
         laned.add(cid)
@@ -1193,7 +1209,7 @@ def _sync_lanes(ctx, board_file, kdir, run, orch, states, now, lines):
     order += sorted(i for i in states if i not in order)
     for iid in order:
         st = (states.get(iid) or {}).get("state")
-        if iid in laned or st in ostate.TERMINAL_STATES or st in (None, "QUEUED"):
+        if iid in laned or st in ostate.TERMINAL_STATES or st in (None, "QUEUED") or (wave0 and st in ow0.TERMINAL):
             continue
         try:
             n = ro.assign_lane(board_file, kdir, ctx.release_id, run, iid, now=now)
@@ -1205,6 +1221,18 @@ def _sync_lanes(ctx, board_file, kdir, run, orch, states, now, lines):
     return changed
 
 
+def derive(ctx, orch, run, g, events, board, kdir):
+    """Every tracked item's derived state: orchestrator_wave0 lanes for a Wave 0 run, else orchestrator_state."""
+    if ow0.is_wave0(orch):
+        return ow0.derive_states(orch, run, g, events, lambda iid: ow0.remaining_gaps(
+            g["items"].get(iid) or {"id": iid}, board, kdir, ctx.repo_root))
+    states = ostate.derive_states(g["items"], g["windows"], g["panes"], g["prs"], g["now"], g["thresholds"])
+    for iid in orch["items"]:                 # a tracked item missing from the backlog is UNKNOWN, never silently absent
+        if iid not in states:
+            states[iid] = ostate.derive_item_state(None, None, None, None, g["now"], g["thresholds"])
+    return states
+
+
 def reconcile(ctx, read_only):
     """The level-triggered half every poll AND `resume` share (XACA-1547-002): read summary + ledger (fail closed), gather
     the live inputs, derive every tracked item's state, record each one that differs from the summary (ledger `state` event +
@@ -1213,13 +1241,11 @@ def reconcile(ctx, read_only):
     board_file, kdir, board, rel, run, orch = _summary_after(ctx)
     events = read_ledger(ctx, kdir, run)
     g = gather(ctx, rel, board, board_file, run, orch, events)
-    states = ostate.derive_states(g["items"], g["windows"], g["panes"], g["prs"], g["now"], g["thresholds"])
-    for iid in orch["items"]:                 # a tracked item missing from the backlog is UNKNOWN, never silently absent
-        if iid not in states:
-            states[iid] = ostate.derive_item_state(None, None, None, None, g["now"], g["thresholds"])
+    wave0 = ow0.is_wave0(orch)
+    states = derive(ctx, orch, run, g, events, board, kdir)
     lines, changes = [], []
     for iid, srow in sorted(orch["items"].items()):
-        cur = states[iid]["state"]
+        cur = ow0.summary_state(states[iid]["state"])
         if (srow or {}).get("state") != cur:
             changes.append((iid, (srow or {}).get("state"), cur))
     if changes and not read_only:
@@ -1231,7 +1257,7 @@ def reconcile(ctx, read_only):
                             now=g["now"], **extra)
             lines.append("transition %s: %s -> %s (%s)" % (iid, old, new, states[iid]["detail"]))
         board_file, kdir, board, rel, run, orch = _summary_after(ctx)     # re-read: since/lanes are now current
-    if not read_only and _sync_lanes(ctx, board_file, kdir, run, orch, states, g["now"], lines):
+    if not read_only and _sync_lanes(ctx, board_file, kdir, run, orch, states, g["now"], lines, wave0):
         board_file, kdir, board, rel, run, orch = _summary_after(ctx)
     return {"board_file": board_file, "kdir": kdir, "board": board, "rel": rel, "run": run, "orch": orch, "events": events,
             "g": g, "states": states, "lines": lines, "changes": changes}
@@ -1243,7 +1269,12 @@ def _poll(ctx, once, read_only):
     g, states, lines, changes = r["g"], r["states"], r["lines"], r["changes"]
     lines.extend(lane_lines(orch))
     th = g["thresholds"]
-    gather_gates(ctx, g, states)         # XACA-1880-003: watch polls only (status / resume never pay the reviews calls)
+    wave0 = ow0.is_wave0(orch)
+    lane_states = states
+    if wave0:   # XACA-1873: verdicts and slots see a terminal planning lane as DONE; no PR, so no gate scan
+        states = {i: dict(r, state=ow0.base_state(r["state"])) for i, r in lane_states.items()}
+    else:
+        gather_gates(ctx, g, states)     # XACA-1880-003: watch polls only (status / resume never pay the reviews calls)
     conds = build_conditions(orch, states, g, events, th)
     if ctx.tokens_interval is not None:
         tokens, budgets = token_step(ctx, board_file, kdir, board, run, orch, events, g, changes, read_only)
@@ -1259,17 +1290,25 @@ def _poll(ctx, once, read_only):
     if slot:
         conds.append(slot)
     done = all(r["state"] in ostate.TERMINAL_STATES for r in states.values())
-    if done:
+    if done and wave0:
+        conds = [c for c in conds if c["verdict"] not in TELEMETRY_VERDICTS]
+        counts = {}
+        for r in lane_states.values():
+            counts[r["state"]] = counts.get(r["state"], 0) + 1
+        conds.append({"verdict": "WAVE0_DONE", "item": "-", "wave": 0, "signature": "WAVE0_DONE|-|-",
+                      "detail": "all %d planning lane(s) ended: %s; re-plan the release" % (
+                          len(lane_states), " ".join("%s=%d" % kv for kv in sorted(counts.items())))})
+    elif done:
         # XACA-1808-008: every item is terminal, so a warn-only telemetry condition has nothing left to pause or re-dispatch. It
         # was already ledgered above (and is counted in the token_summary); it must not outrank ALL_DONE, which `--once` (never
         # suppressed) would otherwise mask forever, so the run would never close and the lead would never get the summary.
         conds = [c for c in conds if c["verdict"] not in TELEMETRY_VERDICTS]
         conds.append({"verdict": "ALL_DONE", "item": "-", "wave": 0, "signature": "ALL_DONE|-|-",
                       "detail": "all %d tracked item(s) are DONE or CANCELLED" % len(states)})
-    extra = {"states": states, "slot": slot_res, "changes": changes}
+    extra = {"states": lane_states, "slot": slot_res, "changes": changes}
     # XACA-1808-014: --once never suppresses EXCEPT the two warn-only verdicts, which are delivered once per signature per
     # repeat window even under --once (a permanent MODEL_MISMATCH would otherwise outrank SLOT_FREE forever).
-    live = [c for c in conds if c["verdict"] == "ALL_DONE"
+    live = [c for c in conds if c["verdict"] in ("ALL_DONE", "WAVE0_DONE")
             or (once and c["verdict"] not in TELEMETRY_VERDICTS)
             or not suppressed(c, events, g["now"], ctx.repeat_after)]
     top = pick(live)
@@ -1285,23 +1324,28 @@ def _poll(ctx, once, read_only):
     if not read_only:
         ro.ledger_append(kdir, run, ro.KIND_VERDICT, now=g["now"], item=top["item"], verdict=top["verdict"],
                          signature=top["signature"], detail=top["detail"])
-        if top["verdict"] == "ALL_DONE":
+        if top["verdict"] in ("ALL_DONE", "WAVE0_DONE"):
             if ctx.tokens_interval is not None:
                 try:
                     final = refresh_tokens(ctx, board, orch, events, run, kdir, g["now"], True, board_file)
                     send_token_summary(ctx, kdir, orch, run, final, lines)
                 except (ro.LedgerError, OSError, ValueError, KeyError, TypeError) as exc:
                     ctx.warn("final token summary failed: %s" % one_line(exc))
-            ro.close_run(board_file, kdir, ctx.release_id, run, outcome="complete", detail=top["detail"], now=g["now"])
-            lines.append("run %s closed (complete)" % run)
+            outcome = "wave0" if wave0 else "complete"
+            ro.close_run(board_file, kdir, ctx.release_id, run, outcome=outcome, detail=top["detail"], now=g["now"])
+            lines.append("run %s closed (%s)" % (run, outcome))
     return Result(top["verdict"], run, top["item"], top["detail"], lines, extra)
 
 
 # ------------------------------------------------------------------ resume (XACA-1547)
-def crash_offer(item, terminal, run):
+def crash_offer(item, terminal, run, plan=False):
     """The ITEM_CRASHED / resume offer: relaunch the worker in place. `kb-dispatch --resume` keeps the item's worktree, branch
     and dispatch stamp (it never re-stamps a todo item), refuses while a live worker still holds the window, and keeps the
-    crashed window (renamed) for inspection. The alternative is the lead's call (cancel / re-plan)."""
+    crashed window (renamed) for inspection. The alternative is the lead's call (cancel / re-plan). plan (XACA-1873): a
+    Wave 0 lane is re-dispatched with --plan, which refuses a live window and a lane that already reported done."""
+    if plan:
+        return ("offer: ask the user, then re-dispatch the planning lane with `kb-dispatch %s --plan --terminal %s --run %s`, "
+                "or leave it refused" % (item, terminal or "<terminal>", run or "<RUN-ID>"))
     return ("offer: re-dispatch in place with `kb-dispatch %s --terminal %s --run %s --resume` "
             "(keeps worktree + stamp), or ask the lead to cancel/re-plan" % (item, terminal or "<terminal>", run or "<RUN-ID>"))
 
@@ -1312,6 +1356,7 @@ RESUME_ACTION = {
     "DONE": "closed", "CANCELLED": "closed", "QUEUED": "queued", "CRASHED": "crashed", "FAILED": "failed",
     "UNKNOWN": "unknown", "DISPATCHING": "live", "RUNNING": "live", "IN_REVIEW": "live", "QUESTION_PENDING": "live",
     "STALLED": "live", "MERGED_PENDING_DONE": "live",     # merged, kb-done still owed: the worker closes it, never re-run
+    "INCOMPLETE": "failed",                                # XACA-1873: a Wave 0 lane that ended with gaps open
 }
 RESUME_REDISPATCH = {"queued": "dispatch", "crashed": "resume"}     # every other action: "never"
 
@@ -1348,7 +1393,8 @@ def resume(ctx, coordinator=None, dry_run=False):
                 lines.append("re-attached: coordinator %s -> %s%s" % (
                     reattached["previous"], coordinator,
                     "; item stamps rewritten: %s" % ", ".join(reattached["items"]) if reattached["items"] else ""))
-        slot, slot_res = slot_condition(orch, states, _max_parallel(orch))
+        slot, slot_res = slot_condition(orch, {i: dict(r, state=ow0.base_state(r["state"])) if ow0.is_wave0(orch) else r
+                                               for i, r in states.items()}, _max_parallel(orch))
     except UsageError as exc:
         return Result("USAGE", ctx.run, None, str(exc))
     except ValueError as exc:
@@ -1367,7 +1413,7 @@ def resume(ctx, coordinator=None, dry_run=False):
                "pendingQuestion": ({"threadId": pq.get("threadId"), "coordinator": pq.get("coordinator")}
                                    if isinstance(pq, dict) and pq else None)}
         if action == "crashed":
-            row["offer"] = crash_offer(iid, row["terminal"], run)
+            row["offer"] = crash_offer(iid, row["terminal"], run, ow0.is_wave0(orch))
         items[iid] = row
         counts[action] = counts.get(action, 0) + 1
     # Defence in depth for requirement 9: only a QUEUED item may ever be offered as new work.
@@ -1442,10 +1488,7 @@ def status(ctx, with_tokens=False):
         except ro.LedgerError as exc:
             events, ledger_error = [], str(exc)
         g = gather(ctx, rel, board, board_file, run, orch, events)
-        states = ostate.derive_states(g["items"], g["windows"], g["panes"], g["prs"], g["now"], g["thresholds"])
-        for iid in orch["items"]:
-            if iid not in states:
-                states[iid] = ostate.derive_item_state(None, None, None, None, g["now"], g["thresholds"])
+        states = derive(ctx, orch, run, g, events, board, kdir)
     except UsageError as exc:
         return Result("USAGE", ctx.run, None, str(exc)), None
     except ValueError as exc:
@@ -1458,7 +1501,8 @@ def status(ctx, with_tokens=False):
         items[iid] = {"wave": waves.get(iid), "terminal": g["terminals"].get(iid), "summaryState": srow.get("state"),
                       "derivedState": states[iid]["state"], "detail": states[iid]["detail"], "since": srow.get("since"),
                       "pr": pr, "pane": g["panes"].get(iid)}
-    view = {"run": run, "release": ctx.release_id, "startedAt": orch.get("startedAt"), "closedAt": orch.get("closedAt"),
+    view = {"run": run, "release": ctx.release_id, "phase": orch.get("phase"), "startedAt": orch.get("startedAt"),
+            "closedAt": orch.get("closedAt"),
             "coordinator": orch.get("coordinator"), "maxParallel": orch.get("maxParallel"), "waves": orch.get("waves"),
             "items": items, "lanes": ro.lanes_view(orch), "contentionStored": isinstance(orch.get("contention"), list),
             "thresholds": {"values": g["thresholds"], "sources": g["sources"]}, "now": ro._ts(g["now"]),
@@ -1470,7 +1514,7 @@ def status(ctx, with_tokens=False):
                                               worktrees_root=ctx.worktrees_root)
         except (OSError, ValueError, KeyError, TypeError) as exc:
             view["tokens"] = {"error": one_line(exc)}
-    n = sum(1 for v in items.values() if v["summaryState"] != v["derivedState"])
+    n = sum(1 for v in items.values() if v["summaryState"] != ow0.summary_state(v["derivedState"]))
     return Result("STATUS", run, None, "%d item(s), %d differ from the summary" % (len(items), n)), view
 
 

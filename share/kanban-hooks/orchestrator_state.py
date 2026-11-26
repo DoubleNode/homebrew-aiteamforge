@@ -267,7 +267,8 @@ def derive_item_state(item, window_row, pane_command, pr, now, thresholds):
         return _res("QUESTION_PENDING", detail, since, signals)
 
     orch = item.get("orchestration")
-    orchestrated = isinstance(orch, dict) and bool(orch.get("runId"))
+    # XACA-1873: a Wave 0 planning stamp (phase "wave0") leaves the item todo; it is not an execution dispatch.
+    orchestrated = isinstance(orch, dict) and bool(orch.get("runId")) and orch.get("phase") != "wave0"
 
     if kind == "open":
         # The worker drives its own gates and kb-pr-monitor through merge (EPIC-0072 2026-11-09 autonomy

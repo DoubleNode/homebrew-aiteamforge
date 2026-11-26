@@ -385,6 +385,11 @@ KIND_MODEL_MISMATCH, KIND_TOKEN_BUDGET, KIND_TOKEN_SUMMARY = "model_mismatch", "
 # XACA-1880-005 kb-nudge: one sanctioned, audited one-line user turn typed into a worker's own idle pane {item, text, actor,
 # pane}. Written BEFORE the keys are sent (an unaudited nudge cannot happen); refusals are not ledgered.
 KIND_NUDGE = "nudge"
+# XACA-1873 Wave 0: a planning lane ended {item, action: done | failed, reason?}, written by kb-orch-plan-done. Positive
+# evidence only: orchestrator_wave0 re-checks readiness, so a `done` with gaps still open derives INCOMPLETE.
+KIND_PLAN_LANE = "plan_lane"
+PLAN_LANE_ACTIONS = ("done", "failed")
+PHASE_WAVE0 = "wave0"
 # kind -> fields that must be present (fail closed: an event the summariser cannot attribute is refused at write time).
 LEDGER_KINDS = {
     KIND_RUN_START: (), KIND_DISPATCH: ("item", "dispatch"), KIND_STATE: ("item", "from", "to"),
@@ -393,6 +398,7 @@ LEDGER_KINDS = {
     KIND_LANE: ("item", "lane", "action"),
     KIND_MODEL_MISMATCH: ("item",), KIND_TOKEN_BUDGET: (), KIND_TOKEN_SUMMARY: (),
     KIND_NUDGE: ("item", "text", "actor", "pane"),
+    KIND_PLAN_LANE: ("item", "action"),
 }
 _RESERVED_FIELDS = ("ts", "run", "kind")
 
@@ -474,6 +480,8 @@ def _check_event(kind, fields):
         raise LedgerError("%s event is missing required field(s): %s" % (kind, ", ".join(missing)))
     if kind == KIND_DISPATCH and not isinstance(fields["dispatch"], dict):
         raise LedgerError("dispatch event: `dispatch` must be the kb-dispatch --json object")
+    if kind == KIND_PLAN_LANE and fields["action"] not in PLAN_LANE_ACTIONS:
+        raise LedgerError("plan_lane event: action must be one of %s" % ", ".join(PLAN_LANE_ACTIONS))
 
 
 def ledger_append(kanban_dir, run_id, kind, now=None, **fields):
@@ -610,12 +618,25 @@ def _plan_waves(plan_):
     return waves, terminals
 
 
-def start_run(board_file, kanban_dir, release_id, plan_, coordinator, max_parallel, now=None):
+def start_run(board_file, kanban_dir, release_id, plan_, coordinator, max_parallel, now=None, phase=None,
+              wave0_run_id=None):
     """Mint a run id, append run_start, write the summary; returns the run id. REFUSES (LedgerError) when the release
     already has an activeRunId that is not closed: no silent double run. The check, the run_start append and the summary
     write all happen under the board lock, so two racing starts cannot both win. Failure modes: if the ledger append fails
     nothing is written to the board; if the board write fails AFTER the append, an orphan ledger holding only run_start is
-    left behind (harmless: no summary references it)."""
+    left behind (harmless: no summary references it).
+
+    XACA-1873: phase="wave0" starts a Wave 0 (planning) run from plan_["wave0"] rows: ONE wave in row order, summary
+    `phase: "wave0"`, items carrying their gaps / mode, contention [] (planning lanes never conflict). Any other run drops
+    a previous run's `phase`, and records wave0_run_id (the Wave 0 run that planned it) as `wave0RunId`, else drops it."""
+    if phase not in (None, PHASE_WAVE0):
+        raise LedgerError("unknown run phase %r" % (phase,))
+    rows = {}
+    if phase == PHASE_WAVE0:
+        rows = {r["id"]: r for r in plan_.get("wave0") or [] if isinstance(r, dict) and r.get("id")}
+        if not rows:
+            raise LedgerError("a wave0 run needs plan wave0 rows: nothing to plan")
+        plan_ = {"waves": [{"wave": 1, "items": list(rows.values())}], "contention": []}
     waves, terminals = _plan_waves(plan_)
     run_id = mint_run_id(release_id, now)
     started = _ts(now)
@@ -640,6 +661,13 @@ def start_run(board_file, kanban_dir, release_id, plan_, coordinator, max_parall
                      "lanes": _init_lanes(orch.get("lanes"), waves, max_parallel, started),
                      "items": {iid: {"terminal": terminals.get(iid), "state": "QUEUED", "since": started}
                                for w in waves for iid in w}})
+        for k, v in (("phase", phase), ("wave0RunId", wave0_run_id)):
+            if v:
+                orch[k] = v
+            else:
+                orch.pop(k, None)
+        for iid, r in rows.items():
+            orch["items"][iid].update({"kind": WAVE0_KIND, "gaps": list(r.get("gaps") or []), "mode": r.get("mode")})
 
     write_summary(board_file, release_id, _mut)
     return run_id

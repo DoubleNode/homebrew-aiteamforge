@@ -2,7 +2,7 @@
 
 Per-ticket / per-lane / coordinator / run token usage, the observed model, model-mismatch proof and optional budgets for an
 orchestrated run, built on kb-token-report's DEDUPLICATED transcript scan (scripts/token_scan.py, imported, never
-re-implemented). Stdlib only, py3.9-safe. dev-team-only (kanban-hooks/*.py is not mirrored to the tap).
+re-implemented). Stdlib only, py3.9-safe. kanban-hooks/*.py is mirrored to the tap by sync-tap.sh's glob.
 
 Pure functions (no I/O, no clock) are separated from the I/O ones at the bottom (`collect_run`, `collect_item`, `ScanCache`).
 Every number is a COUNT of the transcript's own usage data; nothing is estimated.
@@ -13,6 +13,9 @@ ATTRIBUTION (002). A transcript file is `<projects>/<encoded-cwd>/<sessionId>.js
                FIRST timestamped record is >= item.orchestration.dispatchedAt (equal counts; one second earlier does not).
                dispatchedAt here is the EARLIEST of the board value and this run's DISPATCHED ledger `dispatch` events (a same-run
                re-dispatch overwrites the board value; XACA-1808-016).
+  planner      (XACA-1873, a Wave 0 run: summary phase "wave0") the session's cwd is the lane's planning dir
+               `<kanban_dir>/plans/<ID>/` (or under it) AND its first record is >= item.orchestration.dispatchedAt (the
+               same time rule as a worker). Counted per item like a worker.
   coordinator  the session's cwd is the release worktree AND its first record is >= the ledger run_start `ts`.
   unattributed it touches a run worktree but fails a rule above. ALWAYS reported with a reason, never dropped.
 WORKTREE RULE (reported per item as `worktreeRules`): item.worktree from the board ("board": cwd == that path, or under it,
@@ -59,7 +62,10 @@ DATA CONTRACT (006), written to release.orchestration.tokens under the board loc
   {"run": B, "perItem": {<ID>: B}, "coordinator": B, "updatedAt": ISO,
    "complete": bool, "unattributed": int, "modelMismatch": [{"item", "expected", "observed": [...]}]}
   B = {"model", "input", "cacheCreate", "cacheRead", "output", "turns"}   (model: "a,b" sorted observed ids, or null)
-`complete`, `unattributed` (a count) and `modelMismatch` are the ONLY keys beyond the four spec'd ones. Pinned by
+`complete`, `unattributed` (a count) and `modelMismatch` are the ONLY keys beyond the four spec'd ones. WAVE 0 (XACA-1873):
+the full report (not the board block) carries `phase` for a Wave 0 run, and an execution run whose summary has `wave0RunId`
+carries a separate `wave0` block: that run's latest ledger `token_summary` {run, phase, total, totals, complete, ...}, or
+{run, error}. It is never added to this run's totals. Pinned by
 tests/fixtures/xaca-1808/orchestration-tokens.contract.json; XACA-1786 / XACA-1549 render it. Lane / cacheReadShare /
 tokensPerPoint live in the full report (`kb-release-orchestrate tokens --json`), not in the board block.
 
@@ -171,6 +177,8 @@ def build_targets(rel_id, orch, backlog, run, run_start, worktrees_root=None, ka
             disp = _iso(ev_t)
         items[iid] = {"worktree": wt, "rule": "board" if wt else "convention", "name": iid.lower(),
                       "runId": o.get("runId"), "dispatchedAt": disp, "points": it.get("points")}
+        if (orch or {}).get("phase") == "wave0" and kanban_dir:      # XACA-1873: a planning lane's cwd, never a worktree
+            items[iid].update(worktree=os.path.join(os.path.abspath(kanban_dir), "plans", iid), rule="planner")
     root = worktrees_root or (os.path.dirname(os.path.abspath(kanban_dir)) if kanban_dir else None)
     rname = rel_id.lower()
     rwt = os.path.join(root, "worktrees", rname) if root else None
@@ -189,7 +197,7 @@ def dir_names_for(targets):
 
 
 def _match_target(cwd, t):
-    if t["rule"] == "board":
+    if t["rule"] in ("board", "planner"):
         return under(cwd, t["worktree"])
     if t["rule"] == "release-root":
         return under(cwd, t["worktree"]) or convention_match(cwd, t["name"])
@@ -214,7 +222,7 @@ def attribute_session(cwd, first_ts, targets):
         if first_ts is None:
             return "unattributed", iid, "session has no timestamped record: cannot compare with dispatchedAt"
         if first_ts >= disp:                       # equal counts
-            return "worker", iid, None
+            return ("planner" if t["rule"] == "planner" else "worker"), iid, None
         return "unattributed", iid, "started %s, before %s dispatchedAt %s" % (_iso(first_ts), iid, _iso(disp))
     if _match_target(cwd, targets["release"]):
         if rstart is None:
@@ -640,10 +648,10 @@ def collect_run(release_id, orch, backlog, events, run, projects_dir, kanban_dir
                     add_scan(main_part, files[0], floor)
                     coord_observed |= main_part["models"]
                     continue
-                blk = blocks[iid] if role == "worker" else coord
+                blk = blocks[iid] if role in ("worker", "planner") else coord
                 for n, x in enumerate(files):
                     undated += add_scan(blk, x, since)
-                    if role == "worker" and n == 0:     # files[0] is the main session: a subagent picks its own model
+                    if role in ("worker", "planner") and n == 0:     # files[0] is the main session: a subagent picks its own model
                         observed[iid] |= _models_of(x)
                     elif role == "coordinator" and n == 0:
                         coord_observed |= _models_of(x)
@@ -659,7 +667,33 @@ def collect_run(release_id, orch, backlog, events, run, projects_dir, kanban_dir
                             for iid, t in targets["items"].items()}
     rep["releaseWorktree"] = targets["release"]["worktree"]
     rep["run_id"], rep["release"] = run, release_id
+    if (orch or {}).get("phase"):
+        rep["phase"] = orch["phase"]
+    if (orch or {}).get("wave0RunId"):
+        rep["wave0"] = wave0_block(kanban_dir, orch["wave0RunId"])
     return rep
+
+
+def wave0_block(kanban_dir, run_id):
+    """XACA-1873: the Wave 0 run's latest ledger `token_summary`, read from <kanban_dir>/orchestration/<run>.jsonl."""
+    path = os.path.join(kanban_dir or "", "orchestration", "%s.jsonl" % run_id)
+    if not re.fullmatch(r"RUN-[A-Za-z0-9-]+", str(run_id)):
+        return {"run": run_id, "error": "not a run id"}
+    last = None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    ev = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(ev, dict) and ev.get("kind") == "token_summary":
+                    last = ev
+    except OSError as exc:
+        return {"run": run_id, "error": "ledger unreadable: %s" % exc}
+    if last is None:
+        return {"run": run_id, "error": "no token_summary in the Wave 0 ledger"}
+    return dict({k: last.get(k) for k in ("phase", "total", "totals", "complete", "unattributed", "items")}, run=run_id)
 
 
 PREFILTER_CHUNK = 1 << 20      # bytes read per step of the collect_item needle pre-filter (XACA-1808-018)
@@ -770,6 +804,9 @@ def format_table(rep):
     if rep.get("run_id") and c.get("modelStatus") not in (None, "match"):
         out.append("model coordinator: expected %s, status %s, observed %s" % (
             c["expectedModel"], c["modelStatus"], ",".join(c.get("observedModels") or []) or "-"))
+    w0 = rep.get("wave0")
+    if w0:
+        out.append("wave0 %s (not in the numbers above): %s" % (w0["run"], w0.get("error") or "%s tokens" % _fmt(w0.get("total"))))
     g = rep.get("gates")
     if g and g["turns"]:
         out.append("gates (review/test/ux sessions, not in the numbers above): %s tokens over %d turn(s)" % (_fmt(g["total"]), g["turns"]))

@@ -11,7 +11,8 @@ four things the shell cannot do with jq alone:
            release that already has an open run is REFUSED there) and merge the resolved settings into the summary:
              release.orchestration.models = {coordinator: {model, source}, worker: {model, source}}
              release.orchestration.maxParallelSource, release.orchestration.excluded
-           Prints the run id on stdout.
+           Prints the run id on stdout. XACA-1873: --phase wave0 starts a Wave 0 (planning) run from the plan's `wave0`
+           rows instead (release_orchestrator.start_run phase="wave0"); refused when the plan has none.
   close    idempotent hand-off close. An open run whose tracked items are ALL DONE/CANCELLED is closed (run_end, closedAt);
            an already closed run is a no-op; an open run with unfinished items is REFUSED (rc 3). activeRunId stays on the
            release as the closed run's record (close_run's own contract); "closed" is what every reader (kb-dispatch, the
@@ -118,13 +119,15 @@ def apply_exclusions(plan_, excluded, board):
 
 def cmd_start(a):
     plan_ = _read_json(a.plan_file)
-    if not isinstance(plan_, dict) or not _scheduled_ids(plan_):
-        raise ro.LedgerError("the plan has no scheduled items: nothing to start")
+    wave0 = getattr(a, "phase", None) == ro.PHASE_WAVE0
+    if not isinstance(plan_, dict) or not (plan_.get("wave0") if wave0 else _scheduled_ids(plan_)):
+        raise ro.LedgerError("the plan has no %s: nothing to start" % ("wave0 rows" if wave0 else "scheduled items"))
     meta = json.loads(a.meta_json) if a.meta_json else {}
     if not isinstance(meta, dict):
         raise ro.LedgerError("--meta-json must be a JSON object")
     kdir = os.path.abspath(a.kanban_dir)
-    run_id = ro.start_run(a.board, kdir, a.release, plan_, a.coordinator, a.max_parallel)
+    run_id = ro.start_run(a.board, kdir, a.release, plan_, a.coordinator, a.max_parallel,
+                          phase=ro.PHASE_WAVE0 if wave0 else None)
     meta = dict(meta)
     # ALWAYS written: a re-run after a closed run must not inherit the previous run's exclusions (start_run keeps the old
     # summary keys), or the coordinator prompt would name items "excluded by the lead" that this run did not exclude.
@@ -489,6 +492,7 @@ def main(argv=None):
     s.add_argument("--coordinator", required=True)
     s.add_argument("--max-parallel", required=True, type=int)
     s.add_argument("--meta-json")
+    s.add_argument("--phase", choices=(ro.PHASE_WAVE0,), help="XACA-1873: start a Wave 0 (planning) run")
     c = sub.add_parser("close")
     c.add_argument("--board", required=True)
     c.add_argument("--kanban-dir", required=True)

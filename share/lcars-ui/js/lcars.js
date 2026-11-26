@@ -12417,7 +12417,7 @@ function orchTicketCardHtml(t, now, tokenEntry, badgeTexts) {
 
 // Mirror of kanban-hooks/release_orchestrator.py LEDGER_KINDS (the ledger envelope is {ts, run, kind, ...fields}).
 const ORCH_EVENT_KINDS = ['run_start', 'dispatch', 'state', 'question', 'answer', 'stall', 'crash', 'failed', 'done',
-    'verdict', 'run_end', 'lane', 'model_mismatch', 'token_budget', 'token_summary', 'nudge'];
+    'verdict', 'run_end', 'lane', 'model_mismatch', 'token_budget', 'token_summary', 'nudge', 'plan_lane'];
 
 function orchStr(v) {
     return (typeof v === 'string' || typeof v === 'number') ? String(v) : '';
@@ -12472,6 +12472,9 @@ function orchEventDetails(ev) {
             break;
         case 'lane':
             add('item', ev.item); add('lane', ev.lane); add('action', ev.action);
+            break;
+        case 'plan_lane':                       // XACA-1873 Wave 0: {item, action: done|failed, reason?}
+            add('item', ev.item); add('action', ev.action);
             break;
         case 'verdict':
             add('verdict', ev.verdict); add('item', ev.item); add('detail', ev.detail);
