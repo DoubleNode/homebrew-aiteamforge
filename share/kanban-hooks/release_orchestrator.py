@@ -1203,6 +1203,18 @@ def _hotspot_config(board):
     return None, "releaseConfig.orchestration must be an object with a `hotspots` list, got %s (ignored)" % type(o).__name__
 
 
+def wave0_planned(orch):
+    """XACA-1873-034: the tickets the release's CLOSED Wave 0 run planned that no execution run has consumed yet (its
+    `items`, plus `wave0PriorItems`: what an earlier closed Wave 0 run planned). Wave 0 runs once per TICKET, so plan()
+    leaves these refused and only a ticket added to the release since is offered Wave 0. A malformed field reads empty."""
+    if not (isinstance(orch, dict) and orch.get("phase") == PHASE_WAVE0 and orch.get("closedAt")
+            and orch.get("activeRunId")):
+        return set()
+    items = orch.get("items") if isinstance(orch.get("items"), dict) else {}
+    prior = orch.get("wave0PriorItems") if isinstance(orch.get("wave0PriorItems"), list) else []
+    return set(items) | {i for i in prior if isinstance(i, str)}
+
+
 def plan(release_id, kanban_dir, repo_root=None, terminals=None, max_parallel=None, contention=None, loaded=None,
          wave0=False):
     """The whole read-only run plan for a release. `terminals` = parsed terminals[] (None -> no terminals: every item gets
@@ -1217,7 +1229,10 @@ def plan(release_id, kanban_dir, repo_root=None, terminals=None, max_parallel=No
     items, so a gap ticket behind a hard refusal (or on a cycle) stays refused. Both keys are OMITTED when empty, so a
     plan with no gaps is byte-identical to the pre-1873 plan, and so is its XACA-1853 hash (canonical_plan reads only
     waves / refused / maxParallel). Off by default: until the coordinator runs Wave 0 (PR 3), callers keep today's
-    refusals. An invalid releaseConfig.orchestration.planRoles is a PlanError when there is a Wave 0 to route."""
+    refusals. An invalid releaseConfig.orchestration.planRoles is a PlanError when there is a Wave 0 to route.
+    Once per TICKET (XACA-1873-034): the tickets a closed Wave 0 run planned (wave0_planned) never move to `wave0`; they
+    keep exactly the refusals the plan without --wave0 gives them (and so do their dependants), so a re-plan with
+    nothing new for Wave 0 hashes like the approval's plan-run."""
     if contention is None:
         import orchestrator_contention as contention
     kanban_dir = os.path.abspath(kanban_dir)   # a relative dir must not depend on cwd vs repo_root (NO_PLAN_DOC for all)
@@ -1272,11 +1287,15 @@ def plan(release_id, kanban_dir, repo_root=None, terminals=None, max_parallel=No
 
     gaps, hard = {}, {}   # XACA-1873: id -> classify_gaps result; id -> hard CYCLE/BLOCKER_REFUSED reasons
     if wave0:
-        gap_ids = {i for i, why in refused_reasons.items() if classify_gaps([r["code"] for r in why])}
+        planned = wave0_planned(orch)
+        gap_ids = {i for i, why in refused_reasons.items()
+                   if i not in planned and classify_gaps([r["code"] for r in why])}
         live = sched_items + [dict(by_id[i], blockedBy=[b for b in _blockers(by_id[i]) if b not in completed])
                               for i in sorted(gap_ids)]
         hard = build_waves(live, [], max_parallel, refused=(set(refused_reasons) - gap_ids) | cancelled)["refused"]
         for iid in sorted(by_id):
+            if iid in planned:
+                continue
             codes = [r["code"] for r in refused_reasons.get(iid, []) + hard.get(iid, [])]
             warns = [c for c, hit in ((NO_PATHS, iid in no_paths), (UNPARSED_PATHS, bool(unparsed_by_item.get(iid))))
                      if hit]

@@ -71,8 +71,9 @@ def wave0_done(board, release_id):
     if not (isinstance(orch, dict) and orch.get("phase") == ro.PHASE_WAVE0 and orch.get("closedAt")
             and orch.get("activeRunId")):
         return None
-    items = orch.get("items") if isinstance(orch.get("items"), dict) else {}
-    return {"runId": orch["activeRunId"], "items": sorted(items)}
+    # XACA-1873-034: a Wave 0 run started while an earlier one was closed (tickets added to the release later) carries the
+    # earlier run's items (wave0PriorItems), so the approval still covers every plan Wave 0 generated for this release.
+    return {"runId": orch["activeRunId"], "items": sorted(ro.wave0_planned(orch))}
 
 
 def plan_digests(board, ids, kanban_dir, repo_root=None):
@@ -172,7 +173,9 @@ def cmd_start(a):
     if not isinstance(meta, dict):
         raise ro.LedgerError("--meta-json must be a JSON object")
     kdir = os.path.abspath(a.kanban_dir)
-    done = None if wave0 else wave0_done(_read_json(a.board), a.release)
+    done = wave0_done(_read_json(a.board), a.release)
+    prior = done["items"] if (wave0 and done) else []
+    done = None if wave0 else done
     run_id = ro.start_run(a.board, kdir, a.release, plan_, a.coordinator, a.max_parallel,
                           phase=ro.PHASE_WAVE0 if wave0 else None, wave0_run_id=done and done["runId"])
     meta = dict(meta)
@@ -182,6 +185,8 @@ def cmd_start(a):
     # ALWAYS written: a re-run after a closed run must not inherit the previous run's exclusions (start_run keeps the old
     # summary keys), or the coordinator prompt would name items "excluded by the lead" that this run did not exclude.
     meta["excluded"] = list(plan_.get("excluded") or [])
+    # XACA-1873-034: ALWAYS written for the same reason: the tickets a closed earlier Wave 0 run planned ([] otherwise).
+    meta["wave0PriorItems"] = prior
 
     def _merge(orch):
         if orch.get("activeRunId") != run_id:

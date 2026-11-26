@@ -33696,16 +33696,9 @@ _kb_release_orch_active_run() {
         --arg rel "${2-}" -r 2>/dev/null
 }
 
-# _kb_release_orch_wave0_closed <board_file> <REL-ID> -> the id of the release's CLOSED Wave 0 run that no execution run has
-# consumed yet (XACA-1873; the execution start drops `phase`), else nothing. Wave 0 then already ran for this plan: the
-# re-plan must not run it again, and any gap left is "still refused after Wave 0".
-_kb_release_orch_wave0_closed() {
-    _kb_jq_read "${1-}" '[.releases[]? | select(.id == $rel) | (.orchestration // {})
-        | select(.phase == "wave0" and (.closedAt // "") != "" and (.activeRunId // "") != "") | .activeRunId] | first // empty' \
-        --arg rel "${2-}" -r
-}
-
 # _kb_release_orch_wave0_plan <REL-ID> <board_file> -> plan-run --wave0 JSON with the lead's --exclude ids dropped from wave0.
+# Once per TICKET (XACA-1873-034): plan-run --wave0 itself keeps the tickets a closed Wave 0 run planned out of wave0
+# (release_orchestrator.wave0_planned), so the probe, the Wave 0 start and --plan-only share one rule.
 _kb_release_orch_wave0_plan() {
     local ex raw out
     ex=$(printf '%s\n' "${_KB_O_EXCL[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))') || return 1
@@ -33781,10 +33774,11 @@ _kb_release_orch_wave0_rules() {
         "- A lane ends with the planner's \`kb-orch-plan-done\`. A lane reported done with gaps still open is INCOMPLETE: tell the user; never write the plan yourself." \
         "- ITEM_CRASHED: ask the user before re-dispatching it with \`--plan\`. Planner questions arrive as QUESTION_PENDING; a user-owned decision goes to the user." \
         "- WAVE0_DONE (exit 0: read the NAME) means the monitor closed this Wave 0 run. Then, in THIS session:" \
-        "  1. Run \`kb-run ${rel} --plan-only\`. It re-plans (Wave 0 never runs twice), renders the generated plans, the execution waves and a \"Still refused after Wave 0\" section, and prints PLAN-HASH with the approve line." \
+        "  1. Run \`kb-run ${rel} --plan-only\`. It re-plans (Wave 0 runs once per ticket), renders the generated plans, the execution waves and a \"Still refused after Wave 0\" section, and prints PLAN-HASH with the approve line." \
         "  2. Show that output to the user and ask with AskUserQuestion whether to approve it. Never approve it yourself." \
         "  3. On yes, run the printed approve line with \`--start-only\` added (keep its \`--yes\` for a PLANNED release): \`kb-run ${rel} --approve-plan <PLAN-HASH> --start-only\`. It promotes when needed, starts the execution run and dispatches wave 1 WITHOUT launching another coordinator, and prints the new run id. Continue in this session as that run's coordinator, under the rules above, monitoring the NEW run id." \
-        "  4. rc 4 = the plans changed after the view (a stale hash): repeat from step 1. On no: stop; nothing is dispatched and the release stays as it is."
+        "  4. rc 4 = the plans changed after the view (a stale hash): repeat from step 1. On no: stop; nothing is dispatched and the release stays as it is." \
+        "  5. If step 1 prints \"Not approvable yet\" (a ticket added to the release since needs Wave 0) or step 3 is refused with rc 2 for the same reason, tell the user: \`kb-run ${rel}\` plans it in a new Wave 0 run first. Never approve around it."
 }
 
 # _kb_release_orch_open_items <board_file> <REL-ID> -> count of assigned items that are not completed/cancelled.
@@ -33924,6 +33918,14 @@ _kb_orch_plan_verdict() {
     if [[ -z "$approve" ]]; then
         if ! jq -e '(.waves | length) > 0' "$pf" >/dev/null 2>&1; then
             echo "Nothing is schedulable: there is no plan to approve. Nothing was written or dispatched."
+            return 0
+        fi
+        # XACA-1873-034: --approve-plan refuses while a ticket waits for Wave 0, so this view has no approve line.
+        local w0p
+        w0p=$(jq -r '[(.wave0 // [])[].id] | join(" ")' "$pf" 2>/dev/null) || w0p="?"
+        if [[ -n "$w0p" ]]; then
+            echo "Not approvable yet: ticket(s) need Wave 0 planning first ($w0p). Nothing was ${none}, written or dispatched."
+            echo "  Run kb-run $target (with --yes when there is no terminal) to plan them; the approval follows Wave 0."
             return 0
         fi
         echo "PLAN-HASH: $h"
@@ -34159,30 +34161,30 @@ _kb_release_orch_entry() {
     # XACA-1873 Wave 0 (decision Q1 = b): tickets whose only refusals are planning gaps (UNESTIMATED, NO_SUBITEMS,
     # NO_PLAN_DOC, or a plan doc without parseable Files to Modify) are planned FIRST, in planning-only lanes, before the
     # promote and before the plan approval. A [Y/n] confirm that --yes skips: Wave 0 writes plan docs, subitems and points
-    # only (never code, a branch or the stage), so a no-tty --yes run may run it. Once per plan: after a closed Wave 0 run
-    # the re-plan skips it, and any gap left is reported "Still refused after Wave 0". rc 13 = launch the Wave 0 coordinator.
-    if [[ -z "$(_kb_release_orch_wave0_closed "$bf" "$rel")" ]]; then
-        local w0_out w0_ids _kb_w0_rc
-        # Two steps, each with its own status: in `probe | jq` the status is jq's, and jq on empty input exits 0, so a failed
-        # probe would read as "no Wave 0" and skip it (and the --approve-plan refusal below) silently (review round 1).
-        if ! w0_out=$(_kb_release_orch_wave0_plan "$rel" "$bf") || ! w0_ids=$(jq -r '[.wave0[].id] | join(" ")' <<<"$w0_out"); then
-            echo "✗ kb-run: kb-release plan-run failed while checking for unplanned tickets; nothing started" >&2
-            return 1
+    # only (never code, a branch or the stage), so a no-tty --yes run may run it. Once per TICKET (XACA-1873-034): plan-run
+    # --wave0 leaves the tickets a closed Wave 0 run already planned refused (any gap they kept is "Still refused after
+    # Wave 0"), so only a ticket added to the release since is offered Wave 0. rc 13 = launch the Wave 0 coordinator.
+    local w0_out w0_ids _kb_w0_rc
+    # Two steps, each with its own status: in `probe | jq` the status is jq's, and jq on empty input exits 0, so a failed
+    # probe would read as "no Wave 0" and skip it (and the --approve-plan refusal below) silently (review round 1).
+    if ! w0_out=$(_kb_release_orch_wave0_plan "$rel" "$bf") || ! w0_ids=$(jq -r '[.wave0[].id] | join(" ")' <<<"$w0_out"); then
+        echo "✗ kb-run: kb-release plan-run failed while checking for unplanned tickets; nothing started" >&2
+        return 1
+    fi
+    if [[ -n "$w0_ids" ]]; then
+        if [[ -n "${_KB_O_APPROVE-}" ]]; then
+            echo "✗ kb-run: --approve-plan: $rel has ticket(s) that need Wave 0 planning first ($w0_ids); a plan hash cannot approve tickets that have no plan yet. Nothing was started." >&2
+            echo "  Run kb-run $rel (with --yes when there is no terminal) to plan them; the approval follows Wave 0." >&2
+            return 2
         fi
-        if [[ -n "$w0_ids" ]]; then
-            if [[ -n "${_KB_O_APPROVE-}" ]]; then
-                echo "✗ kb-run: --approve-plan: $rel has ticket(s) that need Wave 0 planning first ($w0_ids); a plan hash cannot approve tickets that have no plan yet. Nothing was started." >&2
-                echo "  Run kb-run $rel (with --yes when there is no terminal) to plan them; the approval follows Wave 0." >&2
-                return 2
-            fi
-            echo "Wave 0: ${#${(z)w0_ids}} ticket(s) have no full plan yet: $w0_ids"
-            echo "  Planning lanes (up to ${_KB_O_MAXPAR_R} at once) write only their plan doc, subitems and estimate; no code, no promote."
-            _kb_confirm_launch kb-run "Plan them now in Wave 0, before the execution plan and its approval? [Y/n]: " "$yes"
-            _kb_w0_rc=$?
-            if (( _kb_w0_rc == 2 )); then return 2
-            elif (( _kb_w0_rc != 0 )); then echo "Cancelled. Nothing planned, promoted or dispatched."; return 11; fi
-            return 13
-        fi
+        local -a w0_arr=(${(z)w0_ids})   # an array: ${#${(z)x}} of ONE word is its length in characters
+        echo "Wave 0: ${#w0_arr} ticket(s) have no full plan yet: $w0_ids"
+        echo "  Planning lanes (up to ${_KB_O_MAXPAR_R} at once) write only their plan doc, subitems and estimate; no code, no promote."
+        _kb_confirm_launch kb-run "Plan them now in Wave 0, before the execution plan and its approval? [Y/n]: " "$yes"
+        _kb_w0_rc=$?
+        if (( _kb_w0_rc == 2 )); then return 2
+        elif (( _kb_w0_rc != 0 )); then echo "Cancelled. Nothing planned, promoted or dispatched."; return 11; fi
+        return 13
     fi
     # No Wave 0 to run: a no-tty --yes run still cannot pass the approval, so refuse before the irreversible promote.
     if [[ ! -t 0 && -z "${_KB_O_APPROVE-}" ]]; then
@@ -34230,10 +34232,11 @@ _kb_release_orch_start() {
     plan_raw="$tmpd/plan-raw.json" plan_file="$tmpd/plan.json"
     local ans arg n_flag_excl=${#excl[@]}
     while :; do
-        # XACA-1873: only --plan-only asks for the Wave 0 split (so the view shows the tickets Wave 0 would plan). An
-        # approval never runs with Wave 0 pending (the entry sends it to Wave 0 first), so its plan-run is unchanged.
+        # XACA-1873: only --plan-only asks for the Wave 0 split, always (once per TICKET, -034: a closed Wave 0 run's
+        # tickets stay refused, so with nothing new for Wave 0 the plan and its hash equal the approval's plan-run). An
+        # approval never runs with Wave 0 pending (the entry refuses it first), so its plan-run is unchanged.
         local -a w0=()
-        [[ "$how" == plan-only && -z "$(_kb_release_orch_wave0_closed "$bf" "$rel")" ]] && w0=(--wave0)
+        [[ "$how" == plan-only ]] && w0=(--wave0)
         kb-release-plan-run "$rel" --max-parallel "$maxpar" ${w0[@]+"${w0[@]}"} --json >"$plan_raw" </dev/null || {
             echo "✗ kb-run: kb-release plan-run failed; nothing dispatched" >&2; rm -r -f "$tmpd"; return 1; }
         if (( ${#excl[@]} > 0 )); then
