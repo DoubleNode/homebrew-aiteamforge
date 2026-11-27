@@ -9040,6 +9040,23 @@ body {
     font-weight: bold;
 }
 
+/* XACA-1642-020: RETIRED PRE-GATE pill. LCARS lavender on black text, distinct from gray ARCHIVED, orange STRANDED
+   and green RELEASED: archived, but never shipped through the gate. */
+.archived-badge.release-retired-badge {
+    background: var(--lcars-lavender, #ccccff);
+    color: var(--lcars-black, #000000);
+    font-weight: bold;
+}
+
+/* XACA-1642-027: the retire who/when/why as visible text in the lifecycle panel (the pill's tooltip never shows on
+   keyboard focus or touch). Lavender, matching the pill, and not the italic grey of the "not recorded" hints. */
+.release-lifecycle-row.release-retired-note {
+    color: var(--lcars-lavender, #ccccff);
+    font-style: normal;
+    /* XACA-1642-028: a reason with a long unbroken token (URL, path) must wrap inside the card at narrow widths. */
+    overflow-wrap: anywhere;
+}
+
 /* XACA-1706: RELEASED pill. LCARS green on black text, distinct from gray ARCHIVED and orange STRANDED. */
 .archived-badge.release-released-badge {
     background: var(--lcars-green, #99ff99);

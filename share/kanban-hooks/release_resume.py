@@ -72,7 +72,8 @@ def resume_plan(release, *, flow_config, cr_support_enabled, items=None, other_r
 
     row = the spec 5.2 table row (planned | dev-items-open | dev-deploy-pending | tests-running | tests-failed |
     cr-draft-not-approved | cr-submitted | gamma-soak-pending) or one of the follow-on rows the table implies
-    (stage-passed, gamma-ready, gamma-passed, gamma-cr-unbound (XACA-1682), closeout-ready, cr-stage-incomplete, cr-held, gamma-failed, stage-sha-missing, branch-missing (XACA-1738), terminal).
+    (stage-passed, gamma-ready, gamma-passed, gamma-cr-unbound (XACA-1682), closeout-ready, cr-stage-incomplete, cr-held, gamma-failed, stage-sha-missing, branch-missing (XACA-1738), terminal,
+    cancelled / closed (XACA-1642-014: status outranks stage; a retire-eligible cancelled release offers `kb-release retire`)).
     action = what the session does next. `items` [{id,title,status,prMerged}], `scheduled` [{provider, schedule[],
     tests[]}], `cr` {id, crState, draftApproved, feed} (feed = approval_providers.release_cr_feed) are pre-resolved by
     the loader; None means "could not read" and fails closed. `board` (optional) only feeds the
@@ -141,6 +142,23 @@ def resume_plan(release, *, flow_config, cr_support_enabled, items=None, other_r
         return ("VERSION_SOURCE_MISMATCH: close-out must NOT run yet (it would tag a build whose version file does not "
                 "say the release version). [%s]" % ref[0])
 
+    # XACA-1642-014: the release STATUS outranks its stage. A cancelled release is never promoted (resume offered a DEV
+    # promote for cancelled REL-2026-Q4-044), and an archived/retired record is closed. When a cancelled release meets
+    # the retire rule (G.retire_unmet: the endpoint's own predicate), the next move is the lead's retire, not a promote.
+    status = release.get("status")
+    if status in G.CLOSED_RELEASE_STATUSES:
+        return done("closed", "none", "Release is %s (closed): nothing to resume." % status)
+    if status == "cancelled":
+        unmet = G.retire_unmet(release, items) if items is not None else ["cannot read the assigned items"]
+        if not unmet:
+            return done("cancelled", "offer-retire",
+                        "CANCELLED: never promoted or resumed. Every assigned item is completed or cancelled and no "
+                        "gated record exists, so the lead can retire it (archive; items keep their assignment).",
+                        # The quoted reason goes LAST so the XACA-1350 wrapper guard's extraction sees every flag.
+                        "Preview:  kb-release retire %s --actor <lead> --dry-run --reason \"<why>\"" % rid,
+                        "Retire:   kb-release retire %s --actor <lead> --reason \"<why>\"" % rid)
+        return done("cancelled", "none", "CANCELLED: never promoted or resumed; it is not retire-eligible yet.",
+                    *["retire unmet: " + r for r in unmet])
     if cur == "PROD":
         return done("terminal", "none", "Release is at PROD (terminal): nothing to resume.")
     if cur == "PLANNED":

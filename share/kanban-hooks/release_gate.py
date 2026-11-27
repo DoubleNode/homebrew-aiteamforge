@@ -822,6 +822,110 @@ def deliverable_items(items):
     return [it for it in (items or []) if not (isinstance(it, dict) and it.get("status") == "cancelled")]
 
 
+RETIRE_STAGES = ("PLANNED", "DEV")          # XACA-1642: the only stages a pre-gate release can be retired from
+CLOSED_RELEASE_STATUSES = ("archived", "retired")
+RETIRE_STATUSES = ("active", "in_progress", "planned", "cancelled")  # XACA-1642-018/019: the open statuses retire accepts
+
+
+def _retire_shape_unmet(release, items):
+    """XACA-1642-018/019: retire is an archival action, so an unrecognised shape is NOT eligible (fail closed).
+    The value checks in retire_unmet read only canonical shapes; a mistyped field (stageSha as a str/list, branch as
+    a dict, platforms as a list, environment 'prod') would otherwise be skipped and pass. One reason per field."""
+    reasons = []
+    status = release.get("status")
+    if status not in RETIRE_STATUSES and status != "released" and status not in CLOSED_RELEASE_STATUSES:
+        reasons.append("release status %r is not one retire recognises (%s)" % (status, ", ".join(RETIRE_STATUSES)))
+    br = release.get("branch")
+    if br is not None and not isinstance(br, str):
+        reasons.append("release branch has an unrecognised shape (%s)" % type(br).__name__)
+    st = release.get("stage")
+    if st is not None and st not in STAGES:
+        reasons.append("release stage %r is not a known stage" % (st,))
+    for key in ("stages", "stageSha"):
+        v = release.get(key)
+        if v is not None and not isinstance(v, dict):
+            reasons.append("release %s has an unrecognised shape (%s)" % (key, type(v).__name__))
+    stages = release.get("stages")
+    if isinstance(stages, dict):
+        unknown = sorted(str(k) for k in stages if k not in STAGES)
+        if unknown:
+            reasons.append("release stages has unknown stage key(s): %s" % ", ".join(unknown))
+        for k in sorted((k for k in stages if k in STAGES), key=STAGES.index):
+            if stages[k] is not None and not isinstance(stages[k], dict):
+                # current_stage() skips a non-dict entry, so a recorded QA/PROD entry would otherwise be invisible.
+                reasons.append("release stages.%s has an unrecognised shape (%s)" % (k, type(stages[k]).__name__))
+    plats = release.get("platforms")
+    if plats is not None and not isinstance(plats, dict):
+        reasons.append("release platforms has an unrecognised shape (%s)" % type(plats).__name__)
+    elif isinstance(plats, dict):
+        for pname in sorted(plats, key=str):
+            pv = plats[pname]
+            if not isinstance(pv, dict):
+                reasons.append("platform %s has an unrecognised shape (%s)" % (pname, type(pv).__name__))
+            elif pv.get("environment") is not None and pv.get("environment") not in STAGES:
+                reasons.append("platform %s environment %r is not a known stage" % (pname, pv.get("environment")))
+    bad_items = [it for it in (items or []) if not isinstance(it, dict)]
+    if bad_items:
+        reasons.append("%d assigned item record(s) have an unrecognised shape" % len(bad_items))
+    return reasons
+
+
+def retire_unmet(release, items):
+    """XACA-1642: every reason `release` cannot be RETIRED pre-gate ([] = eligible). `items` = the items whose
+    releaseAssignment points at it. The rule is "nothing a gated release would have recorded is recorded": a recorded
+    branch, a stage past DEV on ANY platform, a stageSha, a rollback SHA or override, or a close-out record means the
+    release entered the gated flow and must leave it through the gate. Status active / in_progress / cancelled are all
+    accepted (XACA-1642-015). Shared by POST /api/releases/<id>/retire and release_resume's cancelled row."""
+    reasons = _retire_shape_unmet(release, items)
+    if reasons:
+        # Fail closed and never raise: the value checks below (current_stage, the platform walk) assume canonical
+        # shapes, and a non-dict stages would raise in current_stage. A shape refusal names the field(s) and stops here.
+        return reasons
+    rid = release.get("id")
+    status = release.get("status")
+    if status == "released":
+        reasons.append("release is released (closed out); its shipped record is preserved as is")
+    elif status in CLOSED_RELEASE_STATUSES:
+        reasons.append("release status is %s: it is already closed" % status)
+    br = release.get("branch")
+    if isinstance(br, str) and br.strip():
+        reasons.append("release records branch %r: it entered the gated flow (retire is for pre-gate releases "
+                       "with no branch); take it through the gate instead" % br)
+    cur = current_stage(release)
+    if cur not in RETIRE_STAGES:
+        reasons.append("release is at %s: retire applies only to a release at PLANNED or DEV" % cur)
+    # Review round 4: "past DEV" must not rest on current_stage() alone. It lets an explicit `stage` win over stages{}
+    # (a promote-then-regress keeps stages.QA with stage=DEV) and counts an entry only with a truthy enteredAt (the
+    # GAMMA-failure writer records {"status": "failed"} with none). ANY non-None stages record past DEV is refused.
+    stages = release.get("stages")
+    past = [k for k in STAGES if k not in RETIRE_STAGES and isinstance(stages, dict) and stages.get(k) is not None]
+    if past:
+        reasons.append("release records stages %s: it entered the gated flow past DEV" % ", ".join(past))
+    plats = _platforms(release)
+    for pname in sorted(plats):
+        env = plats[pname].get("environment") if isinstance(plats[pname], dict) else None
+        if env in STAGES and env not in RETIRE_STAGES and env != cur:
+            reasons.append("platform %s is at %s: retire applies only when every platform is at PLANNED or DEV"
+                           % (pname, env))
+    sha = release.get("stageSha")
+    if isinstance(sha, dict) and any(v for v in sha.values()):  # a non-dict stageSha is refused above
+        reasons.append("release records stageSha %s: a gated deploy was recorded"
+                       % ", ".join(sorted(k for k, v in sha.items() if v)))
+    if release.get("rollbackSha"):
+        reasons.append("release records rollbackSha: it reached GAMMA entry")
+    if release.get("rollbackShaOverride"):
+        reasons.append("release records a rollback override: a lead set its production rollback target")
+    if release.get("closeOut"):
+        reasons.append("release records a closeOut: its PROD close-out has started; finish it with "
+                       "`kb-release close-out %s`" % rid)
+    open_items = sorted((str(it.get("id")), it.get("status")) for it in (items or []) if isinstance(it, dict)
+                        and it.get("status") not in ("completed", "cancelled"))
+    if open_items:
+        reasons.append("assigned item(s) not completed or cancelled: %s"
+                       % ", ".join("%s [%s]" % (i, s or "no status") for i, s in open_items))
+    return reasons
+
+
 def item_blocks_dev_exit(item):
     """XACA-1641: False iff completed AND (PR merged OR a valid explicit prExempt); True otherwise (fail-closed).
     Shared by the gate, release_resume and trunk mode; lcars-ui/server.py calls it for the release view (no JS copy)."""

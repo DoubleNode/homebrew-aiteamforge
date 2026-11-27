@@ -11619,6 +11619,25 @@ function renderArchiveAction(release, isArchived) {
     //   jsAttrEscape  -> a JS string literal inside an attribute (here)
     const id = jsAttrEscape(String((release && release.id) || ''));
 
+    // XACA-1642-021: a release retired pre-gate (kb-release retire, lead-only) cannot be un-archived by the toggle; the
+    // server answers 409. Render a disabled control that says why instead of a live UNARCHIVE that always fails. Same
+    // aria-disabled pattern as the incomplete ARCHIVE button below, with no toggleReleaseArchive(...) behind it.
+    const retired = release && release.retiredPreGate && typeof release.retiredPreGate === 'object'
+        ? release.retiredPreGate : null;
+    if (isArchived && retired) {
+        const why = 'Retired pre-gate by ' + String(retired.by || 'a lead') +
+            (retired.at ? ' on ' + String(retired.at).slice(0, 10) : '') +
+            (retired.reason ? ': ' + String(retired.reason) : '') +
+            '. Un-retire is not available (held for the lead).';
+        const whyId = 'release-archive-reason-' + escapeAttr(String((release && release.id) || ''));
+        return '<button class="release-action-btn unarchive-btn" aria-disabled="true"' +
+            ' onclick="event.stopPropagation(); if (this.getAttribute(\'aria-disabled\') === \'true\') return;"' +
+            ' aria-describedby="' + whyId + '"' +
+            ' title="' + escapeAttr(why) + '">' +
+            '<span class="action-icon">\uD83D\uDD12</span> RETIRED</button>' +
+            '<span id="' + whyId + '" class="sr-only">' + escapeHtml(why) + '</span>';
+    }
+
     if (isArchived) {
         return '<button class="release-action-btn unarchive-btn"' +
             ' onclick="event.stopPropagation(); toggleReleaseArchive(\'' + id + '\')"' +
@@ -12100,7 +12119,17 @@ function renderReleaseCard(release, flowConfig = null, projectEnvironments = {})
     const unresolvedSuffix = unresolvedCount > 0 ? ` <span class="release-item-unresolved-count" title="${unresolvedCount} item(s) could not be resolved against a team/board and are counted as incomplete">(${unresolvedCount} unresolved)</span>` : '';
 
     // XACA-0056-007: Add archived badge for archived releases
-    const archivedBadge = (isArchived ? '<span class="archived-badge">ARCHIVED</span>' : '') + releasedBadge +
+    // XACA-1642-020: a retired pre-gate release is told apart from one closed at PROD; its platforms legitimately
+    // still read DEV/PLANNED, and the tooltip says so (who retired it, when, why).
+    const retiredRec = release.retiredPreGate && typeof release.retiredPreGate === 'object' ? release.retiredPreGate : null;
+    const retiredTitle = retiredRec ? 'Retired pre-gate by ' + String(retiredRec.by || 'a lead') +
+        (retiredRec.at ? ' on ' + String(retiredRec.at).slice(0, 10) : '') +
+        (retiredRec.reason ? ': ' + String(retiredRec.reason) : '') +
+        '. It never entered the gated flow, so its platforms still show the stage it stopped at.' : '';
+    const archivedPill = retiredRec
+        ? '<span class="archived-badge release-retired-badge" title="' + escapeAttr(retiredTitle) + '">RETIRED PRE-GATE</span>'
+        : '<span class="archived-badge">ARCHIVED</span>';
+    const archivedBadge = (isArchived ? archivedPill : '') + releasedBadge +
         promoteStrandedBadgeHtml(release);  // XACA-1375-015
 
     // XACA-0056: Add type badge
@@ -13317,12 +13346,29 @@ function releaseLifecycleHtml(release, crList) {
                     ` <span class="release-lifecycle-label">APPROVAL EXPECTED</span> ${expectedHtml}</div>`;
             }).join('');
 
+        // XACA-1642-026/027: a retired pre-gate release (archived with a retiredPreGate object, the same test the card
+        // pill and the RETIRED control use) is frozen where it stopped. Its head says so instead of the kb-release
+        // hint, which would suggest it can still be promoted, and the who/when/why is VISIBLE text, not a tooltip
+        // only, so keyboard and touch users get it too.
+        const retired = (rel.status === 'archived' && rel.retiredPreGate && typeof rel.retiredPreGate === 'object')
+            ? rel.retiredPreGate : null;
+        const retiredNote = retired
+            ? `<div class="release-lifecycle-row release-retired-note">Retired` +
+                (str(retired.at) ? ' ' + escapeHtml(str(retired.at).slice(0, 10)) : '') +
+                ' by ' + escapeHtml(str(retired.by) || 'a lead') +
+                (str(retired.reason) ? ': ' + escapeHtml(str(retired.reason)) : '') +
+                '. It never entered the gated flow, so it stays at the stage it stopped at. ' +
+                'Un-retire is not available from LCARS or kb-release; bringing it back is a lead decision.</div>'
+            : '';
         return `<div class="release-lifecycle" role="group" aria-label="Release lifecycle (read-only)">` +
             `<div class="release-lifecycle-head"><span class="release-lifecycle-label">STAGE</span> ` +
             `<span class="release-lifecycle-current">${cur ? escapeHtml(cur) : DASH}</span>` +
             (rel.status === 'released'
                 ? '<span class="archived-badge release-released-badge" title="Close-out completed at PROD; this release has shipped">RELEASED</span>' + `<span class="release-lifecycle-ro">read-only — this release has shipped</span>`
-                : `<span class="release-lifecycle-ro">read-only — stages change via kb-release</span>`) + `</div>` +
+                : retired
+                    ? '<span class="archived-badge release-retired-badge">RETIRED PRE-GATE</span>' + `<span class="release-lifecycle-ro">read-only — retired pre-gate; stages no longer change</span>`
+                    : `<span class="release-lifecycle-ro">read-only — stages change via kb-release</span>`) + `</div>` +
+            retiredNote +
             (rowsHtml || `<div class="release-lifecycle-row"><span class="release-lifecycle-nr">stage detail not recorded</span></div>`) +
             crHtml + `</div>`;
     } catch (err) {

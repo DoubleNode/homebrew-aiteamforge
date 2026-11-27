@@ -248,6 +248,12 @@ except ImportError as e:  # pragma: no cover
     _release_closeout = None
     print(f"[LCARS] Warning: release_closeout unavailable, close-out step-state writes fail closed: {e}")
 _PIB_ABSENT = object()   # XACA-1705: _production_in_build "fact does not apply" (key left out of the context)
+# XACA-1642: the status a pre-gate RETIRED release is archived with. Kept in ONE place on purpose: the lead may
+# choose a distinct 'retired' status, and that must be a one-line change. Readers recognise a retired record by its
+# retiredPreGate marker, never by this value. The eligibility rule itself is release_gate.retire_unmet.
+RETIRED_RELEASE_STATUS = 'archived'
+# XACA-1642-012: release statuses that take no new items (the archived/retired record is final, not "open").
+CLOSED_RELEASE_STATUSES = _release_gate.CLOSED_RELEASE_STATUSES if _release_gate is not None else ('archived', 'retired')
 # XACA-1736: the version_source-at-build fact (pure; git is injected). Missing module = the fact is "unknown" and the
 # gate refuses close-out (fails closed), never "no check".
 try:
@@ -6437,6 +6443,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             # POST /api/releases/<id>/deploy-dev — lead records the DEV deploy = stageSha.DEV (XACA-1915)
             release_id = path[len('/api/releases/'):-len('/deploy-dev')]
             self.handle_release_deploy_dev(release_id)
+        elif path.startswith('/api/releases/') and path.endswith('/retire'):
+            # POST /api/releases/<id>/retire — lead-only pre-gate retire disposition (XACA-1642)
+            release_id = path[len('/api/releases/'):-len('/retire')]
+            self.handle_retire_release(release_id)
         elif path.startswith('/api/releases/') and path.endswith('/regress'):
             # POST /api/releases/<id>/regress — the only sanctioned backward move (XACA-1346-006)
             release_id = path[len('/api/releases/'):-len('/regress')]
@@ -9785,12 +9795,24 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             data = self._load_releases_config()
             release = self._find_release_by_id(data, release_id)
             if not release:
+                # XACA-1642-012: an archived (incl. retired pre-gate) release lives in releases-archive/, off the
+                # board. Say so (409, named) instead of a bare 404 that reads as a typo.
+                archived = TEAM_KANBAN_DIRS.get(LCARS_TEAM, KANBAN_DIR) / "releases-archive" / f"{release_id}.json"
+                if archived.exists():
+                    self.send_error(409, f"Release {release_id} is archived (retired or closed); it takes no new "
+                                         f"items. Assign the item to an open release")
+                    return
                 self.send_error(404, f"Release not found: {release_id}")
                 return
 
             # XACA-1706-001: a released release is closed (branch deleted, tag cut); it takes no new work.
             if release.get('status') == 'released':
                 self.send_error(409, f"Release {release_id} is released (terminal status); assign the item to an open release")
+                return
+            # XACA-1642-012: an archived or retired record is final; it takes no new work either.
+            if release.get('status') in CLOSED_RELEASE_STATUSES:
+                self.send_error(409, f"Release {release_id} is {release.get('status')} (closed); it takes no new "
+                                     f"items. Assign the item to an open release")
                 return
 
             # XACA-0037: Validate team ownership - prevent cross-team contamination
@@ -12845,6 +12867,16 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     with open(archive_file, 'r') as f:
                         release = json.load(f)
 
+                    # XACA-1642: a release retired pre-gate (kb-release retire, lead-only) is not un-archived by this
+                    # unauthenticated toggle. Restoring it would put an 'active' record carrying a stale retiredPreGate
+                    # marker back on the board and re-offer the gated promote retire exists to end. Un-retire is HELD
+                    # for the lead; refuse before any write.
+                    if isinstance(release, dict) and isinstance(release.get('retiredPreGate'), dict):
+                        _by = release['retiredPreGate'].get('by') or 'a lead'
+                        _msg = (f"Release {release_id} was retired pre-gate by {_by}; un-retire is not supported "
+                                f"(held for the lead). Nothing changed.")
+                        raise _DeferredResponse.json({"error": _msg, "reasons": [_msg]}, 409)
+
                     # Restore to active status. XACA-1706-001: a release archived from a COMPLETED PROD close-out
                     # was 'released' (terminal); restoring it as 'active' put a finished release back in the active
                     # buckets. Restore 'released' ONLY by the same completeness rule reconcile-closeout uses
@@ -13037,6 +13069,121 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             return
         except Exception as e:
             self.send_error(500, f"Error toggling release archive: {e}")
+
+    @staticmethod
+    def _retire_unmet(release, items):
+        """XACA-1642: every reason `release` cannot be retired pre-gate ([] = eligible). ONE rule, in release_gate
+        (release_resume's cancelled row offers retire by the same predicate, so the plan and the endpoint agree)."""
+        return _release_gate.retire_unmet(release, items)
+
+    def handle_retire_release(self, release_id):
+        """POST /api/releases/<id>/retire (XACA-1642) - the lead-only, reason-required retire disposition for a release
+        that predates branch-per-release and gate enforcement (XACA-1352) and so cannot reach PROD without fabricating
+        a branch, DEV deploy SHA, test set, rollback SHA and deploy confirmation.
+
+        Body {"reason": str, "actor": lead, "dryRun"?: bool}. Eligibility: _retire_unmet (no branch, every platform at
+        PLANNED/DEV, no stageSha/rollbackSha/override/closeOut, every assigned item completed or cancelled; status
+        active/in_progress/planned/cancelled all accepted, XACA-1642-015).
+
+        On success the release moves to releases-archive/<id>.json with status RETIRED_RELEASE_STATUS, archivedAt and
+        retiredPreGate {reason, by, at, priorStatus, stageAtRetire, platformEnvironments, itemIds}. Every stage, test,
+        rollback and deploy field is left exactly as it was: nothing is fabricated. Unlike DELETE and the archive
+        toggle there is NO cascade-clear (releaseAssignment stays on every item, no clearedAssignments) and the
+        manifest dir is KEPT (its status is mirrored). Readers resolve the kept assignments through the archive
+        record (kb-release doctor treats a retiredPreGate id as owned).
+
+        Answers: 400 bad body, 403 actor not in releaseConfig.leads (fails closed when empty), 404 unknown release,
+        409 not eligible (reasons[] lists EVERY unmet condition) or already archived (the already-archived path is
+        held for the lead's decision), 200 {"ok", "retired", "status", "itemIds"} or, for dryRun, {"ok", "dryRun",
+        "eligible", "itemIds"} with nothing written. Logged as release_retired."""
+        try:
+            if self._gate_unavailable():
+                return
+            body, err = self._read_release_json_body()
+            if err:
+                return self._send_json_response({"error": err}, status=400)
+            reason, actor, dry_run = body.get('reason'), body.get('actor'), body.get('dryRun', False)
+            if not isinstance(reason, str) or not reason.strip():
+                return self._send_json_response({"error": "a non-empty 'reason' is required"}, status=400)
+            if not isinstance(actor, str) or not actor.strip():
+                return self._send_json_response({"error": "'actor' (the lead) is required"}, status=400)
+            if not isinstance(dry_run, bool):
+                return self._send_json_response({"error": "'dryRun' must be true or false"}, status=400)
+            reason, actor = reason.strip(), actor.strip()
+            team = LCARS_TEAM
+            archive_dir = TEAM_KANBAN_DIRS.get(team, KANBAN_DIR) / "releases-archive"
+            archive_file = archive_dir / f"{release_id}.json"
+            # Same lock ORDER as handle_archive_release / handle_toggle_release_archive (archive_file path lock, then
+            # the board transaction): one acquisition order across all three is what rules out an AB-BA deadlock.
+            with _get_path_lock(archive_file):
+                with self._board_write_transaction(team):
+                    data = self._load_releases_config(team, _lock_held=True)
+                    release = self._find_release_by_id(data, release_id)
+                    if not release:
+                        if archive_file.exists():
+                            _msg = ("release %s is already archived: retiring an archived record is not "
+                                    "supported (nothing changed)" % release_id)
+                            raise _DeferredResponse.json({"error": _msg, "reasons": [_msg]}, 409)
+                        raise _DeferredResponse.json({"error": "Release not found: %s" % release_id}, 404)
+                    board_raw = self._read_board_raw_locked(team)
+                    rcfg = self._release_cfg(board_raw)
+                    is_lead, lead_reason = self._actor_is_lead(actor, rcfg)
+                    if not is_lead:
+                        raise _DeferredResponse.json({"error": "retire refused: %s" % lead_reason,
+                                                      "reasonCode": self._lead_reason_code(rcfg)}, 403)
+                    items = [it for it in (board_raw.get('backlog') or []) if isinstance(it, dict)
+                             and isinstance(it.get('releaseAssignment'), dict)
+                             and it['releaseAssignment'].get('releaseId') == release_id]
+                    item_ids = sorted(str(it.get('id')) for it in items)
+                    unmet = self._retire_unmet(release, items)
+                    if unmet:
+                        raise _DeferredResponse.json(
+                            {"error": "retire refused: " + self._reasons_error(unmet), "reasons": unmet}, 409)
+                    if archive_file.exists():
+                        _msg = "releases-archive/%s.json already exists; refusing to overwrite it" % release_id
+                        raise _DeferredResponse.json({"error": _msg, "reasons": [_msg]}, 409)
+                    if dry_run:
+                        raise _DeferredResponse.json({"ok": True, "dryRun": True, "eligible": True,
+                                                      "release": release_id, "itemIds": item_ids}, 200)
+                    cur = _release_gate.current_stage(release)
+                    prior_status = release.get('status')
+                    at = self._get_timestamp()
+                    plats = release.get('platforms') if isinstance(release.get('platforms'), dict) else {}
+                    release['status'] = RETIRED_RELEASE_STATUS
+                    release['archivedAt'] = at
+                    release['retiredPreGate'] = {
+                        "reason": reason, "by": actor, "at": at, "priorStatus": prior_status,
+                        "stageAtRetire": cur,
+                        "platformEnvironments": {p: v.get('environment') for p, v in sorted(plats.items())
+                                                 if isinstance(v, dict)},
+                        "itemIds": item_ids,
+                    }
+                    data['releases'] = [r for r in data['releases'] if r.get('id') != release_id]
+                    archive_dir.mkdir(parents=True, exist_ok=True)
+                    self._atomic_write_json(archive_file, release)
+                    # The board still lists the release on ANY save failure (False, or a raise from the board re-read or
+                    # the atomic write): take the archive copy back so the two never disagree. A leftover copy would
+                    # block every retry (409) and make PATCH /archive un-archive a duplicate onto the board.
+                    try:
+                        saved = self._save_releases_config(data, team, _lock_held=True)
+                    except Exception:
+                        archive_file.unlink(missing_ok=True)
+                        raise
+                    if not saved:
+                        archive_file.unlink(missing_ok=True)
+                        raise _DeferredResponse.json({"error": "board write failed"}, 500)
+                    snapshot = copy.deepcopy(release)
+                # The manifest is KEPT; only its status is mirrored (XACA-1812 helper: leaf lock, board lock released).
+                self._mirror_archive_status_to_manifest(snapshot, team)
+            self._log_release_activity(release_id, 'release_retired', cur, cur, actor=actor, reason=reason,
+                                       priorStatus=prior_status, itemIds=item_ids, status=RETIRED_RELEASE_STATUS)
+            return self._send_json_response({"ok": True, "retired": release_id, "status": RETIRED_RELEASE_STATUS,
+                                             "itemIds": item_ids})
+        except _DeferredResponse as deferred:
+            deferred.emit(self)
+            return
+        except Exception as e:
+            self.send_error(500, f"Error retiring release: {e}")
 
     # --- DELETE Handlers ---
 

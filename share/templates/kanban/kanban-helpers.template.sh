@@ -31094,6 +31094,12 @@ kb-release-assign() {
     release_obj=$(jq -r --arg id "$release_id" '.releases[]? | select(.id == $id)' "$board_file" 2>/dev/null)
     release_name=$(printf '%s' "$release_obj" | jq -r '.name // empty' 2>/dev/null)
     if [[ -z "$release_name" ]]; then
+        # XACA-1642-012: an archived (incl. retired pre-gate) release is off the board, in releases-archive/.
+        if [[ -f "$(dirname "$board_file")/releases-archive/${release_id}.json" ]]; then
+            echo "Error: Release $release_id is archived (retired or closed); it cannot take new items." >&2
+            echo "  Assign $item_id to an open release: kb-release list" >&2
+            return 1
+        fi
         echo "Error: Release not found: $release_id"
         echo "  Available releases:"
         kb-release-list
@@ -31105,6 +31111,14 @@ kb-release-assign() {
         echo "  Assign $item_id to an open release: kb-release list" >&2
         return 1
     fi
+    # XACA-1642-012: an archived or retired record is closed; it takes no new work either.
+    case "$(printf '%s' "$release_obj" | jq -r '.status // empty' 2>/dev/null)" in
+        archived|retired)
+            echo "Error: Release $release_id is $(printf '%s' "$release_obj" | jq -r '.status' 2>/dev/null) (closed); it cannot take new items." >&2
+            echo "  Assign $item_id to an open release: kb-release list" >&2
+            return 1
+            ;;
+    esac
 
     # Four-tier platform resolver (XACA-0686):
     #   Tier 1 — explicit arg: use $3 verbatim if non-empty.
@@ -31637,6 +31651,87 @@ kb-release-edit() {
 # XACA-1349-004 (spec 13.3): GAMMA entry is refused (ROLLBACK_SHA_UNKNOWN) when the production SHA is unknown.
 # PR #1036 round 1: an override that disagrees with a resolvable production tag refuses GAMMA entry
 # (ROLLBACK_OVERRIDE_CONFLICT); --clear removes a stale/mistaken override. A used override is consumed.
+# XACA-1642: lead-only pre-gate retire disposition. Thin wrapper over POST /api/releases/<id>/retire (the server
+# decides eligibility). Archives a release that predates gate enforcement WITHOUT fabricating branch/deploy/test/
+# rollback records and WITHOUT clearing releaseAssignment or removing the manifest.
+kb-release-retire() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
+    local release_id="" opt_reason="" opt_actor="" opt_dry=0
+    local usage="Usage: kb-release retire <release-id> --reason <text> [--actor <lead>] [--dry-run]"
+
+    while [[ $# -gt 0 ]]; do
+        case "${1-}" in
+            --reason|-r)
+                if [[ $# -lt 2 ]]; then echo "Error: --reason needs a value" >&2; echo "$usage" >&2; return 2; fi
+                opt_reason="${2-}"; shift 2 ;;
+            --actor|--by)
+                if [[ $# -lt 2 ]]; then echo "Error: --actor needs a value" >&2; echo "$usage" >&2; return 2; fi
+                opt_actor="${2-}"; shift 2 ;;
+            --dry-run)
+                opt_dry=1; shift ;;
+            --help|-h)
+                echo "$usage"
+                echo ""
+                echo "Retire a release that predates branch-per-release and gate enforcement (XACA-1352) and so"
+                echo "cannot reach PROD without inventing a branch, DEV deploy SHA, test set or rollback SHA."
+                echo "The release is archived with a retiredPreGate marker {reason, by, at}; its items KEEP their"
+                echo "releaseAssignment and its manifest is kept. Nothing else is recorded or changed."
+                echo ""
+                echo "Eligible only when: --actor is in releaseConfig.leads; no branch is recorded; every platform is"
+                echo "at PLANNED or DEV; no stageSha, rollbackSha, rollback override or closeOut is recorded; and every"
+                echo "assigned item is completed or cancelled. Status active, in_progress, planned and cancelled are accepted."
+                echo "--dry-run asks the server whether the release is eligible and changes nothing."
+                echo ""
+                echo "Exit codes: 0 ok, 1 server/transport, 2 usage/rejected, 3 refused (409, reasons listed),"
+                echo "            4 release not found, 5 not a lead (403)"
+                return 0 ;;
+            -*)
+                echo "Error: Unknown option: ${1-}" >&2; echo "$usage" >&2; return 2 ;;
+            *)
+                if [[ -z "$release_id" ]]; then
+                    release_id="${1-}"
+                else
+                    echo "Error: Unexpected argument: ${1-}" >&2; echo "$usage" >&2; return 2
+                fi
+                shift ;;
+        esac
+    done
+
+    if [[ -z "$release_id" ]]; then
+        echo "Error: Release ID is required" >&2; echo "$usage" >&2; return 2
+    fi
+    if ! _kb_release_valid_token "$release_id"; then
+        echo "Error: invalid release id: $release_id" >&2; return 2
+    fi
+    if [[ -z "${opt_reason//[[:space:]]/}" ]]; then
+        echo "Error: --reason is required" >&2; echo "$usage" >&2; return 2
+    fi
+    [[ -z "$opt_actor" ]] && opt_actor=$(_kb_release_default_actor)
+    if [[ -z "${opt_actor//[[:space:]]/}" ]]; then
+        echo "Error: --actor <lead> is required" >&2; echo "$usage" >&2; return 2
+    fi
+
+    local payload dry_json=false
+    (( opt_dry )) && dry_json=true
+    payload=$(jq -n --arg reason "$opt_reason" --arg actor "$opt_actor" --argjson dry "$dry_json" \
+        '{reason: $reason, actor: $actor, dryRun: $dry}') || return 1
+
+    _kb_release_api_post "${release_id}/retire" "$payload" || return 1
+
+    if [[ "$_KB_REL_CODE" == "200" ]]; then
+        local n_items rel_status
+        n_items=$(printf '%s' "$_KB_REL_BODY" | jq -r '(.itemIds // []) | length' 2>/dev/null)
+        if (( opt_dry )); then
+            echo "✓ retire $release_id (dry-run): eligible; ${n_items:-0} item(s) would keep their releaseAssignment. Nothing changed."
+        else
+            rel_status=$(printf '%s' "$_KB_REL_BODY" | jq -r '.status // "archived"' 2>/dev/null)
+            echo "✓ retired $release_id (status ${rel_status}, retiredPreGate by $opt_actor); ${n_items:-0} item(s) keep their releaseAssignment"
+        fi
+        return 0
+    fi
+    _kb_release_fail "retire $release_id"
+    return $?
+}
 kb-release-rollback-override() {
     if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     local release_id="" sha="" opt_reason="" opt_by="" opt_clear=0
@@ -35729,6 +35824,10 @@ kb-release() {
             # XACA-1349-004: lead-set rollback SHA when the production tag is unknown (spec 13.3)
             kb-release-rollback-override "$@"
             ;;
+        retire)
+            # XACA-1642: lead-only pre-gate retire (archive, keep assignments + manifest, fabricate nothing)
+            kb-release-retire "$@"
+            ;;
         cr-stage)
             # XACA-1349-002/003: resumable CR stage flow (spec 8.3)
             kb-release-cr-stage "$@"
@@ -35811,6 +35910,8 @@ kb-release() {
             echo "                                              Lead: record the DEV deploy = remote release branch tip (XACA-1915)"
             echo "  kb-release rollback-override <id> <sha> --reason \"...\" --by LEAD   (or --clear --by LEAD)"
             echo "                                              Set the rollback SHA when the prod tag is unknown (XACA-1349)"
+            echo "  kb-release retire <id> --reason \"...\" [--actor LEAD] [--dry-run]"
+            echo "                                              Lead: archive a pre-gate release as retired; keeps assignments (XACA-1642)"
             echo "  kb-release cr-stage <id> [--content-file F] [--step S] [--status] [--skip-notify R --by LEAD]"
             echo "                                              Resumable CR stage: draft, lead approval, publish, notify, submit (XACA-1349)"
             echo "  kb-release gamma-fail <id> --by LEAD --summary \"...\" [--rollback-result PASS|FAIL] [--smoke-result PASS|FAIL] [--status]"

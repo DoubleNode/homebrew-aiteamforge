@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1642: kb-release retire - lead-only exit for pre-gate releases (XACA-1642)
+- Tap files updated in this publish: `share/kanban-hooks/release_chain.py`,`share/kanban-hooks/release_gate.py` `share/kanban-hooks/release_resume.py`,`share/lcars-ui/css/lcars.css` `share/lcars-ui/index.html`,`share/lcars-ui/js/lcars.js` `share/lcars-ui/server.py`,`share/lcars-ui/tests/test-xaca-1000-release-archive-platform-set.js` (+1 more). Run `brew upgrade aiteamforge` to receive them.
 - XACA-1800: Release runner stops recording a broken python as code FAILs; exit-5 all-skipped graded SKIP (XACA-1800)
 - Tap files updated in this publish: `share/kanban-hooks/release_providers.py`,`share/kanban-hooks/release_runner.py` `share/kanban-hooks/release_stage_cli.py`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1859: Cancelled releases free their version; kb-release edit runs the version guard (XACA-1859)

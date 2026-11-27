@@ -126,6 +126,7 @@ let escapeAttr;
 let jsAttrEscape;
 let announceToScreenReader;
 let renderReleaseCard;
+let releaseLifecycleHtml;  // XACA-1642-026/027
 let __flush;
 let __state;
 let isReleaseCompleteSrc;
@@ -215,7 +216,7 @@ try {
         preamble + slices +
         '\nreturn { isReleaseComplete, getIncompletePlatforms, renderArchiveAction,' +
         ' getPlatformName, escapeAttr, jsAttrEscape, announceToScreenReader,' +
-        ' renderReleaseCard, __flush, __state };'
+        ' renderReleaseCard, releaseLifecycleHtml, __flush, __state };'
     );
     ({
         isReleaseComplete,
@@ -226,6 +227,7 @@ try {
         jsAttrEscape,
         announceToScreenReader,
         renderReleaseCard,
+        releaseLifecycleHtml,
         __flush,
         __state,
     } = factory());
@@ -1000,6 +1002,92 @@ announceToScreenReader(null);
 announceToScreenReader(undefined);
 check('announce: empty/null/undefined messages are a no-op',
     __state().timers.filter(function (t) { return t.live; }).length, beforeCount);
+
+
+// ---------------------------------------------------------------- XACA-1642-020/021: retired pre-gate releases
+// A release retired by `kb-release retire` carries a retiredPreGate object. The server refuses to un-archive it
+// (409), so the card must not offer a live UNARCHIVE (021), and its header pill must tell it apart from a release
+// closed at PROD (020). A plain archived record (no marker, or a marker that is not an object, which the server also
+// does not treat as retired) keeps the live UNARCHIVE and the gray ARCHIVED pill: the negative controls.
+const retiredRelease = {
+    id: 'REL-RETIRED-1', name: 'Retired', status: 'archived',
+    platforms: { other: { environment: 'DEV' } },
+    retiredPreGate: { by: 'lead-one', at: '2026-11-26T12:00:00Z', reason: 'pre-gate "W37" <b>x</b>' },
+};
+const retiredAction = renderArchiveAction(retiredRelease, true);
+check('1642-021: retired release renders the RETIRED control', /> RETIRED<\/button>/.test(retiredAction), true);
+check('1642-021: retired control is aria-disabled', retiredAction.includes('aria-disabled="true"'), true);
+check('1642-021: retired control has NO toggleReleaseArchive call (server always refuses it)',
+    retiredAction.includes('toggleReleaseArchive'), false);
+check('1642-021: retired control does not say UNARCHIVE', retiredAction.includes('UNARCHIVE'), false);
+check('1642-021: tooltip names the lead, the date and the held decision',
+    /title="Retired pre-gate by lead-one on 2026-11-26: [^"]*held for the lead\)\."/.test(retiredAction), true);
+check('1642-021: the reason is attribute-escaped (no raw quote or tag in the title)',
+    /title="[^"]*&quot;W37&quot; &lt;b&gt;x&lt;\/b&gt;/.test(retiredAction), true);
+check('1642-021: the reason is announced to screen readers via aria-describedby',
+    /aria-describedby="release-archive-reason-REL-RETIRED-1"/.test(retiredAction) &&
+    /<span id="release-archive-reason-REL-RETIRED-1" class="sr-only">/.test(retiredAction), true);
+
+const plainArchived = { id: 'REL-PLAIN-1', name: 'Plain', status: 'archived', platforms: {} };
+for (const [label, rel] of [
+    ['no marker', plainArchived],
+    ['marker is a string', Object.assign({}, plainArchived, { retiredPreGate: 'yes' })],
+    ['marker is null', Object.assign({}, plainArchived, { retiredPreGate: null })],
+]) {
+    const html = renderArchiveAction(rel, true);
+    check(`1642-021 negative control (${label}): live UNARCHIVE is unchanged`,
+        html.includes('> UNARCHIVE</button>') && html.includes("toggleReleaseArchive('REL-PLAIN-1')") &&
+        !html.includes('aria-disabled'), true);
+}
+
+const retiredCard = renderReleaseCard(retiredRelease);
+const plainCard = renderReleaseCard(plainArchived);
+check('1642-020: retired card shows the RETIRED PRE-GATE pill',
+    retiredCard.includes('class="archived-badge release-retired-badge"') && retiredCard.includes('>RETIRED PRE-GATE</span>'),
+    true);
+check('1642-020: retired card does not also show the plain ARCHIVED pill',
+    retiredCard.includes('<span class="archived-badge">ARCHIVED</span>'), false);
+check('1642-020: retired pill tooltip explains why the platforms still read DEV',
+    /release-retired-badge" title="Retired pre-gate by lead-one[^"]*platforms still show the stage it stopped at\."/
+        .test(retiredCard), true);
+check('1642-020 negative control: a plain archived card keeps the gray ARCHIVED pill',
+    plainCard.includes('<span class="archived-badge">ARCHIVED</span>') && !plainCard.includes('RETIRED PRE-GATE'), true);
+const activeWithMarker = renderReleaseCard(Object.assign({}, retiredRelease, { status: 'active' }));
+check('1642-020: a marker on a NON-archived card adds no pill (the pill is for archived records only)',
+    activeWithMarker.includes('RETIRED PRE-GATE'), false);
+
+// XACA-1642-026/027: the lifecycle panel. A retired release must not say "stages change via kb-release" (it cannot be
+// promoted) and must show who/when/why as visible text, not only in a tooltip. Negative controls: a plain archived
+// release, a non-object marker and a marker on a non-archived release all keep the ordinary head and no note.
+const LC_HINT = 'stages change via kb-release';
+const lcRetired = releaseLifecycleHtml(Object.assign({ stage: 'DEV' }, retiredRelease), []);
+const lcHead = lcRetired.split('release-retired-note')[0];
+check('1642-026: retired lifecycle head carries the RETIRED PRE-GATE pill',
+    /<div class="release-lifecycle-head">.*class="archived-badge release-retired-badge">RETIRED PRE-GATE<\/span>/.test(lcHead), true);
+check('1642-026: retired lifecycle drops the kb-release promote hint', lcRetired.includes(LC_HINT), false);
+check('1642-026: retired lifecycle says stages no longer change',
+    lcRetired.includes('read-only — retired pre-gate; stages no longer change'), true);
+check('1642-027: who/when/why is VISIBLE element text (not inside a title attribute)',
+    /<div class="release-lifecycle-row release-retired-note">Retired 2026-11-26 by lead-one: /.test(lcRetired), true);
+// Element content (not an attribute): escapeHtml neutralises the tag; quotes are inert here, as with the real
+// DOM-backed escapeHtml (textContent -> innerHTML), so they are left as typed.
+check('1642-027: the visible reason is HTML-escaped (no live tag)',
+    lcRetired.includes(': pre-gate "W37" &lt;b&gt;x&lt;/b&gt;.') && !lcRetired.includes('<b>x</b>'), true);
+check('1642-027: the note says what un-retire means (a lead decision, not available here)',
+    lcRetired.includes('Un-retire is not available from LCARS or kb-release; bringing it back is a lead decision.'), true);
+const lcSparse = releaseLifecycleHtml({ id: 'R-S', status: 'archived', stage: 'DEV', retiredPreGate: {} }, []);
+check('1642-027: an empty marker still renders a sane note (no "undefined", falls back to "a lead")',
+    lcSparse.includes('>Retired by a lead. It never entered') && !lcSparse.includes('undefined'), true);
+for (const [label, rel] of [
+    ['plain archived', Object.assign({ stage: 'DEV' }, plainArchived)],
+    ['marker is a string', Object.assign({ stage: 'DEV' }, plainArchived, { retiredPreGate: 'yes' })],
+    ['marker on an active release', Object.assign({ stage: 'DEV' }, retiredRelease, { status: 'active' })],
+]) {
+    const h = releaseLifecycleHtml(rel, []);
+    check(`1642-026/027 negative control (${label}): kb-release hint kept, no pill, no note`,
+        JSON.stringify([h.includes(LC_HINT), h.includes('RETIRED PRE-GATE'), h.includes('release-retired-note')]),
+        JSON.stringify([true, false, false]));
+}
 
 if (failures > 0) {
     console.error(`\n${failures} test(s) failed.`);

@@ -87,6 +87,9 @@ def run_chain(release_id, *, get_plan, run_tests, promote, dry_run=False, max_st
     for _ in range(max_steps):
         plan = get_plan()
         row, cur, run = plan["row"], plan["stage"], plan["run"]
+        if row in ("cancelled", "closed"):
+            # XACA-1642-014: a cancelled or archived/retired release is never chained (the plan names the next move).
+            return end("release-not-open", RC_REFUSED, plan)
         if cur not in release_resume.AUTO_SOURCES and not (cur == "CR" and steps):
             return end("not-auto-source" if cur != "CR" else "human-gate", RC_OK, plan,
                        "stage %s is not an auto-promote source; the chain only runs QA/ALPHA/BETA (spec 3.3)" % cur)
