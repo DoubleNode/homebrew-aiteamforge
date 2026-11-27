@@ -11,6 +11,7 @@ kanban-helpers.sh `kb-quick` acts on through the existing kb-release commands:
   status        the derived phase of a quick release (from stage / status / closeOut / the item; nothing is stored)
   check-cancel  may this quick release be cancelled, and where does its item go back to?
   resolve       a REL-ID or ITEM-ID -> the quick release id
+  list-open     the ids of every quick release still in flight (derived phase not closed/cancelled)
 
 Bookkeeping lives in release TAGS, because PUT /api/releases/<id> accepts no new keys (spike, XACA-1989-001):
   quick                    marks the release as a quick release
@@ -33,12 +34,12 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import release_branches  # noqa: E402
 from orchestrator_state import resolve_item_status  # noqa: E402
+from release_schema import is_terminal_release_status  # noqa: E402
 
 TAG = "quick"
 ITEM_TAG = "quick-item:"
 FROM_TAG = "quick-from:"
 NO_FROM = "none"
-CLOSED_STATUSES = ("released", "cancelled")
 # An item kb-quick may START from. Anything already in flight, finished or blocked is refused (NOT_TODO).
 STARTABLE = ("todo", "backlog", "ready", "planned")
 _ID = re.compile(r"[A-Z][A-Z0-9]*-[0-9]+")
@@ -75,7 +76,9 @@ def item_by_id(board, item_id):
 
 
 def is_open(release):
-    return (release.get("status") or "") not in CLOSED_STATUSES
+    # The shared terminal set (release_schema, XACA-1859): a quick release retired or archived by kb-release
+    # is finished, not open, so it never blocks a new kb-quick for its item.
+    return not is_terminal_release_status(release.get("status"))
 
 
 def quick_info(release):
@@ -92,9 +95,17 @@ def quick_tags(item_id, from_rel):
     return [TAG, ITEM_TAG + item_id, FROM_TAG + (from_rel or NO_FROM)]
 
 
+def quick_in_flight(board, release):
+    """True for a quick release whose derived phase is not closed/cancelled. Every quick-release "is it still open?"
+    question (the listing and kb-quick start) asks this, so they agree with the status line; is_open stays for
+    ordinary releases (the DEV train, a cancel's origin)."""
+    return quick_info(release) is not None and phase(board, release) not in ("closed", "cancelled")
+
+
 def open_quick_for_item(board, item_id):
     """The open quick release carrying item_id, else None (the newest when, against the rules, there are several)."""
-    hits = [r for r in releases(board) if is_open(r) and (quick_info(r) or {}).get("item") == item_id]
+    hits = [r for r in releases(board)
+            if quick_in_flight(board, r) and (quick_info(r) or {}).get("item") == item_id]
     return sorted(hits, key=lambda r: r.get("createdAt") or "")[-1] if hits else None
 
 
@@ -173,11 +184,11 @@ def live_subitems(item):
 # ---------------------------------------------------------------------------------------------------------------------
 def phase(board, release):
     """Derived phase of a quick release: cancelled | closed | closing | created | dev | merged."""
-    status = release.get("status") or ""
+    status = (release.get("status") or "").strip().lower()
     if status == "cancelled":
         return "cancelled"
-    if status == "released" or release.get("stage") == "PROD":
-        return "closed"
+    if is_terminal_release_status(status) or release.get("stage") == "PROD":
+        return "closed"   # released, or finished another way (completed/closed/archived/retired)
     if isinstance(release.get("closeOut"), dict):
         return "closing"
     if release.get("stage") in (None, "", "PLANNED") or not release.get("branch"):
@@ -193,9 +204,15 @@ NEXT = {
     "dev": "work the item: kb-run {item}   (then: kb-quick finish {rel})",
     "merged": "kb-quick finish {rel}   (DEV build + tests, one confirmation, close-out to PROD)",
     "closing": "kb-quick finish {rel}   (resumes the close-out at its first incomplete step)",
-    "closed": "nothing: {rel} is released",
+    "closed": "nothing: {rel} is finished (released or retired)",
     "cancelled": "nothing: {rel} was cancelled",
 }
+
+
+def list_open(board):
+    """Ids of the quick releases in flight (quick_in_flight), in board order. The shell lists through this, never
+    its own status set, so the listing agrees with the status line (stage PROD with a non-terminal status is closed)."""
+    return [r.get("id") for r in releases(board) if r.get("id") and quick_in_flight(board, r)]
 
 
 def status(board, rid):
@@ -210,6 +227,9 @@ def status(board, rid):
     item = item_by_id(board, q["item"] or "")
     return {"ok": True, "release": rid, "shortTitle": rel.get("shortTitle"), "item": q["item"], "from": q["from"],
             "phase": ph, "stage": rel.get("stage"), "status": rel.get("status"), "branch": rel.get("branch"),
+            # closed covers every terminal status; shipped says whether it actually reached production
+            "shipped": ph == "closed" and (rel.get("stage") == "PROD"
+                                           or (rel.get("status") or "").strip().lower() == "released"),
             "branchBaseSha": rel.get("branchBaseSha"), "version": _version(rel),
             "itemStatus": resolve_item_status(item) if item is not None else None,
             "next": NEXT[ph].format(item=q["item"], rel=rid)}
@@ -372,6 +392,8 @@ def main(argv=None):
         p.add_argument("--release", required=True)
         if name == "check-cancel":
             p.add_argument("--branch-tip", default="")
+    p = sub.add_parser("list-open")
+    p.add_argument("--board", required=True)
     p = sub.add_parser("resolve")
     p.add_argument("--board", required=True)
     p.add_argument("--arg", required=True)
@@ -394,6 +416,8 @@ def main(argv=None):
             out = status(board, a.release)
         elif a.cmd == "check-cancel":
             out = check_cancel(board, a.release, a.branch_tip)
+        elif a.cmd == "list-open":
+            out = {"ok": True, "releases": list_open(board)}
         else:
             out = {"ok": True, "release": resolve(board, a.arg)}
     except Refusal as r:

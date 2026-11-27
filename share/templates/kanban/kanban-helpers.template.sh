@@ -35582,8 +35582,11 @@ kb-quick-status() {
     local arg="${1-}" j rc rel
     _kb_quick_ctx || return 1
     if [[ -z "$arg" ]]; then
+        # The open/finished decision is quick_release.py list-open (the derived phase), never a status list kept here.
         local ids
-        ids=$(_kb_jq_read "$_KB_Q_BF" '.releases[]? | select((.tags // []) | index("quick")) | select((.status // "") as $s | $s != "released" and $s != "cancelled") | .id' -r 2>/dev/null)
+        j=$(_kb_quick_py list-open); rc=$?
+        (( rc != 0 )) && { _kb_quick_refused "$j" "$rc"; return $?; }
+        ids=$(printf '%s' "$j" | jq -r '.releases[]?')
         if [[ -z "$ids" ]]; then echo "No open quick releases."; return 0; fi
         while IFS= read -r rel; do
             [[ -n "$rel" ]] && kb-quick-status "$rel"
@@ -35621,7 +35624,13 @@ kb-quick-finish() {
     ver=$(printf '%s' "$j" | jq -r '.version // "?"')
     branch=$(printf '%s' "$j" | jq -r '.branch // empty')
     case "$phase" in
-        closed) echo "✓ $rel is already released (v$ver)."; return 0 ;;
+        closed)
+            if [[ "$(printf '%s' "$j" | jq -r '.shipped')" == true ]]; then
+                echo "✓ $rel is already released (v$ver)."; return 0
+            fi
+            # archived / retired / completed / closed without reaching PROD: finished, but nothing shipped
+            echo "✗ kb-quick: $rel is finished without shipping (status $(printf '%s' "$j" | jq -r '.status // "?"')); nothing to finish" >&2
+            return 3 ;;
         cancelled) echo "✗ kb-quick: $rel was cancelled; nothing to finish" >&2; return 3 ;;
         created|dev)
             echo "✗ kb-quick: $rel is not ready to ship: phase $phase, item $(printf '%s' "$j" | jq -r '.item') is $(printf '%s' "$j" | jq -r '.itemStatus // "?"')" >&2
