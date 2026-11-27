@@ -5471,12 +5471,24 @@ def build_release_orchestration_view(release_id, release, board, kanban_dir, now
 
     # XACA-1549-012: an item in orchestration.items but in no wave must never be silently absent.
     # It rides as an extra trailing wave, flagged via `unwavedWave` (its index) so the UI does not call it "WAVE n".
-    orphans = sorted(k for k in items_map if isinstance(k, str) and k not in seen)
+    # XACA-1914: a LATE item (dispatched with --run after the plan, `late: true`, written by track_item) is in no
+    # wave BY DESIGN, so it is NOT a read error: it rides as its own trailing group flagged via `lateWave`.
+    # Only an unflagged orphan is still the 1549-012 anomaly.
+    def _is_late(iid):
+        st = items_map.get(iid)
+        return isinstance(st, dict) and st.get('late') is True
+    unseen = sorted(k for k in items_map if isinstance(k, str) and k not in seen)
+    orphans = [k for k in unseen if not _is_late(k)]
+    late = [k for k in unseen if _is_late(k)]
     unwaved_idx = None
     if orphans:
         unwaved_idx = len(waves)
         waves.append([_card(iid) for iid in orphans])
         errors.append("orchestration.items holds item(s) in no wave: %s" % ", ".join(orphans))
+    late_idx = None
+    if late:
+        late_idx = len(waves)
+        waves.append([dict(_card(iid), late=True) for iid in late])
 
     events, total = [], 0
     all_events = []
@@ -5512,6 +5524,8 @@ def build_release_orchestration_view(release_id, release, board, kanban_dir, now
             "readError": "; ".join(errors) if errors else None}
     if unwaved_idx is not None:
         view["unwavedWave"] = unwaved_idx
+    if late_idx is not None:
+        view["lateWave"] = late_idx
     return view
 
 

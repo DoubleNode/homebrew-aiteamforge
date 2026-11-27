@@ -12446,7 +12446,7 @@ function orchTicketCardHtml(t, now, tokenEntry, badgeTexts) {
 
 // Mirror of kanban-hooks/release_orchestrator.py LEDGER_KINDS (the ledger envelope is {ts, run, kind, ...fields}).
 const ORCH_EVENT_KINDS = ['run_start', 'dispatch', 'state', 'question', 'answer', 'stall', 'crash', 'failed', 'done',
-    'verdict', 'run_end', 'lane', 'model_mismatch', 'token_budget', 'token_summary', 'nudge', 'plan_lane'];
+    'verdict', 'run_end', 'lane', 'model_mismatch', 'token_budget', 'token_summary', 'nudge', 'plan_lane', 'track'];
 
 function orchStr(v) {
     return (typeof v === 'string' || typeof v === 'number') ? String(v) : '';
@@ -12505,6 +12505,9 @@ function orchEventDetails(ev) {
         case 'plan_lane':                       // XACA-1873 Wave 0: {item, action: done|failed, reason?}
             add('item', ev.item); add('action', ev.action);
             alert = orchStr(ev.action) === 'failed';   // a failed planning lane is flagged like a REFUSED dispatch; reason is added below
+            break;
+        case 'track':                           // XACA-1914: a late (dispatched, unplanned) item joined the run {item, terminal, reason}
+            add('item', ev.item); add('terminal', ev.terminal); add('reason', ev.reason);
             break;
         case 'verdict':
             add('verdict', ev.verdict); add('item', ev.item); add('detail', ev.detail);
@@ -12605,7 +12608,8 @@ function orchPanelInnerHtml(data, releaseId) {
     const waveHtml = waves.map((wave, i) => {
         const tickets = Array.isArray(wave) ? wave : [];
         const done = tickets.filter(t => t && t.state === 'DONE').length;
-        const waveName = (i === data.unwavedWave) ? 'NOT IN ANY WAVE' : 'WAVE ' + (i + 1);
+        // XACA-1914: late (--run, post-plan) items are their own group, matching `kb-release-orchestrate status` LATE.
+        const waveName = (i === data.lateWave) ? 'LATE ADDITIONS' : (i === data.unwavedWave) ? 'NOT IN ANY WAVE' : 'WAVE ' + (i + 1);
         return '<li class="orch-wave"><div class="orch-wave-label">' + waveName +
             ' <span class="orch-wave-count">' + done + '/' + tickets.length + ' DONE</span></div>' +
             '<ul class="orch-cards">' + tickets.map(t => orchTicketCardHtml(t, now, t && hasOwn(per, t.id) ? per[t.id] : null, t && hasOwn(itemBadges, t.id) ? itemBadges[t.id] : null)).join('') + '</ul></li>';

@@ -17,6 +17,12 @@ four things the shell cannot do with jq alone:
            an already closed run is a no-op; an open run with unfinished items is REFUSED (rc 3). activeRunId stays on the
            release as the closed run's record (close_run's own contract); "closed" is what every reader (kb-dispatch, the
            monitor, kb-run's active-run check) treats as "no active run".
+           XACA-1914 (user decision 1a): BEFORE that check, close reconciles from the BOARD: every tracked item whose board
+           status (orchestrator_state.resolve_item_status) is completed / cancelled but whose summary state is not DONE /
+           CANCELLED is recorded DONE / CANCELLED through release_orchestrator.record_state (ledger `state` event + summary
+           + lane mirror, under the board lock). Board-only: no tmux, no gh, no verdicts, so close stays offline and
+           deterministic. Items the board does not show as terminal keep the rc 3 refusal. (R02: a summary still saying
+           CRASHED / QUEUED for two completed items refused the hand-off until a manual `watch --once`.)
   exclude  apply `--exclude <ID>` to a plan-run --json document. FAIL CLOSED: an id that is not scheduled in the plan is an
            error (a typo must not silently exclude nothing), and so is excluding an item that a non-excluded scheduled item
            is blockedBy (its dependant would wait on a ticket nobody will run).
@@ -203,6 +209,28 @@ def cmd_start(a):
     return 0
 
 
+_BOARD_TERMINAL = {"completed": "DONE", "cancelled": "CANCELLED"}
+
+
+def _reconcile_board_terminal(a, run_id, items):
+    """XACA-1914: record DONE / CANCELLED for every tracked, not-yet-terminal item that the board shows completed /
+    cancelled. -> the list of (item, from, to) recorded. An item missing from the backlog is left alone (fail closed)."""
+    import orchestrator_state as ostate
+    backlog = {i.get("id"): i for i in _read_json(a.board).get("backlog") or [] if isinstance(i, dict)}
+    done = []
+    for iid, row in sorted(items.items()):
+        prev = row.get("state") if isinstance(row, dict) else None
+        it = backlog.get(iid)
+        to = _BOARD_TERMINAL.get(ostate.resolve_item_status(it)) if it is not None else None
+        if to is None or prev in DONE_STATES:
+            continue
+        ro.record_state(a.board, os.path.abspath(a.kanban_dir), a.release, run_id, iid, to,
+                        detail="hand-off reconcile: board status %s" % ("completed" if to == "DONE" else "cancelled"))
+        print("reconciled %s: %s -> %s (board status)" % (iid, prev, to))
+        done.append((iid, prev, to))
+    return done
+
+
 def cmd_close(a):
     orch = _release_orch(a.board, a.release)
     run_id = orch.get("activeRunId")
@@ -217,6 +245,8 @@ def cmd_close(a):
         # fail closed: a missing or malformed items record is NOT evidence that every item is done
         print("run %s has no readable items record; not closing it as complete" % run_id, file=sys.stderr)
         return 3
+    if _reconcile_board_terminal(a, run_id, items):
+        items = _release_orch(a.board, a.release).get("items") or {}
     open_ = sorted(i for i, v in items.items() if not (isinstance(v, dict) and v.get("state") in DONE_STATES))
     if open_:
         print("run %s still has unfinished item(s): %s; not closing it" % (run_id, ", ".join(open_)), file=sys.stderr)

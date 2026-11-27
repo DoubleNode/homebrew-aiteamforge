@@ -1246,6 +1246,8 @@ def _sync_lanes(ctx, board_file, kdir, run, orch, states, now, lines, wave0=Fals
     orchestration.runId) or worked by a live activeWindows row. A stale or inferred in_progress item with neither derives
     UNKNOWN, and giving it a lane filled kb-dispatch's cap with a ticket nobody was working. board=None keeps the
     pre-1863 behaviour.
+    LATE ITEMS (XACA-1914): an item kb-dispatch added with release_orchestrator.track_item (items[ID].late, no wave) is
+    taken after every wave item, in id order; it is stamped for this run, so it passes the WORKED ONLY guard.
     Returns True iff a lane was assigned or freed."""
     laned = set()
     changed = False
@@ -1671,7 +1673,7 @@ def status(ctx, with_tokens=False):
         pr = g["prs"].get(iid)
         items[iid] = {"wave": waves.get(iid), "terminal": g["terminals"].get(iid), "summaryState": srow.get("state"),
                       "derivedState": states[iid]["state"], "detail": states[iid]["detail"], "since": srow.get("since"),
-                      "pr": pr, "pane": g["panes"].get(iid)}
+                      "pr": pr, "pane": g["panes"].get(iid), "late": srow.get("late") is True}
     view = {"run": run, "release": ctx.release_id, "phase": orch.get("phase"), "startedAt": orch.get("startedAt"),
             "closedAt": orch.get("closedAt"),
             "coordinator": orch.get("coordinator"), "maxParallel": orch.get("maxParallel"), "waves": orch.get("waves"),
@@ -1699,8 +1701,9 @@ def format_status(view):
     for iid, v in view["items"].items():
         pr = v["pr"]
         prs = "-" if not pr else ("error: %s" % pr["error"] if "error" in pr else "#%s %s" % (pr.get("number"), pr.get("state")))
-        L.append("  %s  terminal=%s  summary=%s  derived=%s  since=%s  pr=%s" % (
-            iid, v["terminal"], v["summaryState"], v["derivedState"], v["since"], prs))
+        L.append("  %s  terminal=%s  summary=%s  derived=%s  since=%s  pr=%s%s" % (
+            iid, v["terminal"], v["summaryState"], v["derivedState"], v["since"], prs,
+            "  LATE (dispatched after the plan, no wave)" if v.get("late") else ""))
     for ln in view["lanes"]:
         cur = ln["current"]
         L.append("lane %s: %s; queue: %s" % (ln["lane"], (cur or {}).get("id") if isinstance(cur, dict) else "free",

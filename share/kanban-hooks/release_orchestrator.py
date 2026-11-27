@@ -16,6 +16,8 @@ the ONLY part of this module that writes, and it is the shell-out boundary for b
                                             XACA-1786): one entry per dispatch slot, see LANES below
   hook_append                               kb-ask / kb-answer / kb-dispatch hook: no-op unless the item carries
                                             orchestration.runId (a flat k=v `dispatch` event is nested for the caller)
+  track_item                                XACA-1914: add a LATE item (dispatched with --run, never planned) to the run's
+                                            items ledger + lateItems, with a `track` event (CLI: track-item)
   write_tokens                              release.orchestration.tokens (XACA-1808), under the board lock
   active_run / rehydrate / reattach_coordinator
                                             crash-safe resume (XACA-1547): find the open run, fold the ledger back into
@@ -441,6 +443,9 @@ KIND_NUDGE = "nudge"
 KIND_PLAN_LANE = "plan_lane"
 PLAN_LANE_ACTIONS = ("done", "failed")
 PHASE_WAVE0 = "wave0"
+# XACA-1914: a LATE item entered the run's items ledger {item, terminal, reason: "late"}: kb-dispatch confirmed a --run
+# dispatch of an item the run's plan did not schedule (track_item). rehydrate ignores it (the dispatch event is the record).
+KIND_TRACK = "track"
 # kind -> fields that must be present (fail closed: an event the summariser cannot attribute is refused at write time).
 LEDGER_KINDS = {
     KIND_RUN_START: (), KIND_DISPATCH: ("item", "dispatch"), KIND_STATE: ("item", "from", "to"),
@@ -450,6 +455,7 @@ LEDGER_KINDS = {
     KIND_MODEL_MISMATCH: ("item",), KIND_TOKEN_BUDGET: (), KIND_TOKEN_SUMMARY: (),
     KIND_NUDGE: ("item", "text", "actor", "pane"),
     KIND_PLAN_LANE: ("item", "action"),
+    KIND_TRACK: ("item",),
 }
 _RESERVED_FIELDS = ("ts", "run", "kind")
 
@@ -972,6 +978,42 @@ def record_state(board_file, kanban_dir, release_id, run_id, item, to, detail=No
         _sync_lane(orch, kanban_dir, run_id, item, to, extra.get("prNumber"), "prNumber" in extra, ts, now)
 
     write_summary(board_file, release_id, _mut)
+
+
+def track_item(board_file, kanban_dir, release_id, run_id, item_id, terminal=None, now=None):
+    """XACA-1914: put a LATE item into the run's items ledger. kb-dispatch calls it (CLI track-item) on a confirmed DISPATCHED
+    outcome for an item the run does not track (an item added to the release after start_run and dispatched with --run).
+    Writes, in ONE locked write_summary: items[item] = {terminal, state: "DISPATCHING", since, late: true}, item appended
+    to orchestration.lateItems, and a `track` ledger event. From then on the monitor gathers, derives, lanes and stall-checks
+    it like any other item, and ALL_DONE / close wait for it. Late items join no wave (they never gate SLOT_FREE; they count
+    as in flight in compute_slot_free). Returns True when tracked, False when the run already tracks it (idempotent: no
+    event, nothing touched). Refuses (LedgerError): not the active open run, a Wave 0 run (planning lanes are planned rows),
+    a summary with no items record (never fabricated), and a run with no ledger (start_run creates it; never conjured)."""
+    if not isinstance(item_id, str) or not item_id:
+        raise LedgerError("track_item needs an item id")
+    if not os.path.isfile(ledger_path(kanban_dir, run_id)):
+        raise LedgerError("no ledger for run %s (item %s); not creating one" % (run_id, item_id))
+    ts = _ts(now)
+    box = {"tracked": False}
+
+    def _mut(orch):
+        _active_run_check(orch, release_id, run_id)
+        items = orch.get("items")
+        if not isinstance(items, dict):
+            raise LedgerError("run %s has no items record; not tracking %s" % (run_id, item_id))
+        if item_id in items:
+            return
+        if orch.get("phase") == PHASE_WAVE0:
+            raise LedgerError("run %s is a Wave 0 run; late item %s is not tracked" % (run_id, item_id))
+        ledger_append(kanban_dir, run_id, KIND_TRACK, now=now, item=item_id, terminal=terminal, reason="late")
+        items[item_id] = {"terminal": terminal, "state": "DISPATCHING", "since": ts, "late": True}
+        late = orch.get("lateItems")
+        late = [x for x in late if x != item_id] if isinstance(late, list) else []
+        orch["lateItems"] = late + [item_id]
+        box["tracked"] = True
+
+    write_summary(board_file, release_id, _mut)
+    return box["tracked"]
 
 
 def close_run(board_file, kanban_dir, release_id, run_id, outcome="complete", detail=None, now=None):
@@ -1521,10 +1563,29 @@ def main(argv=None):
     lh.add_argument("--kanban-dir", help="default: the directory holding --board")
     lh.add_argument("--field", action="append", default=[], metavar="k=v")
     lh.add_argument("--json-field", action="append", default=[], metavar="k=JSON")
+    ti = sub.add_parser("track-item", help="XACA-1914: add a late (dispatched, unplanned) item to the run's items ledger")
+    ti.add_argument("--board", required=True)
+    ti.add_argument("--kanban-dir", help="default: the directory holding --board")
+    ti.add_argument("--release", help="default: the release encoded in --run")
+    ti.add_argument("--run", required=True)
+    ti.add_argument("--item", required=True)
+    ti.add_argument("--terminal")
     try:
         args = ap.parse_args(argv)
     except SystemExit as exc:
         return 0 if exc.code in (0, None) else 2
+    if args.cmd == "track-item":
+        try:
+            if not run_id_valid(args.run):
+                raise LedgerError("invalid run id %r" % args.run)
+            kdir = os.path.abspath(args.kanban_dir or os.path.dirname(os.path.abspath(args.board)))
+            rel = args.release or run_release(args.run)
+            done = track_item(args.board, kdir, rel, args.run, args.item, terminal=args.terminal or None)
+        except (LedgerError, OSError) as exc:
+            print("Error: %s" % exc, file=sys.stderr)
+            return 1
+        print("%s %s in run %s" % ("tracked late item" if done else "already tracked:", args.item, args.run))
+        return 0
     if args.cmd in ("ledger-append", "ledger-hook"):
         try:
             fields = _parse_fields(args.field, args.json_field)

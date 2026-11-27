@@ -57,6 +57,12 @@ FAIL-CLOSED DECISIONS (nothing unknown reads as healthy RUNNING)
   * Bad thresholds raise ValueError (a config bug must not silently disable stall detection).
   * in_progress, orchestrated, no window row: CRASHED once dispatch_seconds has passed (inside it, the
     row may simply not be written yet: DISPATCHING). Not orchestrated and no row: UNKNOWN (we do not own it).
+  * XACA-1914 DISPATCH GRACE: an orchestrated item whose window row exists but whose pane is a shell or gone is NOT
+    CRASHED while its orchestration.dispatchedAt is younger than dispatch_seconds. kb-dispatch confirms DISPATCHED as soon
+    as the board flips and the window row appears, while the fresh pane is still a shell until claude starts, so the
+    old rule recorded a false CRASHED ~6 s after dispatch (R02, XACA-1844). Inside the window it derives DISPATCHING
+    ("worker launching"); with an open PR it stays IN_REVIEW. Past the window, or with a missing/unparseable/future
+    dispatchedAt (no proof of a fresh dispatch), the CRASHED rules apply unchanged. An unreadable pane stays UNKNOWN.
   Crash detection deliberately does NOT use kb-recover's BOUND/ORPHANED classification (XACA-1125 is open).
 
 INPUT SHAPES (what the caller must supply)
@@ -319,7 +325,7 @@ def derive_item_state(item, window_row, pane_command, pr, now, thresholds):
         # The worker drives its own gates and kb-pr-monitor through merge (EPIC-0072 2026-11-09 autonomy
         # amendment), so an open PR does NOT excuse a dead worker: nobody is left to merge or answer a verdict.
         if status == "in_progress" and isinstance(window_row, dict):
-            if cmd == PANE_GONE or cmd in SHELL_COMMANDS:
+            if (cmd == PANE_GONE or cmd in SHELL_COMMANDS) and not _in_dispatch_grace(orch, orchestrated, now, th):
                 return _res("CRASHED", "PR #%s open but the worker pane is %s; nobody is driving kb-pr-monitor"
                             % (pr_num, "gone" if cmd == PANE_GONE else "a shell"), None, signals)
             if cmd is None:
@@ -346,6 +352,10 @@ def derive_item_state(item, window_row, pane_command, pr, now, thresholds):
             return _res("CRASHED", "orchestrated run %s but the window is gone" % orch.get("runId"),
                         r["since"], signals)
         return r
+    if (cmd == PANE_GONE or cmd in SHELL_COMMANDS) and _in_dispatch_grace(orch, orchestrated, now, th):
+        # XACA-1914: a freshly dispatched pane is a shell until claude starts; not a crash inside the grace window.
+        return _dispatch_age(orch, now, th, signals, "worker launching, pane is %s" % (
+            "gone" if cmd == PANE_GONE else "a shell"))
     if cmd == PANE_GONE:
         return _res("CRASHED", "window row exists but its pane is gone", None, signals)
     if cmd is None:
@@ -372,6 +382,18 @@ def derive_item_state(item, window_row, pane_command, pr, now, thresholds):
                     None, signals)
     since = window_row.get("statusChangedAt")
     return _res("RUNNING", "worker alive, last activity %ds ago" % age, since if parse_ts(since) else None, signals)
+
+
+def _in_dispatch_grace(orch, orchestrated, now, th):
+    """XACA-1914: True iff the item is orchestrated and its dispatchedAt parses, is not beyond clock skew in the future,
+    and is no older than dispatch_seconds. Anything unprovable is False (the CRASHED rules then apply, as before)."""
+    if not orchestrated:
+        return False
+    t = parse_ts(orch.get("dispatchedAt"))
+    if t is None:
+        return False
+    age = (now - t).total_seconds()
+    return -th["clock_skew_seconds"] <= age <= th["dispatch_seconds"]
 
 
 def _dispatch_age(orch, now, th, signals, why):

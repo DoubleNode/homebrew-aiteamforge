@@ -11,6 +11,14 @@ All notable changes to the LCARS Kanban Workflow Monitor will be documented in t
 
 ## [Unreleased]
 
+- **XACA-1914: late items get their own LATE ADDITIONS group in the orchestration panel.** Before this, a `late: true`
+  item (from `track_item`) landed under NOT IN ANY WAVE and raised a false ORCHESTRATION DATA UNAVAILABLE alert. The
+  `/orchestration` view (`server.py`) now returns these items in their own trailing group, marked by `lateWave` with
+  `late: true` on each card, and reports no `readError`. An orphan without the flag is still the 1549-012 anomaly.
+- **XACA-1914: orchestration event feed shows the new `track` ledger kind.** A late item that kb-dispatch added to a running
+  release run (dispatched with `--run`, never planned) appears as `track item=<ID> terminal=<T> reason=late`. `ORCH_EVENT_KINDS`
+  mirrors `release_orchestrator.LEDGER_KINDS` again. Bumped `lcars.js?v=4.36`.
+
 - **XACA-1863: `_resolve_item_status` R2 ignores `[USER DECISION]` subitems.** A completed planning decision no longer makes an
   unrecorded item read in_progress; release progress and release-item views now agree with kb-dispatch and kanban-helpers.sh.
 

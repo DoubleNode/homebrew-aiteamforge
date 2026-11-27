@@ -17195,6 +17195,29 @@ _kb_dispatch_ledger() {
     return 0
 }
 
+# _kb_dispatch_track <board_file> <run> <item> <terminal>   (XACA-1914)
+# A confirmed DISPATCHED of an item the run's items ledger does not track (a late addition to the release, dispatched with
+# --run) adds it via release_orchestrator.py track-item: items[ID] {late: true, DISPATCHING}, lateItems, a `track` event.
+# Only when release.orchestration.items is an object WITHOUT the item (a tracked item is never re-tracked; a summary with
+# no items record is not ours to invent). Without it the monitor never watched the item and the hand-off / ALL_DONE ignored
+# it (R02: XACA-1877, 1878, 1881, 1882, 1885). BEST-EFFORT: always rc 0, warns on stderr, never touches stdout.
+_kb_dispatch_track() {
+    local _board="${1-}" _run="${2-}" _item="${3-}" _term="${4-}" _hdir _py _rel _err _rc=0
+    [[ -n "$_board" && -n "$_run" && -n "$_item" && -f "$_board" ]] || return 0
+    _hdir="$(_kb_board_settings_script 2>/dev/null)" && _hdir="$(dirname "$_hdir")" || _hdir=""
+    _py="$_hdir/release_orchestrator.py"
+    [[ -n "$_hdir" && -f "$_py" ]] || return 0
+    _kb_jq_read "$_board" '[.releases[]? | .orchestration // {} | objects | select(.activeRunId == $run)] | first
+        | (.items // null) as $i | ($i | type) == "object" and ($i | has($item) | not)' \
+        --arg run "$_run" --arg item "$_item" -e >/dev/null 2>&1 || return 0
+    local -a _targs
+    _targs=(--board "$_board" --run "$_run" --item "$_item")
+    [[ -n "$_term" ]] && _targs+=(--terminal "$_term")
+    _err="$(python3 "$_py" track-item "${_targs[@]}" 2>&1 >/dev/null </dev/null)" || _rc=$?
+    (( _rc == 0 )) || echo "kb: WARNING run items ledger (track ${_item}) failed: ${_err:-rc=$_rc}" >&2
+    return 0
+}
+
 # _kb_dispatch_result <outcome> <reason> <detail> [observed-json]
 # Reports one kb-dispatch outcome. Reads kb-dispatch's locals (item terminal session window model run team
 # want_json board_file resume _kbd_run_checked) through zsh dynamic scope; only kb-dispatch calls it.
@@ -17218,6 +17241,7 @@ _kb_dispatch_result() {
     fi
     if (( ${_kbd_run_checked:-0} )) && [[ -n "$_obj" ]]; then
         _kb_dispatch_ledger "$board_file" "$run" "$_obj" "${_KB_ORCH_MODEL_SOURCE-}" "${resume:-0}"
+        [[ "$_o" == DISPATCHED ]] && _kb_dispatch_track "$board_file" "$run" "$item" "$terminal"   # XACA-1914: late items
     fi
     if (( want_json )); then
         [[ -n "$_obj" ]] && print -r -- "$_obj"
