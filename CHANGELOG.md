@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1989: kb-quick one-ticket hotfix-style quick release (XACA-1989)
+- Tap files updated in this publish: `share/kanban-hooks/quick_release.py`,`share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1890: Retro gate counts knowledge entries in every tier (XACA-1890)
 - Tap files updated in this publish: `share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1870: Release coordinator tab shows [claude]/amber (claude runs in the pane shell) (XACA-1870)

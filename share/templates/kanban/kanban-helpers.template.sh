@@ -15834,6 +15834,26 @@ kb-run() {
     if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
     _kb_require_live_cwd || return $?  # XACA-1867
     _kb_ensure_jq || return 1
+    # XACA-1989: kb-run --quick <ITEM-ID> [--yes] = kb-quick start (a one-ticket hotfix-style mini-release). Checked
+    # BEFORE the list dispatch, so --quick with a list or a REL-ID is a usage error rather than a batch.
+    local _kb_q_arg _kb_q_on=0 _kb_q_sel="" _kb_q_n=0
+    local -a _kb_q_rest=()
+    for _kb_q_arg in "$@"; do
+        case "$_kb_q_arg" in
+            --quick) _kb_q_on=1 ;;
+            --yes|-y) _kb_q_rest+=("$_kb_q_arg") ;;
+            -*) _kb_q_rest+=("$_kb_q_arg") ;;
+            *) _kb_q_sel="$_kb_q_arg"; _kb_q_n=$(( _kb_q_n + 1 )) ;;
+        esac
+    done
+    if (( _kb_q_on )); then
+        if (( _kb_q_n != 1 )) || [[ "$_kb_q_sel" == *,* || "$_kb_q_sel" == REL-* ]]; then
+            echo "Error: kb-run --quick takes exactly one ITEM-ID (a set of tickets: kb-run A,B; a release: kb-run <REL-ID>)" >&2
+            return 2
+        fi
+        kb-quick-start "$_kb_q_sel" ${_kb_q_rest[@]+"${_kb_q_rest[@]}"}
+        return $?
+    fi
     # XACA-1834: a list (kb-run A,B or kb-run A B) is a batch coordinator; one selector runs below as before.
     if _kb_item_list_args "$@"; then _kb_batch_run "$@"; return $?; fi
 
@@ -15915,6 +15935,7 @@ kb-run() {
 
     if [[ -z "$selector" ]]; then
         echo "Usage: kb-run <id> [--yes] [--orchestrated <RUN-ID> [--coordinator <team:terminal>]]"
+        echo "       kb-run --quick <id> [--yes]   one ticket as its own hotfix-style quick release (= kb-quick, XACA-1989)"
         echo "       kb-run <REL-ID> [--yes]   release session: attach/create the release worktree, resume from the record (XACA-1350)"
         echo "         [--orchestrate | --no-orchestrate] [--max-parallel N] [--exclude ITEM]... [--model M] [--worker-model M]"
         echo "         [--effort low|medium|high|xhigh|max|inherit]   the coordinator session's effort (XACA-1836)"
@@ -35280,6 +35301,462 @@ _kb_release_run() {
     return 0
 }
 
+# ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+# XACA-1989: kb-quick <ITEM-ID> -- a one-ticket auto mini-release (hotfix-style) for a quick one-off ticket.
+#
+# A ticket cannot start until its release has a branch, and a planned train can be weeks from promotion. kb-quick
+# automates the manual R02a-HF1 (REL-2026-Q4-079) route: a ONE-item type:hotfix release, cut as hotfix/<ver> from
+# PRODUCTION (never the integration branch: in trunk mode closing a normal release would ship all unreleased develop
+# work), the normal single-ticket kb-run worker, then DEV build + stage tests and the normal close-out (tag, merge
+# production, back-merge integration, gated promote to PROD).
+#
+# A thin orchestrator: every step is an existing command (kb-release create/edit/assign/promote/new-sha/test/
+# close-out, kb-run). The pure decisions (refusals, -QF<n> naming, derived phase, cancel safety) are
+# kanban-hooks/quick_release.py. Bookkeeping lives in release tags (quick, quick-item:<ID>, quick-from:<REL-ID|none>).
+#
+#   kb-quick <ITEM-ID> [--yes] [--no-run]    = kb-quick start (also: kb-run --quick <ITEM-ID>)
+#   kb-quick finish <REL-ID|ITEM-ID> [--yes] DEV build -> DEV tests -> ONE confirmation -> close-out to PROD
+#   kb-quick cancel <REL-ID|ITEM-ID> [--reason TEXT]   release cancelled, item back to its original release
+#   kb-quick status [<REL-ID|ITEM-ID>]       the derived phase and the next command (no arg: every open quick release)
+# Exit: 0 ok | 1 error | 2 usage / no tty for a confirmation | 3 refused | 4 not found | 5 manual test case | 6 DEV test failed
+# ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+_KB_QUICK_LOCK_WAIT=60      # seconds to wait for another kb-quick start's allocate+create
+_KB_QUICK_LOCK_STALE=600    # a lock older than this is a crashed run's and is broken
+
+# _kb_quick_ctx : sets _KB_Q_TEAM, _KB_Q_BF (board), _KB_Q_KDIR (kanban dir), _KB_Q_HOOKS (kanban-hooks dir).
+_kb_quick_ctx() {
+    local ctx s
+    ctx=$(_kb_detect_context 2>/dev/null)
+    _KB_Q_TEAM="${ctx%%:*}"
+    if [[ -z "$_KB_Q_TEAM" || "$_KB_Q_TEAM" == "ERROR:"* ]]; then
+        echo "Error: kb-quick: could not determine team context" >&2; return 1
+    fi
+    _KB_Q_BF=$(_kb_get_board_file "$_KB_Q_TEAM") || { echo "Error: kb-quick: no board for team '$_KB_Q_TEAM'" >&2; return 1; }
+    _KB_Q_KDIR=$(_kb_get_kanban_dir "$_KB_Q_TEAM") || { echo "Error: kb-quick: no kanban dir for team '$_KB_Q_TEAM'" >&2; return 1; }
+    s=$(_kb_board_settings_script) || { echo "Error: kb-quick: cannot locate kanban-hooks/" >&2; return 1; }
+    _KB_Q_HOOKS=$(dirname "$s")
+    [[ -f "$_KB_Q_HOOKS/quick_release.py" ]] || { echo "Error: kb-quick: missing $_KB_Q_HOOKS/quick_release.py" >&2; return 1; }
+    return 0
+}
+
+# _kb_quick_py <verb> [args...] : quick_release.py against a locked snapshot of the board. JSON on stdout, its rc.
+_kb_quick_py() {
+    local snap rc
+    snap=$(mktemp "${TMPDIR:-/tmp}/kb-quick-board.XXXXXX") || return 1
+    _kb_jq_read "$_KB_Q_BF" '.' > "$snap" 2>/dev/null || { rm -f "$snap"; echo "Error: kb-quick: cannot read $_KB_Q_BF" >&2; return 1; }
+    python3 "$_KB_Q_HOOKS/quick_release.py" "$1" --board "$snap" "${@:2}"
+    rc=$?
+    rm -f "$snap"
+    return $rc
+}
+
+# _kb_quick_refused <json> <rc> : print a refusal's reason + remedy (stderr) and return its rc.
+_kb_quick_refused() {
+    local j="${1-}" rc="${2:-1}" code reason remedy
+    code=$(printf '%s' "$j" | jq -r '.code // "ERROR"' 2>/dev/null)
+    reason=$(printf '%s' "$j" | jq -r '.reason // empty' 2>/dev/null)
+    remedy=$(printf '%s' "$j" | jq -r '.remedy // empty' 2>/dev/null)
+    echo "✗ kb-quick: ${reason:-refused} [${code:-ERROR}]" >&2
+    [[ -n "$remedy" ]] && echo "  Next: $remedy" >&2
+    return "$rc"
+}
+
+# _kb_quick_lock / _kb_quick_unlock : one kb-quick allocate+create at a time per board (mkdir is atomic). The release
+# VERSION is already allocated under the server's board lock; this only keeps two calls off the same -QF<n>.
+_kb_quick_lock() {
+    local d="$_KB_Q_KDIR/.kb-quick.lock" waited=0 age now mtime
+    while ! mkdir "$d" 2>/dev/null; do
+        now=$(date +%s)
+        mtime=$(stat -c %Y "$d" 2>/dev/null || stat -f %m "$d" 2>/dev/null || echo "$now")
+        age=$(( now - mtime ))
+        if (( age > _KB_QUICK_LOCK_STALE )); then
+            echo "⚠ kb-quick: breaking a stale lock (${age}s old): $d" >&2
+            rmdir "$d" 2>/dev/null
+            continue
+        fi
+        if (( waited >= _KB_QUICK_LOCK_WAIT )); then
+            echo "✗ kb-quick: another kb-quick start holds $d (waited ${waited}s); retry shortly" >&2
+            return 1
+        fi
+        sleep 1; waited=$(( waited + 1 ))
+    done
+    return 0
+}
+_kb_quick_unlock() { rmdir "$_KB_Q_KDIR/.kb-quick.lock" 2>/dev/null; return 0; }
+
+# _kb_quick_confirm <prompt> <assume_yes> : an explicit y is required (the default is NO: this ships to production).
+# rc 0 yes | 1 no | 2 no tty and no --yes.
+_kb_quick_confirm() {
+    local ans="" yes_re='^[Yy]([Ee][Ss])?$'
+    if [[ "${2-0}" == "1" || "${KB_ASSUME_YES:-}" == "1" ]]; then
+        echo "kb-quick: --yes given, skipping confirmation"; return 0
+    fi
+    if [[ ! -t 0 ]]; then
+        echo "✗ kb-quick: stdin is not a terminal, so no confirmation is possible; re-run with --yes to proceed" >&2
+        return 2
+    fi
+    printf '%s' "${1-Proceed? [y/N]: }"
+    read -r ans
+    [[ "$ans" =~ $yes_re ]]
+}
+
+# _kb_quick_release_worktree <REL-ID> : attach/create the release worktree (same call kb-run <REL-ID> makes) and print
+# its path. Initialises submodules there: R02a-HF1's DEV run had 2 false FAILs from an uninitialised homebrew-tap.
+_kb_quick_release_worktree() {
+    local rel="${1-}" git_common git_root project_root out wt
+    git_common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+    [[ -n "$git_common" ]] && git_root=$(dirname "$git_common")
+    if [[ -z "$git_root" || "$git_root" == "." ]]; then
+        echo "✗ kb-quick: not in a git repository; run it from the team's repo" >&2; return 1
+    fi
+    project_root=$(_kb_resolve_project_root "$git_root")
+    out=$(python3 "$_KB_Q_HOOKS/release_resume.py" worktree --release "$rel" --kanban-dir "$_KB_Q_KDIR" \
+        --repo-dir "$git_root" --worktree-dir "${project_root}/worktrees/$(printf '%s' "$rel" | tr '[:upper:]' '[:lower:]')") \
+        || { echo "✗ kb-quick: could not attach/create the release worktree for $rel" >&2; return 1; }
+    wt="${out#*$'\t'}"
+    [[ -d "$wt" ]] || { echo "✗ kb-quick: release worktree path is not a directory: $wt" >&2; return 1; }
+    if [[ -f "$wt/.gitmodules" ]]; then
+        git -C "$wt" submodule update --init --recursive >/dev/null 2>&1 \
+            || echo "⚠ kb-quick: 'git submodule update --init' failed in $wt; suites that need a submodule may FAIL" >&2
+    fi
+    printf '%s\n' "$wt"
+}
+
+# _kb_quick_remote_tip <repo-dir> <branch> : the branch's tip on the repo's first remote (release_branches._remote).
+# Prints the SHA; rc 1 with a message when the branch is unknown or the remote is unreadable.
+_kb_quick_remote_tip() {
+    local dir="${1-}" branch="${2-}" remote tip
+    [[ -z "$branch" ]] && { echo "✗ kb-quick: the release records no branch" >&2; return 1; }
+    remote=$(git -C "$dir" remote 2>/dev/null | head -1)
+    [[ -z "$remote" ]] && { echo "✗ kb-quick: $dir has no git remote" >&2; return 1; }
+    tip=$(git -C "$dir" ls-remote -- "$remote" "refs/heads/$branch" 2>/dev/null | awk -v r="refs/heads/$branch" '$2 == r {print $1}')
+    if [[ ! "$tip" =~ ^[0-9a-f]{40}$ ]]; then
+        echo "✗ kb-quick: cannot read the tip of $branch on $remote (unreachable, or the branch is gone)" >&2
+        return 1
+    fi
+    printf '%s\n' "$tip"
+}
+
+kb-quick() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
+    _kb_ensure_jq || return 1
+    local verb="${1-}"
+    case "$verb" in
+        start|finish|cancel|status) shift; "kb-quick-$verb" "$@"; return $? ;;
+        ""|help|-h|--help)
+            echo "Usage: kb-quick <ITEM-ID> [--yes] [--no-run]     start a one-ticket quick release (= kb-quick start)"
+            echo "       kb-quick finish <REL-ID|ITEM-ID> [--yes]  DEV build + tests, ONE confirmation, close-out to PROD"
+            echo "       kb-quick cancel <REL-ID|ITEM-ID> [--reason TEXT]   abandon it; the item returns to its release"
+            echo "       kb-quick status [<REL-ID|ITEM-ID>]        phase + next command (no arg: all open quick releases)"
+            echo ""
+            echo "A quick release is a type:hotfix release carrying ONE item, named <DEV train>-QF<n>, cut as"
+            echo "hotfix/<ver> from production (version = last shipped + patch). Use it for a single ticket whose"
+            echo "release has no branch yet. Several tickets = several kb-quick calls (a set of tickets is kb-run A,B)."
+            echo "Refused: client-merge boards, trunk boards whose production == integration, an unplanned item, an"
+            echo "item that has started, an item already in an open quick release (kb-quick start resumes that one)."
+            echo "finish ships the hotfix branch's REMOTE tip and assumes DEV is the last stage before PROD; with QA/..."
+            echo "enabled it stops after DEV (continue with kb-run <REL-ID>)."
+            echo "Exit: 0 ok, 1 error, 2 usage/no tty, 3 refused, 4 not found, 5 manual case, 6 DEV test failed"
+            [[ -z "$verb" ]] && return 2
+            return 0 ;;
+        -*) echo "Error: kb-quick: unknown option: $verb (see kb-quick --help)" >&2; return 2 ;;
+        *) kb-quick-start "$@"; return $? ;;
+    esac
+}
+
+kb-quick-start() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
+    _kb_ensure_jq || return 1
+    local item_id="" yes=0 no_run=0 j rc action rel short out phase
+    while (( $# > 0 )); do
+        case "$1" in
+            --yes|-y) yes=1; shift ;;
+            --no-run) no_run=1; shift ;;
+            -h|--help) kb-quick --help; return 0 ;;
+            -*) echo "Error: kb-quick start: unknown option: $1" >&2; return 2 ;;
+            *)
+                if [[ -n "$item_id" ]]; then
+                    echo "Error: kb-quick takes ONE item (got $item_id and $1); a set of tickets is kb-run $item_id,$1" >&2
+                    return 2
+                fi
+                item_id="$1"; shift ;;
+        esac
+    done
+    if [[ -z "$item_id" ]]; then echo "Usage: kb-quick start <ITEM-ID> [--yes] [--no-run]" >&2; return 2; fi
+    if [[ "$item_id" == *,* || "$item_id" == REL-* ]]; then
+        echo "Error: kb-quick takes a single ITEM-ID, not '$item_id' (a release: kb-run <REL-ID>; a set: kb-run A,B)" >&2
+        return 2
+    fi
+    _kb_quick_ctx || return 1
+
+    _kb_quick_lock || return 1
+    j=$(_kb_quick_py check-start --item "$item_id" --date "$(date +%Y-%m-%d)" --archive "$_KB_Q_KDIR/releases-archive")
+    rc=$?
+    if (( rc != 0 )); then _kb_quick_unlock; _kb_quick_refused "$j" "$rc"; return $?; fi
+    action=$(printf '%s' "$j" | jq -r '.action')
+    if [[ "$action" == "resume" ]]; then
+        _kb_quick_unlock
+        rel=$(printf '%s' "$j" | jq -r '.release')
+        echo "↻ kb-quick: $item_id is already in quick release $rel ($(printf '%s' "$j" | jq -r '.shortTitle // "?"')); resuming"
+    else
+        local name platform tags from
+        name=$(printf '%s' "$j" | jq -r '.name')
+        short=$(printf '%s' "$j" | jq -r '.shortTitle')
+        platform=$(printf '%s' "$j" | jq -r '.platform')
+        tags=$(printf '%s' "$j" | jq -r '.tags | join(",")')
+        from=$(printf '%s' "$j" | jq -r '.from // "none"')
+        if [[ "$(printf '%s' "$j" | jq -r '.fromHasBranch')" == "true" ]]; then
+            echo "ℹ $item_id's release $from already has a branch: plain 'kb-run $item_id' works too. Continuing with a quick release."
+        fi
+        echo "▶ kb-quick: creating $short for $item_id (from ${from}), type hotfix, platform $platform"
+        out=$(kb-release-create "$name" --type hotfix --platforms "$platform" --short-title "$short" \
+            --target-date "$(date +%Y-%m-%d)" 2>&1)
+        rc=$?
+        printf '%s\n' "$out"
+        rel=$(printf '%s\n' "$out" | sed -n 's/^✓ Created release: .*(\(REL-[A-Za-z0-9-]*\))$/\1/p' | head -1)
+        if (( rc != 0 )) || [[ -z "$rel" ]]; then
+            _kb_quick_unlock
+            echo "✗ kb-quick: release create failed; nothing else was changed" >&2
+            return 1
+        fi
+        if ! kb-release-edit "$rel" --tags "$tags" >/dev/null; then
+            _kb_quick_unlock
+            echo "✗ kb-quick: could not tag $rel as a quick release; cancelling it so no untracked hotfix is left" >&2
+            kb-release-edit "$rel" --status cancelled >/dev/null 2>&1 \
+                || echo "  ALSO FAILED to cancel $rel; cancel it by hand: kb-release edit $rel --status cancelled" >&2
+            return 1
+        fi
+        _kb_quick_unlock
+        if ! kb-release-assign "$item_id" "$rel" "$platform"; then
+            echo "✗ kb-quick: could not assign $item_id to $rel. Retry: kb-quick start $item_id (resumes), or abandon: kb-quick cancel $rel" >&2
+            return 1
+        fi
+    fi
+
+    # PLANNED -> DEV: the gated promote cuts hotfix/<ver> from production and records branch/branchBaseSha.
+    phase=$(_kb_quick_py status --release "$rel" | jq -r '.phase // empty')
+    if [[ "$phase" == "created" ]]; then
+        # A resumed create may not have reached the assign; re-assigning to the same release is idempotent.
+        if [[ "$(_kb_jq_read "$_KB_Q_BF" '[.backlog[]? | select(.id == $i) | .releaseAssignment.releaseId // ""] | first // ""' --arg i "$item_id" -r 2>/dev/null)" != "$rel" ]]; then
+            kb-release-assign "$item_id" "$rel" || { echo "✗ kb-quick: could not assign $item_id to $rel" >&2; return 1; }
+        fi
+        kb-release-promote "$rel" --to "DEV"   # quoted: keeps the XACA-1548 suite's promote anchor unique
+        rc=$?
+        if (( rc != 0 )); then
+            echo "✗ kb-quick: the DEV promote of $rel was refused or failed (rc $rc); $item_id stays in $rel." >&2
+            echo "  Fix what the gate named, then: kb-quick start $item_id   (resumes)   or abandon: kb-quick cancel $rel" >&2
+            return 3
+        fi
+        phase=$(_kb_quick_py status --release "$rel" | jq -r '.phase // empty')
+        if [[ "$phase" != "dev" && "$phase" != "merged" ]]; then
+            echo "✗ kb-quick: after the promote $rel is in phase '${phase:-?}', not dev (no hotfix branch recorded?)" >&2
+            echo "  Inspect: kb-quick status $rel / kb-release resume $rel" >&2
+            return 1
+        fi
+    fi
+    echo "✓ kb-quick: $rel is at DEV on $(_kb_jq_read "$_KB_Q_BF" '[.releases[]? | select(.id == $r) | .branch // "?"] | first' --arg r "$rel" -r 2>/dev/null)"
+    if (( no_run )); then
+        echo "  Next: kb-run $item_id   then: kb-quick finish $rel"
+        return 0
+    fi
+
+    # Hand-off: the existing single-ticket worker (worktree from the hotfix branch, PR, gates, monitor, kb-done).
+    local -a run_args=("$item_id")
+    (( yes )) && run_args+=(--yes)
+    kb-run "${run_args[@]}"
+    rc=$?
+    (( rc != 0 )) && { echo "  kb-run exited $rc. Resume: kb-quick start $item_id   Ship once merged: kb-quick finish $rel" >&2; return $rc; }
+    phase=$(_kb_quick_py status --release "$rel" | jq -r '.phase // empty')
+    if [[ "$phase" == "merged" && -t 0 ]]; then
+        echo "✓ kb-quick: $item_id is merged into $rel."
+        kb-quick-finish "$rel"
+        return $?
+    fi
+    echo "  Next, once $item_id is merged: kb-quick finish $rel"
+    return 0
+}
+
+kb-quick-status() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
+    _kb_ensure_jq || return 1
+    local arg="${1-}" j rc rel
+    _kb_quick_ctx || return 1
+    if [[ -z "$arg" ]]; then
+        local ids
+        ids=$(_kb_jq_read "$_KB_Q_BF" '.releases[]? | select((.tags // []) | index("quick")) | select((.status // "") as $s | $s != "released" and $s != "cancelled") | .id' -r 2>/dev/null)
+        if [[ -z "$ids" ]]; then echo "No open quick releases."; return 0; fi
+        while IFS= read -r rel; do
+            [[ -n "$rel" ]] && kb-quick-status "$rel"
+        done <<< "$ids"
+        return 0
+    fi
+    j=$(_kb_quick_py resolve --arg "$arg"); rc=$?
+    (( rc != 0 )) && { _kb_quick_refused "$j" "$rc"; return $?; }
+    rel=$(printf '%s' "$j" | jq -r '.release')
+    j=$(_kb_quick_py status --release "$rel"); rc=$?
+    (( rc != 0 )) && { _kb_quick_refused "$j" "$rc"; return $?; }
+    printf '%s' "$j" | jq -r '"\(.release)  \(.shortTitle // "?")  v\(.version // "?")  phase=\(.phase)  stage=\(.stage // "?")  item=\(.item // "?") [\(.itemStatus // "?")]  branch=\(.branch // "-")  from=\(.from // "none")\n  Next: \(.next)"'
+}
+
+kb-quick-finish() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
+    _kb_ensure_jq || return 1
+    local arg="" yes=0 j rc rel phase wt row action ver i branch tip
+    while (( $# > 0 )); do
+        case "$1" in
+            --yes|-y) yes=1; shift ;;
+            -h|--help) kb-quick --help; return 0 ;;
+            -*) echo "Error: kb-quick finish: unknown option: $1" >&2; return 2 ;;
+            *) [[ -n "$arg" ]] && { echo "Error: kb-quick finish takes one REL-ID or ITEM-ID" >&2; return 2; }; arg="$1"; shift ;;
+        esac
+    done
+    [[ -z "$arg" ]] && { echo "Usage: kb-quick finish <REL-ID|ITEM-ID> [--yes]" >&2; return 2; }
+    _kb_quick_ctx || return 1
+    j=$(_kb_quick_py resolve --arg "$arg"); rc=$?
+    (( rc != 0 )) && { _kb_quick_refused "$j" "$rc"; return $?; }
+    rel=$(printf '%s' "$j" | jq -r '.release')
+    j=$(_kb_quick_py status --release "$rel"); rc=$?
+    (( rc != 0 )) && { _kb_quick_refused "$j" "$rc"; return $?; }
+    phase=$(printf '%s' "$j" | jq -r '.phase')
+    ver=$(printf '%s' "$j" | jq -r '.version // "?"')
+    branch=$(printf '%s' "$j" | jq -r '.branch // empty')
+    case "$phase" in
+        closed) echo "✓ $rel is already released (v$ver)."; return 0 ;;
+        cancelled) echo "✗ kb-quick: $rel was cancelled; nothing to finish" >&2; return 3 ;;
+        created|dev)
+            echo "✗ kb-quick: $rel is not ready to ship: phase $phase, item $(printf '%s' "$j" | jq -r '.item') is $(printf '%s' "$j" | jq -r '.itemStatus // "?"')" >&2
+            echo "  Next: $(printf '%s' "$j" | jq -r '.next')" >&2
+            return 3 ;;
+    esac
+
+    echo "kb-quick finish $rel ($(printf '%s' "$j" | jq -r '.shortTitle // "?"'), v$ver, branch $(printf '%s' "$j" | jq -r '.branch // "-"')):"
+    echo "  record the DEV build (hotfix branch HEAD), run the DEV stage tests, then close out: tag v$ver, merge"
+    echo "  into production, back-merge integration, delete the hotfix branch, and the gated promote to PROD."
+    _kb_quick_confirm "Ship $rel v$ver to PRODUCTION? [y/N]: " "$yes"
+    rc=$?
+    (( rc == 2 )) && return 2
+    (( rc != 0 )) && { echo "Not shipped. Re-run when ready: kb-quick finish $rel"; return 0; }
+
+    wt=$(_kb_quick_release_worktree "$rel") || return 1
+    rc=1
+    if [[ "$phase" == "closing" ]]; then
+        # The close-out binds to the already-recorded stageSha; the hotfix branch may already be deleted.
+        kb-release-close-out "$rel" --repo-dir "$wt"
+        return $?
+    fi
+    # The DEV build is what gets tested, tagged and shipped, so it must be the hotfix branch's REMOTE tip, never an
+    # unverified local HEAD. A failed fast-forward, a diverged or detached worktree all stop here (fail closed).
+    tip=$(_kb_quick_remote_tip "$wt" "$branch") || return 1
+    git -C "$wt" pull --ff-only --quiet 2>/dev/null
+    if [[ "$(git -C "$wt" rev-parse HEAD 2>/dev/null)" != "$tip" ]]; then
+        echo "✗ kb-quick: the release worktree $wt is at $(git -C "$wt" rev-parse --short HEAD 2>/dev/null || echo '?'), not at the remote tip of $branch (${tip:0:12})." >&2
+        echo "  The DEV build must be exactly what is on the remote. Bring the worktree to it (e.g. git -C $wt checkout --detach $tip), then: kb-quick finish $rel" >&2
+        return 1
+    fi
+    # Follow the release_resume plan row by row (the same rows kb-run <REL-ID> resumes from); bounded, never a loop.
+    for i in 1 2 3 4 5; do
+        j=$(python3 "$_KB_Q_HOOKS/release_resume.py" plan --release "$rel" --kanban-dir "$_KB_Q_KDIR" --repo-dir "$wt" --json) \
+            || { echo "✗ kb-quick: cannot compute the resume plan for $rel" >&2; rc=1; break; }
+        row=$(printf '%s' "$j" | jq -r '.row // empty')
+        action=$(printf '%s' "$j" | jq -r '.action // empty')
+        case "$row" in
+            dev-deploy-pending|stage-sha-missing)
+                kb-release-new-sha "$rel" "$tip" --reason "kb-quick: DEV build = remote tip of ${branch}" \
+                    || { rc=1; break; } ;;
+            tests-running)
+                if [[ "$action" == "walkthrough" ]]; then
+                    echo "✗ kb-quick: the DEV stage has manual cases: kb-release walkthrough $rel, then kb-quick finish $rel" >&2
+                    rc=5; break
+                fi
+                kb-release-test "$rel" --repo-dir "$wt" --only-missing; rc=$?
+                if (( rc == 6 )); then
+                    echo "✗ kb-quick: DEV tests FAILED for $rel. Land a fix on $branch (kb-quick finish then records the new tip and re-tests), or a lead waives (kb-release waive $rel ...), then: kb-quick finish $rel" >&2
+                    break
+                fi
+                (( rc != 0 )) && break ;;
+            tests-failed)
+                if [[ "$(printf '%s' "$j" | jq -r '.stageSha // empty')" != "$tip" ]]; then
+                    # A fix landed on the hotfix branch since the failed run: record the new tip, then re-test it.
+                    kb-release-new-sha "$rel" "$tip" --reason "kb-quick: re-test the fixed remote tip of ${branch}" \
+                        || { rc=1; break; }
+                    continue
+                fi
+                printf '%s' "$j" | jq -r '.lines[]? | "  " + .' >&2
+                echo "✗ kb-quick: DEV tests FAILED for $rel on the current tip of $branch; land a fix there (finish re-tests the new tip) or a lead waiver (kb-release waive), then: kb-quick finish $rel" >&2
+                rc=6; break ;;
+            closeout-ready)
+                kb-release-close-out "$rel" --repo-dir "$wt"; rc=$?; break ;;
+            terminal) rc=0; break ;;
+            *)
+                echo "✗ kb-quick: $rel is at row '${row:-?}' (action ${action:-?}), which kb-quick does not drive:" >&2
+                printf '%s' "$j" | jq -r '.headline, (.lines[]? | "  " + .)' >&2
+                echo "  Continue with: kb-run $rel   (the release session), then kb-quick status $rel" >&2
+                rc=1; break ;;
+        esac
+    done
+    if (( rc == 0 )) && [[ "$row" != "closeout-ready" && "$row" != "terminal" ]]; then
+        echo "✗ kb-quick: stopped at row '${row:-?}' without reaching the close-out; see: kb-quick status $rel" >&2
+        rc=1
+    fi
+    (( rc == 0 )) && echo "✓ kb-quick: $rel v$ver shipped. The item's original release is unchanged; kb-quick status $rel"
+    return $rc
+}
+
+kb-quick-cancel() {
+    if typeset -f kb_ensure_helpers_loaded >/dev/null 2>&1; then kb_ensure_helpers_loaded || return $?; fi  # XACA-1806
+    _kb_ensure_jq || return 1
+    local arg="" reason="" j rc rel branch tip restore item
+    while (( $# > 0 )); do
+        case "$1" in
+            --reason)
+                (( $# < 2 )) && { echo "Error: --reason needs a value" >&2; return 2; }
+                reason="$2"; shift 2 ;;
+            -h|--help) kb-quick --help; return 0 ;;
+            -*) echo "Error: kb-quick cancel: unknown option: $1" >&2; return 2 ;;
+            *) [[ -n "$arg" ]] && { echo "Error: kb-quick cancel takes one REL-ID or ITEM-ID" >&2; return 2; }; arg="$1"; shift ;;
+        esac
+    done
+    [[ -z "$arg" ]] && { echo "Usage: kb-quick cancel <REL-ID|ITEM-ID> [--reason TEXT]" >&2; return 2; }
+    _kb_quick_ctx || return 1
+    j=$(_kb_quick_py resolve --arg "$arg"); rc=$?
+    (( rc != 0 )) && { _kb_quick_refused "$j" "$rc"; return $?; }
+    rel=$(printf '%s' "$j" | jq -r '.release')
+    branch=$(_kb_jq_read "$_KB_Q_BF" '[.releases[]? | select(.id == $r) | .branch // ""] | first // ""' --arg r "$rel" -r 2>/dev/null)
+    tip=""
+    if [[ -n "$branch" ]]; then
+        # Read the REMOTE tip in the TEAM repo (the git common dir's root, as finish does), never whatever repo the
+        # cwd happens to be. An absent branch or unreadable remote leaves tip empty and check-cancel then refuses
+        # (BRANCH_UNVERIFIABLE): a missing branch is not proof that nothing landed on it.
+        local git_common team_repo
+        git_common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+        [[ -n "$git_common" ]] && team_repo=$(dirname "$git_common")
+        if [[ -z "$team_repo" || "$team_repo" == "." ]]; then
+            echo "✗ kb-quick: not in a git repository; run kb-quick cancel from the team's repo" >&2; return 1
+        fi
+        tip=$(_kb_quick_remote_tip "$team_repo" "$branch" 2>/dev/null) || tip=""
+    fi
+    j=$(_kb_quick_py check-cancel --release "$rel" --branch-tip "$tip"); rc=$?
+    (( rc != 0 )) && { _kb_quick_refused "$j" "$rc"; return $?; }
+    item=$(printf '%s' "$j" | jq -r '.item // empty')
+    restore=$(printf '%s' "$j" | jq -r '.restoreTo // empty')
+    kb-release-edit "$rel" --status cancelled >/dev/null || { echo "✗ kb-quick: could not mark $rel cancelled" >&2; return 1; }
+    printf '%s' "$j" | jq -r '.warnings[]? | "⚠ kb-quick: " + .' >&2
+    echo "✓ kb-quick: $rel cancelled${reason:+ ($reason)}"
+    if [[ -n "$item" && "$(printf '%s' "$j" | jq -r '.itemAssignedHere')" == "true" ]]; then
+        if [[ -n "$restore" ]]; then
+            kb-release-assign "$item" "$restore" || { echo "✗ kb-quick: could not return $item to $restore; do it by hand: kb-release assign $item $restore" >&2; return 1; }
+        else
+            kb-release-unassign "$item" || { echo "✗ kb-quick: could not unassign $item; do it by hand: kb-release unassign $item" >&2; return 1; }
+            [[ -n "$(printf '%s' "$j" | jq -r '.from // empty')" ]] \
+                && echo "  ($item's original release $(printf '%s' "$j" | jq -r '.from') is closed, so $item is now unassigned)"
+        fi
+    fi
+    if [[ -n "$branch" ]]; then
+        echo "  $branch still exists on the remote, unchanged at its base. Delete it when you like: git push <remote> --delete $branch"
+    fi
+    return 0
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # XACA-1844: kb-release orchestration [show | set <key> <value> | unset <key>] [--team T] [--release REL-ID]
 # The one writer of the orchestration routing keys the resolvers above read (XACA-1544-012, XACA-1836), so nobody
@@ -40292,6 +40769,8 @@ kb-help() {
     echo "  kb-backlog due <id> [YYYY-MM-DD|-]      Set/clear due date"
     echo "  kb-pick <id>                            Mark item as active (simple)"
     echo "  kb-run <id>                             Launch cc (auto-creates worktree)"
+    echo "  kb-quick <id> [--yes]                   One ticket as its own quick release (hotfix-style, to PROD)"
+    echo "  kb-quick finish|cancel|status <id>      Ship / abandon / inspect a quick release"
     echo "  kb-work <id>                            Launch cc (NO worktree, use current dir)"
     echo "  kb-run-review <id>                      Launch PR code review in a worktree"
     echo "  kb-work-review <id>                     Launch PR code review in current directory"
