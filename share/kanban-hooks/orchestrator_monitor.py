@@ -1218,7 +1218,21 @@ def poll(ctx, once=False, read_only=False):
         return Result("USAGE", ctx.run, None, "ledger/summary write refused: %s" % exc)
 
 
-def _sync_lanes(ctx, board_file, kdir, run, orch, states, now, lines, wave0=False):
+def _laneable_ids(board, run):
+    """XACA-1863: ids of the board items a lane may be assigned to: stamped for THIS run (item.orchestration.runId ==
+    run), or worked by a live activeWindows row. Anything else is a stale or inferred in_progress item."""
+    out = set()
+    for it in (board or {}).get("backlog") or []:
+        iid = it.get("id") if isinstance(it, dict) else None
+        if not isinstance(iid, str):
+            continue
+        o = it.get("orchestration")
+        if (isinstance(o, dict) and o.get("runId") == run) or ro.has_live_window(iid, board):
+            out.add(iid)
+    return out
+
+
+def _sync_lanes(ctx, board_file, kdir, run, orch, states, now, lines, wave0=False, board=None):
     """LEVEL-TRIGGERED lane sync (PR #1343 review): every in-flight item (state neither QUEUED nor DONE/CANCELLED) that
     holds no lane gets the lowest free one via assign_lane, so lanes[] - which ticket-lamp shows and kb-dispatch's
     LANES_FULL counts - reflects reality even when nothing called assign_lane at dispatch time. Items are taken in plan
@@ -1228,6 +1242,10 @@ def _sync_lanes(ctx, board_file, kdir, run, orch, states, now, lines, wave0=Fals
     sees no transition again, and a held lane both fills kb-dispatch's cap and hides the item from SLOT_FREE (rule 3b).
     This sync is the only assigner and assigns only non-QUEUED items, so a QUEUED occupant is always stale.
     wave0 (XACA-1873): a terminal planning lane (orchestrator_wave0.TERMINAL) is freed too, and never assigned.
+    WORKED ONLY (XACA-1863): given `board`, a lane is assigned only to an item stamped for THIS run (kb-dispatch stamps
+    orchestration.runId) or worked by a live activeWindows row. A stale or inferred in_progress item with neither derives
+    UNKNOWN, and giving it a lane filled kb-dispatch's cap with a ticket nobody was working. board=None keeps the
+    pre-1863 behaviour.
     Returns True iff a lane was assigned or freed."""
     laned = set()
     changed = False
@@ -1256,9 +1274,12 @@ def _sync_lanes(ctx, board_file, kdir, run, orch, states, now, lines, wave0=Fals
         laned.add(cid)
     order = [i for w in orch.get("waves") or [] for i in (w if isinstance(w, list) else [])]
     order += sorted(i for i in states if i not in order)
+    laneable = _laneable_ids(board, run) if board is not None else None
     for iid in order:
         st = (states.get(iid) or {}).get("state")
         if iid in laned or st in ostate.TERMINAL_STATES or st in (None, "QUEUED") or (wave0 and st in ow0.TERMINAL):
+            continue
+        if laneable is not None and iid not in laneable:
             continue
         try:
             n = ro.assign_lane(board_file, kdir, ctx.release_id, run, iid, now=now)
@@ -1400,7 +1421,7 @@ def reconcile(ctx, read_only):
                             now=g["now"], **extra)
             lines.append("transition %s: %s -> %s (%s)" % (iid, old, new, states[iid]["detail"]))
         board_file, kdir, board, rel, run, orch = _summary_after(ctx)     # re-read: since/lanes are now current
-    if not read_only and _sync_lanes(ctx, board_file, kdir, run, orch, states, g["now"], lines, wave0):
+    if not read_only and _sync_lanes(ctx, board_file, kdir, run, orch, states, g["now"], lines, wave0, board=board):
         board_file, kdir, board, rel, run, orch = _summary_after(ctx)
     if not read_only and not wave0:        # XACA-1875: a planning lane never finishes its item, so it is never closed here
         _close_finished_windows(ctx, kdir, run, orch, states, g, events, board, lines)

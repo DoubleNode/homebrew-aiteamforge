@@ -8914,6 +8914,18 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         return _get_path_lock(self._get_release_manifest_path(release_id, team))
 
     @staticmethod
+    def _is_planning_subitem(sub):
+        """XACA-1863: True iff `sub` is a planning-phase subitem (its title,
+        after leading whitespace, starts with "[USER DECISION]"). Mirrors
+        kanban-helpers.sh `kb_is_planning_subitem` and
+        orchestrator_state.is_planning_subitem."""
+        title = sub.get('title') if isinstance(sub, dict) else None
+        # Same whitespace set as the jq class and orchestrator_state.PLANNING_SUBITEM_WS: a bare
+        # lstrip() also strips \x1c-\x1f, which jq does not (XACA-1863-017).
+        return (isinstance(title, str)
+                and title.lstrip(' \t\n\r\v\f').startswith('[USER DECISION]'))
+
+    @staticmethod
     def _resolve_item_status(item):
         """Resolve a board item's status per ITEM_STATUS_CONTRACT.md §1.5.
 
@@ -8949,8 +8961,13 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
         # Item is UNRECORDED. Resolve from evidence. Ceiling is 'in_progress'.
         subitems = item.get('subitems') or []
+        # XACA-1863: a planning-phase subitem (title starts "[USER DECISION]"
+        # after leading whitespace) is NOT evidence that work began. Planners
+        # resolve decisions before dispatch, so counting them made every fully
+        # planned ticket read in_progress.
         live = [(s.get('status') or 'todo') for s in subitems
-                if (s.get('status') or 'todo') != 'cancelled']
+                if (s.get('status') or 'todo') != 'cancelled'
+                and not LCARSHandler._is_planning_subitem(s)]
 
         # R2 — subitem evidence that work has begun. Widened predicate per
         # contract §1.5: 'in_review' and 'blocked' now count as in-flight

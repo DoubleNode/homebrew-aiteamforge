@@ -192,11 +192,23 @@ def _question_open(item):
     return bool(pq)
 
 
+PLANNING_SUBITEM_PREFIX = "[USER DECISION]"
+PLANNING_SUBITEM_WS = " \t\n\r\v\f"   # == the jq class in kb_is_planning_subitem: never bare lstrip() (it also eats \x1c-\x1f)
+
+
+def is_planning_subitem(sub):
+    """XACA-1863: True iff `sub` is a planning-phase subitem: its title, after leading whitespace, starts with
+    "[USER DECISION]". Such a subitem is never R2 evidence of a start (planners resolve decisions before dispatch, so
+    counting them made every fully planned ticket read in_progress). Mirrors kanban-helpers.sh kb_is_planning_subitem."""
+    title = sub.get("title") if isinstance(sub, dict) else None
+    return isinstance(title, str) and title.lstrip(PLANNING_SUBITEM_WS).startswith(PLANNING_SUBITEM_PREFIX)
+
+
 def resolve_item_status(item):
     """The board's item status exactly as kanban-helpers.sh `kb_resolve_item_status` resolves it (what kb-dispatch uses).
     A RECORDED status (non-null, not blank after trimming) wins verbatim. An unrecorded one is derived: a live
-    (non-cancelled) subitem in_progress / in_review / blocked / completed, activelyWorking truthy, or startedAt set ->
-    "in_progress"; otherwise "todo". Items created by kb-backlog carry NO status key, so reading raw `item.status` would
+    (non-cancelled) subitem in_progress / in_review / blocked / completed (a "[USER DECISION]" planning subitem does not
+    count, XACA-1863), activelyWorking truthy, or startedAt set -> "in_progress"; otherwise "todo". Items created by kb-backlog carry NO status key, so reading raw `item.status` would
     turn every fresh todo item into UNKNOWN (XACA-1546-005)."""
     rec = item.get("status")
     if rec is not None and (not isinstance(rec, str) or rec.strip() != ""):
@@ -204,7 +216,7 @@ def resolve_item_status(item):
     subs = item.get("subitems")
     if isinstance(subs, list):
         for s in subs:
-            if not isinstance(s, dict):
+            if not isinstance(s, dict) or is_planning_subitem(s):    # XACA-1863: a decision is not a start
                 continue
             st = s.get("status")
             st = st.strip() if isinstance(st, str) else st

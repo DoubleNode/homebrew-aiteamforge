@@ -616,7 +616,10 @@ _kb_jq_update() {
 #        states (completed/cancelled). jq's `//` alone does not catch `""`
 #        (contract §1.1, Case O) -- that is why this is a `def`, not `//`.
 #   R2 — unrecorded + a live (non-cancelled) subitem in in_progress,
-#        in_review, blocked, or completed -> "in_progress".
+#        in_review, blocked, or completed -> "in_progress". A PLANNING-PHASE
+#        subitem (title starts "[USER DECISION]", after leading whitespace) is
+#        NOT evidence: planners resolve decisions before dispatch, so counting
+#        them made every fully planned ticket read in_progress (XACA-1863).
 #   R3 — unrecorded + activelyWorking truthy -> "in_progress".
 #   R4 — unrecorded + startedAt present -> "in_progress".
 #   R5 — unrecorded, no evidence -> "todo" (the board-convention default).
@@ -636,11 +639,15 @@ def kb_recorded_or_null:
 def kb_resolve_subitem_status:
   (kb_recorded_or_null) as $rec | if $rec != null then $rec else "todo" end;
 
+def kb_is_planning_subitem:
+  (.title) as $t | ($t | type) == "string" and ($t | sub("^[ \t\n\r\u000b\f]+"; "") | startswith("[USER DECISION]"));
+
 def kb_resolve_item_status:
   (kb_recorded_or_null) as $rec |
   if $rec != null then $rec
   else
-    ( ((.subitems // []) | map(kb_resolve_subitem_status) | map(select(. != "cancelled"))) as $live |
+    ( ((.subitems // []) | map(select(kb_is_planning_subitem | not)) | map(kb_resolve_subitem_status)
+        | map(select(. != "cancelled"))) as $live |
       if ($live | any(. == "in_progress" or . == "in_review" or . == "blocked" or . == "completed")) then "in_progress"
       elif (.activelyWorking // false) then "in_progress"
       elif ((.startedAt // null) != null) then "in_progress"
@@ -15781,6 +15788,7 @@ _kb_batch_run() {
         printf '%s\n' "$refused" | sed 's/^/    /' >&2
         echo "  Plan each NO_PLAN_DOC / NO_SUBITEMS ticket with /plan-project <ID> (plan doc + subitems), estimate any UNESTIMATED one, then re-run: kb-run ${csv}" >&2
         echo "  A NOT_TODO or HELD_BY_RUN ticket is already being worked: leave it out of the list, or finish (or cancel) the run that holds it." >&2
+        echo "  STALE_IN_PROGRESS: it reads in_progress but nothing is working it (no run stamp, window or worktree): run the kb-backlog demote remedy shown, then re-run." >&2
         echo "  NOT_FOUND: the ID is not on your team's board (check the spelling). ALREADY_TERMINAL: the ticket is done or cancelled, so drop it." >&2
         echo "  BLOCKED_OUTSIDE_RELEASE: it waits on a ticket that is not in this list: add that ticket, or finish it first." >&2
         return 1

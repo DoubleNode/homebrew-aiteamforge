@@ -107,6 +107,8 @@ NO_TERMINAL = "NO_TERMINAL"
 NO_PATHS = "NO_PATHS"
 UNPARSED_PATHS = "UNPARSED_PATHS"
 HOTSPOTS_CONFIG_INVALID = "HOTSPOTS_CONFIG_INVALID"
+STALE_IN_PROGRESS = "STALE_IN_PROGRESS"   # XACA-1863: resolves in_progress, but nothing is working it (a hard refusal)
+STALE_DEMOTE_REASON = "stale in_progress: not being worked"
 # XACA-1873 Wave 0: readiness codes / plan() warnings that a planning lane can fix. Anything else is HARD.
 PLANNING_GAP_CODES = (UNESTIMATED, NO_SUBITEMS, NO_PLAN_DOC)
 PLANNING_GAP_WARNINGS = (NO_PATHS, UNPARSED_PATHS)
@@ -146,16 +148,62 @@ def _order_key(item):
 
 
 # ---------------------------------------------------------------- 003: readiness
-def check_readiness(item, release_item_ids, board, kanban_dir, repo_root=None, find_plan_doc=None):
+def has_live_window(item_id, board):
+    """True iff board.activeWindows has a row working this item: workingOnId is the item or one of its subitems
+    (`<ITEM>-NNN`), or the row id has the form `<terminal>:<ITEM>`."""
+    for w in (board or {}).get("activeWindows") or []:
+        if not isinstance(w, dict):
+            continue
+        wid, won = w.get("id"), w.get("workingOnId")
+        if isinstance(won, str) and (won == item_id or won.startswith(item_id + "-")):
+            return True
+        if isinstance(wid, str) and wid.endswith(":" + item_id):
+            return True
+    return False
+
+
+def stale_in_progress(item, board, path_exists=None):
+    """XACA-1863: True iff the item resolves in_progress (exactly as kb-dispatch reads it) yet nothing is working it: no
+    orchestration.runId stamp, no live activeWindows row and no worktree directory on disk. kb-dispatch refuses such an
+    item (ITEM_NOT_TODO) and the monitor sees only ITEM_STALLED, so the plan must flag it before the lead approves."""
+    if ostate.resolve_item_status(item) != "in_progress":
+        return False
+    orch = item.get("orchestration")
+    if isinstance(orch, dict) and orch.get("runId"):
+        return False
+    iid = item.get("id")
+    if isinstance(iid, str) and has_live_window(iid, board):
+        return False
+    wt = item.get("worktree")
+    exists = path_exists if path_exists is not None else os.path.isdir
+    return not (isinstance(wt, str) and wt.strip() and exists(wt))
+
+
+def demote_remedy(item_id, clear_worktree=False):
+    """The one command that clears a STALE_IN_PROGRESS refusal. clear_worktree (XACA-1863-019): the item still records a
+    worktree path, and a stale item's path is by definition gone from disk, so the demote must drop it too (demote keeps
+    worktree fields by default, which would leave the item pointing at a deleted worktree: the XACA-1302 case)."""
+    return 'kb-backlog demote %s --reason "%s"%s' % (item_id, STALE_DEMOTE_REASON,
+                                                     " --clear-worktree" if clear_worktree else "")
+
+
+def check_readiness(item, release_item_ids, board, kanban_dir, repo_root=None, find_plan_doc=None, path_exists=None):
     """Refusal reasons ([{code,text}], stable order) for one item; [] means ready.
 
     `release_item_ids` = ids assigned to the release. `board` supplies outside blockers' status. `find_plan_doc` is
     orchestrator_contention.find_plan_doc (injected so tests need no real module; plan() passes the real one).
-    ALREADY_TERMINAL short-circuits: nothing else matters for an item that will not be scheduled."""
+    ALREADY_TERMINAL short-circuits: nothing else matters for an item that will not be scheduled.
+    STALE_IN_PROGRESS (XACA-1863) comes first when present; `path_exists` (default os.path.isdir) tests the worktree."""
     status = item.get("status")
     if status in TERMINAL_STATUSES:
         return [_reason(ALREADY_TERMINAL, "status is %s; nothing to schedule" % status)]
     out = []
+    if stale_in_progress(item, board, path_exists):
+        r = _reason(STALE_IN_PROGRESS, "resolves in_progress but has no run stamp, no live window and no live "
+                                       "worktree; nothing is working it and kb-dispatch would refuse it")
+        wt = item.get("worktree")
+        r["remedy"] = demote_remedy(item.get("id"), clear_worktree=isinstance(wt, str) and bool(wt.strip()))
+        out.append(r)
     if estimate_of(item) is None:
         out.append(_reason(UNESTIMATED, "no positive numeric `points` estimate"))
     subs = item.get("subitems")
@@ -1392,6 +1440,9 @@ def format_plan(plan_, still_refused=None):
         for r in plan_["refused"]:
             out.append("  %s  %s" % (r["id"], r["title"]))
             out.extend("    %s: %s" % (x["code"], x["text"]) for x in r["reasons"])
+            for x in r["reasons"]:
+                if x.get("code") == STALE_IN_PROGRESS:
+                    out.append("      remedy: %s" % (x.get("remedy") or demote_remedy(r["id"])))
     if still_refused:
         out.extend(["", "Still refused after Wave 0"])
         for r in still_refused:

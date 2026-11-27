@@ -11,6 +11,9 @@ All notable changes to the LCARS Kanban Workflow Monitor will be documented in t
 
 ## [Unreleased]
 
+- **XACA-1863: `_resolve_item_status` R2 ignores `[USER DECISION]` subitems.** A completed planning decision no longer makes an
+  unrecorded item read in_progress; release progress and release-item views now agree with kb-dispatch and kanban-helpers.sh.
+
 - **XACA-1351 (UX gate):** lifecycle block a11y (`role="group"`, sr-only current-stage text, focus outline), CR row shows a distinct
   "Confluence ↗" link instead of re-linking the id, and expected approval is shown as local time (raw value in tooltip).
 - **XACA-1351: Releases tab is read-only.** PROMOTE button, `promoteRelease()` and the promote modal are removed; stages change only via

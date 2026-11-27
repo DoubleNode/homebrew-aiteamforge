@@ -390,7 +390,9 @@ def batch_readiness(board, ids, kanban_dir, repo_root=None, find_plan_doc=None):
     """-> [{id, title, reasons:[{code,text}]}] for every refused id ([] = all ready). ALREADY_TERMINAL is a refusal here:
     a batch names its tickets explicitly, so one with nothing to run is a typo or a stale list, not something to skip.
     NOT_TODO (resolved status is not todo: kb-dispatch would refuse it with ITEM_NOT_TODO) and HELD_BY_RUN (another
-    open run tracks it) are refused here too, so a batch never mints and then fails at dispatch (XACA-1834-010)."""
+    open run tracks it) are refused here too, so a batch never mints and then fails at dispatch (XACA-1834-010).
+    XACA-1863: an in_progress item nothing is working (check_readiness STALE_IN_PROGRESS) gets that code, with its demote
+    remedy, INSTEAD of NOT_TODO; an in_progress item that is really being worked keeps NOT_TODO."""
     if find_plan_doc is None:
         import orchestrator_contention as contention
         find_plan_doc = contention.find_plan_doc
@@ -404,9 +406,13 @@ def batch_readiness(board, ids, kanban_dir, repo_root=None, find_plan_doc=None):
             out.append({"id": iid, "title": None, "reasons": [{"code": NOT_FOUND, "text": "not on this board (a batch runs on the caller's board only)"}]})
             continue
         why = ro.check_readiness(it, ids, board, kanban_dir, repo_root, find_plan_doc)
+        for w in why:   # XACA-1863: a batch has no format_plan, so the stale refusal carries its own remedy
+            if w.get("code") == ro.STALE_IN_PROGRESS:
+                w["text"] = "%s; remedy: %s" % (w["text"], w.get("remedy") or ro.demote_remedy(iid))
+        stale = any(w.get("code") == ro.STALE_IN_PROGRESS for w in why)
         if not any(w.get("code") == ro.ALREADY_TERMINAL for w in why):
             st = orchestrator_state.resolve_item_status(it)
-            if st != "todo":
+            if st != "todo" and not stale:    # STALE_IN_PROGRESS is the specific (fixable) form of NOT_TODO
                 why.append({"code": NOT_TODO, "text": "status is %s; only a todo item is dispatched" % st})
             if iid in holders:
                 why.append({"code": HELD_BY_RUN, "text": "tracked by the open %s" % holders[iid]})
