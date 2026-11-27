@@ -6,6 +6,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+
+## [0.21.31] - 2026-11-27
+
 - XACA-1989: kb-quick one-ticket hotfix-style quick release (XACA-1989)
 - Tap files updated in this publish: `share/kanban-hooks/quick_release.py`,`share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1890: Retro gate counts knowledge entries in every tier (XACA-1890)
@@ -8377,7 +8380,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.30...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.31...HEAD
+[0.21.31]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.30...v0.21.31
 [0.21.30]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.29...v0.21.30
 [0.21.29]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.28...v0.21.29
 [0.21.28]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.21.27...v0.21.28
