@@ -11,7 +11,9 @@ DISTINCT named message: a missing config must never look like "no providers".
 import json
 import os
 import re
+import shlex
 
+from release_runner import MODULE_NAME, python_module_command
 from release_schema import STAGES
 
 SCHEMA_ID = "release-test-providers/v1"
@@ -20,7 +22,8 @@ KINDS = ("automated", "manual")
 
 _COMMON = {"name", "kind", "envLabel", "optional"}
 _AUTOMATED = _COMMON | {"command", "parser", "listCommand", "cwd", "env", "timeoutSec",
-                        "perFile", "continueOnFailure", "readOnly", "schedule", "pattern"}
+                        "perFile", "continueOnFailure", "readOnly", "schedule", "pattern",
+                        "requires"}
 _MANUAL = _COMMON | {"cases", "device", "filter"}
 _BOOL_FIELDS = ("perFile", "continueOnFailure", "readOnly", "optional")
 _SECRET_KEY = re.compile(r"(KEY|TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|CRED|BEARER|COOKIE|SIGNATURE)", re.IGNORECASE)
@@ -76,6 +79,21 @@ def _validate_env(where, env, errs):
                 errs.append("%s: env.%s must be a string or exactly {\"secretRef\": \"env:<NAME>\"}" % (where, k))
         else:
             errs.append("%s: env.%s must be a string or a secretRef object" % (where, k))
+
+
+def _validate_requires(where, p, errs):
+    """XACA-1800: `requires` lists extra modules the interpreter preflight imports (e.g. ["PIL"]). It only means
+    something for a `<python> -m <module>` command, so on any other command it is an error, never silently ignored."""
+    req = p["requires"]
+    if not isinstance(req, list) or not req or not all(isinstance(m, str) and MODULE_NAME.fullmatch(m) for m in req):
+        errs.append("%s: requires must be a non-empty list of python module names (e.g. [\"PIL\"])" % where)
+    try:
+        argv = shlex.split(p.get("command") or "")
+    except ValueError:
+        argv = []
+    if python_module_command(argv) is None:
+        errs.append("%s: requires is only allowed on a '<python> -m <module> ...' command (the interpreter "
+                    "preflight imports them; any other command is not probed)" % where)
 
 
 def _validate_provider(stage, idx, p, seen, errs):
@@ -145,6 +163,8 @@ def _validate_provider(stage, idx, p, seen, errs):
             t = p["timeoutSec"]
             if isinstance(t, bool) or not isinstance(t, int) or t <= 0:
                 errs.append("%s: timeoutSec must be a positive integer" % where)
+        if "requires" in p:
+            _validate_requires(where, p, errs)
         if "schedule" in p:
             s = p["schedule"]
             if stage != "GAMMA":

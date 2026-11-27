@@ -36,7 +36,8 @@ import urllib.request
 import release_walkthrough
 from release_gate import TEST_STAGES, current_stage
 from release_providers import ProvidersError, load_providers, providers_for_stage
-from release_runner import RunnerError, _harness, build_expected, check_gamma, run_stage, verify_stage_sha
+from release_runner import (PreflightError, RunnerError, _harness, build_expected, check_gamma, preflight,
+                            preflight_notes, run_stage, verify_stage_sha)
 
 RC_OK, RC_TRANSPORT, RC_USAGE, RC_REFUSED, RC_NOTFOUND, RC_FAILING = 0, 1, 2, 3, 4, 6
 
@@ -220,6 +221,8 @@ def cmd_test(a, *, run=None, post=None, out=None):
         print("kb-release test: refused: %s" % (e,), file=sys.stderr)
         return RC_REFUSED
 
+    for line in preflight_notes(result.get("interpreters") or {}):
+        say("  " + line)
     for pr in result["problems"]:
         print("  problem: %s" % pr, file=sys.stderr)
     payload = {"sha": sha, "expected": result["expected"], "records": result["records"]}
@@ -236,8 +239,15 @@ def cmd_test(a, *, run=None, post=None, out=None):
         sum(1 for r in tops if r.get("result") == k) for k in ("PASS", "FAIL", "SKIP")))
     for r in failing:
         say("  FAIL %s: %s" % (r.get("test"), (r.get("notes") or "")[:200]))
+    # XACA-1800-005: a SKIP is not a pass. The gate fails a non-optional SKIP until a lead waives it, so the
+    # exit code must not report success for it (exit-5 files can now be SKIP instead of FAIL).
+    optional = {e.get("test") for e in result["expected"] if isinstance(e, dict) and e.get("optional")}
+    skipped = [r for r in tops if r.get("result") == "SKIP" and r.get("test") not in optional]
+    for r in skipped:
+        say("  SKIP %s: %s (not optional: the gate fails it until a lead waives it)"
+            % (r.get("test"), (r.get("notes") or "")[:200]))
     say("  ids: %s" % ", ".join((resp.get("ids") or [])[:5] + (["..."] if len(resp.get("ids") or []) > 5 else [])))
-    return RC_FAILING if failing or result["problems"] else RC_OK
+    return RC_FAILING if failing or skipped or result["problems"] else RC_OK
 
 
 def _dry_run(a, release, stage, sha, providers, run, say, select=None):
@@ -255,7 +265,16 @@ def _dry_run(a, release, stage, sha, providers, run, say, select=None):
         say("(expected set not enumerated: listing the wrong tree would be misleading)")
         return RC_REFUSED
     say("SHA check: HEAD == stageSha, tree clean")
-    expected, problems = build_expected(providers, repo_dir=a.repo_dir, kanban_dir=a.kanban_dir, run=run)
+    try:   # XACA-1800 (folded XACA-1831): the same interpreter preflight the real run does first
+        found = preflight(providers, repo_dir=a.repo_dir, run=run, select=select,
+                          include_scheduled=a.include_scheduled or select is not None)
+    except PreflightError as e:
+        say("WOULD REFUSE: %s" % e)
+        return RC_REFUSED
+    for line in preflight_notes(found):
+        say(line)
+    expected, problems = build_expected(providers, repo_dir=a.repo_dir, kanban_dir=a.kanban_dir, run=run,
+                                        interpreters=found)
     # XACA-1694-011 / XACA-1628: preview the same set the real run posts, recorded harness ids included
     expected.extend(_recorded_harness_carry(release, stage, sha, providers, expected))
     say("Expected set (%d):" % len(expected))

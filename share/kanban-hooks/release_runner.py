@@ -43,6 +43,24 @@ No "intentionallyEmpty" is ever produced or sent (XACA-1347-008): the provider s
 declare a stage intentionally empty, a missing/empty provider set must never read as "passed", and
 the /tests endpoint refuses that field with a 400.
 
+Interpreter preflight (XACA-1800): a provider whose command is `<python> [flags] -m <module> ...` (e.g. `python3 -m
+pytest {file}`) is checked ONCE, before anything is listed or run: its interpreter must `import <module>` plus every
+name in the provider's optional `requires` list. Resolution order: $AITEAMFORGE_TEST_PYTHON (an explicit override:
+it is the only candidate, a failing override is never fallen past); else a token containing '/' is the only
+candidate; else every `<token>` on the provider env's PATH, in PATH order, and the FIRST that passes wins and is
+substituted for the token. If no candidate passes, run_stage raises PreflightError (a RunnerError): nothing is
+recorded and nothing is posted. Why not one `<provider>::harness` FAIL: a harness id enters the stage's expected set
+and the server's add-only lock (XACA-1628) keeps it there; a machine fault is not a fact about the code, so it must
+not land on the release at all. Commands that are not `python -m` are not probed (an unrunnable binary already fails
+once, on the first file, as an OSError harness FAIL).
+
+pytest exit 5 (XACA-1800-004): pytest exits 5 when it collected no tests, which is ALSO what a module-level skip
+(`pytest.importorskip` with the dependency missing) looks like. A perFile file of a `-m pytest` provider is graded
+SKIP only on positive evidence: exit 5, pytest's own final summary says ONLY "<n> skipped" (warnings allowed), the
+output parsed, and no parsed row is anything but SKIP. Every other exit-5 shape ("no tests ran", empty output, an
+error or failure in the summary, any non-SKIP row) stays FAIL. A SKIP is not a pass: the gate fails a non-optional
+SKIP until a lead waives it; the record now says why the file did not run instead of blaming the code.
+
 Manual case-file format (load_cases): markdown.
 
     ## ALPHA-01: Sign in with email        <- "## <ID>: <title>"; ID has no spaces
@@ -78,8 +96,21 @@ _KEYLINE = re.compile(r"^[-*]\s+([A-Za-z]+):\s*(.*)$")
 _STEPLINE = re.compile(r"^\s*(?:\d+[.)]|[-*])\s+(.*)$")
 
 
+TEST_PYTHON_ENV = "AITEAMFORGE_TEST_PYTHON"
+PREFLIGHT_TIMEOUT_SEC = 60
+_PYTHON_TOKEN = re.compile(r"^python[0-9]*(?:\.[0-9]+)*$")
+MODULE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")   # fullmatch: it becomes code
+# pytest's closing line, e.g. "==== 1 skipped in 0.01s ====" or "=== 2 skipped, 1 warning in 0.3s (0:00:00) ==="
+_PYTEST_SUMMARY = re.compile(r"^=+ (?P<body>.+?) in [0-9.]+s(?: \([^)]*\))? =+$")
+_SUMMARY_PART = re.compile(r"^(?P<n>[0-9]+) (?P<what>[a-z]+)$")
+
+
 class RunnerError(Exception):
     """A named refusal (bad SHA, dirty tree, GAMMA safety, unreadable case file)."""
+
+
+class PreflightError(RunnerError):
+    """XACA-1800: the machine cannot run a provider (its interpreter lacks a module). Nothing runs, nothing is posted."""
 
 
 # --------------------------------------------------------------------- helpers
@@ -270,7 +301,171 @@ def _provider_cwd(provider, repo_dir):
     return _under(repo_dir, provider.get("cwd") or ".", "cwd")
 
 
-def _automated_expected(p, repo_dir, environ, run, list_timeout):
+# --------------------------------------------------------------------- interpreter preflight (XACA-1800)
+def python_module_command(argv):
+    """`[python3, -u, -m, pytest, ...]` -> (0, "pytest"); None when argv is not `<python> [flags] -m <module>`.
+    Only leading single-token flags are skipped; a flag that takes a value (-W x, -X y) ends the scan, so the
+    command is then simply not probed (never mis-probed)."""
+    if not argv or not _PYTHON_TOKEN.match(os.path.basename(argv[0])):
+        return None
+    for i in range(1, len(argv)):
+        a = argv[i]
+        if a == "-m":
+            mod = argv[i + 1] if i + 1 < len(argv) else ""
+            return (0, mod) if MODULE_NAME.fullmatch(mod) else None
+        if not a.startswith("-") or a in ("-W", "-X", "-c") or a.startswith("--"):
+            return None
+    return None
+
+
+def _interpreter_candidates(token, env, cwd):
+    """-> ([(path, origin)], problem|None). See the module docstring for the order."""
+    override = (env.get(TEST_PYTHON_ENV) or "").strip()
+    if override:
+        if not os.path.isabs(override):
+            return [], "%s=%r must be an absolute path" % (TEST_PYTHON_ENV, override)
+        return [(override, "$%s" % TEST_PYTHON_ENV)], None
+    if "/" in token:
+        return [(token if os.path.isabs(token) else os.path.join(cwd, token), "the command")], None
+    out, seen = [], set()
+    for d in (env.get("PATH") or "").split(os.pathsep):
+        if not d or not os.path.isabs(d):
+            continue   # an empty or relative PATH entry would resolve inside the tree under test
+        cand = os.path.normpath(os.path.join(d, token))
+        # NOT realpath: a venv's python3 symlinks to the same binary as the base install but imports differently
+        if cand in seen or not os.path.isfile(cand) or not os.access(cand, os.X_OK):
+            continue
+        seen.add(cand)
+        out.append((cand, "PATH entry %s" % d))
+    if not out:
+        return [], "no '%s' found on the provider's PATH" % token
+    return out, None
+
+
+LIST_KEY = "%s::list"   # preflight key of a provider's listCommand ('::' is reserved in provider names)
+
+
+def resolve_interpreter(p, *, repo_dir, environ=None, run=subprocess.run, field="command"):
+    """Probe one provider's `field` ("command" or "listCommand"). -> None (not a `python -m` command: nothing to check), or a dict
+    {"interpreter": path|None, "token": str, "modules": [...], "tried": [(path, origin, why|None)], "problem": str|None}.
+    `interpreter` is the first candidate whose `import` of every module succeeded (None when none did)."""
+    environ = os.environ if environ is None else environ
+    try:
+        argv = shlex.split(p.get(field) or "")
+        cwd = _provider_cwd(p, repo_dir)
+    except (RunnerError, ValueError):
+        return None   # not preparable: _run_provider records that as a harness FAIL, exactly as before
+    shape = python_module_command(argv)
+    if shape is None:
+        return None
+    env, missing, secrets = _resolve_env(p, environ)
+    if missing:
+        return None   # _run_provider records the missing secret; probing without it could mis-report
+    modules = [shape[1]] + [m for m in (p.get("requires") or []) if m != shape[1]] if field == "command" else [shape[1]]
+    bad = [m for m in modules if not (isinstance(m, str) and MODULE_NAME.fullmatch(m))]
+    out = {"interpreter": None, "token": argv[0], "modules": modules, "tried": [], "problem": None}
+    if bad:
+        out["problem"] = "requires has invalid module name(s): %s" % ", ".join(repr(b) for b in bad)
+        return out
+    cands, problem = _interpreter_candidates(argv[0], env, cwd)
+    if problem:
+        out["problem"] = problem
+        return out
+    probe = "import " + ", ".join(modules)
+    for path, origin in cands:
+        code, _o, err, timed, oserr = _exec(run, [path, "-c", probe], cwd, env, PREFLIGHT_TIMEOUT_SEC, secrets)
+        if oserr:
+            why = "could not start: %s" % _redact(oserr, secrets, 160)
+        elif timed:
+            why = "import probe timed out after %ss" % PREFLIGHT_TIMEOUT_SEC
+        elif code != 0:
+            lines = [ln for ln in (err or "").strip().splitlines() if ln.strip()]
+            why = _redact(lines[-1] if lines else "exited %s" % code, secrets, 160)
+        else:
+            out["tried"].append((path, origin, None))
+            out["interpreter"] = path
+            return out
+        out["tried"].append((path, origin, why))
+    return out
+
+
+def _preflight_message(name, res):
+    tried = "; ".join("%s (%s): %s" % (path, origin, why) for path, origin, why in res["tried"])
+    who = ("provider '%s' listCommand" % name[:-len("::list")] if name.endswith("::list")
+           else "provider '%s'" % name)
+    return ("%s cannot run on this machine: %s. No test ran and nothing was recorded. Fix: install %s "
+            "into the interpreter, put one that has %s first on PATH, or set %s=<absolute path to a python that has "
+            "it>; then re-run" % (who, res["problem"] or ("no interpreter can `import %s` (tried %s)"
+                                                            % (", ".join(res["modules"]), tried)),
+                                  " and ".join(res["modules"]), "it" if len(res["modules"]) == 1 else "them",
+                                  TEST_PYTHON_ENV))
+
+
+def preflight(providers, *, repo_dir, environ=None, run=subprocess.run, select=None, include_scheduled=False):
+    """Probe every automated provider this run would execute (honours `select` and `schedule`, like run_stage).
+    -> {provider name: resolve_interpreter result} for the probed `python -m` providers.
+    A `python -m` listCommand is probed for EVERY automated provider (the expected set lists them all, selected or
+    not) and recorded under LIST_KEY % name; build_expected then runs it with the resolved interpreter too.
+    Raises PreflightError naming every provider that cannot run (all of them, so one fix pass is enough)."""
+    found, faults = {}, []
+    for p in providers:
+        if p.get("kind") == "manual":
+            continue
+        res = resolve_interpreter(p, repo_dir=repo_dir, environ=environ, run=run, field="listCommand")
+        if res is not None:
+            found[LIST_KEY % p.get("name")] = res
+            if res["interpreter"] is None:
+                faults.append(_preflight_message(LIST_KEY % p.get("name"), res))
+        if select is not None and p.get("name") not in select:
+            continue
+        if p.get("schedule") and not include_scheduled:
+            continue
+        res = resolve_interpreter(p, repo_dir=repo_dir, environ=environ, run=run)
+        if res is None:
+            continue
+        found[p.get("name")] = res
+        if res["interpreter"] is None:
+            faults.append(_preflight_message(p.get("name"), res))
+    if faults:
+        raise PreflightError("environment fault: " + " | ".join(faults))
+    return found
+
+
+def preflight_notes(found):
+    """Human lines for the CLI: which interpreter each probed provider uses, and which candidates it passed over."""
+    lines = []
+    for name in sorted(found):
+        res = found[name]
+        label = "%s (listCommand)" % name[:-len("::list")] if name.endswith("::list") else name
+        lines.append("interpreter: %s -> %s" % (label, res["interpreter"]))
+        for path, origin, why in res["tried"]:
+            if why:
+                lines.append("  passed over %s (%s): %s" % (path, origin, why))
+    return lines
+
+
+def _pytest_all_skipped(out, protos, parse_error):
+    """XACA-1800-004 positive evidence that a pytest exit-5 file only skipped. -> the summary body, or None."""
+    if parse_error or any(r["result"] != "SKIP" or any(c["result"] != "SKIP" for c in r["children"])
+                          for r in protos):
+        return None
+    lines = [ln.strip() for ln in (out or "").splitlines() if ln.strip()]
+    m = _PYTEST_SUMMARY.match(lines[-1]) if lines else None
+    if not m:
+        return None
+    skipped = 0
+    for part in m.group("body").split(", "):
+        pm = _SUMMARY_PART.match(part.strip())
+        if not pm:
+            return None   # "no tests ran", or anything else we do not recognise
+        if pm.group("what") == "skipped":
+            skipped += int(pm.group("n"))
+        elif pm.group("what") not in ("warning", "warnings"):
+            return None   # passed / failed / error(s) / deselected / xfailed / xpassed: not "only skipped"
+    return m.group("body") if skipped > 0 else None
+
+
+def _automated_expected(p, repo_dir, environ, run, list_timeout, interpreters=None):
     """-> (test ids, problem|None) from listCommand. Empty/failed is a PROBLEM, never an empty set."""
     try:
         cwd = _provider_cwd(p, repo_dir)
@@ -282,6 +477,9 @@ def _automated_expected(p, repo_dir, environ, run, list_timeout):
         return [], "listCommand not run: secret env var(s) not set: %s" % ", ".join(missing)
     if not argv:
         return [], "listCommand is empty"
+    resolved = ((interpreters or {}).get(LIST_KEY % p.get("name")) or {}).get("interpreter")
+    if resolved and python_module_command(argv) is not None:   # XACA-1800: the preflight-resolved python
+        argv = [resolved] + argv[1:]
     code, out, err, timed, oserr = _exec(run, argv, cwd, env, list_timeout, secrets)
     if oserr:
         return [], "listCommand could not start: %s" % _redact(oserr, secrets)
@@ -318,14 +516,14 @@ def _manual_expected(p, kanban_dir):
     return ["%s %s" % (c["id"], c["title"]) for c in cases], None
 
 
-def _provider_expected(p, repo_dir, kanban_dir, environ, run, list_timeout):
+def _provider_expected(p, repo_dir, kanban_dir, environ, run, list_timeout, interpreters=None):
     if p.get("kind") == "manual":
         return _manual_expected(p, kanban_dir)
-    return _automated_expected(p, repo_dir, environ, run, list_timeout)
+    return _automated_expected(p, repo_dir, environ, run, list_timeout, interpreters)
 
 
 def build_expected(providers, *, repo_dir, kanban_dir, run=subprocess.run, environ=None,
-                   list_timeout=LIST_TIMEOUT_SEC):
+                   list_timeout=LIST_TIMEOUT_SEC, interpreters=None):
     """Spec 7.2.1 -> (expected_list, problems).
 
     expected_list entries are a str, or {"test", "optional": True} when the provider is optional
@@ -334,7 +532,8 @@ def build_expected(providers, *, repo_dir, kanban_dir, run=subprocess.run, envir
     the gate cannot pass on an empty set.
     """
     environ = os.environ if environ is None else environ
-    return _assemble(_disjoint([(p,) + _provider_expected(p, repo_dir, kanban_dir, environ, run, list_timeout)
+    return _assemble(_disjoint([(p,) + _provider_expected(p, repo_dir, kanban_dir, environ, run, list_timeout,
+                                                          interpreters)
                                 for p in providers]))
 
 
@@ -424,8 +623,9 @@ def _proto_names(proto):
     return [c["test"] for c in proto.get("children") or []]
 
 
-def _run_provider(p, rec, names, repo_dir, environ, run, owner):
-    """Run one automated provider into `rec`; return True if a harness FAIL was written."""
+def _run_provider(p, rec, names, repo_dir, environ, run, owner, interpreter=None):
+    """Run one automated provider into `rec`; return True if a harness FAIL was written.
+    `interpreter` (XACA-1800): the preflight-resolved python, substituted for the command's first token."""
     env_label, name = p["envLabel"], p["name"]
     hname = _harness(p)
     timeout = p.get("timeoutSec") or DEFAULT_TIMEOUT_SEC
@@ -442,6 +642,10 @@ def _run_provider(p, rec, names, repo_dir, environ, run, owner):
     if not base:
         rec.add(hname, "FAIL", "command is empty", env_label)
         return True
+    shape = python_module_command(base)
+    if interpreter and shape is not None:
+        base = [interpreter] + base[1:]
+    is_pytest = shape is not None and shape[1] == "pytest"
     parser, pattern = p["parser"], p.get("pattern")
 
     if not p.get("perFile"):
@@ -490,6 +694,10 @@ def _run_provider(p, rec, names, repo_dir, environ, run, owner):
         g, gnotes = grade_parent(code, pr, timed_out=timed)
         if timed:
             gnotes = "timed out after %ss" % timeout
+        elif code == 5 and is_pytest:
+            body = _pytest_all_skipped(out, pr.results, pr.error)
+            if body:   # XACA-1800-004: positive evidence only; every other exit-5 shape stays FAIL
+                g, gnotes = "SKIP", "pytest exit 5: every test in this file was skipped (%s)" % body
         if g == "FAIL" and not timed and code not in (0, None):
             tail = _redact(err, secrets)
             if tail:
@@ -558,9 +766,9 @@ def run_stage(release, stage, providers, *, repo_dir, kanban_dir, env_label_defa
     in `only` makes its provider run (a perFile provider with no other file due runs every file and posts only the
     harness record), so a PASS is never written for a run that executed nothing.
 
-    Returns {"expected": [...], "records": [proto...], "problems": [...]}.
+    Returns {"expected": [...], "records": [proto...], "problems": [...], "interpreters": {name: preflight result}}.
     Raises RunnerError (nothing run) on a GAMMA safety violation, a missing/invalid stageSha, a dirty
-    tree or HEAD mismatch. `verify` is injectable for tests; `run` is used for providers.
+    tree or HEAD mismatch, and PreflightError (XACA-1800) when a provider's interpreter cannot import its modules. `verify` is injectable for tests; `run` is used for providers.
     """
     check_gamma(stage, providers)
     sha = (release.get("stageSha") or {}).get(stage)
@@ -568,9 +776,13 @@ def run_stage(release, stage, providers, *, repo_dir, kanban_dir, env_label_defa
         raise RunnerError("release has no stageSha.%s; nothing to verify or run against" % stage)
     verify(repo_dir, sha)
     environ = os.environ if environ is None else environ
+    # XACA-1800: before anything is listed or run. Raises PreflightError (nothing recorded, nothing posted).
+    interpreters = preflight(providers, repo_dir=repo_dir, environ=environ, run=run, select=select,
+                             include_scheduled=include_scheduled)
     ts = _iso(now if now is not None else (lambda: datetime.datetime.now(datetime.timezone.utc)))
     rec = _Records(stage, sha, ts)
-    per_provider = _disjoint([(p,) + _provider_expected(p, repo_dir, kanban_dir, environ, run, list_timeout)
+    per_provider = _disjoint([(p,) + _provider_expected(p, repo_dir, kanban_dir, environ, run, list_timeout,
+                                                        interpreters)
                               for p in providers])
     expected, problems = _assemble(per_provider)
     owner = {n: p.get("name") for p, names, problem in per_provider if not problem for n in names}
@@ -608,7 +820,8 @@ def run_stage(release, stage, providers, *, repo_dir, kanban_dir, env_label_defa
                     # PASS current beside a fresh harness PASS (XACA-1628-014). Posting it only tightens the gate.
                     drop_current = keep_fail = True
         start = len(rec.items)
-        failed = _run_provider(p, rec, names, repo_dir, environ, run, owner)
+        failed = _run_provider(p, rec, names, repo_dir, environ, run, owner,
+                               (interpreters.get(p.get("name")) or {}).get("interpreter"))
         if drop_current:
             drop = {r["ref"] for r in rec.items[start:]
                     if not r["parentRef"] and r["test"] not in only and not r["test"].endswith("::harness")
@@ -633,7 +846,7 @@ def run_stage(release, stage, providers, *, repo_dir, kanban_dir, env_label_defa
     if dup:   # defence in depth: the per-provider checks should make this unreachable
         raise RunnerError("internal inconsistency: duplicate test name(s) in the run's records: %s; nothing posted"
                           % ", ".join(dup[:5]))
-    return {"expected": expected, "records": rec.items, "problems": problems}
+    return {"expected": expected, "records": rec.items, "problems": problems, "interpreters": interpreters}
 
 
 def _disjoint(per_provider):
