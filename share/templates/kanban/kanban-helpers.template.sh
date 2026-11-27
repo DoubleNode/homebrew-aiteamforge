@@ -9646,24 +9646,20 @@ kb-sweep() {
             retro_blocking=true
         fi
 
-        # Check for at least one knowledge entry referencing this item
-        local kanban_dir knowledge_dir knowledge_count=0
-        id_team=$(_kb_get_team_from_code "$working_id")
-        if [[ -n "$id_team" ]]; then
-            kanban_dir=$(_kb_get_kanban_dir "$id_team")
-            knowledge_dir="${kanban_dir}/knowledge"
-            if [[ -d "$knowledge_dir" ]]; then
-                knowledge_count=$(grep -rl "$working_id" "$knowledge_dir" 2>/dev/null | wc -l | tr -d ' ')
-            fi
-        fi
+        # Check for at least one knowledge entry referencing this item.
+        # XACA-1890 retro-knowledge BEGIN (site A, kb-sweep)
+        local knowledge_count=0
+        knowledge_count=$(_kb_retro_knowledge_count "$working_id")
         if [[ "$knowledge_count" -gt 0 ]]; then
             echo "  ✅ Knowledge entries referencing $working_id: $knowledge_count"
         else
             echo "  🚫 BLOCKING: No knowledge entries found referencing $working_id"
             echo "     Retrospectives should produce at least 1 knowledge entry."
+            _kb_retro_knowledge_searched "$working_id" "     "
             echo "     See: ~/knowledge/templates/knowledge_entry_template.md"
             retro_blocking=true
         fi
+        # XACA-1890 retro-knowledge END
         echo ""
 
         if $retro_blocking; then
@@ -12826,23 +12822,19 @@ kb-backlog() {
                         fi
 
                         if $retro_ok; then
-                            # Also check for at least one knowledge entry
-                            local retro_knowledge_dir retro_id_team retro_kanban_dir retro_knowledge_count=0
-                            retro_id_team=$(_kb_get_team_from_code "$retro_parent_id")
-                            if [[ -n "$retro_id_team" ]]; then
-                                retro_kanban_dir=$(_kb_get_kanban_dir "$retro_id_team")
-                                retro_knowledge_dir="${retro_kanban_dir}/knowledge"
-                                if [[ -d "$retro_knowledge_dir" ]]; then
-                                    retro_knowledge_count=$(grep -rl "$retro_parent_id" "$retro_knowledge_dir" 2>/dev/null | wc -l | tr -d ' ')
-                                fi
-                            fi
+                            # Also check for at least one knowledge entry referencing the item.
+                            # XACA-1890 retro-knowledge BEGIN (site C, kb-backlog sub done)
+                            local retro_knowledge_count=0
+                            retro_knowledge_count=$(_kb_retro_knowledge_count "$retro_parent_id")
                             if [[ "$retro_knowledge_count" -eq 0 ]]; then
                                 echo ""
                                 echo "🚫 BLOCKING: No knowledge entries referencing $retro_parent_id found."
                                 echo "   Create at least one knowledge entry before marking this subitem done."
+                                _kb_retro_knowledge_searched "$retro_parent_id" "   "
                                 echo "   See: ~/knowledge/templates/knowledge_entry_template.md"
                                 retro_ok=false
                             fi
+                            # XACA-1890 retro-knowledge END
                         fi
 
                         if ! $retro_ok; then
@@ -21690,6 +21682,75 @@ PYEOF
 # Internal: resolve the local (unsynced) knowledge root (honours KB_KNOWLEDGE_LOCAL_ROOT)
 _kb_knowledge_local_root() {
     echo "${KB_KNOWLEDGE_LOCAL_ROOT:-${HOME}/knowledge-local}"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# XACA-1890 — retrospective gate: which knowledge roots count.
+# The "at least one knowledge entry references this item" check used to be four
+# inline greps that drifted apart: canonical searched only the global root, the
+# tap template only <kanban>/knowledge. So a project-tier-only entry blocked
+# here and a global-only entry blocked on tap installs. One helper, byte-identical
+# in canonical and template (tests/test-xaca-1890-retro-knowledge-tiers.zsh
+# enforces the parity), searches the UNION:
+#   1. global root             _kb_knowledge_global_root  (~/knowledge)
+#   2. team kanban knowledge   <_kb_get_kanban_dir team>/knowledge (incl. project/)
+#   3. local PII root          _kb_knowledge_local_root   (~/knowledge-local)
+# A missing root is skipped; an unresolvable team skips only root 2.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Internal: print each existing knowledge root the retro gate searches for
+# <item-id>, one per line, in the order above.
+_kb_retro_knowledge_roots() {
+    local item_id="${1-}" root team kdir
+    root=$(_kb_knowledge_global_root 2>/dev/null)
+    [[ -n "$root" && -d "$root" ]] && print -r -- "$root"  # KB1890-ROOT-GLOBAL
+    team=$(_kb_get_team_from_code "$item_id" 2>/dev/null)
+    if [[ -n "$team" ]]; then
+        kdir=$(_kb_get_kanban_dir "$team" 2>/dev/null)
+        [[ -n "$kdir" && -d "$kdir/knowledge" ]] && print -r -- "$kdir/knowledge"  # KB1890-ROOT-KANBAN
+    fi
+    root=$(_kb_knowledge_local_root 2>/dev/null)
+    [[ -n "$root" && -d "$root" ]] && print -r -- "$root"  # KB1890-ROOT-LOCAL
+    return 0
+}
+
+# Internal: print the number of UNIQUE files under the retro roots that
+# reference <item-id>. Paths are resolved (:A) before `sort -u`, so one file
+# reachable through two roots (identical or symlinked) counts once.
+# Generated INDEX.md files are not entries (a stale index line must not satisfy
+# the gate), and the id must not run on into more digits (XACA-189 must not be
+# satisfied by XACA-1890). A malformed id counts 0 (fail-closed), never a regex.
+_kb_retro_knowledge_count() {
+    local item_id="${1-}" n f
+    local -a roots
+    if [[ -z "$item_id" ]]; then
+        print -r -- 0
+        return 0
+    fi
+    roots=("${(@f)$(_kb_retro_knowledge_roots "$item_id")}")
+    roots=(${roots:#})
+    if (( ${#roots} == 0 )); then
+        print -r -- 0
+        return 0
+    fi
+    [[ "$item_id" =~ '^[A-Za-z0-9_-]+$' ]] || { print -r -- 0; return 0; }  # KB1890-ID-GUARD
+    local pat="${item_id}([^0-9]|\$)"  # KB1890-ID-BOUNDARY
+    n=$(grep -rlE --exclude=INDEX.md -- "$pat" "${roots[@]}" 2>/dev/null \
+        | while IFS= read -r f; do print -r -- "${f:A}"; done | sort -u | wc -l | tr -d ' ')
+    print -r -- "${n:-0}"
+}
+
+# Internal: print "Searched: <root>" lines for the BLOCKING message, prefixed
+# by <indent>, so the operator can see every tier that was looked at.
+_kb_retro_knowledge_searched() {
+    local item_id="${1-}" indent="${2-}" r found=false
+    for r in "${(@f)$(_kb_retro_knowledge_roots "$item_id")}"; do
+        [[ -z "$r" ]] && continue
+        print -r -- "${indent}Searched: $r"
+        found=true
+    done
+    $found || print -r -- "${indent}Searched: (no knowledge root exists on this host)"
+    return 0
 }
 
 # XACA-0991-003 (blocking-tier hardening, ported from canonical
