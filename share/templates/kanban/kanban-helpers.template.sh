@@ -34806,12 +34806,13 @@ _kb_release_orch_coordinate() {
     local prompt="$_KB_LAUNCH_PROMPT"
     export CC_SESSION_NAME="${rel}: ${name:-release} (coordinator)"
     if ! _kb_ensure_cc_function "kb-run"; then unset CC_SESSION_NAME; return 1; fi
-    # A subshell scopes the exports to this one launch; "inherit" exports nothing for that setting.
-    (
-        [[ "$cmodel" != "inherit" ]] && export ANTHROPIC_MODEL="$cmodel"
-        [[ "$ceffort" != "inherit" ]] && export CLAUDE_CODE_EFFORT_LEVEL="$ceffort"
-        echo -e "$prompt" | \cc
-    )
+    # local -x scopes the exports to this function (the caller's values come back on return); "inherit" exports nothing
+    # for that setting. NOT a ( ... ) subshell (XACA-1870): under an interactive zsh the subshell becomes the foreground
+    # process-group leader with claude inside it, so tmux reports pane_current_command=zsh and the tab never shows
+    # [claude]/amber. cc must run in this shell, the same way every other kb-run launch path does.
+    [[ "$cmodel" != "inherit" ]] && local -x ANTHROPIC_MODEL="$cmodel"
+    [[ "$ceffort" != "inherit" ]] && local -x CLAUDE_CODE_EFFORT_LEVEL="$ceffort"
+    echo -e "$prompt" | \cc
     local _kb_cc_rc=$?
     unset CC_SESSION_NAME
     if (( _kb_cc_rc != 0 )); then

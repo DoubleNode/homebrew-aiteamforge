@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1870: Release coordinator tab shows [claude]/amber (claude runs in the pane shell) (XACA-1870)
+- Tap files updated in this publish: `share/templates/kanban/kanban-helpers.template.sh`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1891: resolve_kanban_dir no longer accepts a checkout board lacking the target (XACA-1891)
 - Tap files updated in this publish: `share/kanban-hooks/orchestrator_monitor.py`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1914: Run ledger reconciles board completions, tracks late items, grants dispatch grace (XACA-1914)
