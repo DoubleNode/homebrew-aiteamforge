@@ -152,7 +152,8 @@ TERMINAL used to find the window row / tmux window: the terminal of the item's l
 else the `<team>-board.json` file name. Env: KB_ORCH_TMUX (default tmux), KB_ORCH_GH (default gh), KB_ORCH_MAIL_DIR (default
 ~/.aiteamforge/mail: the kb-msg store whose <team>__<terminal>.jsonl is the coordinator inbox, XACA-1864), KB_KANBAN_DIR (default
 <checkout>/kanban, or the MAIN checkout's kanban/ from a linked worktree with no board, when neither --board
-nor --kanban-dir is given; on a TAP CONSUMER, where neither holds a board, resolve_kanban_dir() falls back to the current
+nor --kanban-dir is given, provided its board HOLDS the release/item (XACA-1891); otherwise (a TAP CONSUMER, where no
+board lives there, or a checkout board holding only other releases/items) resolve_kanban_dir() falls back to the current
 tmux team's registry kanban dir, then the ONE registered board holding the release, else exit 2 naming --kanban-dir:
 XACA-1878). Multiple panes in one window: a non-shell pane wins.
 """
@@ -480,9 +481,12 @@ def _has_board(kdir):
 
 
 def _board_holds(kdir, release_id=None, item_id=None):
-    """True when a *-board.json under kdir carries the release (or, with item_id, the backlog item). Never raises."""
+    """True when a *-board.json under kdir carries the release (or, with item_id, the backlog item). Never raises.
+    No target -> False: an id-less row must never match a None id (XACA-1891)."""
     import glob
     want = item_id or release_id
+    if not want or not kdir:
+        return False
     for path in sorted(glob.glob(os.path.join(kdir, "*-board.json"))):
         try:
             with open(path, "r", encoding="utf-8") as fh:
@@ -538,17 +542,18 @@ def _registry_kanban_dirs():
 def resolve_kanban_dir(ctx, release_id=None, item_id=None):
     """The kanban dir used when no --board / --kanban-dir / KB_KANBAN_DIR is given (XACA-1878).
 
-    1. the checkout default (default_kanban_dir, the XACA-1808 worktree rule) when it holds a *-board.json: on the dev
-       checkout nothing changes;
+    1. the checkout default (default_kanban_dir, the XACA-1808 worktree rule) when its board holds the release/item
+       (with no target at all: when it holds any *-board.json): on the dev checkout nothing changes. A checkout board
+       that holds only OTHER releases/items no longer masks steps 2-3 (XACA-1891);
     2. else (a TAP CONSUMER: the monitor runs from ~/aiteamforge/kanban-hooks or libexec/share/kanban-hooks, where no
        board lives) the registry kanban dir of the CURRENT tmux session's team, when its board holds the release/item;
     3. else the ONE registered team kanban dir whose board holds it;
     4. else UsageError (exit 2) naming --kanban-dir and every dir tried. Never silently a dir with no board."""
     own = default_kanban_dir(ctx.repo_root)
-    if _has_board(own):
-        return own
-    tried = [own + " (no board)"]
     want = item_id or release_id
+    if _has_board(own) if want is None else _board_holds(own, release_id, item_id):
+        return own
+    tried = [own + (" (does not hold %s)" % want if _has_board(own) else " (no board)")]
     reg = _registry_kanban_dirs()
     team = _tmux_team(ctx)
     if team:

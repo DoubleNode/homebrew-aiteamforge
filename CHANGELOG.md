@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1891: resolve_kanban_dir no longer accepts a checkout board lacking the target (XACA-1891)
+- Tap files updated in this publish: `share/kanban-hooks/orchestrator_monitor.py`. Run `brew upgrade aiteamforge` to receive them.
 - XACA-1914: Run ledger reconciles board completions, tracks late items, grants dispatch grace (XACA-1914)
 - Tap files updated in this publish: `share/kanban-hooks/orchestrator_monitor.py`,`share/kanban-hooks/orchestrator_run_cli.py` `share/kanban-hooks/orchestrator_state.py`,`share/kanban-hooks/release_orchestrator.py` `share/lcars-ui/CHANGELOG.md`,`share/lcars-ui/index.html` `share/lcars-ui/js/lcars.js`,`share/lcars-ui/server.py` (+2 more). Run `brew upgrade aiteamforge` to receive them.
 - XACA-1863: Flag stale or inferred in_progress run items instead of tracking them as in-flight (XACA-1863)
